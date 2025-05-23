@@ -1,0 +1,7 @@
+ebooklib
+beautifulsoup4
+ttkbootstrap
+openai
+google-generativeai
+requests
+pillow
