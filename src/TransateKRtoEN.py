@@ -11,6 +11,7 @@ from ebooklib import epub
 from bs4 import BeautifulSoup
 from collections import Counter
 from unified_api_client import UnifiedClient
+from unified_api_client import UnifiedClientError
 
 
 # Load or initialize history between runs
@@ -267,7 +268,7 @@ def main():
                 time.sleep(DELAY)
                 break
 
-            except OpenAIError as e:
+            except UnifiedClientError as e:
                 if getattr(e, "http_status", None) == 429:
                     print("⚠️ Rate limited, sleeping 60s…")
                     time.sleep(60)
