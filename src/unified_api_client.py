@@ -72,8 +72,12 @@ class UnifiedClient:
         return result
 
     def _send_gemini(self, messages, temperature, max_tokens):
-        history = [m['content'] for m in messages if m['role'] == 'user']
-        prompt = "\n".join(history)
+        # include both system & user messages so Gemini sees your instructions
+        prompt_parts = []
+        for m in messages:
+            if m['role'] in ('system', 'user'):
+                prompt_parts.append(m['content'])
+        prompt = "\n\n".join(prompt_parts)
         model = genai.GenerativeModel(self.model)
         response = model.generate_content(prompt, generation_config={
             'temperature': temperature,
