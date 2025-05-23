@@ -10,9 +10,9 @@
 
 ## 🏷️ Badges
 
-![Build](https://img.shields.io/github/actions/workflow/status/yourusername/glossarion/python-app.yml?branch=main)
-![License](https://img.shields.io/github/license/yourusername/glossarion)
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
+![Build](https://img.shields.io/github/actions/workflow/status/Shirochi-stack/Glossarion/python-app.yml?branch=main)
+![License](https://img.shields.io/github/license/Shirochi-stack/Glossarion)
+![Python](https://img.shields.io/badge/Python-3.10+-blue)
 
 
 ## ✨ Features
