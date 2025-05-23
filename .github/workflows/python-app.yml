@@ -1,7 +1,4 @@
-# Generate the proper GitHub Actions workflow YAML content
-
-workflow_yaml = """\
-name: Build
+name: Python Application
 
 on:
   push:
@@ -11,6 +8,7 @@ on:
 
 jobs:
   build:
+
     runs-on: ubuntu-latest
 
     steps:
@@ -27,11 +25,13 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Compile check
-      run: python -m py_compile src/*.py
-"""
+    - name: Run basic script validation
+      run: |
+        python -m py_compile *.py
 
-workflow_path = Path("/mnt/data/python-app.yml")
-workflow_path.write_text(workflow_yaml, encoding="utf-8")
-
-workflow_path.name
+    - name: Confirm GUI startup script exists
+      run: |
+        if [ ! -f translator_gui.py ]; then
+          echo "❌ GUI script missing!"
+          exit 1
+        fi
