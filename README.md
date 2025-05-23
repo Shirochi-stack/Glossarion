@@ -130,7 +130,7 @@ All settings are saved in `config.json`.
 
 ## 💬 Acknowledgments
 
-Built with ❤️ using OpenAI & Gemini APIs. Designed with translators, for translators.  
+Built with ❤️ using OpenAI & Gemini APIs. Designed with ChatGPT.  
 GUI and logic heavily assisted by [ChatGPT].
 
 ---
