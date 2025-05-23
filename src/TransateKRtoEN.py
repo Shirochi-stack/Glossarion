@@ -275,7 +275,8 @@ def main():
                     raise
 
         # Now write out the HTML file
-        fname = f"response_{c['num']:03d}_{re.sub(r'\\W+','_',c['title'])[:40]}.html"
+        safe_title = re.sub(r'\W+', '_', c['title'])[:40]
+        fname = f"response_{c['num']:03d}_{safe_title}.html"
         with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
             f.write(f"<h1>Chapter {c['num']}: {c['title']}</h1>\n" + result)
         print(f"✅ Saved chapter {c['num']}")
