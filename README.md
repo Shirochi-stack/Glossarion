@@ -110,6 +110,8 @@ All settings are saved in `config.json`.
 │   ├── extract_glossary_from_epub.py
 │   ├── epub_fallback_compiler_with_cover_portable.py
 │   ├── unified_api_client.py
+│   ├── launch_Glossarion.bat             
+│   └── launch_Glossarion.vbs         # Launch GUI with no CMD window
 ├── docs/
 │   └── UserGuide.md
 ├── Glossary/                         # Extracted glossary JSON and Markdown files
@@ -121,8 +123,6 @@ All settings are saved in `config.json`.
 ├── .gitignore
 ├── requirements.txt                  # Python dependencies
 ├── install_requirements.bat          # Installer for all Python dependencies
-├── launch_gui_silent.bat             # Launch GUI with no CMD window
-└── launch_gui_icon_ready.bat         # EXE-compatible launcher
 ```
 
 
