@@ -1,4 +1,4 @@
-name: Python Application
+name: Build
 
 on:
   push:
@@ -8,7 +8,6 @@ on:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
@@ -26,12 +25,4 @@ jobs:
         pip install -r requirements.txt
 
     - name: Run basic script validation
-      run: |
-        python -m py_compile *.py
-
-    - name: Confirm GUI startup script exists
-      run: |
-        if [ ! -f translator_gui.py ]; then
-          echo "❌ GUI script missing!"
-          exit 1
-        fi
+      run: python -m py_compile src/*.py
