@@ -6,6 +6,7 @@ from ebooklib import epub
 from bs4 import BeautifulSoup
 from unified_api_client import UnifiedClient
 from typing import List, Dict
+import re
 PROGRESS_FILE = "glossary_progress.json"
 
 def load_config(path: str) -> Dict:
@@ -105,6 +106,7 @@ def trim_context_history(history: List[Dict], limit: int) -> List[Dict]:
 
 def build_prompt(chapter_text: str) -> str:
     return f"""
+Output exactly a JSON array of objects and nothing else.
 You are a glossary extractor for Korean, Japanese, or Chinese novels.
 - Extract character information (e.g., name, traits), locations (countries, regions, cities), and translate them into English (romanization or equivalent).
 - Romanize all untranslated honorifics and suffixes (e.g., 님 to '-nim', さん to '-san').
@@ -222,26 +224,31 @@ def main():
                 {"role":"user","content":build_prompt(chap)}
             ]
             resp = client.send(msgs, temperature=temp, max_tokens=mtoks)
+
+            # Save the raw response in case you need to inspect it
+            os.makedirs("Payloads", exist_ok=True)
             with open(f"Payloads/failed_response_chap{idx+1}.txt", "w", encoding="utf-8") as f:
                 f.write(resp)
+
+            # Extract the JSON array itself (strip any leading/trailing prose)
+            m = re.search(r"\[.*\]", resp, re.DOTALL)
+            json_str = m.group(0) if m else resp
+
+            # Parse *only* the cleaned-up JSON
             try:
-                data = json.loads(resp)
+                data = json.loads(json_str)
             except json.JSONDecodeError as e:
                 print(f"[Warning] JSON decode error chap {idx+1}: {e}")
-                continue
+                continue    
                 
-            # add new entries
+            #merge entries as before
             glossary.extend(data)
             glossary[:] = merge_glossary_entries(glossary)
-
             completed.append(idx)
             history.append({"user": build_prompt(chap), "assistant": resp})
             save_progress(completed, glossary, history)
-
-            json_path = os.path.join(glossary_dir, os.path.basename(args.output))
-            md_path   = os.path.join(glossary_dir, os.path.basename(args.output).replace('.json', '.md'))
-            save_glossary_json(glossary, json_path)
-            save_glossary_md(glossary, md_path)
+            save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+            save_glossary_md(glossary, os.path.join(glossary_dir, os.path.basename(args.output).replace('.json', '.md')))
 
         except Exception as e:
             print(f"Error at chapter {idx+1}: {e}")
