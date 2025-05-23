@@ -1,4 +1,4 @@
-name: Python Application
+name: Build
 
 on:
   push:
@@ -8,12 +8,10 @@ on:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
+    - uses: actions/checkout@v3
 
     - name: Set up Python
       uses: actions/setup-python@v4
@@ -25,13 +23,5 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Run basic script validation
-      run: |
-        python -m py_compile *.py
-
-    - name: Confirm GUI startup script exists
-      run: |
-        if [ ! -f translator_gui.py ]; then
-          echo "❌ GUI script missing!"
-          exit 1
-        fi
+    - name: Lint/compile test
+      run: python -m py_compile src/*.py
