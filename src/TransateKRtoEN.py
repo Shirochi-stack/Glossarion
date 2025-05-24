@@ -6,10 +6,6 @@ import shutil
 logging.basicConfig(level=logging.DEBUG)
 
 import os, sys, io, zipfile, time, json, re, textwrap, mimetypes, subprocess
-# allow passing the EPUB path as argv[1]
-if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
-    EPUB_PATH = sys.argv[1]
-print(f"[DEBUG] Transating EPUB: {EPUB_PATH}", file=sys.stderr)
 import ebooklib                                        # needed for ITEM_DOCUMENT
 from ebooklib import epub
 from bs4 import BeautifulSoup
@@ -65,18 +61,7 @@ if not API_KEY:
     print("❌ Error: Set OPENAI_OR_Gemini_API_KEY in your environment.")
     sys.exit(1)
 
-# allow passing the EPUB path as argv[1], or via EPUB_PATH env
-EPUB_PATH = os.getenv("EPUB_PATH", None)
-if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
-    EPUB_PATH = sys.argv[1]
-if not EPUB_PATH or not os.path.isfile(EPUB_PATH):
-    sys.exit("❌ You must specify a valid EPUB file via argv or EPUB_PATH")
-
-# derive a “namespaced” output directory from the EPUB’s basename
-from pathlib import Path
-epub_name = Path(EPUB_PATH).stem
-base_out = f"{epub_name}_output"
- 
+EPUB_PATH       = os.getenv("EPUB_PATH", "default.epub")
 MODEL           = os.getenv("MODEL", "gpt-4.1-nano")
 TRANSLATION_LANG= os.getenv("TRANSLATION_LANG", "korean").lower()
 CONTEXTUAL      = os.getenv("CONTEXTUAL", "1") == "1"
@@ -187,14 +172,29 @@ def send(messages):
 
 # ---------- MAIN ----------
 def main():
-    # each run goes into <epub_basename>_output (no more collisions)
+    # derive app name from the script filename
+    epub_base = os.path.splitext(os.path.basename(EPUB_PATH))[0]
+    base_out  = f"{epub_base}_output"
+
+    # make a unique output dir
     out = base_out
-    # if you really want to avoid collisions when re-running the same book:
     i = 1
     while os.path.exists(out):
-        out = f"{base_out}_{i}"
+        out = f"{base_out}{i}"
         i += 1
-    os.makedirs(out, exist_ok=True)
+    os.makedirs(out)
+    print(f"[DEBUG] Created output folder → {out}")
+
+    # …your existing code to delete history, clear old payloads, etc.…
+    # for example:
+    history_file = os.path.join(out, "translation_history.json")
+    if os.path.exists(history_file):
+        os.remove(history_file)
+        print(f"[DEBUG] Deleted old history → {history_file}")
+
+    # …and all of your debug logs and translation logic follow here…
+
+
 
     # 1) unpack and collect
     with zipfile.ZipFile(EPUB_PATH, 'r') as zf:
