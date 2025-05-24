@@ -187,7 +187,7 @@ def main():
 
     # …your existing code to delete history, clear old payloads, etc.…
     # for example:
-    history_file = os.path.join(out, "translation_history.json")
+    history_file = os.path.join(payloads_dir, "translation_history.json")
     if os.path.exists(history_file):
         os.remove(history_file)
         print(f"[DEBUG] Deleted old history → {history_file}")
