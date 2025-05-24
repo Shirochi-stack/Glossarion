@@ -74,7 +74,7 @@ class TranslatorGUI:
         tb.Label(self.frame, text="Model:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
         self.model_var = tk.StringVar(value=self.config.get('model','gpt-4.1-nano'))
         tb.Combobox(self.frame, textvariable=self.model_var,
-                    values=["gpt-4.1-nano","gpt-4.1-mini","gpt-4.1","gpt-3.5-turbo"], state="normal").grid(
+                    values=["gpt-4.1-nano","gpt-4.1-mini","gpt-4.1","gpt-3.5-turbo","gemini-1.5-pro","gemini-1.5-flash", "gemini-2.0-flash"], state="normal").grid(
             row=1, column=1, columnspan=2, sticky=tk.EW, padx=5, pady=5)
 
         # Language
@@ -185,6 +185,7 @@ class TranslatorGUI:
                         pass
             self.master.destroy()
             # Ensure the interpreter exits
+            self.root.destroy()
             sys.exit(0)
 
     def _make_bottom_toolbar(self):
@@ -544,6 +545,8 @@ class TranslatorGUI:
         env = os.environ.copy()
         env["TRANSLATION_HISTORY_LIMIT"] = str(self.trans_history.get())
         env['TRANSLATION_TEMPERATURE'] = str(self.trans_temp.get())
+        # point history I/O at the global Payloads folder:
+        env["EPUB_OUTPUT_DIR"] = os.getcwd()       
         env['EPUB_PATH'] = epub_path
         env['MODEL'] = model
         env['CONTEXTUAL'] = '1' if contextual else '0'
