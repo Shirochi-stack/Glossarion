@@ -134,31 +134,35 @@ def load_progress() -> Dict:
             return json.load(f)
     return {"completed": [], "glossary": [], "context_history": []}
 
+def dedupe_keep_order(old, new):
+    seen = set()
+    out = []
+    for x in (old if isinstance(old, list) else [old]) + \
+             (new if isinstance(new, list) else [new]):
+        if isinstance(x, str):
+            lx = x.lower()
+            if lx not in seen:
+                seen.add(lx)
+                out.append(lx)
+    return out
+
 def merge_glossary_entries(glossary):
     merged = {}
-
     for entry in glossary:
         key = entry['original_name']
         if key not in merged:
             merged[key] = entry.copy()
-            if 'locations' in merged[key]:
-                merged[key]['locations'] = list(set(x.lower() for x in merged[key].get('locations') or []))
+            # initial normalize locations in appearance order
+            merged[key]['locations'] = dedupe_keep_order(
+                entry.get('locations') or [], []
+            )
         else:
-            # Merge fields with normalization
             for field in ['locations', 'traits', 'group_affiliation']:
-                old = merged[key].get(field)
-                new = entry.get(field)
+                old = merged[key].get(field) or []
+                new = entry.get(field) or []
+                merged[key][field] = dedupe_keep_order(old, new)
 
-                if isinstance(old, str):
-                    old = [old]
-                if isinstance(new, str):
-                    new = [new]
-
-                old = set(x.lower() if isinstance(x, str) else x for x in (old or []))
-                new = set(x.lower() if isinstance(x, str) else x for x in (new or []))
-                merged[key][field] = list(old.union(new))
-
-            # Merge how_they_refer_to_others as a union of mappings
+            # how_they_refer_to_others stays the same…
             old_map = merged[key].get('how_they_refer_to_others', {}) or {}
             new_map = entry.get('how_they_refer_to_others', {}) or {}
             for k, v in new_map.items():
@@ -166,18 +170,23 @@ def merge_glossary_entries(glossary):
                     old_map[k] = v
             merged[key]['how_they_refer_to_others'] = old_map
 
-    # Remove null fields globally
+    # strip out any None fields exactly as before…
     for entry in merged.values():
-        for field in ['title', 'group_affiliation', 'traits', 'locations', 'gender']:
+        for field in ['title','group_affiliation','traits','locations','gender']:
             if entry.get(field) is None:
                 entry.pop(field, None)
-
-        if 'how_they_refer_to_others' in entry:
+        # only sanitize how_they_refer_to_others if it's actually a dict
+        htr = entry.get('how_they_refer_to_others')
+        if isinstance(htr, dict):
             entry['how_they_refer_to_others'] = {
-                k: v for k, v in entry['how_they_refer_to_others'].items() if v is not None
+                k: v for k, v in htr.items() if v is not None
             }
+        else:
+            # drop it entirely if it was null or something else
+            entry.pop('how_they_refer_to_others', None)
 
     return list(merged.values())
+
 
 
     
