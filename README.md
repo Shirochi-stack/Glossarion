@@ -59,8 +59,8 @@
    - `ebooklib`
    - `beautifulsoup4`
    - `ttkbootstrap`
-   - `openai` (optional)
-   - `google-generativeai` (optional)
+   - `openai`
+   - `google-generativeai`
 
 3. Launch the GUI:
    ```bash
