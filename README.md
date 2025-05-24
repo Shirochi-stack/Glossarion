@@ -19,7 +19,7 @@
 
 ### 🔁 Contextual Translation Pipeline
 - Translate EPUB chapters using OpenAI or Gemini chat models.
-- Preserve honorifics, suffixes (e.g., -nim, -san), and speech tone.
+- Customizable system prompts that allow you to adjust your preferences.
 - Fully retains HTML structure and embedded images.
 - Manual glossary override supported.
 - Contextual memory (configurable per chapter window).
