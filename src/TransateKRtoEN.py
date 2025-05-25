@@ -5,15 +5,31 @@ import shutil
 # optional: turn on HTTP‐level debugging in the OpenAI client
 logging.basicConfig(level=logging.DEBUG)
 
-import os, sys, io, zipfile, time, json, re, textwrap, mimetypes, subprocess
-import ebooklib                                        # needed for ITEM_DOCUMENT
+import os, sys, io, zipfile, time, json, re, textwrap, mimetypes, subprocess, tiktoken
+import ebooklib   
+MODEL            = os.getenv("MODEL", "gemini-1.5-flash")
+_tok_env = os.getenv("TOKEN_LIMIT", "").strip()
+if _tok_env.isdigit():
+    MAX_INPUT_TOKENS = int(_tok_env)
+    _budget_str = str(MAX_INPUT_TOKENS)
+else:
+    MAX_INPUT_TOKENS = None       # signal “unlimited”
+    _budget_str = "∞"             # or "unlimited"
+try:
+    # for any OpenAI model or if tiktoken knows it
+    enc = tiktoken.encoding_for_model(MODEL)
+except KeyError:
+    # fallback for Gemini (or any unknown name)
+    enc = tiktoken.get_encoding("cl100k_base")
+
+print(f"[DEBUG] Using model = {MODEL}")
+print(f"[DEBUG] Input token budget = {MAX_INPUT_TOKENS}")
+# needed for ITEM_DOCUMENT
 from ebooklib import epub
 from bs4 import BeautifulSoup
 from collections import Counter
 from unified_api_client import UnifiedClient
 from unified_api_client import UnifiedClientError
-
-
 
 # Load or initialize history between runs
 def load_history():
@@ -60,15 +76,19 @@ API_KEY = os.getenv("OPENAI_API_KEY")
 if not API_KEY:
     print("❌ Error: Set OPENAI_OR_Gemini_API_KEY in your environment.")
     sys.exit(1)
-
+client = UnifiedClient(model=MODEL, api_key=API_KEY)
 EPUB_PATH       = os.getenv("EPUB_PATH", "default.epub")
 MODEL           = os.getenv("MODEL", "gpt-4.1-nano")
 TRANSLATION_LANG= os.getenv("TRANSLATION_LANG", "korean").lower()
 CONTEXTUAL      = os.getenv("CONTEXTUAL", "1") == "1"
 DELAY           = int(os.getenv("SEND_INTERVAL_SECONDS", "2"))
 SYSTEM_PROMPT   = os.getenv("SYSTEM_PROMPT", "").strip()
+rng = os.getenv("CHAPTER_RANGE", "")
+if rng and re.match(r"^\d+\s*-\s*\d+$", rng):
+    start, end = map(int, rng.split("-", 1))
+else:
+    start, end = None, None
 
-client = UnifiedClient(model=MODEL, api_key=API_KEY)
 
 # ---------- INSTRUCTIONS ----------
 if TRANSLATION_LANG == "japanese":
@@ -172,29 +192,35 @@ def send(messages):
 
 # ---------- MAIN ----------
 def main():
-    # derive app name from the script filename
+    epub_path = sys.argv[1]
     epub_base = os.path.splitext(os.path.basename(EPUB_PATH))[0]
-    base_out  = f"{epub_base}_output"
+    base_out  = epub_base
 
-    # make a unique output dir
+    # ─── always use a folder named exactly after the EPUB ───
     out = base_out
-    i = 1
-    while os.path.exists(out):
-        out = f"{base_out}{i}"
-        i += 1
-    os.makedirs(out)
+    os.makedirs(out, exist_ok=True)
     print(f"[DEBUG] Created output folder → {out}")
 
-    # …your existing code to delete history, clear old payloads, etc.…
-    # for example:
+    # now we can set the env var correctly
+    os.environ["EPUB_OUTPUT_DIR"] = out
+        
+    # ─── override payloads_dir so history lives inside `out` ───
+    global payloads_dir
+    payloads_dir = out
+    
+    # ─── PURGE old translation history on startup ───
     history_file = os.path.join(payloads_dir, "translation_history.json")
     if os.path.exists(history_file):
         os.remove(history_file)
-        print(f"[DEBUG] Deleted old history → {history_file}")
-
-    # …and all of your debug logs and translation logic follow here…
-
-
+        print(f"[DEBUG] Purged translation history → {history_file}")
+        
+    # ─── load or init our own per-EPUB progress file ───
+    PROGRESS_FILE = os.path.join(payloads_dir, "translation_progress.json")
+    if os.path.exists(PROGRESS_FILE):
+        with open(PROGRESS_FILE, "r", encoding="utf-8") as pf:
+            prog = json.load(pf)
+    else:
+        prog = {"completed": []}    
 
     # 1) unpack and collect
     with zipfile.ZipFile(EPUB_PATH, 'r') as zf:
@@ -257,11 +283,28 @@ def main():
 
     base_msg = [{"role":"system","content":system}]
     history  = []
+    def save_progress():
+        with open(PROGRESS_FILE, "w", encoding="utf-8") as pf:
+            json.dump(prog, pf, ensure_ascii=False, indent=2)
+    
+    total_chapters = len(chapters)
+    
+    for idx, c in enumerate(chapters):
+        chap_num = c["num"]
 
+        # 1) apply the user’s range filter
+        if start is not None and not (start <= chap_num <= end):
+            continue
 
-    for c in chapters:
+        # 2) skip chapters already done
+        if idx in prog["completed"]:
+            print(f"[SKIP] Chapter #{idx+1} (EPUB-num {chap_num}) already done, skipping.")
+            continue
+
         user_prompt = c["body"] 
         history = load_history()
+        trimmed     = history[-HIST_LIMIT*2:] if CONTEXTUAL else []
+        msgs        = base_msg + trimmed + [{"role":"user","content": user_prompt}]
 
         # Trim history
         if CONTEXTUAL:
@@ -273,8 +316,14 @@ def main():
 
         while True:
             try:
-                result = send(msgs)
-
+               
+                #print(">>> FULL MSGS:", json.dumps(msgs, ensure_ascii=False, indent=2))
+                # after building msgs, dump token usage vs. budget
+                total_tokens = sum(len(enc.encode(m["content"])) for m in msgs)
+                print(f"[DEBUG] Prompt tokens = {total_tokens} / {MAX_INPUT_TOKENS}")
+                result, finish_reason = send(msgs)
+                if finish_reason == "length":
+                    print(f"[WARN] Output was truncated at {max_tokens} tokens!")
                 # Record this turn and persist it
                 history.append({"role":"user",      "content": user_prompt})
                 history.append({"role":"assistant", "content": result})
@@ -296,7 +345,11 @@ def main():
         fname = f"response_{c['num']:03d}_{safe_title}.html"
         with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
             f.write(f"<h1>Chapter {c['num']}: {c['title']}</h1>\n" + result)
-        print(f"✅ Saved chapter {c['num']}")
+        final_title = c['title'] or safe_title
+        print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved Chapter {c['num']}: {final_title}")
+        # ─── record that this chapter is done and save progress ───
+        prog["completed"].append(idx)
+        save_progress()
 
     # 3) final EPUB via fallback compiler
     print("📘 Building final EPUB…")
