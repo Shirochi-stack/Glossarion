@@ -10,7 +10,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 from ttkbootstrap.constants import *
 import logging
-
+import shutil
 
 
 CREATE_NO_WINDOW = 0x08000000
@@ -25,7 +25,7 @@ class TranslatorGUI:
         master.minsize(1280, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
         master.bind('<Escape>', lambda e: master.attributes('-fullscreen', False))
-        
+        self.payloads_dir = os.path.join(os.getcwd(), "Payloads")        
         # Warn on close
         self.master.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -98,16 +98,39 @@ class TranslatorGUI:
         # API delay
         tb.Label(self.frame, text="API call delay (s):").grid(row=4, column=0,
                                                               sticky=tk.W, padx=5, pady=5)
-        self.delay_entry = tb.Entry(self.frame, width=6)
+        self.delay_entry = tb.Entry(self.frame, width=8)
         self.delay_entry.insert(0,str(self.config.get('delay',2)))
         self.delay_entry.grid(row=4, column=1, sticky=tk.W, padx=5, pady=5)
+        
+        # ── New Chapter Range field ──
+        tb.Label(self.frame, text="Chapter range:").grid(row=5, column=0, sticky=tk.W, padx=5, pady=5)
+        self.chapter_range_entry = tb.Entry(self.frame, width=12)
+        # default could be “” or something like “1-5”
+        self.chapter_range_entry.insert(0, self.config.get('chapter_range', ''))
+        self.chapter_range_entry.grid(row=5, column=1, sticky=tk.W, padx=5, pady=5)
+        
+        #Token limit
+        tb.Label(self.frame, text="Token limit:").grid(row=6, column=0,sticky=tk.W, padx=5, pady=5)
+        self.token_limit_entry = tb.Entry(self.frame, width=8)
+        self.token_limit_entry.insert(0, str(self.config.get('token_limit', 1000000)))
+        self.token_limit_entry.grid(row=6, column=1, sticky=tk.W, padx=5, pady=5)
+        
+        # ── Disable Token Limit button, placed below the token-limit field ──
+        self.toggle_token_btn = tb.Button(
+            self.frame,
+            text="Disable Token Limit",
+            command=self.toggle_token_limit,
+            bootstyle="danger-outline",
+            width=16
+        )
+        self.toggle_token_btn.grid(row=7, column=1, sticky=tk.W, padx=5, pady=5)
 
         # Translation settings
         tb.Label(self.frame, text="Temperature:").grid(row=4, column=2, sticky=tk.W, padx=5, pady=5)
         self.trans_temp = tb.Entry(self.frame, width=6)
         self.trans_temp.insert(0,str(self.config.get('translation_temperature',0.3)))
         self.trans_temp.grid(row=4, column=3, sticky=tk.W, padx=5, pady=5)
-        tb.Label(self.frame, text="Translation History Limit:").grid(row=5, column=2, sticky=tk.W, padx=5, pady=5)
+        tb.Label(self.frame, text="Transl. Hist. Limit:").grid(row=5, column=2, sticky=tk.W, padx=5, pady=5)
         self.trans_history = tb.Entry(self.frame, width=6)
         self.trans_history.insert(0,str(self.config.get('translation_history_limit',3)))
         self.trans_history.grid(row=5, column=3, sticky=tk.W, padx=5, pady=5)
@@ -117,7 +140,7 @@ class TranslatorGUI:
         self.glossary_temp = tb.Entry(self.frame, width=6)
         self.glossary_temp.insert(0,str(self.config.get('glossary_temperature',0.3)))
         self.glossary_temp.grid(row=6, column=3, sticky=tk.W, padx=5, pady=5)
-        tb.Label(self.frame, text="Glossary History Limit:").grid(row=7, column=2, sticky=tk.W, padx=5, pady=5)
+        tb.Label(self.frame, text="Glossary Hist. Limit:").grid(row=7, column=2, sticky=tk.W, padx=5, pady=5)
         self.glossary_history = tb.Entry(self.frame, width=6)
         self.glossary_history.insert(0,str(self.config.get('glossary_history_limit',3)))
         self.glossary_history.grid(row=7, column=3, sticky=tk.W, padx=5, pady=5)
@@ -127,16 +150,16 @@ class TranslatorGUI:
         self.title_trim.insert(0, str(self.config.get('title_trim_count', 1)))
 
         self.group_trim = tb.Entry(self.frame, width=6)
-        self.group_trim.insert(0, str(self.config.get('group_affiliation_trim_count', 5)))
+        self.group_trim.insert(0, str(self.config.get('group_affiliation_trim_count', 1)))
 
         self.traits_trim = tb.Entry(self.frame, width=6)
-        self.traits_trim.insert(0, str(self.config.get('traits_trim_count', 5)))
+        self.traits_trim.insert(0, str(self.config.get('traits_trim_count', 1)))
 
         self.refer_trim = tb.Entry(self.frame, width=6)
-        self.refer_trim.insert(0, str(self.config.get('refer_trim_count', 5)))
+        self.refer_trim.insert(0, str(self.config.get('refer_trim_count', 1)))
 
         self.loc_trim = tb.Entry(self.frame, width=6)
-        self.loc_trim.insert(0, str(self.config.get('locations_trim_count', 5)))
+        self.loc_trim.insert(0, str(self.config.get('locations_trim_count', 1)))
 
         # API Key
         tb.Label(self.frame, text="OpenAI / Gemini API Key:").grid(row=8, column=0, sticky=tk.W, padx=5, pady=5)
@@ -148,7 +171,18 @@ class TranslatorGUI:
 
         # System Prompt
         tb.Label(self.frame, text="System Prompt:").grid(row=9, column=0, sticky=tk.NW, padx=5, pady=5)
-        self.prompt_text = scrolledtext.ScrolledText(self.frame, wrap=tk.WORD)
+        self.prompt_text = tk.Text(
+        self.frame,
+        height=5,
+        width=60,
+        wrap='word',
+        undo=True,              # turn on undo
+        autoseparators=True,    # auto group edits
+        maxundo=-1              # no fixed undo history limit
+        )
+        # bind keys
+        self.prompt_text.bind('<Control-z>', lambda e: self.prompt_text.edit_undo())
+        self.prompt_text.bind('<Control-y>', lambda e: self.prompt_text.edit_redo())
         self.prompt_text.grid(row=9, column=1, columnspan=3, sticky=tk.NSEW, padx=5, pady=5)
 
         # Run Translation
@@ -169,10 +203,10 @@ class TranslatorGUI:
         # Bottom toolbar
         self._make_bottom_toolbar()
         
+        self.token_limit_disabled = False
 
         # initial prompt
         self.on_profile_select()
-
     def on_close(self):
         if messagebox.askokcancel("Quit", "Are you sure you want to exit? Unsaved translations will be stopped."):
             # Terminate any running subprocesses
@@ -188,6 +222,24 @@ class TranslatorGUI:
             self.root.destroy()
             sys.exit(0)
 
+    def toggle_token_limit(self):
+        """Toggle whether the token-limit entry is active or not."""
+        if not self.token_limit_disabled:
+            # disable it
+            self.token_limit_entry.delete(0, tk.END)
+            self.token_limit_entry.config(state=tk.DISABLED)
+            self.toggle_token_btn.config(text="Enable Token Limit", bootstyle="success-outline")
+            self.append_log("⚠️ Token limit disabled.")
+        else:
+            # re-enable it
+            self.token_limit_entry.config(state=tk.NORMAL)
+            # restore a default or previous value—here we use 1,000,000
+            self.token_limit_entry.insert(0, str(self.config.get('token_limit', 1000000)))
+            self.toggle_token_btn.config(text="Disable Token Limit", bootstyle="danger-outline")
+            self.append_log("✅ Token limit re-enabled.")
+        # flip the flag
+        self.token_limit_disabled = not self.token_limit_disabled
+        
     def _make_bottom_toolbar(self):
         # 1) toolbar on row 11
         btn_frame = tb.Frame(self.frame)
@@ -337,8 +389,31 @@ class TranslatorGUI:
           .grid(row=len(labels), column=0, columnspan=2, pady=10)
         tb.Button(dlg, text="➕ Aggregate Unique Locations",
                   command=aggregate_locations, bootstyle="info") \
-          .grid(row=len(labels)+1, column=0, columnspan=2, pady=5)
+          .grid(row=len(labels)+1, column=0, columnspan=2, pady=5)         
+            # 1) define the helper
+        def delete_empty_fields():
+            for char in glossary:
+                for key in list(char.keys()):
+                    val = char[key]
+                    if val in (None, [], {}, ""):
+                        char.pop(key, None)
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(glossary, f, ensure_ascii=False, indent=2)
+            messagebox.showinfo("Deleted", "Empty fields removed.")
+            dlg.lift()
 
+        # 2) place the button (note the commas after each kwarg!)
+        tb.Button(
+            dlg,
+            text="Delete Empty Fields",          # ← comma here
+            command=delete_empty_fields,         # ← *and* here
+            bootstyle="warning"                  # no trailing comma needed but allowed
+        ).grid(
+            row=len(labels)+2,
+            column=0,
+            columnspan=2,
+            pady=5
+        )
 
         dlg.wait_window()
 
@@ -507,6 +582,10 @@ class TranslatorGUI:
 
     def run_translation(self):
         epub_path = self.entry_epub.get()
+        epub_path   = self.entry_epub.get()
+        epub_base   = os.path.splitext(os.path.basename(epub_path))[0]
+        output_dir  = os.path.join(os.getcwd(), epub_base)
+        history_file = os.path.join(output_dir, "translation_history.json")
         api_key   = self.api_key_entry.get()
         delay     = self.delay_entry.get()
         model     = self.model_var.get()
@@ -553,6 +632,15 @@ class TranslatorGUI:
         env['SEND_INTERVAL_SECONDS'] = str(delay)
         env['OPENAI_API_KEY'] = api_key
         env['SYSTEM_PROMPT']    = self.prompt_text.get("1.0", "end").strip()
+        # new:
+        chap_range = self.chapter_range_entry.get().strip()
+        if chap_range:
+            env['CHAPTER_RANGE'] = chap_range
+        token_val = self.token_limit_entry.get().strip()
+        if token_val:
+            env['TOKEN_LIMIT'] = token_val
+        else:
+            env.pop('TOKEN_LIMIT', None)
         # ← insert here ↓
         if hasattr(self, 'manual_glossary_path'):
             env['MANUAL_GLOSSARY'] = self.manual_glossary_path
@@ -627,29 +715,67 @@ class TranslatorGUI:
             if "TRANSLATION_COMPLETE_SIGNAL" in full_out:
                 messagebox.showinfo("Success", "Translation complete!")
             else:
-                self.append_log("⚠️ Main translation incomplete, running fallback…")
-                if messagebox.askyesno("Fallback?", "Main failed—run EPUB fallback compiler?"):
-                    # define the path to the fallback script
-                    fallback = os.path.join(base_dir,
+                  # 1) Save translation history
+                history_file = os.path.join(output_dir, "translation_history.json")
+                
+                if os.path.exists(history_file):
+                    save_path = filedialog.asksaveasfilename(
+                        title="Save Translation History",
+                        defaultextension=".json",
+                        initialfile="translation_history.json",
+                        filetypes=[("JSON files","*.json")]
+                    )
+                    if save_path:
+                        try:
+                            import shutil
+                            shutil.copy2(history_file, save_path)
+                            messagebox.showinfo(
+                                "History Saved",
+                                f"Translation history saved to:\n{save_path}"
+                            )
+                        except Exception as e:
+                            messagebox.showerror(
+                                "Save Failed",
+                                f"Could not save history:\n{e}"
+                            )
+                if not os.path.exists(history_file):
+                    # log it instead of popping a dialog
+                    self.append_log("[WARN] No translation_history.json found to save.")
+                    return
+
+                # 2) Optionally run EPUB fallback compiler
+                if messagebox.askyesno(
+                        "Run Fallback?",
+                        "Translation failed. Would you like to run the EPUB fallback compiler now?"
+                    ):
+                    # define the path to your fallback script
+                    fallback = os.path.join(
+                        base_dir,
                         "epub_fallback_compiler_with_cover_portable.py"
                     )
-                    # launch it
                     fb = subprocess.Popen(
                         [sys.executable, fallback, out],
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
                         text=True
                     )
-                    # stream its output into the log
-                    for line in iter(fb.stdout.readline, ''):
+                    for line in iter(fb.stdout.readline, ""):
                         self.append_log("[FALLBACK] " + line.rstrip())
                     fb.wait()
-                    # notify user
                     if fb.returncode == 0:
-                        messagebox.showinfo("Fallback Success", "Fallback EPUB compiled successfully.")
+                        messagebox.showinfo(
+                            "Fallback Success",
+                            "Fallback EPUB compiled successfully."
+                        )
                     else:
-                        messagebox.showerror("Fallback Failed", "Fallback EPUB compilation failed.")
-                # (no more fb references here)
+                        messagebox.showerror(
+                            "Fallback Failed",
+                            "Fallback EPUB compilation failed."
+                        )
+
+                # 3) Re-enable UI and exit
+                self._reenable()
+                return
 
 
         self._reenable()
@@ -729,6 +855,8 @@ class TranslatorGUI:
             stderr=subprocess.STDOUT,
             bufsize=1,          # line-buffered
             text=True,          # universal_newlines
+            encoding='utf-8',
+            errors='replace',
             env=env
         )
         for line in proc.stdout:
@@ -805,6 +933,13 @@ class TranslatorGUI:
             self.config['glossary_temperature'] = float(self.glossary_temp.get())
             self.config['glossary_history_limit'] = int(self.glossary_history.get())
             self.config['api_key'] = self.api_key_entry.get()
+            # defensively handle empty/disabled token‐limit field
+            _tl = self.token_limit_entry.get().strip()
+            if _tl.isdigit():
+                self.config['token_limit'] = int(_tl)
+            else:
+                self.config['token_limit'] = None
+
             # Write to file
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, ensure_ascii=False, indent=2)
