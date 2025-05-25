@@ -305,7 +305,7 @@ class TranslatorGUI:
         # 2) Build a dialog for all six controls
         dlg = tk.Toplevel(self.master)
         dlg.title("Glossary Trimmer")
-        dlg.geometry("420x425")
+        dlg.geometry("420x480")
         dlg.transient(self.master)   # keep on top
         dlg.grab_set()               # modal
 
