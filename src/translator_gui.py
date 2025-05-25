@@ -12,6 +12,28 @@ from ttkbootstrap.constants import *
 import logging
 import shutil
 
+if getattr(sys, "frozen", False) and len(sys.argv) > 1:
+    # first arg is our helper name
+    helper, *rest = sys.argv[1:]
+    if helper == "TransateKRtoEN":
+        from TransateKRtoEN import main as _main
+        sys.exit(_main(*rest))
+    elif helper == "extract_glossary_from_epub":
+        from extract_glossary_from_epub import main as _main
+        sys.exit(_main(*rest))
+    elif helper == "epub_fallback_compiler_with_cover_portable":
+        from epub_fallback_compiler_with_cover_portable import main as _main
+        sys.exit(_main(*rest))
+        
+def build_subprocess_args(script_basename, *params):
+    exe = sys.executable
+    if getattr(sys, 'frozen', False):
+        # prefix with the helper name
+        return exe, [exe, script_basename, *params]
+    else:
+        base   = os.path.dirname(os.path.abspath(__file__))
+        helper = os.path.join(base, f"{script_basename}.py")
+        return exe, [exe, "-u", helper, *params]
 
 CREATE_NO_WINDOW = 0x08000000
 CONFIG_FILE = "config.json"
@@ -207,6 +229,8 @@ class TranslatorGUI:
 
         # initial prompt
         self.on_profile_select()
+
+        
     def on_close(self):
         if messagebox.askokcancel("Quit", "Are you sure you want to exit? Unsaved translations will be stopped."):
             # Terminate any running subprocesses
@@ -648,7 +672,6 @@ class TranslatorGUI:
         env['TRANSLATION_LANG'] = self.lang_var.get().lower()
 
         base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-        script = os.path.join(base_dir, "TransateKRtoEN.py")
         
         self.log_debug("📦 Environment Variables Set:")
         self.log_debug(f"  EPUB_PATH = {epub_path}")
@@ -669,115 +692,56 @@ class TranslatorGUI:
         self.log_debug("🚀 Launching translation subprocess...\n")
         self.append_log("🚀 Starting translation subprocess…")
         
-            
-        # … earlier in run_translation()
-
-        proc = subprocess.Popen(
-            [sys.executable, '-u', script, epub_path],
+        #  Launch translation subprocess
+        exe, args = build_subprocess_args('TransateKRtoEN', epub_path)
+        self.proc = subprocess.Popen(
+            args,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             bufsize=1,
-            text=True,                # <<< text mode so stdout yields str
+            text=True,
             encoding='utf-8',
             errors='ignore',
             creationflags=CREATE_NO_WINDOW,
-            env=env
+            env=env,
         )
 
-        full_out = ""
-        for line in proc.stdout:    # read every line exactly once
+        # ▶️ Stream its output
+        for line in self.proc.stdout:
             self.append_log(line.rstrip())
-            full_out += line
 
-        proc.wait()
-        if proc.returncode == 0:
-            self.append_log("✅ Translation finished successfully.")
-        else:
-            self.append_log(f"❌ Translation failed with code {proc.returncode}.")
+        # ▶️ Wait for it to finish
+        self.proc.wait()
 
-        # now you can check:
-        if "TRANSLATION_COMPLETE_SIGNAL" in full_out:
+        # ▶️ Check exit code
+        if self.proc.returncode == 0:
             messagebox.showinfo("Success", "Translation complete!")
         else:
-            # read up to 1KB at a time (returns str because text=True)
-            for raw_chunk in iter(lambda: proc.stdout.read(1024), ''):
-                # raw_chunk is already decoded text, so just split it
-                for line in raw_chunk.splitlines():
-                    self.append_log("[FALLBACK] " + line)
-            proc.wait()
+            self.append_log(f"❌ Translation failed (code {self.proc.returncode}).")
+            if messagebox.askyesno("Run Fallback?",
+                                   "Translation failed. Run EPUB fallback compiler?"):
+                exe_fb, args_fb = build_subprocess_args(
+                    'epub_fallback_compiler_with_cover_portable',
+                    output_dir
+                )
+                fb = subprocess.Popen(
+                    args_fb,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1
+                )
+                for line in fb.stdout:
+                    self.append_log("[FALLBACK] " + line.rstrip())
+                fb.wait()
+                if fb.returncode == 0:
+                    messagebox.showinfo("Fallback Success",
+                                        "Fallback EPUB compiled successfully.")
+                else:
+                    messagebox.showerror("Fallback Failed",
+                                         f"Exit code {fb.returncode}")
 
-            full_out = ""
-            for line in iter(proc.stdout.readline, ""):
-                self.append_log(line.rstrip())
-                full_out += line
-            proc.wait()
-
-            if "TRANSLATION_COMPLETE_SIGNAL" in full_out:
-                messagebox.showinfo("Success", "Translation complete!")
-            else:
-                  # 1) Save translation history
-                history_file = os.path.join(output_dir, "translation_history.json")
-                
-                if os.path.exists(history_file):
-                    save_path = filedialog.asksaveasfilename(
-                        title="Save Translation History",
-                        defaultextension=".json",
-                        initialfile="translation_history.json",
-                        filetypes=[("JSON files","*.json")]
-                    )
-                    if save_path:
-                        try:
-                            import shutil
-                            shutil.copy2(history_file, save_path)
-                            messagebox.showinfo(
-                                "History Saved",
-                                f"Translation history saved to:\n{save_path}"
-                            )
-                        except Exception as e:
-                            messagebox.showerror(
-                                "Save Failed",
-                                f"Could not save history:\n{e}"
-                            )
-                if not os.path.exists(history_file):
-                    # log it instead of popping a dialog
-                    self.append_log("[WARN] No translation_history.json found to save.")
-                    return
-
-                # 2) Optionally run EPUB fallback compiler
-                if messagebox.askyesno(
-                        "Run Fallback?",
-                        "Translation failed. Would you like to run the EPUB fallback compiler now?"
-                    ):
-                    # define the path to your fallback script
-                    fallback = os.path.join(
-                        base_dir,
-                        "epub_fallback_compiler_with_cover_portable.py"
-                    )
-                    fb = subprocess.Popen(
-                        [sys.executable, fallback, out],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True
-                    )
-                    for line in iter(fb.stdout.readline, ""):
-                        self.append_log("[FALLBACK] " + line.rstrip())
-                    fb.wait()
-                    if fb.returncode == 0:
-                        messagebox.showinfo(
-                            "Fallback Success",
-                            "Fallback EPUB compiled successfully."
-                        )
-                    else:
-                        messagebox.showerror(
-                            "Fallback Failed",
-                            "Fallback EPUB compilation failed."
-                        )
-
-                # 3) Re-enable UI and exit
-                self._reenable()
-                return
-
-
+        # ▶️ Re-enable UI
         self._reenable()
 
     def _reenable(self):
@@ -826,11 +790,7 @@ class TranslatorGUI:
         # Build subprocess command
         base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
         script = os.path.join(base_dir, "extract_glossary_from_epub.py")
-        cmd = [
-            sys.executable, script,
-            "--epub", epub_path,
-            "--config", CONFIG_FILE
-        ]
+
         env = os.environ.copy()
         env['PYTHONUNBUFFERED'] = '1'
         env['GLOSSARY_TEMPERATURE'] = temp
@@ -844,77 +804,75 @@ class TranslatorGUI:
         self.log_debug("📄 Extracting chapters for glossary…")
         self.log_debug("")
 
-
-
-
-        # Run and stream logs
-        self.append_log("🚀 Starting glossary extraction…")
-        proc = subprocess.Popen(
-            cmd,
+        # ▶️ Launch glossary extraction subprocess
+        exe, args = build_subprocess_args(
+            'extract_glossary_from_epub',
+            '--epub', epub_path,
+            '--config', CONFIG_FILE
+        )
+        self.glossary_proc = subprocess.Popen(
+            args,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            bufsize=1,          # line-buffered
-            text=True,          # universal_newlines
+            bufsize=1,
+            text=True,
             encoding='utf-8',
             errors='replace',
-            env=env
+            env=env,
         )
-        for line in proc.stdout:
+
+        # ▶️ Stream its output
+        for line in self.glossary_proc.stdout:
             self.append_log(line.rstrip())
-            self.master.update_idletasks()
-        # Wait for subprocess to finish
-        proc.wait()
 
+        # ▶️ Wait for it to finish
+        self.glossary_proc.wait()
 
-        if proc.returncode == 0:
-            self.append_log("✅ Glossary extraction completed successfully.")
-            messagebox.showinfo("Glossary", "Glossary extraction finished!")
+        # ▶️ Check exit code
+        if self.glossary_proc.returncode == 0:
+            messagebox.showinfo("Glossary", "Extraction finished!")
         else:
-            self.append_log(f"❌ Glossary extraction failed (exit code {proc.returncode}).")
-            messagebox.showerror("Glossary Error", f"Exit code {proc.returncode}")
+            messagebox.showerror(
+                "Glossary Error",
+                f"Exit code {self.glossary_proc.returncode}"
+            )
 
+        # ▶️ Re-enable the button
         self.glossary_button.config(state=tk.NORMAL)
 
     def epub_fallback(self):
+        
         folder = filedialog.askdirectory(title="Select translation output folder")
         if not folder:
             return
-
+        
         self.append_log("📦 [DEBUG] Running EPUB fallback...")
         try:
-            cmd = [
-                sys.executable,
-                'epub_fallback_compiler_with_cover_portable.py',
+
+                        # build args for fallback compiler
+            exe, args = build_subprocess_args(
+                'epub_fallback_compiler_with_cover_portable',
                 folder
-            ]
-            proc = subprocess.Popen(
-                cmd,
+            )
+            self.fallback_proc = subprocess.Popen(
+                args,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,   # same as universal_newlines=True
-                bufsize=1    # line-buffered
+                text=True,
+                bufsize=1
             )
 
-            for line in proc.stdout:
-                # drop any old debug markers, raw JSON, or the script's own success line
-                if (
-                    line.startswith("=== DEBUG: ChatGPT payload")
-                    or line.startswith("{")
-                    or line.startswith("=== END DEBUG")
-                    or "Fallback EPUB created at:" in line
-                ):
-                    continue
-
+            for line in self.fallback_proc.stdout:
                 self.append_log(line.rstrip())
+            self.fallback_proc.wait()
 
-            proc.wait()
-            if proc.returncode == 0:
+            if self.fallback_proc.returncode == 0:
                 out_file = os.path.join(folder, "translated_fallback.epub")
-                self.append_log(f"✅ Fallback EPUB created at: {out_file}")
+                self.append_log(f"✅ Fallback created: {out_file}")
                 messagebox.showinfo("Fallback Success", f"Created: {out_file}")
             else:
-                self.append_log(f"❌ Fallback failed with code {proc.returncode}")
-                messagebox.showerror("Fallback Failed", f"Exited with code {proc.returncode}")
+                self.append_log(f"❌ Fallback failed (code {self.fallback_proc.returncode})")
+                messagebox.showerror("Fallback Failed", f"Exit code {self.fallback_proc.returncode}")
 
         except Exception as e:
             self.append_log(f"❌ Could not launch fallback: {e}")
