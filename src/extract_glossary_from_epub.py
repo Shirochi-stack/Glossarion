@@ -2,6 +2,29 @@ import os
 import json
 import argparse
 import zipfile
+import time
+import sys
+import tiktoken
+# on Windows, make prints UTF-8 capable
+if sys.platform.startswith("win"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+MODEL             = os.getenv("MODEL", "gemini-1.5-flash")
+MAX_GLOSSARY_TOKENS = int(os.getenv("GLOSSARY_TOKEN_LIMIT", 1000000))
+# ─── resilient tokenizer setup ───
+try:
+    enc = tiktoken.encoding_for_model(MODEL)
+except Exception:
+    try:
+        enc = tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        enc = None
+
+def count_tokens(text: str) -> int:
+    if enc:
+        return len(enc.encode(text))
+    # crude fallback: assume ~1 token per 4 chars
+    return max(1, len(text) // 4)
+
 from ebooklib import epub
 from bs4 import BeautifulSoup
 from unified_api_client import UnifiedClient
@@ -191,17 +214,30 @@ def merge_glossary_entries(glossary):
 
     
 def main():
+    start = time.time()
     parser = argparse.ArgumentParser(description="Extract character glossary from EPUB via ChatGPT")
-    parser.add_argument('--epub', required=True)
-    parser.add_argument('--output', default='glossary.json')
+    parser.add_argument('--epub',   required=True)
+    parser.add_argument('--output', default='glossary.json',
+                        help="Name of the JSON file to write.  (Defaults to <epub_basename>_glossary.json)")
     parser.add_argument('--config', default='config.json')
     args = parser.parse_args()
+
+    epub_base = os.path.splitext(os.path.basename(args.epub))[0]
+
+    # If user didn't override --output, derive it from the EPUB filename:
+    if args.output == 'glossary.json':
+        args.output = f"{epub_base}_glossary.json"
+
     # ensure we have a Glossary subfolder next to the JSON/MD outputs
     glossary_dir = os.path.join(os.path.dirname(args.output), "Glossary")
     os.makedirs(glossary_dir, exist_ok=True)
-    # override the module‐level PROGRESS_FILE
+
+    # override the module‐level PROGRESS_FILE to include epub name
     global PROGRESS_FILE
-    PROGRESS_FILE = os.path.join(glossary_dir, "glossary_progress.json")
+    PROGRESS_FILE = os.path.join(
+        glossary_dir,
+        f"{epub_base}_glossary_progress.json"
+    )
 
 
     config = load_config(args.config)
@@ -221,31 +257,56 @@ def main():
     completed = prog['completed']
     glossary = prog['glossary']
     history = prog['context_history']
-
+    total_chapters = len(chapters) 
     for idx, chap in enumerate(chapters):
         if idx in completed:
             print(f"Skipping chapter {idx+1} (already processed)")
             continue
-        print(f"Chapter {idx+1}/{len(chapters)}...")
+                
         try:
-            msgs = trim_context_history(history, ctx_limit) + [
-                {"role":"system","content":sys_prompt},
-                {"role":"user","content":build_prompt(chap)}
-            ]
-            resp = client.send(msgs, temperature=temp, max_tokens=mtoks)
+            msgs = [{"role":"system","content":sys_prompt}] \
+                 + trim_context_history(history, ctx_limit) \
+                 + [{"role":"user","content":build_prompt(chap)}]
+
+            total_tokens = sum(count_tokens(m["content"]) for m in msgs)
+            print(f"[DEBUG] Glossary prompt tokens = {total_tokens} / {MAX_GLOSSARY_TOKENS}")
+            raw = client.send(msgs, temperature=temp, max_tokens=mtoks)
+            # if send() returned (text, finish_reason), pull out the text
+            resp = raw[0] if isinstance(raw, tuple) else raw
 
             # Save the raw response in case you need to inspect it
             os.makedirs("Payloads", exist_ok=True)
-            with open(f"Payloads/failed_response_chap{idx+1}.txt", "w", encoding="utf-8") as f:
+            # after
+            with open(f"Payloads/failed_response_chap{idx+1}.txt", "w", encoding="utf-8", errors="replace") as f:
                 f.write(resp)
 
             # Extract the JSON array itself (strip any leading/trailing prose)
             m = re.search(r"\[.*\]", resp, re.DOTALL)
+            if m:
+                data = json.loads(m.group(0))
+            else:
+                print(f"[Warning] Couldn’t find JSON array in chapter {idx+1}, saving raw…")
+                # optionally write raw to a .txt and `continue`
+                continue
+            
             json_str = m.group(0) if m else resp
 
             # Parse *only* the cleaned-up JSON
             try:
                 data = json.loads(json_str)
+                total_ent = len(data)
+                # log each entry _with_ chapter number
+                for eidx, entry in enumerate(data, start=1):
+                    elapsed = time.time() - start
+                    avg     = elapsed / eidx
+                    eta     = avg * (total_ent - eidx)
+                    name    = entry.get("original_name","?")
+                    print(
+                        f"[Chapter {idx+1}/{total_chapters}] "
+                        f"[{eidx}/{total_ent}] "
+                        f"({elapsed:.1f}s elapsed, ETA {eta:.1f}s) "
+                        f"→ Entry “{name}”"
+                    )
             except json.JSONDecodeError as e:
                 print(f"[Warning] JSON decode error chap {idx+1}: {e}")
                 continue    
