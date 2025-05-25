@@ -40,7 +40,7 @@ class UnifiedClient:
         else:
             raise ValueError("Unsupported model type. Use a model starting with 'gpt' or 'gemini'")
 
-    def send(self, messages, temperature=0.3, max_tokens=2048):
+    def send(self, messages, temperature=0.3, max_tokens=8192):
         try:
             payload = {
                 "model": self.model,
@@ -53,37 +53,59 @@ class UnifiedClient:
                 json.dump(payload, pf, ensure_ascii=False, indent=2)
 
             if self.client_type == 'openai':
-                return self._send_openai(messages, temperature)
+                # will return (result, finish_reason)
+                return self._send_openai(messages, temperature, max_tokens)
             elif self.client_type == 'gemini':
-                return self._send_gemini(messages, temperature, max_tokens)
-
+                result = self._send_gemini(messages, temperature, max_tokens)
+                return result, None
         except Exception as e:
-            raise UnifiedClientError(f"UnifiedClient error: {str(e)}") from e
+            raise UnifiedClientError(f"UnifiedClient error: {e}") from e
 
-    def _send_openai(self, messages, temperature):
-        response = openai.chat.completions.create(
+    def _send_openai(self, messages, temperature, max_tokens):
+        resp   = openai.chat.completions.create(
             model=self.model,
             messages=messages,
-            temperature=temperature
+            temperature=temperature,
+            max_tokens=max_tokens
         )
-        result = response.choices[0].message.content
+        choice = resp.choices[0]
+        text   = choice.message.content
+        reason = choice.finish_reason
+
+        # dump for debug
         with open("Payloads/glossary_response.txt", "w", encoding="utf-8") as rf:
-            rf.write(result)
-        return result
+            rf.write(text)
+
+        return text, reason
 
     def _send_gemini(self, messages, temperature, max_tokens):
-        # include both system & user messages so Gemini sees your instructions
-        prompt_parts = []
+        # ─── Build one big prompt by concatenating your system/user/assistant turns ───
+        parts = []
         for m in messages:
-            if m['role'] in ('system', 'user'):
-                prompt_parts.append(m['content'])
-        prompt = "\n\n".join(prompt_parts)
+            # you can tweak how you interleave roles here if you like
+            parts.append(m["content"])
+        prompt = "\n\n".join(parts)
+
+        # ─── Instantiate the Gemini model ───
         model = genai.GenerativeModel(self.model)
-        response = model.generate_content(prompt, generation_config={
-            'temperature': temperature,
-            'max_output_tokens': max_tokens
-        })
+
+        # ─── Send it off ───
+        response = model.generate_content(
+            prompt,
+            generation_config={
+                "temperature":      temperature,
+                "max_output_tokens": max_tokens,
+            }
+        )
+
+        # ─── Grab the text ───
         result = response.text
-        with open("Payloads/glossary_response.txt", "w", encoding="utf-8") as rf:
+
+        # ─── (Optional) dump it for debug ───
+        os.makedirs("Payloads", exist_ok=True)
+        with open("Payloads/gemini_response.txt", "w", encoding="utf-8") as rf:
             rf.write(result)
+
         return result
+
+        
