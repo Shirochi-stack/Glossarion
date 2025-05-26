@@ -9,6 +9,7 @@ import os, sys, io, zipfile, time, json, re, textwrap, mimetypes, subprocess, ti
 import ebooklib   
 MODEL            = os.getenv("MODEL", "gemini-1.5-flash")
 _tok_env = os.getenv("TOKEN_LIMIT", "").strip()
+REMOVE_HEADER = os.getenv("REMOVE_HEADER", "0") == "1"
 if _tok_env.isdigit():
     MAX_INPUT_TOKENS = int(_tok_env)
     _budget_str = str(MAX_INPUT_TOKENS)
@@ -186,7 +187,9 @@ def send(messages):
     #print("=== END DEBUG ===\n")
 
     # Actually send the request
-    return client.send(messages, temperature=TEMP, max_tokens=12000)
+    return client.send(messages, temperature=TEMP, max_tokens=4196)
+    # alias for rolling‐summary logic
+send_to_model = lambda msgs: send(msgs)[0]
 
 
 
@@ -226,6 +229,10 @@ def main():
     with zipfile.ZipFile(EPUB_PATH, 'r') as zf:
         metadata = extract_epub_metadata(zf)
         chapters = extract_chapters(zf)
+        if REMOVE_HEADER and chapters:
+            first = chapters[0]["body"]
+            _, _, stripped = first.partition("\n\n")
+            chapters[0]["body"] = stripped or first
         # images
         imgdir = os.path.join(out, "images")
         os.makedirs(imgdir, exist_ok=True)
@@ -323,11 +330,70 @@ def main():
                 print(f"[DEBUG] Prompt tokens = {total_tokens} / {MAX_INPUT_TOKENS}")
                 result, finish_reason = send(msgs)
                 if finish_reason == "length":
-                    print(f"[WARN] Output was truncated at {max_tokens} tokens!")
-                # Record this turn and persist it
-                history.append({"role":"user",      "content": user_prompt})
-                history.append({"role":"assistant", "content": result})
+                    print(f"[WARN] Output was truncated at {total_tokens} tokens!")
+                # Load and trim history
+                history = load_history()
+                old_len = len(history)
+                history = history[-HIST_LIMIT * 2:]
+                history_trimmed = len(history) < old_len
+                if history_trimmed:
+                    print(f"[DBG] Trimmed translation history from {old_len} to {len(history)} entries.")
+
+                # Append latest user and assistant messages
+                history.append({"role": "user", "content": user_prompt})
+                history.append({"role": "assistant", "content": result})
+
+                # Save updated history
                 save_history(history)
+
+                # Use rolling summary if trimming occurred and enabled
+                if history_trimmed and os.getenv("USE_ROLLING_SUMMARY", "0") == "1":
+                    # Summarize ONLY the most recent chapter (last assistant message)
+                    recent_entries = [h for h in history[-2:] if h["role"] == "assistant"]
+
+                    summary_prompt = (
+                        "Summarize the key events, tone, and terminology used in the following translation.\n"
+                        "The summary will be used to maintain consistency in the next chapter.\n\n"
+                        + "\n\n".join(e["content"] for e in recent_entries)
+                    )
+
+                    summary_resp = send_to_model([
+                        {"role": "system", "content": "You are a summarizer."},
+                        {"role": "user", "content": summary_prompt}
+                    ])
+
+                    # Clean and purge both old files
+                    summary_file = os.path.join(out, "rolling_summary.txt")
+                    history_file = os.path.join(out, "translation_history.json")
+
+                    if os.path.exists(history_file):
+                        try:
+                            os.remove(history_file)
+                            print("[DBG] translation_history.json purged due to rolling summary.")
+                        except Exception as e:
+                            print(f"[WARN] Failed to delete history file: {e}")
+
+                    if os.path.exists(summary_file):
+                        try:
+                            os.remove(summary_file)
+                            print("[DBG] Old rolling_summary.txt removed before regeneration.")
+                        except Exception as e:
+                            print(f"[WARN] Failed to delete old summary: {e}")
+
+                    with open(summary_file, "w", encoding="utf-8") as sf:
+                        sf.write(summary_resp.strip())
+
+                    # Inject new summary into prompt
+                    trimmed = []  # Reset context window to empty
+                    base_msg.insert(1, {
+                        "role": os.getenv("SUMMARY_ROLE", "user"),
+                        "content": (
+                            "Here is a concise summary of the previous chapter. "
+                            "Use this to ensure accurate tone, terminology, and character continuity:\n\n"
+                            f"{summary_resp.strip()}"
+                        )
+                    })
+
 
                 # Pause after success, then exit retry loop
                 time.sleep(DELAY)
@@ -351,12 +417,12 @@ def main():
         prog["completed"].append(idx)
         save_progress()
 
-    # 3) final EPUB via fallback compiler
+    # 3) final EPUB via EPUB compiler
     print("📘 Building final EPUB…")
-    fallback = os.path.join(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__))),
-                            "epub_fallback_compiler_with_cover_portable.py")
+    epubc = os.path.join(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__))),
+                            "epub_converter.py")
     try:
-        subprocess.run([sys.executable, fallback, out], check=True)
+        subprocess.run([sys.executable, epubc, out], check=True)
         print("✅ All done: your final EPUB is in", out)
     except subprocess.CalledProcessError as e:
         print("❌ EPUB build failed:", e)
