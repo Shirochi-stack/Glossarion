@@ -244,7 +244,7 @@ def main():
     client = UnifiedClient(model=config['model'], api_key=config['api_key'])
     model = config.get('model', 'gpt-4.1-mini')
     temp = config.get('temperature', 0.3)
-    mtoks = config.get('max_tokens', 12000)
+    mtoks = config.get('max_tokens', 4196)
     sys_prompt = config.get('system_prompt', 'You are a helpful assistant.')
     ctx_limit = config.get('context_limit_chapters', 3)
 
@@ -282,11 +282,14 @@ def main():
 
             # Extract the JSON array itself (strip any leading/trailing prose)
             m = re.search(r"\[.*\]", resp, re.DOTALL)
-            if m:
-                data = json.loads(m.group(0))
-            else:
+            if not m:
                 print(f"[Warning] Couldn’t find JSON array in chapter {idx+1}, saving raw…")
-                # optionally write raw to a .txt and `continue`
+                continue
+
+            try:
+                data = json.loads(m.group(0))
+            except json.JSONDecodeError as e:
+                print(f"[Error] Invalid JSON format in chapter {idx+1}: {e}")
                 continue
             
             json_str = m.group(0) if m else resp
