@@ -7,41 +7,26 @@ import subprocess
 import math
 import ttkbootstrap as tb
 import tkinter as tk
+import tkinter as ttk
 from tkinter import filedialog, messagebox, scrolledtext
 from ttkbootstrap.constants import *
 import logging
 import shutil
+from tkinter import scrolledtext
+from PIL import Image, ImageTk
+from tkinter import simpledialog
+from tkinter import ttk
 
-if getattr(sys, "frozen", False) and len(sys.argv) > 1:
-    # first arg is our helper name
-    helper, *rest = sys.argv[1:]
-    if helper == "TransateKRtoEN":
-        from TransateKRtoEN import main as _main
-        sys.exit(_main(*rest))
-    elif helper == "extract_glossary_from_epub":
-        from extract_glossary_from_epub import main as _main
-        sys.exit(_main(*rest))
-    elif helper == "epub_fallback_compiler_with_cover_portable":
-        from epub_fallback_compiler_with_cover_portable import main as _main
-        sys.exit(_main(*rest))
-        
-def build_subprocess_args(script_basename, *params):
-    exe = sys.executable
-    if getattr(sys, 'frozen', False):
-        # prefix with the helper name
-        return exe, [exe, script_basename, *params]
-    else:
-        base   = os.path.dirname(os.path.abspath(__file__))
-        helper = os.path.join(base, f"{script_basename}.py")
-        return exe, [exe, "-u", helper, *params]
 
 CREATE_NO_WINDOW = 0x08000000
 CONFIG_FILE = "config.json"
 BASE_WIDTH, BASE_HEIGHT = 1280, 1000
-
 class TranslatorGUI:
     def __init__(self, master):
         self.master = master
+        self.max_output_tokens = 4196  # default fallback
+        self.proc = None
+        self.glossary_proc = None       
         master.title("EPUB Translator")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1280, 1000)
@@ -50,13 +35,42 @@ class TranslatorGUI:
         self.payloads_dir = os.path.join(os.getcwd(), "Payloads")        
         # Warn on close
         self.master.protocol("WM_DELETE_WINDOW", self.on_close)
+        
+        # Base directory for resources
+        self.base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+        ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
 
+        # Load and set window icon
+        if os.path.isfile(ico_path):
+            try:
+                master.iconbitmap(ico_path)
+            except Exception:
+                pass
+
+        # Load embedded icon image for display
+        try:
+            self.logo_img = ImageTk.PhotoImage(Image.open(ico_path)) if os.path.isfile(ico_path) else None
+        except Exception as e:
+            logging.error(f"Failed to load logo: {e}")
+            self.logo_img = None
+        if self.logo_img:
+            master.iconphoto(False, self.logo_img)
         # Load config
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 self.config = json.load(f)
+
         except:
             self.config = {}
+        
+        # ─── restore rolling-summary state from config.json ───
+        self.rolling_summary_var = tk.BooleanVar(
+        value=self.config.get('use_rolling_summary', False)
+        )
+        self.summary_role_var   = tk.StringVar(
+        value=self.config.get('summary_role', 'user')
+        )
+            
 
         # Default prompts
         self.default_prompts = {
@@ -96,7 +110,7 @@ class TranslatorGUI:
         tb.Label(self.frame, text="Model:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
         self.model_var = tk.StringVar(value=self.config.get('model','gpt-4.1-nano'))
         tb.Combobox(self.frame, textvariable=self.model_var,
-                    values=["gpt-4.1-nano","gpt-4.1-mini","gpt-4.1","gpt-3.5-turbo","gemini-1.5-pro","gemini-1.5-flash", "gemini-2.0-flash"], state="normal").grid(
+                    values=["gpt-4.1-nano","gpt-4.1-mini","gpt-4.1","gpt-3.5-turbo","gemini-1.5-pro","gemini-1.5-flash", "gemini-2.0-flash","deepseek-chat","claude-sonnet-4-20250514"], state="normal").grid(
             row=1, column=1, columnspan=2, sticky=tk.EW, padx=5, pady=5)
 
         # Language
@@ -131,19 +145,13 @@ class TranslatorGUI:
         self.chapter_range_entry.insert(0, self.config.get('chapter_range', ''))
         self.chapter_range_entry.grid(row=5, column=1, sticky=tk.W, padx=5, pady=5)
         
-        #Token limit
-        tb.Label(self.frame, text="Token limit:").grid(row=6, column=0,sticky=tk.W, padx=5, pady=5)
-        self.token_limit_entry = tb.Entry(self.frame, width=8)
-        self.token_limit_entry.insert(0, str(self.config.get('token_limit', 1000000)))
-        self.token_limit_entry.grid(row=6, column=1, sticky=tk.W, padx=5, pady=5)
-        
         # ── Disable Token Limit button, placed below the token-limit field ──
         self.toggle_token_btn = tb.Button(
             self.frame,
-            text="Disable Token Limit",
+            text="Disable Input Token Limit",
             command=self.toggle_token_limit,
             bootstyle="danger-outline",
-            width=16
+            width=21
         )
         self.toggle_token_btn.grid(row=7, column=1, sticky=tk.W, padx=5, pady=5)
 
@@ -186,11 +194,29 @@ class TranslatorGUI:
         # API Key
         tb.Label(self.frame, text="OpenAI / Gemini API Key:").grid(row=8, column=0, sticky=tk.W, padx=5, pady=5)
         self.api_key_entry = tb.Entry(self.frame, show='*')
-        self.api_key_entry.insert(0,self.config.get('api_key',''))
         self.api_key_entry.grid(row=8, column=1, columnspan=3, sticky=tk.EW, padx=5, pady=5)
-        tb.Button(self.frame, text="Show", command=self.toggle_api_visibility,
-                  width=12).grid(row=8, column=4, sticky=tk.EW, padx=5, pady=5)
-
+        initial_key = self.config.get('api_key', '')
+        if initial_key:
+            self.api_key_entry.insert(0, initial_key)
+        tb.Button(self.frame, text="Show", command=self.toggle_api_visibility,width=12).grid(row=8, column=4, sticky=tk.EW, padx=5, pady=5)  
+        
+        # --- New "Other" button for advanced settings ---
+        tb.Button(
+            self.frame,
+            text="⚙️  Other Setting",
+            command=self.open_other_settings,
+            bootstyle="info-outline",
+            width=15
+        ).grid(row=7, column=4, sticky=tk.EW, padx=5, pady=5)
+        # Remove Header?
+        self.remove_header_var = tk.BooleanVar(value=self.config.get('remove_header', False))
+        tb.Checkbutton(
+            self.frame,
+            text="Remove Header",
+            variable=self.remove_header_var,
+            bootstyle="round-toggle"
+        ).grid(row=7, column=0, columnspan=5, sticky=tk.W, padx=5, pady=(0,5))
+        
         # System Prompt
         tb.Label(self.frame, text="System Prompt:").grid(row=9, column=0, sticky=tk.NW, padx=5, pady=5)
         self.prompt_text = tk.Text(
@@ -206,7 +232,20 @@ class TranslatorGUI:
         self.prompt_text.bind('<Control-z>', lambda e: self.prompt_text.edit_undo())
         self.prompt_text.bind('<Control-y>', lambda e: self.prompt_text.edit_redo())
         self.prompt_text.grid(row=9, column=1, columnspan=3, sticky=tk.NSEW, padx=5, pady=5)
-
+        
+        #Token limit
+        tb.Label(self.frame, text="Input Token limit:").grid(row=6, column=0,sticky=tk.W, padx=5, pady=5)
+        self.token_limit_entry = tb.Entry(self.frame, width=8)
+        self.token_limit_entry.insert(0, str(self.config.get('token_limit', 1000000)))
+        self.token_limit_entry.grid(row=6, column=1, sticky=tk.W, padx=5, pady=5)
+        tb.Button(
+            self.frame,
+            text="Output Token Limit",
+            command=self.prompt_custom_token_limit,
+            bootstyle="info",
+            width=16
+        ).grid(row=9, column=0, sticky=tk.W, padx=5, pady=5)
+        
         # Run Translation
         self.run_button = tb.Button(self.frame, text="Run Translation",
                                     command=self.run_translation_thread,
@@ -229,22 +268,100 @@ class TranslatorGUI:
 
         # initial prompt
         self.on_profile_select()
+        
+    def open_other_settings(self):
+        top = tk.Toplevel(self.master)
+        top.title("Advanced Settings")
+        top.geometry("320x200")
 
+        # Rolling summary checkbox
+        self.rolling_summary_var = tk.BooleanVar(value=os.getenv("USE_ROLLING_SUMMARY", "0") == "1")
+        tb.Checkbutton(top, text="Use Rolling Summary", variable=self.rolling_summary_var,
+                       bootstyle="round-toggle").pack(anchor=tk.W, padx=10, pady=10)
+
+        # Summary role dropdown
+        tk.Label(top, text="Summary Role:").pack(anchor=tk.W, padx=10)
+        self.summary_role_var = tk.StringVar(value=os.getenv("SUMMARY_ROLE", "user"))
+        ttk.Combobox(top, textvariable=self.summary_role_var,
+                     values=["user", "system"], state="readonly").pack(anchor=tk.W, padx=10)
+
+        # Save settings button
+        def save_and_close():
+            os.environ["USE_ROLLING_SUMMARY"] = "1" if self.rolling_summary_var.get() else "0"
+            os.environ["SUMMARY_ROLE"] = self.summary_role_var.get()
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.config, f, ensure_ascii=False, indent=2)
+            self.append_log(f"[DBG] USE_ROLLING_SUMMARY={os.environ['USE_ROLLING_SUMMARY']} | SUMMARY_ROLE={os.environ['SUMMARY_ROLE']}")
+            top.destroy()
+
+        tb.Button(top, text="Save", command=save_and_close).pack(pady=10) 
         
     def on_close(self):
-        if messagebox.askokcancel("Quit", "Are you sure you want to exit? Unsaved translations will be stopped."):
+        if messagebox.askokcancel("Quit", "Are you sure you want to exit?"):
             # Terminate any running subprocesses
-            for proc_attr in ('proc', 'fallback_proc', 'glossary_proc'):
-                proc = getattr(self, proc_attr, None)
-                if proc and proc.poll() is None:
+            for self.proc_attr in ('proc', 'epub_proc', 'glossary_proc'):
+                self.proc = getattr(self, self.proc_attr, None)
+                if self.proc and self.proc.poll() is None:
                     try:
-                        proc.terminate()
+                        self.proc.terminate()
                     except Exception:
                         pass
             self.master.destroy()
-            # Ensure the interpreter exits
-            self.root.destroy()
             sys.exit(0)
+
+    def prompt_custom_token_limit(self):
+        from tkinter import simpledialog
+        val = simpledialog.askinteger(
+            "Set Max Output Token Limit",
+            "Enter max tokens for API output (e.g., 8192):",
+            minvalue=1,
+            maxvalue=200000
+        )
+        if val:
+            self.max_output_tokens = val
+            self.append_log(f"✅ Output token limit set to {val}")
+
+
+    def stop_actions(self):
+        self.stop_requested = True
+        """Terminate any active translation or glossary subprocess."""
+        # Translation
+        if getattr(self, 'proc', None) and self.proc.poll() is None:
+            self.proc.terminate()
+            self.append_log("❌ Translation stopped by user.")
+            
+        if getattr(self, 'glossary_proc', None) and self.glossary_proc.poll() is None:
+            self.glossary_proc.terminate()
+            self.append_log("❌ Glossary extraction stopped by user.")
+        # Restore button
+        self.update_run_button()
+        # Re-enable the extract-glossary toolbar button in case it was disabled
+        self.glossary_button.config(state=tk.NORMAL)
+
+    def update_run_button(self):
+        """Switch Run↔Stop depending on whether a subprocess is active."""
+        running = False
+        # Check translation proc
+        if getattr(self, 'proc', None) and self.proc.poll() is None:
+            running = True
+        # Check glossary proc
+        if getattr(self, 'glossary_proc', None) and self.glossary_proc.poll() is None:
+            running = True
+
+        if running:
+            self.run_button.config(
+                text="Stop Translation",
+                command=self.stop_actions,
+                bootstyle="danger",
+                state=tk.NORMAL
+            )
+        else:
+            self.run_button.config(
+                text="Run Translation",
+                command=self.run_translation_thread,
+                bootstyle="success",
+                state=tk.NORMAL
+            )
 
     def toggle_token_limit(self):
         """Toggle whether the token-limit entry is active or not."""
@@ -270,7 +387,7 @@ class TranslatorGUI:
         btn_frame.grid(row=11, column=0, columnspan=5, sticky=tk.EW, pady=5)
 
         toolbar_items = [
-            ("EPUB Converter",      self.epub_fallback,               "info"),
+            ("EPUB Converter",      self.epub_converter,               "info"),
             ("Extract Glossary",    self.run_glossary_extraction_thread, "warning"),
             ("Trim Glossary",       self.trim_glossary,               "secondary"),
             ("Save Config",         self.save_config,                 "secondary"),
@@ -594,7 +711,9 @@ class TranslatorGUI:
         self.log_text.configure(state=tk.DISABLED)
 
     def run_translation_thread(self):
-        self.run_button_state(False)
+        # immediately switch to “Stop Translation”
+        # schedule on the main thread so Tkinter actually redraws
+        self.master.after(0, self.update_run_button)
         threading.Thread(target=self.run_translation, daemon=True).start()
 
     def run_button_state(self, enabled):
@@ -605,6 +724,7 @@ class TranslatorGUI:
                 break
 
     def run_translation(self):
+        self.stop_requested = False
         epub_path = self.entry_epub.get()
         epub_path   = self.entry_epub.get()
         epub_base   = os.path.splitext(os.path.basename(epub_path))[0]
@@ -630,7 +750,7 @@ class TranslatorGUI:
             messagebox.showerror("Error", "Delay must be an integer.")
             return self._reenable()
 
-        # --- save config ---
+        # --- save updated config fields without wiping others ---
         cfg = {
             "api_key": api_key,
             "delay": delay,
@@ -639,12 +759,24 @@ class TranslatorGUI:
             "contextual": contextual,
             "system_prompt": sys_prompt,
             "translation_temperature": float(self.trans_temp.get()),
-            "translation_history_limit":  int(self.trans_history.get())
+            "translation_history_limit": int(self.trans_history.get()),
+            "glossary_temperature": float(self.glossary_temp.get()),
+            "glossary_history_limit": int(self.glossary_history.get()),
+            "remove_header":          self.remove_header_var.get(),
+            "chapter_range":          self.chapter_range_entry.get().strip(),
+            "token_limit":            (int(self.token_limit_entry.get()) 
+                                   if self.token_limit_entry.get().isdigit() 
+                                   else None),
+            "use_rolling_summary":    self.rolling_summary_var.get(),
+            "summary_role":           self.summary_role_var.get(),
+            
         }
+        # Merge into full config and write
+        for k, v in cfg.items():
+            self.config[k] = v
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
+            json.dump(self.config, f, ensure_ascii=False, indent=2)
 
-        # --- build env & launch ---
         env = os.environ.copy()
         env["TRANSLATION_HISTORY_LIMIT"] = str(self.trans_history.get())
         env['TRANSLATION_TEMPERATURE'] = str(self.trans_temp.get())
@@ -654,8 +786,12 @@ class TranslatorGUI:
         env['MODEL'] = model
         env['CONTEXTUAL'] = '1' if contextual else '0'
         env['SEND_INTERVAL_SECONDS'] = str(delay)
+        env["API_KEY"] = api_key
         env['OPENAI_API_KEY'] = api_key
         env['SYSTEM_PROMPT']    = self.prompt_text.get("1.0", "end").strip()
+        env["REMOVE_HEADER"] = "1" if self.remove_header_var.get() else "0"
+        env["USE_ROLLING_SUMMARY"] = "1" if self.config.get('use_rolling_summary') else "0"
+        env["SUMMARY_ROLE"]        =  self.config.get('summary_role', 'user')
         # new:
         chap_range = self.chapter_range_entry.get().strip()
         if chap_range:
@@ -672,6 +808,7 @@ class TranslatorGUI:
         env['TRANSLATION_LANG'] = self.lang_var.get().lower()
 
         base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+        script = os.path.join(base_dir, "TransateKRtoEN.py")
         
         self.log_debug("📦 Environment Variables Set:")
         self.log_debug(f"  EPUB_PATH = {epub_path}")
@@ -692,57 +829,71 @@ class TranslatorGUI:
         self.log_debug("🚀 Launching translation subprocess...\n")
         self.append_log("🚀 Starting translation subprocess…")
         
-        #  Launch translation subprocess
-        exe, args = build_subprocess_args('TransateKRtoEN', epub_path)
+            
+        # … earlier in run_translation()
+
         self.proc = subprocess.Popen(
-            args,
+            [sys.executable, '-u', script, epub_path],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             bufsize=1,
-            text=True,
+            text=True,                # <<< text mode so stdout yields str
             encoding='utf-8',
             errors='ignore',
             creationflags=CREATE_NO_WINDOW,
-            env=env,
+            env=env
         )
+        # immediately switch the button into “Stop”
+        self.update_run_button()
 
-        # ▶️ Stream its output
-        for line in self.proc.stdout:
+        full_out = ""
+        for line in self.proc.stdout:    # read every line exactly once
             self.append_log(line.rstrip())
+            full_out += line
 
-        # ▶️ Wait for it to finish
         self.proc.wait()
-
-        # ▶️ Check exit code
+        
         if self.proc.returncode == 0:
+            self.append_log("✅ Translation finished successfully.")
+        else:
+            self.append_log(f"❌ Translation failed with code {self.proc.returncode}.")
+          
+
+        # now you can check:
+        if "TRANSLATION_COMPLETE_SIGNAL" in full_out:
             messagebox.showinfo("Success", "Translation complete!")
         else:
-            self.append_log(f"❌ Translation failed (code {self.proc.returncode}).")
-            if messagebox.askyesno("Run Fallback?",
-                                   "Translation failed. Run EPUB fallback compiler?"):
-                exe_fb, args_fb = build_subprocess_args(
-                    'epub_fallback_compiler_with_cover_portable',
-                    output_dir
-                )
-                fb = subprocess.Popen(
-                    args_fb,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1
-                )
-                for line in fb.stdout:
-                    self.append_log("[FALLBACK] " + line.rstrip())
-                fb.wait()
-                if fb.returncode == 0:
-                    messagebox.showinfo("Fallback Success",
-                                        "Fallback EPUB compiled successfully.")
-                else:
-                    messagebox.showerror("Fallback Failed",
-                                         f"Exit code {fb.returncode}")
+            # read up to 1KB at a time (returns str because text=True)
+            for raw_chunk in iter(lambda: self.proc.stdout.read(1024), ''):
+                # raw_chunk is already decoded text, so just split it
+                for line in raw_chunk.splitlines():
+                    self.append_log("[EPUB] " + line)
+            self.proc.wait()
 
-        # ▶️ Re-enable UI
+            full_out = ""
+            for line in iter(self.proc.stdout.readline, ""):
+                self.append_log(line.rstrip())
+                full_out += line
+            self.proc.wait()
+            self.master.after(0, self.update_run_button)
+
+
+
+            # 3) Re-enable UI and exit
+                    # translation finished
+            self.proc = None
+            self.master.after(0, self.update_run_button)  
+            self._reenable()
+            return
+
+
         self._reenable()
+        proc_return = self.proc.wait()
+        # … your existing success/failure logging …
+        # Now clear it and update the button back to “Run”
+        self.proc = None
+        self.master.after(0, self.update_run_button)
+       
 
     def _reenable(self):
         self.run_button.config(state=tk.NORMAL)
@@ -753,6 +904,7 @@ class TranslatorGUI:
         threading.Thread(target=self.run_glossary_extraction, daemon=True).start()
 
     def run_glossary_extraction(self):
+        self.stop_requested = False
         epub_path = self.entry_epub.get()
         temp = self.glossary_temp.get()
         history = self.glossary_history.get()
@@ -775,6 +927,7 @@ class TranslatorGUI:
             return
 
         # Persist settings
+        self.config['api_key'] = self.api_key_entry.get()
         self.config['temperature'] = temp_val
         self.config['glossary_history_limit'] = hist_val
         self.config['title_trim_count']            = int(self.title_trim.get())
@@ -784,13 +937,15 @@ class TranslatorGUI:
         self.config['locations_trim_count']        = int(self.loc_trim.get())
         
 
-        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(self.config, f, ensure_ascii=False, indent=2)
 
         # Build subprocess command
         base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
         script = os.path.join(base_dir, "extract_glossary_from_epub.py")
-
+        cmd = [
+            sys.executable, script,
+            "--epub", epub_path,
+            "--config", CONFIG_FILE
+        ]
         env = os.environ.copy()
         env['PYTHONUNBUFFERED'] = '1'
         env['GLOSSARY_TEMPERATURE'] = temp
@@ -804,78 +959,82 @@ class TranslatorGUI:
         self.log_debug("📄 Extracting chapters for glossary…")
         self.log_debug("")
 
-        # ▶️ Launch glossary extraction subprocess
-        exe, args = build_subprocess_args(
-            'extract_glossary_from_epub',
-            '--epub', epub_path,
-            '--config', CONFIG_FILE
-        )
-        self.glossary_proc = subprocess.Popen(
-            args,
+
+
+
+        # Run and stream logs
+        self.append_log("🚀 Starting glossary extraction…")
+        self.proc = subprocess.Popen(
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            bufsize=1,
-            text=True,
+            bufsize=1,          # line-buffered
+            text=True,          # universal_newlines
             encoding='utf-8',
             errors='replace',
-            env=env,
+            env=env
         )
-
-        # ▶️ Stream its output
-        for line in self.glossary_proc.stdout:
+        self.update_run_button()
+        for line in self.proc.stdout:
             self.append_log(line.rstrip())
-
-        # ▶️ Wait for it to finish
-        self.glossary_proc.wait()
-
-        # ▶️ Check exit code
-        if self.glossary_proc.returncode == 0:
-            messagebox.showinfo("Glossary", "Extraction finished!")
-        else:
-            messagebox.showerror(
-                "Glossary Error",
-                f"Exit code {self.glossary_proc.returncode}"
-            )
-
-        # ▶️ Re-enable the button
+            self.master.update_idletasks()
+        # Wait for subprocess to finish
+        self.proc.wait()
+        self.glossary_proc = None
+        self.update_run_button()
         self.glossary_button.config(state=tk.NORMAL)
 
-    def epub_fallback(self):
-        
+
+        if self.proc.returncode == 0:
+            self.append_log("✅ Glossary extraction completed successfully.")
+        else:
+            self.append_log(f"❌ Glossary extraction failed (exit code {self.proc.returncode}).")
+
+        self.glossary_button.config(state=tk.NORMAL)
+
+    def epub_converter(self):
         folder = filedialog.askdirectory(title="Select translation output folder")
         if not folder:
             return
-        
-        self.append_log("📦 [DEBUG] Running EPUB fallback...")
-        try:
 
-                        # build args for fallback compiler
-            exe, args = build_subprocess_args(
-                'epub_fallback_compiler_with_cover_portable',
+        self.append_log("📦 [DEBUG] Running EPUB Converter...")
+        try:
+            cmd = [
+                sys.executable,
+                'epub_converter.py',
                 folder
-            )
-            self.fallback_proc = subprocess.Popen(
-                args,
+            ]
+            self.proc = subprocess.Popen(
+                cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1
+                text=True,   # same as universal_newlines=True
+                bufsize=1    # line-buffered
             )
 
-            for line in self.fallback_proc.stdout:
-                self.append_log(line.rstrip())
-            self.fallback_proc.wait()
+            for line in self.proc.stdout:
+                # drop any old debug markers, raw JSON, or the script's own success line
+                if (
+                    line.startswith("=== DEBUG: ChatGPT payload")
+                    or line.startswith("{")
+                    or line.startswith("=== END DEBUG")
+                    or "EPUB created at:" in line
+                ):
+                    continue
 
-            if self.fallback_proc.returncode == 0:
-                out_file = os.path.join(folder, "translated_fallback.epub")
-                self.append_log(f"✅ Fallback created: {out_file}")
-                messagebox.showinfo("Fallback Success", f"Created: {out_file}")
+                self.append_log(line.rstrip())
+
+            self.proc.wait()
+            if self.proc.returncode == 0:
+                out_file = os.path.join(folder, "translated_default.epub")
+                self.append_log(f"✅ EPUB created at: {out_file}")
+                messagebox.showinfo("EPUB Compilation Success", f"Created: {out_file}")
             else:
-                self.append_log(f"❌ Fallback failed (code {self.fallback_proc.returncode})")
-                messagebox.showerror("Fallback Failed", f"Exit code {self.fallback_proc.returncode}")
+                self.append_log(f"❌ EPUB Converter failed with code {proc.returncode}")
+                messagebox.showerror("EPUB Converter Failed", f"Exited with code {proc.returncode}")
 
         except Exception as e:
-            self.append_log(f"❌ Could not launch fallback: {e}")
+            self.append_log(f"❌ Could not launch EPUB COnverter: {e}")
 
     def save_config(self):
         """Persist all settings to config.json without referencing lang_var."""
@@ -891,6 +1050,16 @@ class TranslatorGUI:
             self.config['glossary_temperature'] = float(self.glossary_temp.get())
             self.config['glossary_history_limit'] = int(self.glossary_history.get())
             self.config['api_key'] = self.api_key_entry.get()
+            # persist the new toggles & fields
+            self.config['remove_header']   = self.remove_header_var.get()
+            self.config['chapter_range']   = self.chapter_range_entry.get().strip()
+            self.config['use_rolling_summary']  = self.rolling_summary_var.get()
+            self.config['summary_role']         = self.summary_role_var.get()            
+            self.config['token_limit']     = (
+                int(self.token_limit_entry.get().strip())
+                if self.token_limit_entry.get().strip().isdigit()
+                else None
+            )
             # defensively handle empty/disabled token‐limit field
             _tl = self.token_limit_entry.get().strip()
             if _tl.isdigit():
@@ -901,6 +1070,7 @@ class TranslatorGUI:
             # Write to file
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, ensure_ascii=False, indent=2)
+                
             messagebox.showinfo("Saved", "Configuration saved.")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save config: {e}")
@@ -914,7 +1084,7 @@ class TranslatorGUI:
         # And immediately disable again so the user can’t edit it
         self.log_text.configure(state=tk.DISABLED)
 
-
+        
 if __name__ == "__main__":
     root = tb.Window(themename="darkly")
     app = TranslatorGUI(root)
