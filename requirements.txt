@@ -1,7 +1,8 @@
+tiktoken
 ebooklib
 beautifulsoup4
 ttkbootstrap
+Pillow
+requests
 openai
 google-generativeai
-requests
-pillow
