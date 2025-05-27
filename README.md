@@ -56,7 +56,7 @@
    pip install -r requirements.txt
    ```
    Requirements include:
-   - `ttoken`
+   - `tiktoken`
    - `ebooklib`
    - `beautifulsoup4`
    - `ttkbootstrap`
