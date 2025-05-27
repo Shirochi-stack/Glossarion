@@ -56,13 +56,14 @@
    pip install -r requirements.txt
    ```
    Requirements include:
+   - `ttoken`
    - `ebooklib`
    - `beautifulsoup4`
    - `ttkbootstrap`
    - `openai`
    - `google-generativeai`
 
-3. Launch the GUI:
+4. Launch the GUI:
    ```bash
    python translator_gui.py
    ```
