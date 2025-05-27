@@ -47,7 +47,7 @@ class UnifiedClient:
         else:
             raise ValueError("Unsupported model type. Use a model starting with 'gpt', 'gemini', 'deepseek', or 'sonnet'")
 
-    def send(self, messages, temperature=0.3, max_tokens=4196):
+    def send(self, messages, temperature=0.3, max_tokens=8192):
         try:
             os.makedirs("Payloads", exist_ok=True)
             with open("Payloads/glossary_payload.json", "w", encoding="utf-8") as pf:
@@ -88,14 +88,45 @@ class UnifiedClient:
         parts = [m["content"] for m in messages]
         prompt = "\n\n".join(parts)
         model = genai.GenerativeModel(self.model)
-        response = model.generate_content(
-            prompt,
-            generation_config={
-                "temperature": temperature,
-                "max_output_tokens": max_tokens,
-            }
-        )
-        result = response.text
+        # —— RETRY LOOP WITH INITIAL BOOST —— #
+        BOOST_FACTOR = 4                   # ← change this to 3 or 4 to boost harder
+        attempts     = 4
+        attempt      = 0
+        result       = None
+        current_tok  = max_tokens * BOOST_FACTOR
+
+        while attempt < attempts:
+            response = model.generate_content(
+                prompt,
+                generation_config={
+                    "temperature": temperature,
+                    "max_output_tokens": current_tok
+                }
+            )
+            # first try the quick accessor
+            try:
+                result = response.text
+            except Exception:
+                # if that fails, try candidates
+                if getattr(response, 'candidates', None):
+                    cand = response.candidates[0]
+                    result = getattr(cand, 'content', None) or getattr(cand, 'text', "")
+                else:
+                    # warn and prepare to retry
+                    print(f"⚠️ Attempt {attempt+1}: no text/candidates at {max_tokens} tokens")
+                    result = None
+            # if we got something non‐empty, break out
+            if result:
+                break
+            # otherwise shrink the budget and retry
+            max_tokens = max(256, max_tokens // 2)
+            attempt += 1
+            print(f"🔄 Retrying Gemini with max_output_tokens={max_tokens}")
+
+        if not result:
+            # after exhausting retries, fall back to empty array
+            print("⚠️ All retries failed; returning empty array")
+            result = "[]"
 
         with open("Payloads/gemini_response.txt", "w", encoding="utf-8") as rf:
             rf.write(result)
