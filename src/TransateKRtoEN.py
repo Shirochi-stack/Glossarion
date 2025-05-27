@@ -6,9 +6,10 @@ import shutil
 logging.basicConfig(level=logging.DEBUG)
 
 import os, sys, io, zipfile, time, json, re, textwrap, mimetypes, subprocess, tiktoken
-import ebooklib   
+import ebooklib
+import re
 MODEL            = os.getenv("MODEL", "gemini-1.5-flash")
-_tok_env = os.getenv("TOKEN_LIMIT", "").strip()
+_tok_env = os.getenv("MAX_INPUT_TOKENS", "").strip()
 REMOVE_HEADER = os.getenv("REMOVE_HEADER", "0") == "1"
 if _tok_env.isdigit():
     MAX_INPUT_TOKENS = int(_tok_env)
@@ -163,7 +164,11 @@ def save_glossary(output_dir, chapters):
     with open(os.path.join(output_dir, "glossary.json"), 'w', encoding='utf-8') as f:
         json.dump(gloss, f, ensure_ascii=False, indent=2)
 
-def send(messages):
+def send(messages, max_tokens=None):
+    if max_tokens is None:
+        max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
+    logging.debug(f"[DEBUG] Sending request with max_tokens={max_tokens}")
+    return client.send(messages, temperature=TEMP, max_tokens=max_tokens)
     # Build the exact payload we're about to send
     payload = {
         "model": MODEL,
@@ -187,7 +192,16 @@ def send(messages):
     #print("=== END DEBUG ===\n")
 
     # Actually send the request
-    return client.send(messages, temperature=TEMP, max_tokens=4196)
+    if max_tokens is None:
+    # Read from env, fallback to 8192 if not set or invalid
+        try:
+            max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
+        except ValueError:
+            max_tokens = 8192
+    logging.debug(f"[DEBUG] Sending request with max_tokens={max_tokens}")
+    
+    return client.send(messages, temperature=TEMP, max_tokens=max_tokens)
+    print(f"[DEBUG] Sending request with max_tokens={max_tokens}")
     # alias for rolling‐summary logic
 send_to_model = lambda msgs: send(msgs)[0]
 
@@ -331,6 +345,23 @@ def main():
                 result, finish_reason = send(msgs)
                 if finish_reason == "length":
                     print(f"[WARN] Output was truncated at {total_tokens} tokens!")
+                # ─── If REMOVE_HEADER is on, also strip Gemini’s “Okay, I will translate…” line ───
+                if REMOVE_HEADER:
+                    # split into lines, preserving newline chars
+                    lines = result.splitlines(True)
+
+                    # compile regex to catch Gemini intros like:
+                    # “Okay, I will translate…”, “Sure, here’s the translation…”, etc.
+                    intro_re = re.compile(
+                        r'^(?:okay|sure|understood|of course|got it|here(?:\'|’)s)[^\n]*\b(?:translate|translation)\b',
+                        re.IGNORECASE
+                    )
+
+                    # strip off any leading intro lines
+                    while lines and intro_re.match(lines[0]):
+                        lines.pop(0)
+
+                    result = "".join(lines)
                 # Load and trim history
                 history = load_history()
                 old_len = len(history)
@@ -409,8 +440,14 @@ def main():
         # Now write out the HTML file
         safe_title = re.sub(r'\W+', '_', c['title'])[:40]
         fname = f"response_{c['num']:03d}_{safe_title}.html"
+
+        # strip any ``` or ```html fences from the model output
+        cleaned = re.sub(r"^```(?:html)?\s*", "", result, flags=re.MULTILINE)
+        cleaned = re.sub(r"\s*```$", "", cleaned, flags=re.MULTILINE)
+
+        # write only the cleaned HTML
         with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-            f.write(f"<h1>Chapter {c['num']}: {c['title']}</h1>\n" + result)
+            f.write(f"<h1>Chapter {c['num']}: {c['title']}</h1>\n" + cleaned)
         final_title = c['title'] or safe_title
         print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved Chapter {c['num']}: {final_title}")
         # ─── record that this chapter is done and save progress ───
