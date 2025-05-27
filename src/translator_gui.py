@@ -20,16 +20,16 @@ from tkinter import ttk
 
 CREATE_NO_WINDOW = 0x08000000
 CONFIG_FILE = "config.json"
-BASE_WIDTH, BASE_HEIGHT = 1280, 1000
+BASE_WIDTH, BASE_HEIGHT = 1320, 1000
 class TranslatorGUI:
     def __init__(self, master):
         self.master = master
-        self.max_output_tokens = 4196  # default fallback
+        self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
         master.title("EPUB Translator")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
-        master.minsize(1280, 1000)
+        master.minsize(1320, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
         master.bind('<Escape>', lambda e: master.attributes('-fullscreen', False))
         self.payloads_dir = os.path.join(os.getcwd(), "Payloads")        
@@ -59,7 +59,7 @@ class TranslatorGUI:
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 self.config = json.load(f)
-
+            self.max_output_tokens = self.config.get('max_output_tokens', self.max_output_tokens)
         except:
             self.config = {}
         
@@ -238,13 +238,14 @@ class TranslatorGUI:
         self.token_limit_entry = tb.Entry(self.frame, width=8)
         self.token_limit_entry.insert(0, str(self.config.get('token_limit', 1000000)))
         self.token_limit_entry.grid(row=6, column=1, sticky=tk.W, padx=5, pady=5)
-        tb.Button(
+        self.output_btn = tb.Button(
             self.frame,
-            text="Output Token Limit",
+            text=f"Output Token Limit: {self.max_output_tokens}",
             command=self.prompt_custom_token_limit,
             bootstyle="info",
-            width=16
-        ).grid(row=9, column=0, sticky=tk.W, padx=5, pady=5)
+            width=22
+        )
+        self.output_btn.grid(row=9, column=0, sticky=tk.W, padx=5, pady=5)
         
         # Run Translation
         self.run_button = tb.Button(self.frame, text="Run Translation",
@@ -276,9 +277,16 @@ class TranslatorGUI:
 
         # Rolling summary checkbox
         self.rolling_summary_var = tk.BooleanVar(value=os.getenv("USE_ROLLING_SUMMARY", "0") == "1")
+        # load the *saved* setting from config.json
+        self.rolling_summary_var = tk.BooleanVar(
+        value=self.config.get('use_rolling_summary', False)
+        )
         tb.Checkbutton(top, text="Use Rolling Summary", variable=self.rolling_summary_var,
                        bootstyle="round-toggle").pack(anchor=tk.W, padx=10, pady=10)
-
+        # load the *saved* summary-role
+        self.summary_role_var = tk.StringVar(
+        value=self.config.get('summary_role', "user")
+        )
         # Summary role dropdown
         tk.Label(top, text="Summary Role:").pack(anchor=tk.W, padx=10)
         self.summary_role_var = tk.StringVar(value=os.getenv("SUMMARY_ROLE", "user"))
@@ -287,11 +295,17 @@ class TranslatorGUI:
 
         # Save settings button
         def save_and_close():
+            # write back into our in-memory config
+            self.config['use_rolling_summary'] = self.rolling_summary_var.get()
+            self.config['summary_role']       = self.summary_role_var.get()
+
+            # update environment for immediate effect (optional)
             os.environ["USE_ROLLING_SUMMARY"] = "1" if self.rolling_summary_var.get() else "0"
-            os.environ["SUMMARY_ROLE"] = self.summary_role_var.get()
+            os.environ["SUMMARY_ROLE"]        = self.summary_role_var.get()
+            
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, ensure_ascii=False, indent=2)
-            self.append_log(f"[DBG] USE_ROLLING_SUMMARY={os.environ['USE_ROLLING_SUMMARY']} | SUMMARY_ROLE={os.environ['SUMMARY_ROLE']}")
+            f"[DBG] use_rolling_summary={self.config['use_rolling_summary']} | summary_role={self.config['summary_role']}"
             top.destroy()
 
         tb.Button(top, text="Save", command=save_and_close).pack(pady=10) 
@@ -313,12 +327,14 @@ class TranslatorGUI:
         from tkinter import simpledialog
         val = simpledialog.askinteger(
             "Set Max Output Token Limit",
-            "Enter max tokens for API output (e.g., 8192):",
+            "Enter max output tokens for API output (e.g., 2048, 4196, 8192):",
             minvalue=1,
             maxvalue=200000
         )
         if val:
             self.max_output_tokens = val
+            # update the button text so you can see the new value
+            self.output_btn.config(text=f"Output Token Limit: {val}")
             self.append_log(f"✅ Output token limit set to {val}")
 
 
@@ -786,21 +802,28 @@ class TranslatorGUI:
         env['MODEL'] = model
         env['CONTEXTUAL'] = '1' if contextual else '0'
         env['SEND_INTERVAL_SECONDS'] = str(delay)
+        # ─── export the *real* output-token limit, as set by your dialog ───
+        env["MAX_OUTPUT_TOKENS"] = str(self.max_output_tokens)
+        self.log_debug(f"  MAX_OUTPUT_TOKENS = {self.max_output_tokens}")
         env["API_KEY"] = api_key
         env['OPENAI_API_KEY'] = api_key
         env['SYSTEM_PROMPT']    = self.prompt_text.get("1.0", "end").strip()
         env["REMOVE_HEADER"] = "1" if self.remove_header_var.get() else "0"
         env["USE_ROLLING_SUMMARY"] = "1" if self.config.get('use_rolling_summary') else "0"
         env["SUMMARY_ROLE"]        =  self.config.get('summary_role', 'user')
+        self.log_debug(f"  USE_ROLLING_SUMMARY = {env['USE_ROLLING_SUMMARY']}")
+        self.log_debug(f"  SUMMARY_ROLE       = {env['SUMMARY_ROLE']}")
         # new:
         chap_range = self.chapter_range_entry.get().strip()
         if chap_range:
             env['CHAPTER_RANGE'] = chap_range
         token_val = self.token_limit_entry.get().strip()
-        if token_val:
-            env['TOKEN_LIMIT'] = token_val
+        token_val = self.token_limit_entry.get().strip()
+        if token_val.isdigit():
+            env['MAX_INPUT_TOKENS'] = token_val
+            self.append_log(f"🔧 MAX_INPUT_TOKENS → {token_val}")
         else:
-            env.pop('TOKEN_LIMIT', None)
+            env.pop('MAX_INPUT_TOKENS', None)
         # ← insert here ↓
         if hasattr(self, 'manual_glossary_path'):
             env['MANUAL_GLOSSARY'] = self.manual_glossary_path
@@ -809,7 +832,7 @@ class TranslatorGUI:
 
         base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
         script = os.path.join(base_dir, "TransateKRtoEN.py")
-        
+        # ─── log them for debug visibility ───
         self.log_debug("📦 Environment Variables Set:")
         self.log_debug(f"  EPUB_PATH = {epub_path}")
         self.log_debug(f"  MODEL = {model}")
@@ -857,6 +880,13 @@ class TranslatorGUI:
             self.append_log("✅ Translation finished successfully.")
         else:
             self.append_log(f"❌ Translation failed with code {self.proc.returncode}.")
+            # ——— Detect token-limit fallback and warn the user ———
+        if "⚠️ Warning: Gemini returned no text or candidates; falling back to empty array" in full_out:
+            messagebox.showwarning(
+                "Output Token Limit Reached",
+                "It looks like the model ran out of output tokens and returned an empty response.  "
+                "You can increase the max output token limit via “Other → Set Max Output Token Limit.”"
+            )
           
 
         # now you can check:
@@ -989,6 +1019,13 @@ class TranslatorGUI:
             self.append_log("✅ Glossary extraction completed successfully.")
         else:
             self.append_log(f"❌ Glossary extraction failed (exit code {self.proc.returncode}).")
+         # ——— Detect token-limit fallback and warn the user ———
+        if "⚠️ Warning: Gemini returned no text or candidates; falling back to empty array" in full_out:
+            messagebox.showwarning(
+                "Output Token Limit Reached",
+                "It looks like the model ran out of output tokens and returned an empty response.  "
+                "You can increase the max output token limit via “Other → Set Max Output Token Limit.”"
+            )
 
         self.glossary_button.config(state=tk.NORMAL)
 
@@ -999,15 +1036,19 @@ class TranslatorGUI:
 
         self.append_log("📦 [DEBUG] Running EPUB Converter...")
         try:
+            # use absolute path so non-ASCII project paths don’t break
+            script = os.path.join(self.base_dir, "epub_converter.py")
             cmd = [
                 sys.executable,
-                'epub_converter.py',
+                script,
                 folder
             ]
             self.proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
+                encoding='utf-8',
+                errors='ignore',
                 text=True,   # same as universal_newlines=True
                 bufsize=1    # line-buffered
             )
@@ -1055,11 +1096,10 @@ class TranslatorGUI:
             self.config['chapter_range']   = self.chapter_range_entry.get().strip()
             self.config['use_rolling_summary']  = self.rolling_summary_var.get()
             self.config['summary_role']         = self.summary_role_var.get()            
-            self.config['token_limit']     = (
-                int(self.token_limit_entry.get().strip())
-                if self.token_limit_entry.get().strip().isdigit()
-                else None
-            )
+            self.config['max_input_tokens'] = (int(self.token_limit_entry.get())
+                                            if self.token_limit_entry.get().isdigit()
+                                            else None)
+            self.config['max_output_tokens'] = self.max_output_tokens           
             # defensively handle empty/disabled token‐limit field
             _tl = self.token_limit_entry.get().strip()
             if _tl.isdigit():
