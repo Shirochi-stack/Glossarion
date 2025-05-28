@@ -1,0 +1,174 @@
+import os
+import hashlib
+import json
+import csv
+from bs4 import BeautifulSoup
+from langdetect import detect, LangDetectException
+from difflib import SequenceMatcher
+from collections import Counter
+from tqdm import tqdm
+import tkinter as tk
+from tkinter import filedialog, messagebox
+import threading
+
+# Global flag to allow stopping the scan externally
+_stop_flag = False
+
+def stop_scan():
+    if stop_flag is None:
+        stop_flag = lambda: False
+
+def extract_text_from_html(file_path):
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        soup = BeautifulSoup(f, "html.parser")
+        return soup.get_text(separator='\n', strip=True)
+
+def is_similar(text1, text2, threshold=0.95):
+    return SequenceMatcher(None, text1, text2).ratio() >= threshold
+
+def has_no_spacing_or_linebreaks(text, space_threshold=0.01):
+    space_ratio = text.count(" ") / max(1, len(text))
+    newline_count = text.count("\n")
+    return space_ratio < space_threshold or newline_count == 0
+
+def has_repeating_sentences(text, min_repeats=5):
+    sentences = [s.strip() for s in text.replace("\n", " ").split('.') if s.strip()]
+    if len(sentences) < min_repeats:
+        return False
+    counter = Counter(sentences)
+    for sent, count in counter.items():
+        if count >= min_repeats and len(sent) > 10:
+            return True
+    return False
+
+def scan_html_folder(folder_path, log=print, stop_flag=None):
+    global _stop_flag
+    _stop_flag = False
+    hashes = []
+    texts = []
+    results = []
+    html_files = [f for f in os.listdir(folder_path) if f.lower().endswith(".html")]
+    html_files.sort()
+
+    log(f"🔍 Found {len(html_files)} HTML files. Starting scan...")
+
+    for idx, filename in enumerate(html_files):
+        if stop_flag():
+            log("⛔ QA scan interrupted by user.")
+            return
+        full_path = os.path.join(folder_path, filename)
+        try:
+            raw_text = extract_text_from_html(full_path)
+        except Exception as e:
+            log(f"⚠️ Failed to read {filename}: {e}")
+            continue
+
+        norm_text = raw_text.strip().lower()
+        if len(norm_text) < 100:
+            log(f"⚠️ Skipped {filename}: Too short")
+            continue
+
+        issues = []
+        preview = raw_text[:500].replace('\n', ' ') + '...'
+
+        hash_digest = hashlib.md5(norm_text.encode("utf-8")).hexdigest()
+        if hash_digest in hashes:
+            issues.append("duplicate")
+        else:
+            for prev_text in texts:
+                if is_similar(norm_text, prev_text):
+                    issues.append("duplicate")
+                    break
+            else:
+                hashes.append(hash_digest)
+                texts.append(norm_text)
+
+        try:
+            lang = detect(norm_text)
+            if lang != 'en':
+                issues.append(f"non_english ({lang})")
+        except LangDetectException:
+            issues.append("non_english (unknown)")
+
+        if has_no_spacing_or_linebreaks(raw_text):
+            issues.append("no_spacing_or_linebreaks")
+
+        if has_repeating_sentences(raw_text):
+            issues.append("repetitive_sentences")
+
+        results.append({
+            "file_index": idx,
+            "filename": filename,
+            "filepath": full_path,
+            "issues": issues,
+            "preview": preview,
+            "score": len(issues)
+        })
+
+        log(f"📄 {filename}: {', '.join(issues) if issues else '✅ OK'}")
+
+    output_dir = os.path.basename(folder_path.rstrip('/\\')) + "_Scan Report"
+    output_path = os.path.join(folder_path, output_dir)
+    os.makedirs(output_path, exist_ok=True)
+
+    with open(os.path.join(output_path, "validation_results.json"), "w", encoding="utf-8") as jf:
+        json.dump(results, jf, indent=2, ensure_ascii=False)
+
+    with open(os.path.join(output_path, "validation_results.csv"), "w", encoding="utf-8", newline="") as cf:
+        writer = csv.DictWriter(cf, fieldnames=["file_index", "filename", "score", "issues"])
+        writer.writeheader()
+        for row in results:
+            writer.writerow({
+                "file_index": row["file_index"],
+                "filename": row["filename"],
+                "score": row["score"],
+                "issues": "; ".join(row["issues"])
+            })
+
+    html_report = "<html><head><meta charset='utf-8'><title>Translation QA Report</title></head><body>"
+    html_report += "<h1>Translation QA Report</h1>"
+    html_report += f"<p>Total Files Scanned: {len(results)}</p>"
+    html_report += f"<p>Files with Issues: {sum(1 for r in results if r['issues'])}</p>"
+    html_report += f"<p>Clean Files: {sum(1 for r in results if not r['issues'])}</p>"
+    html_report += "<table border='1'><tr><th>#</th><th>Filename</th><th>Issues</th><th>Preview</th></tr>"
+
+    for row in results:
+        link = f"<a href='{row['filename']}' target='_blank'>{row['filename']}</a>"
+        issues_str = "; ".join(row["issues"])
+        html_report += f"<tr><td>{row['file_index']}</td><td>{link}</td><td>{issues_str}</td><td>{row['preview']}</td></tr>"
+
+    html_report += "</table></body></html>"
+
+    with open(os.path.join(output_path, "validation_results.html"), "w", encoding="utf-8") as html_file:
+        html_file.write(html_report)
+
+    completed_clean_files = [row["file_index"] for row in results if not row["issues"]]
+    progress_file_path = os.path.join(folder_path, "translation_progress.json")
+    with open(progress_file_path, "w", encoding="utf-8") as tf:
+        json.dump({"completed": completed_clean_files}, tf, indent=2)
+
+    log("\n✅ Validation complete.")
+    log(f" - {output_path}/validation_results.json")
+    log(f" - {output_path}/validation_results.csv")
+    log(f" - {output_path}/validation_results.html")
+    log(f" - Replaced: {progress_file_path} with {len(completed_clean_files)} clean chapter entries")
+
+def launch_gui():
+    def run_scan():
+        folder_path = filedialog.askdirectory(title="Select Folder with HTML Files")
+        if folder_path:
+            threading.Thread(target=scan_html_folder, args=(folder_path,), daemon=True).start()
+
+    root = tk.Tk()
+    root.title("Translation QA Scanner")
+    root.geometry("400x100")
+    scan_button = tk.Button(root, text="Scan Folder for QA Issues", command=run_scan)
+    scan_button.pack(pady=20)
+    root.mainloop()
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) < 2:
+        launch_gui()
+    else:
+        scan_html_folder(sys.argv[1])
