@@ -20,7 +20,7 @@ from tkinter import ttk
 
 CREATE_NO_WINDOW = 0x08000000
 CONFIG_FILE = "config.json"
-BASE_WIDTH, BASE_HEIGHT = 1320, 1000
+BASE_WIDTH, BASE_HEIGHT = 1400, 1000
 class TranslatorGUI:
     def __init__(self, master):
         self.master = master
@@ -264,12 +264,45 @@ class TranslatorGUI:
 
         # Bottom toolbar
         self._make_bottom_toolbar()
+
         
         self.token_limit_disabled = False
 
         # initial prompt
         self.on_profile_select()
+            
+    def run_qa_scan(self):
+        from scan_html_folder import scan_html_folder
+
+        folder_path = filedialog.askdirectory(title="Select Folder with HTML Files")
+        if not folder_path:
+            self.append_log("⚠️ QA scan canceled.")
+            return
+
+        self.append_log(f"🔍 Starting QA scan for folder: {folder_path}")
+
+        self.stop_requested = False  # reset stop flag
+
+        def log_callback(msg):
+            self.append_log(msg)
+
+        def task():
+            self.qa_button.config(text="Stop Scan", command=self.stop_qa_scan, bootstyle="danger")
+            try:
+                scan_html_folder(folder_path, log=log_callback, stop_flag=lambda: self.stop_requested)
+                self.append_log("✅ QA scan completed successfully.")
+            except Exception as e:
+                self.append_log(f"❌ QA scan error: {e}")
+            finally:
+                self.qa_button.config(text="QA Scan", command=self.run_qa_scan, bootstyle="warning")
+
+        threading.Thread(target=task, daemon=True).start()
         
+    def stop_qa_scan(self):
+        self.stop_requested = True
+        self.append_log("⛔ QA scan stop requested.")
+
+            
     def open_other_settings(self):
         top = tk.Toplevel(self.master)
         top.title("Advanced Settings")
@@ -401,6 +434,11 @@ class TranslatorGUI:
         # 1) toolbar on row 11
         btn_frame = tb.Frame(self.frame)
         btn_frame.grid(row=11, column=0, columnspan=5, sticky=tk.EW, pady=5)
+        
+        # Add QA Scan button here
+        self.qa_button = tb.Button(btn_frame, text="QA Scan", command=self.run_qa_scan, bootstyle="warning")
+        self.qa_button.grid(row=0, column=99, sticky=tk.EW, padx=5)
+        
 
         toolbar_items = [
             ("EPUB Converter",      self.epub_converter,               "info"),
