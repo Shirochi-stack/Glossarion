@@ -29,7 +29,7 @@ class TranslatorGUI:
         self.glossary_proc = None       
         master.title("EPUB Translator")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
-        master.minsize(1320, 1000)
+        master.minsize(1400, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
         master.bind('<Escape>', lambda e: master.attributes('-fullscreen', False))
         self.payloads_dir = os.path.join(os.getcwd(), "Payloads")        
