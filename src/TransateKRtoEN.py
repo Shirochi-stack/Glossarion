@@ -243,17 +243,65 @@ def main():
     with zipfile.ZipFile(EPUB_PATH, 'r') as zf:
         metadata = extract_epub_metadata(zf)
         chapters = extract_chapters(zf)
+
         if REMOVE_HEADER and chapters:
             first = chapters[0]["body"]
-            _, _, stripped = first.partition("\n\n")
-            chapters[0]["body"] = stripped or first
+            soup = BeautifulSoup(first, "html.parser")
+
+            removed_tags = []
+
+            # Gemini filler pattern
+            gemini_intro_re = re.compile(
+                r"^(okay|sure|understood|of course|got it|here(?:'|’)s)\b.*\b(translate|translation)\b",
+                re.IGNORECASE
+            )
+
+            # Remove Gemini filler from second+ <h1>
+            h1_tags = soup.find_all("h1")
+            if len(h1_tags) > 1:
+                for tag in h1_tags[1:]:
+                    text = tag.get_text(strip=True)
+                    if gemini_intro_re.search(text):
+                        removed_tags.append(f"<h1>: {text[:60]}...")
+                        tag.decompose()
+
+            # Remove Gemini filler from <p> or <div> if present
+            for tag in soup.find_all(["p", "div"]):
+                text = tag.get_text(strip=True)
+                if gemini_intro_re.search(text):
+                    removed_tags.append(f"<{tag.name}>: {text[:60]}...")
+                    tag.decompose()
+
+            # Preserve JSON block removal as-is
+            text_preview = soup.get_text(strip=True)
+            if text_preview.lstrip().startswith("{") and text_preview.rstrip().endswith("}"):
+                try:
+                    json.loads(text_preview)
+                    soup.clear()
+                    removed_tags.append("- Removed leaked JSON block in header")
+                except json.JSONDecodeError:
+                    pass
+
+            chapters[0]["body"] = str(soup)
+
+            # Log what we removed
+            if removed_tags:
+                removal_log_path = os.path.join(out, "removal.txt")
+                with open(removal_log_path, "a", encoding="utf-8") as logf:
+                    logf.write(f"{chapters[0]['title']} (Chapter {chapters[0]['num']})\n")
+                    for entry in removed_tags:
+                        logf.write(f"- {entry}\n")
+                    logf.write("\n")
+
+
         # images
         imgdir = os.path.join(out, "images")
         os.makedirs(imgdir, exist_ok=True)
         for n in zf.namelist():
-            if n.lower().endswith(('.png','.jpg','.jpeg','.gif','.svg')):
+            if n.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.svg')):
                 with open(os.path.join(imgdir, os.path.basename(n)), 'wb') as f:
                     f.write(zf.read(n))
+
 
     # write meta.json
     with open(os.path.join(out,"metadata.json"),'w',encoding='utf-8') as mf:
@@ -362,6 +410,8 @@ def main():
                         lines.pop(0)
 
                     result = "".join(lines)
+                    
+                    
                 # Load and trim history
                 history = load_history()
                 old_len = len(history)
