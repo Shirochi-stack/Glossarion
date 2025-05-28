@@ -10,6 +10,7 @@ from tqdm import tqdm
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import threading
+import re
 
 # Global flag to allow stopping the scan externally
 _stop_flag = False
@@ -142,16 +143,39 @@ def scan_html_folder(folder_path, log=print, stop_flag=None):
     with open(os.path.join(output_path, "validation_results.html"), "w", encoding="utf-8") as html_file:
         html_file.write(html_report)
 
-    completed_clean_files = [row["file_index"] for row in results if not row["issues"]]
-    progress_file_path = os.path.join(folder_path, "translation_progress.json")
-    with open(progress_file_path, "w", encoding="utf-8") as tf:
-        json.dump({"completed": completed_clean_files}, tf, indent=2)
+    # ——— prune only the faulty chapters from your existing history ———
+
+    prog_path = os.path.join(folder_path, "translation_progress.json")
+    try:
+        with open(prog_path, "r", encoding="utf-8") as pf:
+            prog = json.load(pf)
+            existing = prog.get("completed", [])
+    except FileNotFoundError:
+        existing = []
+
+    # build list of chapter numbers having issues
+    faulty = []
+    for row in results:
+        if row["issues"]:
+            m = re.match(r"response_(\d+)_", row["filename"])
+            if m:
+                faulty.append(int(m.group(1)))
+
+    # remove them from your existing list
+    updated = [chap for chap in existing if chap not in faulty]
+
+    # write back the pruned history
+    with open(prog_path, "w", encoding="utf-8") as pf:
+        json.dump({"completed": updated}, pf, indent=2)
+
+    log(f"[QA Scan] Removed chapters with issues: {faulty}")
+
 
     log("\n✅ Validation complete.")
     log(f" - {output_path}/validation_results.json")
     log(f" - {output_path}/validation_results.csv")
     log(f" - {output_path}/validation_results.html")
-    log(f" - Replaced: {progress_file_path} with {len(completed_clean_files)} clean chapter entries")
+    log(f" - Pruned {faulty} from {prog_path}; {len(updated)} chapters remain")
 
 def launch_gui():
     def run_scan():
