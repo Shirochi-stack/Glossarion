@@ -1,12 +1,11 @@
 @echo off
+REM ensure we’re in the script’s folder:
 cd /d "%~dp0"
 
-where python >nul 2>&1
-if %ERRORLEVEL% neq 0 (
-    echo ❌ python.exe not found. Please install Python and ensure it is in your PATH.
-    pause
-    exit /b
-)
+REM call the real python
+python translator_gui.py
 
-start python.exe translator_gui.py
-exit
+REM or, alternatively:
+REM py -3 translator_gui.py
+
+pause
