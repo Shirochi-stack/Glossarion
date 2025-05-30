@@ -55,7 +55,7 @@ class TranslatorGUI:
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
-        master.title("Glossarion v1.3.0 “Purge & Launch” 🚀✨")
+        master.title("Glossarion v1.3.2")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1400, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
@@ -182,7 +182,7 @@ class TranslatorGUI:
         print(f"[DEBUG] Setting model to: {default_model}")  # Debug logging
         self.model_var = tk.StringVar(value=default_model)
         tb.Combobox(self.frame, textvariable=self.model_var,
-                    values=["gpt-4o","gpt-4o-mini","gpt-4-turbo","gpt-3.5-turbo","gemini-1.5-pro","gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-exp","deepseek-chat","claude-3-5-sonnet-20241022"], state="normal").grid(
+                    values=["gpt-4o","gpt-4o-mini","gpt-4-turbo","gpt-4.1-nano","gpt-3.5-turbo","gemini-1.5-pro","gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-exp","deepseek-chat","claude-3-5-sonnet-20241022"], state="normal").grid(
             row=1, column=1, columnspan=2, sticky=tk.EW, padx=5, pady=5)
 
         # Language
@@ -420,6 +420,7 @@ class TranslatorGUI:
                 self.append_log(f"📖 EPUB: {os.path.basename(epub_path)}")
                 self.append_log(f"🤖 Model: {self.model_var.get()}")
                 self.append_log(f"🔑 API Key: {api_key[:10]}...")
+                self.append_log(f"📤 Output Token Limit: {self.max_output_tokens}")
                 
                 # Set environment variables - FIXED: Use multiple API key variables
                 os.environ.update({
@@ -551,7 +552,7 @@ class TranslatorGUI:
                 self.append_log("❌ Error: Please select a valid EPUB file for glossary extraction.")
                 return
 
-            # ADD THIS: Check for API key
+            # Check for API key
             api_key = self.api_key_entry.get()
             if not api_key:
                 self.append_log("❌ Error: Please enter your API key.")
@@ -563,29 +564,30 @@ class TranslatorGUI:
             
             try:
                 # Set up environment for glossary extraction
-                os.environ.update({
+                env_updates = {
                     'GLOSSARY_TEMPERATURE': str(self.glossary_temp.get()),
                     'GLOSSARY_CONTEXT_LIMIT': str(self.glossary_history.get()),
                     'MODEL': self.model_var.get(),
                     'OPENAI_API_KEY': self.api_key_entry.get(),
                     'OPENAI_OR_Gemini_API_KEY': self.api_key_entry.get(),
                     'API_KEY': self.api_key_entry.get()
-                })
-                
-                # Create a temporary config for the glossary extraction
-                temp_config = {
-                    'model': self.model_var.get(),
-                    'api_key': self.api_key_entry.get(),
-                    'temperature': float(self.glossary_temp.get()),
-                    'context_limit_chapters': int(self.glossary_history.get()),
-                    'max_tokens': 4196,
-                    'system_prompt': 'You are a helpful assistant.'
                 }
                 
-                # Save temporary config
-                temp_config_path = 'temp_glossary_config.json'
-                with open(temp_config_path, 'w', encoding='utf-8') as f:
-                    json.dump(temp_config, f, ensure_ascii=False, indent=2)
+                # Use the same token limit logic as translation
+                # The complete section should look like:
+                if self.token_limit_disabled:
+                    os.environ['MAX_INPUT_TOKENS'] = ''  # NOT GLOSSARY_TOKEN_LIMIT
+                    self.append_log("🎯 Input Token Limit: Unlimited (disabled)")
+                else:
+                    token_val = self.token_limit_entry.get().strip()
+                    if token_val and token_val.isdigit():
+                        os.environ['MAX_INPUT_TOKENS'] = token_val  # NOT GLOSSARY_TOKEN_LIMIT
+                        self.append_log(f"🎯 Input Token Limit: {token_val}")
+                    else:
+                        os.environ['MAX_INPUT_TOKENS'] = '1000000'  # NOT GLOSSARY_TOKEN_LIMIT
+                        self.append_log(f"🎯 Input Token Limit: 1000000 (default)")
+                
+                self.append_log(f"[DEBUG] After setting env, MAX_INPUT_TOKENS = {os.environ.get('MAX_INPUT_TOKENS', 'NOT SET')}")
                 
                 # Set up argv for glossary extraction
                 epub_base = os.path.splitext(os.path.basename(epub_path))[0]
@@ -595,10 +597,13 @@ class TranslatorGUI:
                     'extract_glossary_from_epub.py',
                     '--epub', epub_path,
                     '--output', output_path,
-                    '--config', temp_config_path
+                    '--config', CONFIG_FILE  # Use the main config.json
                 ]
                 
                 self.append_log("🚀 Starting glossary extraction...")
+                self.append_log(f"📤 Output Token Limit: {self.max_output_tokens}") 
+                os.environ['MAX_OUTPUT_TOKENS'] = str(self.max_output_tokens)
+
                 
                 # Call glossary extraction directly with callbacks
                 glossary_main(
@@ -608,10 +613,6 @@ class TranslatorGUI:
                 
                 if not self.stop_requested:
                     self.append_log("✅ Glossary extraction completed successfully!")
-                
-                # Clean up temp config
-                if os.path.exists(temp_config_path):
-                    os.remove(temp_config_path)
                     
             finally:
                 # Restore environment and argv
@@ -621,14 +622,32 @@ class TranslatorGUI:
                 
         except Exception as e:
             self.append_log(f"❌ Glossary extraction error: {e}")
+            
         finally:
             self.stop_requested = False
             if glossary_stop_flag:
                 glossary_stop_flag(False)
-            # ADD THIS LINE: Clear the thread reference to fix double-click issue
+            # Clear the thread reference to fix double-click issue
             self.glossary_thread = None
             self.master.after(0, self.update_run_button)
-
+                    
+    def toggle_token_limit(self):
+        """Toggle whether the token-limit entry is active or not."""
+        if not self.token_limit_disabled:
+            # disable it
+            self.token_limit_entry.config(state=tk.DISABLED)
+            self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
+            self.append_log("⚠️ Input token limit disabled - both translation and glossary extraction will process chapters of any size.")
+            self.token_limit_disabled = True
+        else:
+            # re-enable it
+            self.token_limit_entry.config(state=tk.NORMAL)
+            if not self.token_limit_entry.get().strip():
+                self.token_limit_entry.insert(0, str(self.config.get('token_limit', 1000000)))
+            self.toggle_token_btn.config(text="Disable Input Token Limit", bootstyle="danger-outline")
+            self.append_log(f"✅ Input token limit enabled: {self.token_limit_entry.get()} tokens (applies to both translation and glossary extraction)")
+            self.token_limit_disabled = False
+            
     def update_run_button(self):
         """Switch Run↔Stop depending on whether a process is active."""
         translation_running = (
