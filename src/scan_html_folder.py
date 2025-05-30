@@ -16,8 +16,9 @@ import re
 _stop_flag = False
 
 def stop_scan():
-    if stop_flag is None:
-        stop_flag = lambda: False
+    """Set the stop flag to True"""
+    global _stop_flag
+    _stop_flag = True
 
 def extract_text_from_html(file_path):
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -48,15 +49,18 @@ def scan_html_folder(folder_path, log=print, stop_flag=None):
     hashes = []
     texts = []
     results = []
+    chapter_contents = {}  # Store chapter content for duplicate detection
     html_files = [f for f in os.listdir(folder_path) if f.lower().endswith(".html")]
     html_files.sort()
 
     log(f"🔍 Found {len(html_files)} HTML files. Starting scan...")
 
+    # First pass: collect all chapter data and detect issues
     for idx, filename in enumerate(html_files):
-        if stop_flag():
+        if stop_flag and stop_flag():
             log("⛔ QA scan interrupted by user.")
             return
+        
         full_path = os.path.join(folder_path, filename)
         try:
             raw_text = extract_text_from_html(full_path)
@@ -69,13 +73,29 @@ def scan_html_folder(folder_path, log=print, stop_flag=None):
             log(f"⚠️ Skipped {filename}: Too short")
             continue
 
+        # Extract chapter number from filename
+        chapter_num = None
+        m = re.match(r"response_(\d+)_", filename)
+        if m:
+            chapter_num = int(m.group(1))
+            # Store the normalized text for this chapter number
+            if chapter_num not in chapter_contents:
+                chapter_contents[chapter_num] = []
+            chapter_contents[chapter_num].append({
+                'filename': filename,
+                'norm_text': norm_text,
+                'idx': idx
+            })
+
         issues = []
         preview = raw_text[:500].replace('\n', ' ') + '...'
 
+        # Check for exact duplicates using hash
         hash_digest = hashlib.md5(norm_text.encode("utf-8")).hexdigest()
         if hash_digest in hashes:
             issues.append("duplicate")
         else:
+            # Check for similar content (not exact match)
             for prev_text in texts:
                 if is_similar(norm_text, prev_text):
                     issues.append("duplicate")
@@ -84,6 +104,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None):
                 hashes.append(hash_digest)
                 texts.append(norm_text)
 
+        # Language detection
         try:
             lang = detect(norm_text)
             if lang != 'en':
@@ -91,9 +112,11 @@ def scan_html_folder(folder_path, log=print, stop_flag=None):
         except LangDetectException:
             issues.append("non_english (unknown)")
 
+        # Spacing/formatting issues
         if has_no_spacing_or_linebreaks(raw_text):
             issues.append("no_spacing_or_linebreaks")
 
+        # Repetitive content
         if has_repeating_sentences(raw_text):
             issues.append("repetitive_sentences")
 
@@ -103,11 +126,28 @@ def scan_html_folder(folder_path, log=print, stop_flag=None):
             "filepath": full_path,
             "issues": issues,
             "preview": preview,
-            "score": len(issues)
+            "score": len(issues),
+            "chapter_num": chapter_num
         })
 
         log(f"📄 {filename}: {', '.join(issues) if issues else '✅ OK'}")
 
+    # Second pass: detect chapters with the same number that have similar content
+    duplicate_chapter_numbers = []
+    for chapter_num, entries in chapter_contents.items():
+        if len(entries) > 1:
+            # Multiple files for the same chapter number
+            log(f"⚠️ Found {len(entries)} files for Chapter {chapter_num}")
+            # Mark all but the first as duplicates
+            for i in range(1, len(entries)):
+                for result in results:
+                    if result['filename'] == entries[i]['filename']:
+                        if 'duplicate_chapter' not in result['issues']:
+                            result['issues'].append(f'duplicate_chapter_{chapter_num}')
+                            result['score'] = len(result['issues'])
+                duplicate_chapter_numbers.append(chapter_num)
+
+    # Generate reports
     output_dir = os.path.basename(folder_path.rstrip('/\\')) + "_Scan Report"
     output_path = os.path.join(folder_path, output_dir)
     os.makedirs(output_path, exist_ok=True)
@@ -131,20 +171,26 @@ def scan_html_folder(folder_path, log=print, stop_flag=None):
     html_report += f"<p>Total Files Scanned: {len(results)}</p>"
     html_report += f"<p>Files with Issues: {sum(1 for r in results if r['issues'])}</p>"
     html_report += f"<p>Clean Files: {sum(1 for r in results if not r['issues'])}</p>"
+    
+    if duplicate_chapter_numbers:
+        html_report += f"<p style='color:red;'>⚠️ Found duplicate chapter numbers: {sorted(set(duplicate_chapter_numbers))}</p>"
+    
     html_report += "<table border='1'><tr><th>#</th><th>Filename</th><th>Issues</th><th>Preview</th></tr>"
 
     for row in results:
-        link = f"<a href='{row['filename']}' target='_blank'>{row['filename']}</a>"
+        # Use relative path for HTML links to work properly
+        link = f"<a href='../{row['filename']}' target='_blank'>{row['filename']}</a>"
         issues_str = "; ".join(row["issues"])
-        html_report += f"<tr><td>{row['file_index']}</td><td>{link}</td><td>{issues_str}</td><td>{row['preview']}</td></tr>"
+        # Highlight rows with issues
+        row_style = ' style="background-color: #ffeeee;"' if row["issues"] else ''
+        html_report += f"<tr{row_style}><td>{row['file_index']}</td><td>{link}</td><td>{issues_str}</td><td>{row['preview']}</td></tr>"
 
     html_report += "</table></body></html>"
 
     with open(os.path.join(output_path, "validation_results.html"), "w", encoding="utf-8") as html_file:
         html_file.write(html_report)
 
-    # ——— prune only the faulty chapters from your existing history ———
-
+    # Fix: Update progress file correctly using file indices, not chapter numbers
     prog_path = os.path.join(folder_path, "translation_progress.json")
     try:
         with open(prog_path, "r", encoding="utf-8") as pf:
@@ -153,29 +199,28 @@ def scan_html_folder(folder_path, log=print, stop_flag=None):
     except FileNotFoundError:
         existing = []
 
-    # build list of chapter numbers having issues
-    faulty = []
+    # Build list of FILE INDICES that have issues (not chapter numbers)
+    faulty_indices = []
     for row in results:
         if row["issues"]:
-            m = re.match(r"response_(\d+)_", row["filename"])
-            if m:
-                faulty.append(int(m.group(1)))
+            # Get the file index from the results
+            faulty_indices.append(row["file_index"])
 
-    # remove them from your existing list
-    updated = [chap for chap in existing if chap not in faulty]
+    # Remove faulty indices from the completed list
+    updated = [idx for idx in existing if idx not in faulty_indices]
 
-    # write back the pruned history
+    # Write back the pruned history
     with open(prog_path, "w", encoding="utf-8") as pf:
         json.dump({"completed": updated}, pf, indent=2)
 
-    log(f"[QA Scan] Removed chapters with issues: {faulty}")
-
+    log(f"[QA Scan] Removed file indices with issues: {sorted(faulty_indices)}")
+    log(f"[QA Scan] Chapter numbers affected: {sorted(set(r['chapter_num'] for r in results if r['issues'] and r['chapter_num']))}")
 
     log("\n✅ Validation complete.")
     log(f" - {output_path}/validation_results.json")
     log(f" - {output_path}/validation_results.csv")
     log(f" - {output_path}/validation_results.html")
-    log(f" - Pruned {faulty} from {prog_path}; {len(updated)} chapters remain")
+    log(f" - Pruned {len(faulty_indices)} indices from {prog_path}; {len(updated)} chapters remain")
 
 def launch_gui():
     def run_scan():
