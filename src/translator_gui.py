@@ -508,10 +508,13 @@ class TranslatorGUI:
                 
         except Exception as e:
             self.append_log(f"❌ Translation setup error: {e}")
+            
         finally:
             self.stop_requested = False
             if translation_stop_flag:
                 translation_stop_flag(False)
+            # Clear the thread reference to fix double-click issue
+            self.translation_thread = None
             self.master.after(0, self.update_run_button)
 
     def run_glossary_extraction_thread(self):
