@@ -315,6 +315,7 @@ def main(log_callback=None, stop_callback=None):
 
     print(f"[DEBUG] Found API key: {API_KEY[:10]}...")
     print(f"[DEBUG] Using model = {MODEL}")
+    print(f"[DEBUG] Max output tokens = {MAX_OUTPUT_TOKENS}")
 
     # Initialize client
     client = UnifiedClient(model=MODEL, api_key=API_KEY)
