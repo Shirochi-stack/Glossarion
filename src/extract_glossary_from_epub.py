@@ -5,11 +5,36 @@ import zipfile
 import time
 import sys
 import tiktoken
-# on Windows, make prints UTF-8 capable
+
+# Fix for PyInstaller - handle stdout reconfigure more carefully
 if sys.platform.startswith("win"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    try:
+        # Try to reconfigure if the method exists
+        if hasattr(sys.stdout, 'reconfigure'):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        # If reconfigure doesn't work, try to set up UTF-8 another way
+        import io
+        import locale
+        if sys.stdout and hasattr(sys.stdout, 'buffer'):
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
 MODEL             = os.getenv("MODEL", "gemini-1.5-flash")
 MAX_GLOSSARY_TOKENS = int(os.getenv("GLOSSARY_TOKEN_LIMIT", 1000000))
+
+# Global stop flag for GUI integration
+_stop_requested = False
+
+def set_stop_flag(value):
+    """Set the global stop flag"""
+    global _stop_requested
+    _stop_requested = value
+
+def is_stop_requested():
+    """Check if stop was requested"""
+    global _stop_requested
+    return _stop_requested
+
 # ─── resilient tokenizer setup ───
 try:
     enc = tiktoken.encoding_for_model(MODEL)
@@ -31,6 +56,26 @@ from unified_api_client import UnifiedClient
 from typing import List, Dict
 import re
 PROGRESS_FILE = "glossary_progress.json"
+
+def set_output_redirect(log_callback=None):
+    """Redirect print statements to a callback function for GUI integration"""
+    if log_callback:
+        import sys
+        import io
+        
+        class CallbackWriter:
+            def __init__(self, callback):
+                self.callback = callback
+                self.buffer = ""
+                
+            def write(self, text):
+                if text.strip():
+                    self.callback(text.strip())
+                    
+            def flush(self):
+                pass
+                
+        sys.stdout = CallbackWriter(log_callback)
 
 def load_config(path: str) -> Dict:
     with open(path, 'r', encoding='utf-8') as f:
@@ -54,16 +99,13 @@ def load_config(path: str) -> Dict:
 
     return cfg
 
-
 def save_progress(completed: List[int], glossary: List[Dict], context_history: List[Dict]):
     with open(PROGRESS_FILE, 'w', encoding='utf-8') as f:
         json.dump({"completed": completed, "glossary": glossary, "context_history": context_history}, f, ensure_ascii=False, indent=2)
 
-
 def save_glossary_json(glossary: List[Dict], output_path: str):
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(glossary, f, ensure_ascii=False, indent=2)
-
 
 def save_glossary_md(glossary: List[Dict], output_path: str):
     with open(output_path, 'w', encoding='utf-8') as f:
@@ -74,7 +116,6 @@ def save_glossary_md(glossary: List[Dict], output_path: str):
                 if key not in ['name', 'original_name']:
                     f.write(f"- **{key}**: {val}\n")
             f.write("\n")
-
 
 def extract_chapters_from_epub(epub_path: str) -> List[str]:
     chapters = []
@@ -113,7 +154,6 @@ def extract_chapters_from_epub(epub_path: str) -> List[str]:
             print(f"[Warning] Skipped corrupted chapter {name}: {e}")
     return chapters
 
-
 def trim_context_history(history: List[Dict], limit: int) -> List[Dict]:
     # 1) take only the last `limit` entries
     recent = history[-limit:]
@@ -124,8 +164,6 @@ def trim_context_history(history: List[Dict], limit: int) -> List[Dict]:
         trimmed.append({"role": "user",      "content": entry["user"]})
         trimmed.append({"role": "assistant", "content": entry["assistant"]})
     return trimmed
-
-
 
 def build_prompt(chapter_text: str) -> str:
     return f"""
@@ -148,8 +186,6 @@ Sort by appearance order; respond with a JSON array only.
 Text:
 {chapter_text}
 """
-
-
 
 def load_progress() -> Dict:
     if os.path.exists(PROGRESS_FILE):
@@ -210,10 +246,18 @@ def merge_glossary_entries(glossary):
 
     return list(merged.values())
 
-
-
+def main(log_callback=None, stop_callback=None):
+    """Modified main function that can accept a logging callback and stop callback"""
+    if log_callback:
+        set_output_redirect(log_callback)
     
-def main():
+    # Set up stop checking
+    def check_stop():
+        if stop_callback and stop_callback():
+            print("❌ Glossary extraction stopped by user request.")
+            return True
+        return is_stop_requested()
+        
     start = time.time()
     parser = argparse.ArgumentParser(description="Extract character glossary from EPUB via ChatGPT")
     parser.add_argument('--epub',   required=True)
@@ -239,7 +283,6 @@ def main():
         f"{epub_base}_glossary_progress.json"
     )
 
-
     config = load_config(args.config)
     client = UnifiedClient(model=config['model'], api_key=config['api_key'])
     model = config.get('model', 'gpt-4.1-mini')
@@ -253,16 +296,28 @@ def main():
         print("No chapters found. Exiting.")
         return
 
+    # Check for stop before starting processing
+    if check_stop():
+        return
+
     prog = load_progress()
     completed = prog['completed']
     glossary = prog['glossary']
     history = prog['context_history']
     total_chapters = len(chapters) 
+    
     for idx, chap in enumerate(chapters):
+        # Check for stop at the beginning of each chapter
+        if check_stop():
+            print(f"❌ Glossary extraction stopped at chapter {idx+1}")
+            return
+            
         if idx in completed:
             print(f"Skipping chapter {idx+1} (already processed)")
             continue
                 
+        print(f"🔄 Processing Chapter {idx+1}/{total_chapters}")
+        
         try:
             msgs = [{"role":"system","content":sys_prompt}] \
                  + trim_context_history(history, ctx_limit) \
@@ -270,7 +325,62 @@ def main():
 
             total_tokens = sum(count_tokens(m["content"]) for m in msgs)
             print(f"[DEBUG] Glossary prompt tokens = {total_tokens} / {MAX_GLOSSARY_TOKENS}")
-            raw = client.send(msgs, temperature=temp, max_tokens=mtoks)
+            
+            # Check if we're over the token limit
+            if total_tokens > MAX_GLOSSARY_TOKENS:
+                print(f"⚠️ Chapter {idx+1} exceeds glossary token limit: {total_tokens} > {MAX_GLOSSARY_TOKENS}")
+                print(f"⚠️ Skipping chapter {idx+1} due to token limit")
+                completed.append(idx)
+                save_progress(completed, glossary, history)
+                continue
+            
+            # Check for stop before API call
+            if check_stop():
+                print(f"❌ Glossary extraction stopped before API call for chapter {idx+1}")
+                return
+            
+            # Run API call in a separate thread with timeout checking
+            import threading
+            import queue
+            
+            result_queue = queue.Queue()
+            api_error = None
+            
+            def api_call():
+                try:
+                    result = client.send(msgs, temperature=temp, max_tokens=mtoks)
+                    result_queue.put(result)
+                except Exception as e:
+                    result_queue.put(e)
+            
+            api_thread = threading.Thread(target=api_call)
+            api_thread.daemon = True
+            api_thread.start()
+            
+            # Check for stop every 0.5 seconds while waiting for API
+            timeout = 300  # 5 minute total timeout
+            check_interval = 0.5
+            elapsed = 0
+            
+            while elapsed < timeout:
+                try:
+                    # Try to get result with short timeout
+                    result = result_queue.get(timeout=check_interval)
+                    if isinstance(result, Exception):
+                        raise result
+                    raw = result
+                    break
+                except queue.Empty:
+                    # No result yet, check if stop requested
+                    if check_stop():
+                        print(f"❌ Glossary extraction stopped during API call for chapter {idx+1}")
+                        return
+                    elapsed += check_interval
+            else:
+                # Timeout reached
+                print(f"⚠️ API call timed out after {timeout} seconds")
+                continue
+                
             # if send() returned (text, finish_reason), pull out the text
             resp = raw[0] if isinstance(raw, tuple) else raw
 
@@ -283,7 +393,7 @@ def main():
             # Extract the JSON array itself (strip any leading/trailing prose)
             m = re.search(r"\[.*\]", resp, re.DOTALL)
             if not m:
-                print(f"[Warning] Couldn’t find JSON array in chapter {idx+1}, saving raw…")
+                print(f"[Warning] Couldn't find JSON array in chapter {idx+1}, saving raw…")
                 continue
 
             try:
@@ -300,16 +410,20 @@ def main():
                 total_ent = len(data)
                 # log each entry _with_ chapter number
                 for eidx, entry in enumerate(data, start=1):
+                    # Check for stop during entry processing
+                    if check_stop():
+                        print(f"❌ Glossary extraction stopped during entry processing for chapter {idx+1}")
+                        return
+                        
                     elapsed = time.time() - start
-                    avg     = elapsed / eidx
-                    eta     = avg * (total_ent - eidx)
-                    name    = entry.get("original_name","?")
-                    print(
-                        f"[Chapter {idx+1}/{total_chapters}] "
-                        f"[{eidx}/{total_ent}] "
-                        f"({elapsed:.1f}s elapsed, ETA {eta:.1f}s) "
-                        f"→ Entry “{name}”"
-                    )
+                    # Fixed the calculation to avoid division by zero
+                    if idx == 0 and eidx == 1:
+                        eta = 0
+                    else:
+                        avg = elapsed / ((idx * 100) + eidx)
+                        eta = avg * (total_chapters * 100 - ((idx * 100) + eidx))
+                    name = entry.get("original_name","?")
+                    print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → Entry "{name}"')
             except json.JSONDecodeError as e:
                 print(f"[Warning] JSON decode error chap {idx+1}: {e}")
                 continue    
@@ -323,8 +437,17 @@ def main():
             save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
             save_glossary_md(glossary, os.path.join(glossary_dir, os.path.basename(args.output).replace('.json', '.md')))
 
+            # Check for stop after processing chapter
+            if check_stop():
+                print(f"❌ Glossary extraction stopped after processing chapter {idx+1}")
+                return
+
         except Exception as e:
             print(f"Error at chapter {idx+1}: {e}")
+            # Check for stop even after error
+            if check_stop():
+                print(f"❌ Glossary extraction stopped after error in chapter {idx+1}")
+                return
 
     print(f"Done. Glossary saved to {args.output}")
 
