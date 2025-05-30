@@ -19,8 +19,29 @@ if sys.platform.startswith("win"):
         if sys.stdout and hasattr(sys.stdout, 'buffer'):
             sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
-MODEL             = os.getenv("MODEL", "gemini-1.5-flash")
-MAX_GLOSSARY_TOKENS = int(os.getenv("GLOSSARY_TOKEN_LIMIT", 1000000))
+MODEL = os.getenv("MODEL", "gemini-1.5-flash")
+
+# Parse token limit from environment variable (same logic as translation)
+def parse_glossary_token_limit():
+    """Parse token limit from environment variable"""
+    env_value = os.getenv("GLOSSARY_TOKEN_LIMIT", "1000000").strip()
+    
+    if not env_value or env_value == "":
+        return None, "unlimited"
+    
+    if env_value.lower() == "unlimited":
+        return None, "unlimited"
+    
+    if env_value.isdigit() and int(env_value) > 0:
+        limit = int(env_value)
+        return limit, str(limit)
+    
+    # Default fallback
+    return 1000000, "1000000 (default)"
+
+MAX_GLOSSARY_TOKENS, GLOSSARY_LIMIT_STR = parse_glossary_token_limit()
+
+
 
 # Global stop flag for GUI integration
 _stop_requested = False
@@ -287,7 +308,13 @@ def main(log_callback=None, stop_callback=None):
     client = UnifiedClient(model=config['model'], api_key=config['api_key'])
     model = config.get('model', 'gpt-4.1-mini')
     temp = config.get('temperature', 0.3)
-    mtoks = config.get('max_tokens', 4196)
+    env_max_output = os.getenv("MAX_OUTPUT_TOKENS")
+    if env_max_output and env_max_output.isdigit():
+        mtoks = int(env_max_output)
+        print(f"[DEBUG] Output Token Limit: {mtoks} (from GUI)")
+    else:
+        mtoks = config.get('max_tokens', 4196)
+        print(f"[DEBUG] Output Token Limit: {mtoks} (from config)")
     sys_prompt = config.get('system_prompt', 'You are a helpful assistant.')
     ctx_limit = config.get('context_limit_chapters', 3)
 
@@ -324,11 +351,24 @@ def main(log_callback=None, stop_callback=None):
                  + [{"role":"user","content":build_prompt(chap)}]
 
             total_tokens = sum(count_tokens(m["content"]) for m in msgs)
-            print(f"[DEBUG] Glossary prompt tokens = {total_tokens} / {MAX_GLOSSARY_TOKENS}")
+            
+            # READ THE TOKEN LIMIT RIGHT HERE, RIGHT NOW
+            env_value = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
+            if not env_value or env_value == "":
+                token_limit = None
+                limit_str = "unlimited"
+            elif env_value.isdigit() and int(env_value) > 0:
+                token_limit = int(env_value)
+                limit_str = str(token_limit)
+            else:
+                token_limit = 1000000
+                limit_str = "1000000 (default)"
+            
+            print(f"[DEBUG] Glossary prompt tokens = {total_tokens} / {limit_str}")
             
             # Check if we're over the token limit
-            if total_tokens > MAX_GLOSSARY_TOKENS:
-                print(f"⚠️ Chapter {idx+1} exceeds glossary token limit: {total_tokens} > {MAX_GLOSSARY_TOKENS}")
+            if token_limit is not None and total_tokens > token_limit:
+                print(f"⚠️ Chapter {idx+1} exceeds token limit: {total_tokens} > {token_limit}")
                 print(f"⚠️ Skipping chapter {idx+1} due to token limit")
                 completed.append(idx)
                 save_progress(completed, glossary, history)
