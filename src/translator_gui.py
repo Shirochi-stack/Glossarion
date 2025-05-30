@@ -641,6 +641,11 @@ class TranslatorGUI:
             self.glossary_thread and 
             self.glossary_thread.is_alive()
         )
+        qa_running = (
+            hasattr(self, 'qa_thread') and 
+            self.qa_thread and 
+            self.qa_thread.is_alive()
+        )
 
         # Update translation button
         if translation_running:
@@ -655,7 +660,7 @@ class TranslatorGUI:
                 text="Run Translation",
                 command=self.run_translation_thread,
                 bootstyle="success",
-                state=tk.NORMAL if translation_main and not glossary_running else tk.DISABLED
+                state=tk.NORMAL if translation_main and not (glossary_running or qa_running) else tk.DISABLED
             )
             
         # Update glossary button if it exists
@@ -672,10 +677,10 @@ class TranslatorGUI:
                     text="Extract Glossary",
                     command=self.run_glossary_extraction_thread,
                     bootstyle="warning",
-                    state=tk.NORMAL if glossary_main and not translation_running else tk.DISABLED
+                    state=tk.NORMAL if glossary_main and not (translation_running or qa_running) else tk.DISABLED
                 )
                 
-        # Disable other buttons when either process is running
+        # Disable other buttons when any process is running
         if hasattr(self, 'qa_button'):
             self.qa_button.config(state=tk.NORMAL if not (translation_running or glossary_running) else tk.DISABLED)
 
@@ -761,13 +766,19 @@ class TranslatorGUI:
         self.stop_requested = False
 
         def run_scan():
+            # Update buttons when scan starts
+            self.master.after(0, self.update_run_button)
             self.qa_button.config(text="Stop Scan", command=self.stop_qa_scan, bootstyle="danger")
+            
             try:
                 scan_html_folder(folder_path, log=self.append_log, stop_flag=lambda: self.stop_requested)
                 self.append_log("✅ QA scan completed successfully.")
             except Exception as e:
                 self.append_log(f"❌ QA scan error: {e}")
             finally:
+                # Clear thread reference and update buttons when done
+                self.qa_thread = None
+                self.master.after(0, self.update_run_button)
                 self.master.after(0, lambda: self.qa_button.config(
                     text="QA Scan", 
                     command=self.run_qa_scan, 
