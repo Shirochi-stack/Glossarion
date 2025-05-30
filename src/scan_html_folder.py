@@ -1044,7 +1044,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, aggressive_mode=Tru
 
     log(f"\n✅ Scan complete!")
     log(f"📁 Reports saved to: {output_path}")
-    log(f"🔧 Removed {len(faulty_indices)} problematic files from progress tracking")
+    log(f"🔧 Removed {len(faulty_indices)} anomalies from progress tracking")
 
 def launch_gui():
     def run_scan():
