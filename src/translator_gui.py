@@ -55,7 +55,7 @@ class TranslatorGUI:
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
-        master.title("EPUB Translator")
+        master.title("Glossarion v1.3.0 “Purge & Launch” 🚀✨")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1400, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
@@ -548,6 +548,12 @@ class TranslatorGUI:
                 self.append_log("❌ Error: Please select a valid EPUB file for glossary extraction.")
                 return
 
+            # ADD THIS: Check for API key
+            api_key = self.api_key_entry.get()
+            if not api_key:
+                self.append_log("❌ Error: Please enter your API key.")
+                return
+
             # Save current sys.argv and environment
             old_argv = sys.argv
             old_env = dict(os.environ)
@@ -616,6 +622,8 @@ class TranslatorGUI:
             self.stop_requested = False
             if glossary_stop_flag:
                 glossary_stop_flag(False)
+            # ADD THIS LINE: Clear the thread reference to fix double-click issue
+            self.glossary_thread = None
             self.master.after(0, self.update_run_button)
 
     def update_run_button(self):
