@@ -55,7 +55,7 @@ class TranslatorGUI:
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
-        master.title("Glossarion v1.3.2")
+        master.title("Glossarion v1.4.0")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1400, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
@@ -110,12 +110,20 @@ class TranslatorGUI:
         self.summary_role_var = tk.StringVar(
             value=self.config.get('summary_role', 'user')
         )
+        
+        # ─── NEW: Add variables for new toggles ───
+        self.disable_system_prompt_var = tk.BooleanVar(
+            value=self.config.get('disable_system_prompt', False)
+        )
+        self.disable_auto_glossary_var = tk.BooleanVar(
+            value=self.config.get('disable_auto_glossary', False)
+        )
 
         # Default prompts
         self.default_prompts = {
-            "korean": "You are a professional Korean to English novel translator.\n- Use a context rich and natural translation style.\n- Retain honorifics, and suffixes like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
-            "japanese": "You are a professional Japanese to English novel translator.\n- Use a context rich and natural translation style.\n- Retain honorifics, and suffixes like -san, -sama, -chan, -kun.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
-            "chinese": "You are a professional Chinese to English novel translator.\n- Use a context rich and natural translation style.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji."
+            "korean": "You are a professional Korean to English novel translator, please output only english text while following these rules:\n- Use a context rich and natural translation style.\n- Retain honorifics, and suffixes like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
+            "japanese": "You are a professional Japanese to English novel translator, please output only english text while following these rules:\n- Use a context rich and natural translation style.\n- Retain honorifics, and suffixes like -san, -sama, -chan, -kun.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
+            "chinese": "You are a professional Chinese to English novel translator, please output only english text while following these rules:\n- Use a context rich and natural translation style.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji."
         }
 
         # Profiles - FIXED: Load from config properly
@@ -182,7 +190,7 @@ class TranslatorGUI:
         print(f"[DEBUG] Setting model to: {default_model}")  # Debug logging
         self.model_var = tk.StringVar(value=default_model)
         tb.Combobox(self.frame, textvariable=self.model_var,
-                    values=["gpt-4o","gpt-4o-mini","gpt-4-turbo","gpt-4.1-nano","gpt-3.5-turbo","gemini-1.5-pro","gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-exp","deepseek-chat","claude-3-5-sonnet-20241022"], state="normal").grid(
+                    values=["gpt-4o","gpt-4o-mini","gpt-4-turbo","gpt-4.1-nano","gpt-4.1-mini","gpt-4.1","gpt-3.5-turbo","gemini-1.5-pro","gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-exp","deepseek-chat","claude-3-5-sonnet-20241022","claude-3-7-sonnet-20250219"], state="normal").grid(
             row=1, column=1, columnspan=2, sticky=tk.EW, padx=5, pady=5)
 
         # Language
@@ -422,6 +430,12 @@ class TranslatorGUI:
                 self.append_log(f"🔑 API Key: {api_key[:10]}...")
                 self.append_log(f"📤 Output Token Limit: {self.max_output_tokens}")
                 
+                # ─── NEW: Log the state of new toggles ───
+                if self.disable_system_prompt_var.get():
+                    self.append_log("⚠️ Hardcoded prompts disabled")
+                if self.disable_auto_glossary_var.get():
+                    self.append_log("⚠️ Automatic glossary disabled")
+                
                 # Set environment variables - FIXED: Use multiple API key variables
                 os.environ.update({
                     'EPUB_PATH': epub_path,
@@ -440,7 +454,10 @@ class TranslatorGUI:
                     'TRANSLATION_LANG': self.lang_var.get().lower(),
                     'TRANSLATION_TEMPERATURE': str(self.trans_temp.get()),
                     'TRANSLATION_HISTORY_LIMIT': str(self.trans_history.get()),
-                    'EPUB_OUTPUT_DIR': os.getcwd()
+                    'EPUB_OUTPUT_DIR': os.getcwd(),
+                    # ─── NEW: Add environment variables for new toggles ───
+                    'DISABLE_SYSTEM_PROMPT': "1" if self.disable_system_prompt_var.get() else "0",
+                    'DISABLE_AUTO_GLOSSARY': "1" if self.disable_auto_glossary_var.get() else "0"
                 })
                 
                 # Set chapter range if specified
@@ -857,27 +874,10 @@ class TranslatorGUI:
             self.output_btn.config(text=f"Output Token Limit: {val}")
             self.append_log(f"✅ Output token limit set to {val}")
 
-    def toggle_token_limit(self):
-        """Toggle whether the token-limit entry is active or not."""
-        if not self.token_limit_disabled:
-            # disable it
-            self.token_limit_entry.config(state=tk.DISABLED)
-            self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
-            self.append_log("⚠️ Input token limit disabled - chapters will not be checked for size.")
-            self.token_limit_disabled = True
-        else:
-            # re-enable it
-            self.token_limit_entry.config(state=tk.NORMAL)
-            if not self.token_limit_entry.get().strip():
-                self.token_limit_entry.insert(0, str(self.config.get('token_limit', 1000000)))
-            self.toggle_token_btn.config(text="Disable Input Token Limit", bootstyle="danger-outline")
-            self.append_log(f"✅ Input token limit enabled: {self.token_limit_entry.get()}")
-            self.token_limit_disabled = False
-
     def open_other_settings(self):
         top = tk.Toplevel(self.master)
         top.title("Advanced Settings")
-        top.geometry("320x200")
+        top.geometry("400x370")
 
         # Rolling summary checkbox  
         tb.Checkbutton(top, text="Use Rolling Summary", variable=self.rolling_summary_var,
@@ -886,18 +886,31 @@ class TranslatorGUI:
         # Summary role dropdown
         tk.Label(top, text="Summary Role:").pack(anchor=tk.W, padx=10)
         ttk.Combobox(top, textvariable=self.summary_role_var,
-                     values=["user", "system"], state="readonly").pack(anchor=tk.W, padx=10)
+                     values=["user", "system"], state="readonly").pack(anchor=tk.W, padx=10, pady=(0, 10))
+        
+        # Add separator
+        ttk.Separator(top, orient='horizontal').pack(fill='x', padx=10, pady=10)
+        
+        # Disable Hardcoded Prompts checkbox (removes "You are a professional translator..." prefix)
+        tb.Checkbutton(top, text="Disable Hardcoded Prompts", variable=self.disable_system_prompt_var,
+                       bootstyle="round-toggle").pack(anchor=tk.W, padx=10, pady=10)
+        
+        # Disable Auto Glossary checkbox
+        tb.Checkbutton(top, text="Disable Auto Glossary", variable=self.disable_auto_glossary_var,
+                       bootstyle="round-toggle").pack(anchor=tk.W, padx=10, pady=10)
 
         def save_and_close():
             self.config['use_rolling_summary'] = self.rolling_summary_var.get()
             self.config['summary_role'] = self.summary_role_var.get()
+            self.config['disable_system_prompt'] = self.disable_system_prompt_var.get()
+            self.config['disable_auto_glossary'] = self.disable_auto_glossary_var.get()
             os.environ["USE_ROLLING_SUMMARY"] = "1" if self.rolling_summary_var.get() else "0"
             os.environ["SUMMARY_ROLE"] = self.summary_role_var.get()
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, ensure_ascii=False, indent=2)
             top.destroy()
 
-        tb.Button(top, text="Save", command=save_and_close).pack(pady=10)
+        tb.Button(top, text="Save", command=save_and_close).pack(pady=20)
 
     def on_profile_select(self, event=None):
         """Load the selected profile's prompt into the text area."""
@@ -1137,6 +1150,9 @@ class TranslatorGUI:
             self.config['use_rolling_summary'] = self.rolling_summary_var.get()
             self.config['summary_role'] = self.summary_role_var.get()
             self.config['max_output_tokens'] = self.max_output_tokens
+            # ─── NEW: Save new toggle states ───
+            self.config['disable_system_prompt'] = self.disable_system_prompt_var.get()
+            self.config['disable_auto_glossary'] = self.disable_auto_glossary_var.get()
             
             _tl = self.token_limit_entry.get().strip()
             if _tl.isdigit():
