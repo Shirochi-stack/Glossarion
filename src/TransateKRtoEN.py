@@ -265,40 +265,52 @@ def get_content_hash(html_content):
     fingerprint = text[:1000]
     return hashlib.md5(fingerprint.encode('utf-8')).hexdigest()
 
-def clean_ai_artifacts(text):
-    """Remove AI response artifacts from text"""
+def clean_ai_artifacts(text, remove_artifacts=True):
+    """Remove AI response artifacts from text - but ONLY when enabled"""
+    if not remove_artifacts:
+        # If artifact removal is disabled, just return the text as-is
+        return text
+        
     original_text = text
     
-    # Remove common AI prefixes - more comprehensive list
-    ai_prefixes = [
-        r'^(?:Okay|Sure|Understood|Of course|Got it|Alright|Certainly)',
-        r'^(?:I\'ll|I will|Let me|Here\'s|Here is|Here are)',
-        r'^(?:I understand|I can help|I\'m happy to)',
-    ]
+    # Only remove AI prefixes at the very beginning of the response
+    # These patterns should ONLY match at the start of the entire text
+    if text.strip().lower().startswith(('okay,', 'sure,', 'understood,', 'of course,', 'alright,', 'certainly,')):
+        # Look for common AI response patterns
+        ai_response_pattern = re.compile(
+            r'^(?:okay|sure|understood|of course|got it|alright|certainly),?\s+'
+            r'(?:I\'ll|I will|let me|here\'s|here is|here are)\s+'
+            r'(?:translate|help|assist|proceed)[^.!?\n]*?[\n\r]+',
+            re.IGNORECASE
+        )
+        text = ai_response_pattern.sub('', text, count=1)  # Only remove first occurrence
     
-    for prefix in ai_prefixes:
-        text = re.sub(prefix + r'[^.!?\n]*?(?:translat|help|assist|proceed)[^.!?\n]*[\n\r]+', '', 
-                     text, flags=re.IGNORECASE | re.MULTILINE)
+    # Remove JSON blocks ONLY if they appear to be AI artifacts
+    # Check if the text starts with JSON
+    if text.strip().startswith(('{', '[')):
+        # Look for JSON that contains "role" - this is likely an AI artifact
+        json_artifact_pattern = re.compile(r'^\s*\{[^{}]*"role"\s*:\s*"[^"]+"\s*[^{}]*\}', re.DOTALL)
+        if json_artifact_pattern.match(text):
+            text = json_artifact_pattern.sub('', text, count=1)
     
-    # Remove JSON blocks
-    text = re.sub(r'```json\s*', '', text, flags=re.MULTILINE)
-    text = re.sub(r'\s*```', '', text, flags=re.MULTILINE)
-    text = re.sub(r'\{[^{}]*"role"\s*:\s*"[^"]+"\s*[^{}]*\}', '', text, flags=re.DOTALL)
-    text = re.sub(r'\[\s*\{[^]]+\]\s*', '', text, flags=re.DOTALL)
+    # Remove markdown code fences
+    text = re.sub(r'^```(?:json|html|xml)?\s*\n', '', text, flags=re.MULTILINE, count=1)
+    text = re.sub(r'\n```\s*$', '', text, flags=re.MULTILINE, count=1)
     
     # Remove part markers
-    text = re.sub(r'\[PART\s+\d+/\d+\]\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'^\[PART\s+\d+/\d+\]\s*\n?', '', text, flags=re.IGNORECASE)
     
-    # Remove system/assistant markers
+    # Remove system/assistant markers ONLY at the beginning of lines
     text = re.sub(r'^(?:System|Assistant|AI|User|Human|Model)\s*:\s*', '', 
-                 text, flags=re.IGNORECASE | re.MULTILINE)
+                 text, flags=re.IGNORECASE | re.MULTILINE, count=1)
     
-    # Remove translation notes
+    # Remove translation notes ONLY if they're at the beginning
     text = re.sub(r'^(?:Note|Translation note|Translator\'s note)\s*:[^\n]+\n', '', 
-                 text, flags=re.IGNORECASE | re.MULTILINE)
+                 text, flags=re.IGNORECASE, count=1)
     
-    # Clean up any JSON arrays that might have leaked
-    if text.strip().startswith('[') and '"original_name"' in text:
+    # Clean up any JSON arrays that might have leaked through
+    # But ONLY if they look like glossary JSON
+    if text.strip().startswith('[') and '"original_name"' in text[:200]:  # Check only first 200 chars
         # This looks like glossary JSON
         lines = text.split('\n')
         cleaned_lines = []
@@ -313,11 +325,87 @@ def clean_ai_artifacts(text):
         
         text = '\n'.join(cleaned_lines)
     
-    # Remove empty lines at the start
-    text = re.sub(r'^\s*\n+', '', text)
+    # Remove empty lines at the start only
+    text = re.sub(r'^\s*\n+', '', text, count=1)
     
     return text
 
+
+def restore_missing_headers(translated_text, original_html):
+    """
+    Restore headers that may have been lost during translation.
+    This function checks if headers from the original are missing in the translation.
+    """
+    # Parse both texts
+    original_soup = BeautifulSoup(original_html, 'html.parser')
+    trans_soup = BeautifulSoup(translated_text, 'html.parser')
+    
+    # Find all headers in original
+    original_headers = original_soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+    if not original_headers:
+        return translated_text  # No headers to restore
+    
+    # Check if translation has any headers
+    trans_headers = trans_soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+    
+    # If original has headers but translation doesn't, we need to restore them
+    if original_headers and not trans_headers:
+        print("⚠️ Headers missing in translation - attempting restoration")
+        
+        # Get the first header from original
+        first_header = original_headers[0]
+        header_tag = first_header.name
+        header_text = first_header.get_text(strip=True)
+        
+        # Try to find where this header text might be in the translation
+        trans_text = trans_soup.get_text()
+        
+        # Look for the header text at the beginning of the translation
+        # It might have been converted to plain text
+        lines = translated_text.split('\n')
+        restored = False
+        
+        for i, line in enumerate(lines[:5]):  # Check first 5 lines
+            line_text = BeautifulSoup(line, 'html.parser').get_text(strip=True)
+            # Check if this line contains something that looks like a header
+            if line_text and len(line_text) < 200:  # Headers are usually short
+                # Check if it's not already in a paragraph tag
+                if not line.strip().startswith('<p>') and not line.strip().startswith('<h'):
+                    # This might be our header - wrap it in the appropriate tag
+                    lines[i] = f'<{header_tag}>{line_text}</{header_tag}>'
+                    restored = True
+                    print(f"✅ Restored header: <{header_tag}>{line_text[:50]}...</{header_tag}>")
+                    break
+                elif line.strip().startswith('<p>') and line.strip().endswith('</p>'):
+                    # It's in a paragraph tag - convert to header
+                    content = BeautifulSoup(line, 'html.parser').get_text(strip=True)
+                    if len(content) < 200:  # Likely a header
+                        lines[i] = f'<{header_tag}>{content}</{header_tag}>'
+                        restored = True
+                        print(f"✅ Converted paragraph to header: <{header_tag}>{content[:50]}...</{header_tag}>")
+                        break
+        
+        if restored:
+            return '\n'.join(lines)
+    
+    # If translation has headers but they're in the wrong tags (e.g., all headers became <p>)
+    # This is a more complex case - for now just return as is
+    return translated_text
+    
+def debug_headers(text, label=""):
+    """Debug function to check header presence"""
+    soup = BeautifulSoup(text, 'html.parser')
+    headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+    if headers:
+        print(f"[DEBUG-HEADERS] {label} - Found {len(headers)} headers:")
+        for h in headers[:3]:  # Show first 3
+            print(f"  - <{h.name}>{h.get_text(strip=True)[:50]}...</{h.name}>")
+    else:
+        print(f"[DEBUG-HEADERS] {label} - No headers found!")
+        # Check if header text exists but without tags
+        text_start = soup.get_text(strip=True)[:200]
+        print(f"  - Text start: {text_start[:100]}...")
+        
 def extract_chapters(zf):
     """Extract chapters from EPUB file with robust duplicate detection"""
     chaps = []
@@ -719,124 +807,81 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     raise UnifiedClientError(f"API call timed out after {timeout} seconds")
 
 def remove_header_artifacts(chapters):
-    """Remove AI response artifacts from ALL chapters while preserving chapter headers"""
+    """Remove AI response artifacts from ALL chapters while preserving ALL headers"""
     if not chapters:
         return []
     
     all_removed_tags = []
     
     # Comprehensive patterns for AI artifacts
+    # These should ONLY match actual AI responses, not chapter content
     artifact_patterns = [
-        # AI response starters - more comprehensive
-        re.compile(r'^(?:okay|sure|understood|of course|got it|alright|certainly|I\'ll|I will|let me|here\'s|here is|here are)\b[^.!?]*?(?:translat|proceed|help|your|the)\b[^.!?\n]*[\n\r]+', re.IGNORECASE | re.MULTILINE),
+        # AI response starters - must be at the beginning of a line/text
+        re.compile(r'^(?:okay|sure|understood|of course|got it|alright|certainly),?\s+(?:I\'ll|I will|let me|here\'s|here is|here are)\s+(?:translat|proceed|help)', re.IGNORECASE | re.MULTILINE),
+        # Standalone AI confirmations at the start
+        re.compile(r'^(?:I\'ll translate|I will translate|Let me translate|Here\'s the translation|Here is the translation)', re.IGNORECASE | re.MULTILINE),
         # JSON artifacts
         re.compile(r'```json\s*\n?', re.MULTILINE),
         re.compile(r'\n?\s*```\s*$', re.MULTILINE),
         re.compile(r'\{[^{}]*"role"\s*:\s*"[^"]+"\s*[^{}]*\}', re.DOTALL),
         re.compile(r'\[\s*\{[^]]+\]\s*', re.DOTALL),
-        # System/Assistant markers
+        # System/Assistant markers at the start of lines
         re.compile(r'^(?:System|Assistant|User|Human|AI|Model)\s*:\s*', re.IGNORECASE | re.MULTILINE),
         # Part markers from chunking
         re.compile(r'\[PART\s+\d+/\d+\]\s*', re.IGNORECASE),
-        # Common AI explanations
-        re.compile(r'^(?:Note|Explanation|Translation note|Translator\'s note)\s*:\s*[^\n]+\n', re.IGNORECASE | re.MULTILINE),
+        # Translation notes at the start
+        re.compile(r'^(?:Note|Translation note|Translator\'s note)\s*:\s*[^\n]+$', re.IGNORECASE | re.MULTILINE),
         # Code blocks
         re.compile(r'```[^`]*```', re.DOTALL),
     ]
-    
-    # Chapter header patterns to PRESERVE
-    chapter_patterns = [
-        re.compile(r'^Chapter\s+\d+', re.IGNORECASE),
-        re.compile(r'^Chapter\s+[IVXLCDM]+', re.IGNORECASE),  # Roman numerals
-        re.compile(r'第\s*\d+\s*[章节話话回]'),  # Chinese
-        re.compile(r'제\s*\d+\s*[장화권부]'),   # Korean
-        re.compile(r'第\s*\d+\s*話'),           # Japanese
-        re.compile(r'^\d+\s*[-–—.]\s*\w+'),     # Numbered chapters like "1. Title"
-        re.compile(r'^Part\s+\d+', re.IGNORECASE),
-        re.compile(r'^Episode\s+\d+', re.IGNORECASE),
-        re.compile(r'^Prologue', re.IGNORECASE),
-        re.compile(r'^Epilogue', re.IGNORECASE),
-    ]
-    
-    def is_chapter_header(text):
-        """Check if text appears to be a chapter header"""
-        # First check if it matches known chapter patterns
-        for pattern in chapter_patterns:
-            if pattern.search(text):
-                return True
-        
-        # Additional heuristics for chapter headers
-        # Short text (less than 100 chars) that doesn't contain AI artifacts
-        if len(text) < 100:
-            # Check if it contains typical AI response words
-            ai_words = ['translate', 'help', 'assist', 'proceed', 'sure', 'okay', 'understood']
-            text_lower = text.lower()
-            if not any(word in text_lower for word in ai_words):
-                # Might be a chapter title
-                return True
-        
-        return False
     
     # Process ALL chapters
     for idx, chapter in enumerate(chapters):
         removed_tags = []
         original_body = chapter["body"]
         
-        # First pass: clean with BeautifulSoup
+        # Parse HTML
         soup = BeautifulSoup(original_body, "html.parser")
         
-        # Check all text-containing tags
-        for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'div', 'span']):
+        # Only check non-header tags for artifact removal
+        # NEVER touch h1, h2, h3, h4, h5, h6 tags - these are likely chapter headers
+        for tag in soup.find_all(['p', 'div', 'span']):
             if not tag.get_text(strip=True):
                 continue
             
             tag_text = tag.get_text(strip=True)
             
-            # IMPORTANT: Skip if this looks like a chapter header
-            if tag.name in ['h1', 'h2', 'h3', 'h4'] and is_chapter_header(tag_text):
-                continue  # Don't remove chapter headers!
+            # Only remove if the ENTIRE tag content is an AI artifact
+            # This prevents removing paragraphs that just happen to contain words like "sure" or "okay"
+            is_pure_artifact = False
             
-            # For paragraphs and divs, only remove if the ENTIRE content is an artifact
-            if tag.name in ['p', 'div', 'span']:
-                # Check if entire tag is ONLY an artifact
-                for pattern in artifact_patterns:
-                    if pattern.match(tag_text) and pattern.search(tag_text).group(0) == tag_text:
-                        removed_tags.append(f"Removed <{tag.name}>: {tag_text[:60]}...")
-                        tag.decompose()
-                        break
-            else:
-                # For other tags, check if they match artifact patterns
-                for pattern in artifact_patterns:
-                    if pattern.search(tag_text):
-                        removed_tags.append(f"Removed <{tag.name}>: {tag_text[:60]}...")
-                        tag.decompose()
-                        break
-        
-        # Second pass: clean the HTML string directly
+            for pattern in artifact_patterns:
+                match = pattern.match(tag_text)
+                if match and match.group(0).strip() == tag_text.strip():
+                    # The entire tag is just the artifact
+                    is_pure_artifact = True
+                    removed_tags.append(f"Removed <{tag.name}>: {tag_text[:60]}...")
+                    tag.decompose()
+                    break
+            
+        # Second pass: clean the HTML string for artifacts outside of tags
         html_str = str(soup)
         original_len = len(html_str)
         
-        # Apply all artifact patterns to the raw HTML
-        # But be more careful to not remove content within legitimate tags
-        for pattern in artifact_patterns:
-            # Only apply to standalone lines, not content within tags
-            html_str = pattern.sub('', html_str)
-        
-        # Special handling for JSON at the beginning
-        # Check if content starts with JSON
-        temp_soup = BeautifulSoup(html_str, 'html.parser')
-        text_only = temp_soup.get_text(strip=True)
-        
-        if text_only and (text_only.strip().startswith('{') or text_only.strip().startswith('[')):
-            # Look for the end of JSON and remove it
+        # Remove standalone JSON blocks at the beginning
+        if html_str.strip().startswith(('{', '[')):
             lines = html_str.split('\n')
             clean_lines = []
             json_ended = False
             bracket_count = 0
+            in_json = False
             
-            for line in lines:
-                if not json_ended:
-                    # Count brackets to find end of JSON
+            for i, line in enumerate(lines):
+                # Check if we're at the start and it looks like JSON
+                if i == 0 and (line.strip().startswith('{') or line.strip().startswith('[')):
+                    in_json = True
+                
+                if in_json and not json_ended:
                     bracket_count += line.count('{') + line.count('[')
                     bracket_count -= line.count('}') + line.count(']')
                     
@@ -846,15 +891,19 @@ def remove_header_artifacts(chapters):
                         json_end = max(line.rfind('}'), line.rfind(']'))
                         if json_end < len(line) - 1:
                             remaining = line[json_end + 1:].strip()
-                            if remaining:
+                            if remaining and not remaining.startswith(('{{', '[[', '{"', '["')):
                                 clean_lines.append(remaining)
                         continue
                 
-                if json_ended or (line.strip() and not any(char in line for char in ['{', '}', '[', ']', '"role"', '"content"'])):
+                if json_ended or not in_json:
                     clean_lines.append(line)
             
-            html_str = '\n'.join(clean_lines)
-            removed_tags.append("Removed JSON block from beginning")
+            if in_json and json_ended:
+                html_str = '\n'.join(clean_lines)
+                removed_tags.append("Removed JSON block from beginning")
+        
+        # Remove code blocks but ONLY if they're markdown code blocks
+        html_str = re.sub(r'```(?:json|html|xml|python)?\s*\n.*?\n```', '', html_str, flags=re.DOTALL)
         
         # Remove empty tags left behind
         html_str = re.sub(r'<([^>]+)>\s*</\1>', '', html_str)
@@ -876,6 +925,7 @@ def remove_header_artifacts(chapters):
         removal_log_path = os.path.join(output_dir, "removal.txt")
         with open(removal_log_path, "w", encoding="utf-8") as logf:
             logf.write("=== AI Artifact Removal Log ===\n\n")
+            logf.write("Note: Header tags (h1-h6) are preserved. Only AI artifacts in p/div/span tags are removed.\n\n")
             for title, num, tags in all_removed_tags:
                 logf.write(f"{title} (Chapter {num}):\n")
                 for tag in tags:
@@ -1001,6 +1051,14 @@ def main(log_callback=None, stop_callback=None):
     else:
         print("⚠️ Emergency paragraph restoration is DISABLED")
     
+    # Add debug logging
+    print(f"[DEBUG] REMOVE_HEADER environment variable: {os.getenv('REMOVE_HEADER', 'NOT SET')}")
+    print(f"[DEBUG] REMOVE_HEADER parsed value: {REMOVE_HEADER}")
+    if REMOVE_HEADER:
+        print("⚠️ AI artifact removal is ENABLED - will clean AI response artifacts")
+    else:
+        print("✅ AI artifact removal is DISABLED - preserving all content as-is")
+        
     # Parse chapter range
     rng = os.getenv("CHAPTER_RANGE", "")
     if rng and re.match(r"^\d+\s*-\s*\d+$", rng):
@@ -1350,8 +1408,9 @@ def main(log_callback=None, stop_callback=None):
                     if finish_reason == "length":
                         print(f"    [WARN] Output was truncated!")
                     
-                    # Clean AI artifacts aggressively
-                    result = clean_ai_artifacts(result)
+                    # Clean AI artifacts ONLY if the toggle is enabled
+                    if REMOVE_HEADER:
+                        result = clean_ai_artifacts(result)
                     
                     if EMERGENCY_RESTORE:
                         result = emergency_restore_paragraphs(result, chunk_html)
@@ -1480,8 +1539,12 @@ def main(log_callback=None, stop_callback=None):
         cleaned = re.sub(r"^```(?:html)?\s*", "", merged_result, flags=re.MULTILINE)
         cleaned = re.sub(r"\s*```$", "", cleaned, flags=re.MULTILINE)
 
-        # Final artifact cleanup
-        cleaned = clean_ai_artifacts(cleaned)
+        # Final artifact cleanup - NOW RESPECTS THE TOGGLE
+        cleaned = clean_ai_artifacts(cleaned, remove_artifacts=REMOVE_HEADER)
+
+        # Debug the final result
+        if idx < 3:  # Debug first 3 chapters
+            debug_headers(cleaned, f"Chapter {idx+1} - Final before save")
 
         # Write HTML file
         with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
