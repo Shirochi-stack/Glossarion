@@ -55,7 +55,7 @@ class TranslatorGUI:
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
-        master.title("Glossarion v1.4.6")
+        master.title("Glossarion v1.4.7")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1400, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
@@ -896,7 +896,7 @@ class TranslatorGUI:
     def open_other_settings(self):
         top = tk.Toplevel(self.master)
         top.title("Other Settings")
-        top.geometry("550x550")  # Increased height for new toggle
+        top.geometry("550x650")  # Increased height for new toggle
 
         # Rolling summary checkbox  
         tb.Checkbutton(top, text="Use Rolling Summary", variable=self.rolling_summary_var,
