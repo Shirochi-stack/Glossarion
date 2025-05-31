@@ -10,6 +10,8 @@ from ebooklib import epub
 from bs4 import BeautifulSoup
 from collections import Counter
 from unified_api_client import UnifiedClient, UnifiedClientError
+import hashlib
+import unicodedata
 
 # Import the new modules
 from history_manager import HistoryManager
@@ -61,13 +63,194 @@ def set_output_redirect(log_callback=None):
                 
         sys.stdout = CallbackWriter(log_callback)
 
-# Remove old load_history and save_history functions since we'll use HistoryManager
-
 def get_instructions(lang):
     """Get minimal technical instructions only"""
     # Only return the technical requirement that applies to all languages
-    return "Preserve all HTML tags and image references exactly as they appear in the source."
+    return "Preserve ALL HTML tags exactly as they appear in the source, including <p>, <br>, <div>, etc."
 
+# Modifications for TransateKRtoEN.py
+
+def emergency_restore_paragraphs(text, original_html=None, verbose=True):
+    """
+    Emergency restoration when AI returns wall of text without proper paragraph tags.
+    This function attempts to restore paragraph structure using various heuristics.
+    
+    Args:
+        text: The translated text that may have lost formatting
+        original_html: The original HTML to compare structure (optional)
+        verbose: Whether to print debug messages (default True)
+    """
+    # Handle verbose mode
+    if not verbose:
+        # Suppress print statements if not verbose
+        original_print = print
+        print = lambda *args, **kwargs: None
+    
+    # Check if we already have proper paragraph structure
+    if text.count('</p>') >= 3:  # Assume 3+ paragraphs means structure is OK
+        if not verbose:
+            print = original_print
+        return text
+    
+    # If we have the original HTML, try to match its structure
+    if original_html:
+        original_para_count = original_html.count('<p>')
+        current_para_count = text.count('<p>')
+        
+        if current_para_count < original_para_count / 2:  # Less than half the expected paragraphs
+            print(f"⚠️ Paragraph mismatch! Original: {original_para_count}, Current: {current_para_count}")
+            print("🔧 Attempting emergency paragraph restoration...")
+    
+    # If no paragraph tags found and text is long, we have a problem
+    if '</p>' not in text and len(text) > 300:
+        print("❌ No paragraph tags found - applying emergency restoration")
+        
+        # First, try to preserve any existing HTML tags
+        has_html = '<' in text and '>' in text
+        
+        # Clean up any broken tags
+        text = text.replace('</p><p>', '</p>\n<p>')  # Ensure line breaks between paragraphs
+        
+        # Strategy 1: Look for double line breaks (often indicates paragraph break)
+        if '\n\n' in text:
+            parts = text.split('\n\n')
+            paragraphs = ['<p>' + part.strip() + '</p>' for part in parts if part.strip()]
+            if not verbose:
+                print = original_print
+            return '\n'.join(paragraphs)
+        
+        # Strategy 2: Look for dialogue patterns (quotes often start new paragraphs)
+        dialogue_pattern = r'(?<=[.!?])\s+(?=[""\u201c\u201d])'
+        if re.search(dialogue_pattern, text):
+            parts = re.split(dialogue_pattern, text)
+            paragraphs = []
+            for part in parts:
+                part = part.strip()
+                if part:
+                    # Check if it already has tags
+                    if not part.startswith('<p>'):
+                        part = '<p>' + part
+                    if not part.endswith('</p>'):
+                        part = part + '</p>'
+                    paragraphs.append(part)
+            if not verbose:
+                print = original_print
+            return '\n'.join(paragraphs)
+        
+        # Strategy 3: Split by sentence patterns
+        # Look for: period/exclamation/question mark + space + capital letter
+        sentence_boundary = r'(?<=[.!?])\s+(?=[A-Z\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af])'
+        sentences = re.split(sentence_boundary, text)
+        
+        if len(sentences) > 1:
+            # Group sentences into paragraphs
+            # Aim for 3-5 sentences per paragraph, or natural breaks
+            paragraphs = []
+            current_para = []
+            
+            for sentence in sentences:
+                sentence = sentence.strip()
+                if not sentence:
+                    continue
+                    
+                current_para.append(sentence)
+                
+                # Create new paragraph if:
+                # - We have 3-4 sentences
+                # - Current sentence ends with closing quote
+                # - Next sentence would start with quote
+                # - Current sentence seems like scene break
+                should_break = (
+                    len(current_para) >= 3 or
+                    sentence.rstrip().endswith(('"', '"', '"')) or
+                    '* * *' in sentence or
+                    '***' in sentence or
+                    '---' in sentence
+                )
+                
+                if should_break:
+                    para_text = ' '.join(current_para)
+                    if not para_text.startswith('<p>'):
+                        para_text = '<p>' + para_text
+                    if not para_text.endswith('</p>'):
+                        para_text = para_text + '</p>'
+                    paragraphs.append(para_text)
+                    current_para = []
+            
+            # Don't forget the last paragraph
+            if current_para:
+                para_text = ' '.join(current_para)
+                if not para_text.startswith('<p>'):
+                    para_text = '<p>' + para_text
+                if not para_text.endswith('</p>'):
+                    para_text = para_text + '</p>'
+                paragraphs.append(para_text)
+            
+            result = '\n'.join(paragraphs)
+            print(f"✅ Restored {len(paragraphs)} paragraphs from wall of text")
+            if not verbose:
+                print = original_print
+            return result
+        
+        # Strategy 4: Last resort - fixed size chunks
+        # Split into chunks of ~150-200 words
+        words = text.split()
+        if len(words) > 100:
+            paragraphs = []
+            words_per_para = max(100, len(words) // 10)  # Aim for ~10 paragraphs
+            
+            for i in range(0, len(words), words_per_para):
+                chunk = ' '.join(words[i:i + words_per_para])
+                if chunk.strip():
+                    paragraphs.append('<p>' + chunk.strip() + '</p>')
+            
+            if not verbose:
+                print = original_print
+            return '\n'.join(paragraphs)
+    
+    # If text has some structure but seems incomplete
+    elif '<p>' in text and text.count('<p>') < 3 and len(text) > 1000:
+        print("⚠️ Very few paragraphs for long text - checking if more breaks needed")
+        
+        # Extract existing paragraphs
+        soup = BeautifulSoup(text, 'html.parser')
+        existing_paras = soup.find_all('p')
+        
+        # Check if any paragraph is too long
+        new_paragraphs = []
+        for para in existing_paras:
+            para_text = para.get_text()
+            if len(para_text) > 500:  # Paragraph seems too long
+                # Split this paragraph
+                sentences = re.split(r'(?<=[.!?])\s+', para_text)
+                if len(sentences) > 5:
+                    # Re-group into smaller paragraphs
+                    chunks = []
+                    current = []
+                    for sent in sentences:
+                        current.append(sent)
+                        if len(current) >= 3:
+                            chunks.append('<p>' + ' '.join(current) + '</p>')
+                            current = []
+                    if current:
+                        chunks.append('<p>' + ' '.join(current) + '</p>')
+                    new_paragraphs.extend(chunks)
+                else:
+                    new_paragraphs.append(str(para))
+            else:
+                new_paragraphs.append(str(para))
+        
+        if not verbose:
+            print = original_print
+        return '\n'.join(new_paragraphs)
+    
+    # Restore print function if verbose was disabled
+    if not verbose:
+        print = original_print
+    
+    # Return original text if no restoration needed
+    return text  
+    
 def extract_epub_metadata(zf):
     """Extract metadata from EPUB file"""
     meta = {}
@@ -80,16 +263,142 @@ def extract_epub_metadata(zf):
             break
     return meta
 
+def get_content_hash(html_content):
+    """Create a hash of content to detect duplicates"""
+    soup = BeautifulSoup(html_content, 'html.parser')
+    text = soup.get_text(strip=True).lower()
+    
+    # Remove all types of chapter markers for better duplicate detection
+    text = re.sub(r'chapter\s*\d+\s*:?\s*', '', text)
+    text = re.sub(r'第\s*\d+\s*[章节話话回]', '', text)
+    text = re.sub(r'제\s*\d+\s*[장화권부]', '', text)
+    text = re.sub(r'第\s*\d+\s*話', '', text)
+    text = re.sub(r'\bch\.?\s*\d+\b', '', text)
+    
+    # Normalize whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    # Use first 1000 chars for fingerprint
+    fingerprint = text[:1000]
+    return hashlib.md5(fingerprint.encode('utf-8')).hexdigest()
+
+def clean_ai_artifacts(text):
+    """Remove AI response artifacts from text"""
+    original_text = text
+    
+    # Remove common AI prefixes - more comprehensive list
+    ai_prefixes = [
+        r'^(?:Okay|Sure|Understood|Of course|Got it|Alright|Certainly)',
+        r'^(?:I\'ll|I will|Let me|Here\'s|Here is|Here are)',
+        r'^(?:I understand|I can help|I\'m happy to)',
+    ]
+    
+    for prefix in ai_prefixes:
+        text = re.sub(prefix + r'[^.!?\n]*?(?:translat|help|assist|proceed)[^.!?\n]*[\n\r]+', '', 
+                     text, flags=re.IGNORECASE | re.MULTILINE)
+    
+    # Remove JSON blocks
+    text = re.sub(r'```json\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\s*```', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\{[^{}]*"role"\s*:\s*"[^"]+"\s*[^{}]*\}', '', text, flags=re.DOTALL)
+    text = re.sub(r'\[\s*\{[^]]+\]\s*', '', text, flags=re.DOTALL)
+    
+    # Remove part markers
+    text = re.sub(r'\[PART\s+\d+/\d+\]\s*', '', text, flags=re.IGNORECASE)
+    
+    # Remove system/assistant markers
+    text = re.sub(r'^(?:System|Assistant|AI|User|Human|Model)\s*:\s*', '', 
+                 text, flags=re.IGNORECASE | re.MULTILINE)
+    
+    # Remove translation notes
+    text = re.sub(r'^(?:Note|Translation note|Translator\'s note)\s*:[^\n]+\n', '', 
+                 text, flags=re.IGNORECASE | re.MULTILINE)
+    
+    # Clean up any JSON arrays that might have leaked
+    if text.strip().startswith('[') and '"original_name"' in text:
+        # This looks like glossary JSON
+        lines = text.split('\n')
+        cleaned_lines = []
+        json_ended = False
+        
+        for line in lines:
+            if not json_ended and (']' in line or '}' in line):
+                json_ended = True
+                continue
+            if json_ended or (not any(char in line for char in ['{', '}', '[', ']', '"'])):
+                cleaned_lines.append(line)
+        
+        text = '\n'.join(cleaned_lines)
+    
+    # Remove empty lines at the start
+    text = re.sub(r'^\s*\n+', '', text)
+    
+    return text
+
 def extract_chapters(zf):
-    """Extract chapters from EPUB file with multi-language support"""
+    """Extract chapters from EPUB file with robust duplicate detection"""
     chaps = []
-      # Get all HTML files and sort them to maintain order
+    
+    # Get all HTML files and sort them to maintain order
     html_files = sorted([name for name in zf.namelist() 
                         if name.lower().endswith(('.xhtml', '.html'))])
     
     print(f"[DEBUG] Processing {len(html_files)} HTML files from EPUB")
     
-    # Process EVERY HTML file
+    # Track content to avoid duplicates
+    content_hashes = {}
+    seen_chapters = {}
+    chapter_patterns = [
+        # English patterns
+        (r'chapter[\s_-]*(\d+)', re.IGNORECASE),
+        (r'\bch\.?\s*(\d+)\b', re.IGNORECASE),
+        (r'part[\s_-]*(\d+)', re.IGNORECASE),
+        
+        # Chinese patterns
+        (r'第\s*(\d+)\s*[章节話话回]', 0),
+        (r'第\s*([一二三四五六七八九十百千]+)\s*[章节話话回]', 0),
+        (r'(\d+)[章节話话回]', 0),
+        
+        # Japanese patterns
+        (r'第\s*(\d+)\s*話', 0),
+        (r'第\s*(\d+)\s*章', 0),
+        (r'その\s*(\d+)', 0),
+        
+        # Korean patterns
+        (r'제\s*(\d+)\s*[장화권부]', 0),
+        (r'(\d+)\s*[장화권부]', 0),
+        
+        # Generic patterns
+        (r'^\s*(\d+)\s*[-–—.]', re.MULTILINE),
+        (r'_(\d+)\.x?html?$', re.IGNORECASE),
+        (r'(\d+)', 0),  # Last resort - any number
+    ]
+    
+    # Chinese number conversion
+    chinese_nums = {
+        '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+        '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
+        '十一': 11, '十二': 12, '十三': 13, '十四': 14, '十五': 15,
+        '十六': 16, '十七': 17, '十八': 18, '十九': 19, '二十': 20,
+        '三十': 30, '四十': 40, '五十': 50, '六十': 60,
+        '七十': 70, '八十': 80, '九十': 90, '百': 100,
+    }
+    
+    def convert_chinese_number(cn_num):
+        """Convert Chinese number to integer"""
+        if cn_num in chinese_nums:
+            return chinese_nums[cn_num]
+        
+        # Handle compound numbers
+        if '十' in cn_num:
+            parts = cn_num.split('十')
+            if len(parts) == 2:
+                tens = chinese_nums.get(parts[0], 1) if parts[0] else 1
+                ones = chinese_nums.get(parts[1], 0) if parts[1] else 0
+                return tens * 10 + ones
+        
+        return None
+    
     for idx, name in enumerate(html_files):
         try:
             raw = zf.read(name)
@@ -103,168 +412,28 @@ def extract_chapters(zf):
                 full_body_html = str(soup)
                 body_text = soup.get_text(strip=True)
             
-            # Skip only if completely empty
-            if not body_text.strip():
-                print(f"[DEBUG] Skipping empty file: {name}")
+            # Skip empty or very short files
+            if len(body_text.strip()) < 100:
+                print(f"[DEBUG] Skipping short file: {name} ({len(body_text)} chars)")
                 continue
             
-            # Always use index as chapter number to avoid skipping
-            # This ensures we don't miss any content
-            chapter_num = idx + 1
+            # Create content hash to detect duplicates
+            content_hash = get_content_hash(full_body_html)
             
-            # Try to get a better title
-            title = None
-            
-            # Method 1: Look for headers
-            for header_tag in ['h1', 'h2', 'h3', 'title']:
-                header = soup.find(header_tag)
-                if header:
-                    title = header.get_text(strip=True)
-                    if title:
-                        break
-            
-            # Method 2: Use filename
-            if not title:
-                # Remove extension and path
-                base_name = os.path.splitext(os.path.basename(name))[0]
-                title = base_name.replace('_', ' ').replace('-', ' ')
-            
-            # Method 3: Fallback
-            if not title or title.lower() in ['text', 'document', 'html']:
-                title = f"Chapter {chapter_num}"
-            
-            # Create chapter entry
-            chaps.append({
-                "num": chapter_num,
-                "title": title[:100],  # Limit title length
-                "body": full_body_html,
-                "filename": name
-            })
-            
-        except Exception as e:
-            print(f"[ERROR] Failed to process {name}: {e}")
-            # Even on error, add a placeholder so we don't skip
-            chaps.append({
-                "num": idx + 1,
-                "title": f"Chapter {idx + 1} (Error)",
-                "body": f"<p>Error loading chapter from {name}</p>",
-                "filename": name
-            })
-    
-    print(f"[DEBUG] Extracted {len(chaps)} chapters")
-    return chaps
-    # Multi-language chapter patterns
-    chapter_patterns = [
-        # English
-        (r'chapter[\W_]*(\d+)', re.IGNORECASE),
-        (r'ch[\W_]*(\d+)', re.IGNORECASE),
-        (r'part[\W_]*(\d+)', re.IGNORECASE),
-        
-        # Chinese
-        (r'第\s*(\d+)\s*[章节話话回]', 0),  # 第1章, 第1节, 第1話, 第1话, 第1回
-        (r'第\s*([一二三四五六七八九十百千]+)\s*[章节話话回]', 0),  # 第一章, etc
-        (r'(\d+)[章节話话回]', 0),  # 1章, 1节, etc
-        
-        # Japanese
-        (r'第\s*(\d+)\s*話', 0),  # 第1話
-        (r'第\s*(\d+)\s*章', 0),  # 第1章
-        (r'その\s*(\d+)', 0),     # その1
-        (r'話\s*(\d+)', 0),       # 話1
-        (r'第\s*(\d+)\s*部', 0),  # 第1部
-        
-        # Korean
-        (r'제\s*(\d+)\s*[장화권부]', 0),  # 제1장, 제1화, 제1권, 제1부
-        (r'(\d+)\s*[장화권부]', 0),       # 1장, 1화, etc
-        
-        # Generic number patterns (as fallback)
-        (r'^(\d+)\.?\s*$', re.MULTILINE),  # Just numbers at line start
-        (r'^\s*(\d+)\s*[-–—]\s*', re.MULTILINE),  # "1 - Title"
-        (r'_(\d+)\.x?html?$', re.IGNORECASE),  # filename_1.html
-        (r'[\W_](\d{2,4})[\W_]', 0),  # Any 2-4 digit number surrounded by non-word chars
-    ]
-    
-    # Chinese number conversion
-    chinese_nums = {
-        '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
-        '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
-        '十一': 11, '十二': 12, '十三': 13, '十四': 14, '十五': 15,
-        '十六': 16, '十七': 17, '十八': 18, '十九': 19, '二十': 20,
-        '三十': 30, '四十': 40, '五十': 50, '六十': 60,
-        '七十': 70, '八十': 80, '九十': 90, '百': 100,
-        '一百': 100, '两百': 200, '三百': 300, '四百': 400,
-        '五百': 500, '六百': 600, '七百': 700, '八百': 800,
-        '九百': 900, '千': 1000
-    }
-    
-    def convert_chinese_number(cn_num):
-        """Convert Chinese number to integer"""
-        if cn_num in chinese_nums:
-            return chinese_nums[cn_num]
-        
-        # Handle compound numbers like 二十一 (21)
-        if '十' in cn_num:
-            parts = cn_num.split('十')
-            if len(parts) == 2:
-                tens = chinese_nums.get(parts[0], 1) if parts[0] else 1
-                ones = chinese_nums.get(parts[1], 0) if parts[1] else 0
-                return tens * 10 + ones
-        
-        # Handle hundreds
-        if '百' in cn_num:
-            parts = cn_num.split('百')
-            hundreds = chinese_nums.get(parts[0], 1) if parts[0] else 1
-            remainder = parts[1] if len(parts) > 1 and parts[1] else ''
-            if remainder:
-                return hundreds * 100 + convert_chinese_number(remainder)
-            return hundreds * 100
-            
-        return None
-    
-    # Track found chapters to avoid duplicates
-    found_chapters = {}
-    
-    # First, try to detect chapter pattern from filenames
-    all_files = [n for n in zf.namelist() if n.lower().endswith(('.xhtml', '.html'))]
-    detected_pattern = None
-    
-    # Check if files follow a numeric pattern
-    for pattern, flags in chapter_patterns[:10]:  # Check first 10 patterns
-        matches = 0
-        for fname in all_files[:10]:  # Sample first 10 files
-            if re.search(pattern, fname, flags):
-                matches += 1
-        if matches > len(all_files[:10]) * 0.5:  # If >50% match
-            detected_pattern = (pattern, flags)
-            print(f"[DEBUG] Detected chapter pattern in filenames: {pattern}")
-            break
-    
-    # Process each file
-    for idx, name in enumerate(all_files):
-        if not name.lower().endswith(('.xhtml', '.html')):
-            continue
-            
-        try:
-            raw = zf.read(name)
-            soup = BeautifulSoup(raw, 'html.parser')
-            
-            # Skip if no body content
-            if not soup.body:
-                continue
-                
-            body_text = soup.body.get_text(strip=True)
-            if len(body_text) < 100:  # Skip very short files (likely TOC, etc)
+            # Check if we've seen this content before
+            if content_hash in content_hashes:
+                print(f"[DEBUG] Skipping duplicate content in {name} (matches {content_hashes[content_hash]['filename']})")
                 continue
             
-            # Try to extract chapter number
+            # Try to extract chapter number from various sources
             chapter_num = None
             chapter_title = None
             
-            # Method 1: Check filename first
+            # Method 1: Check filename
             for pattern, flags in chapter_patterns:
                 m = re.search(pattern, name, flags)
                 if m:
                     try:
-                        # Try to convert to number
                         num_str = m.group(1)
                         if num_str.isdigit():
                             chapter_num = int(num_str)
@@ -279,12 +448,11 @@ def extract_chapters(zf):
             
             # Method 2: Check content headers
             if not chapter_num:
-                # Look for chapter markers in headers
                 for header in soup.find_all(['h1', 'h2', 'h3', 'title']):
                     header_text = header.get_text(strip=True)
                     if not header_text:
                         continue
-                        
+                    
                     for pattern, flags in chapter_patterns:
                         m = re.search(pattern, header_text, flags)
                         if m:
@@ -304,17 +472,16 @@ def extract_chapters(zf):
                     if chapter_num:
                         break
             
-            # Method 3: Check first few paragraphs for chapter markers
+            # Method 3: Check first few paragraphs
             if not chapter_num:
-                first_texts = []
-                for elem in soup.find_all(['p', 'div'])[:5]:  # Check first 5 elements
-                    text = elem.get_text(strip=True)
-                    if text:
-                        first_texts.append(text)
-                
-                for text in first_texts:
+                first_elements = soup.find_all(['p', 'div'])[:5]
+                for elem in first_elements:
+                    elem_text = elem.get_text(strip=True)
+                    if not elem_text:
+                        continue
+                    
                     for pattern, flags in chapter_patterns:
-                        m = re.search(pattern, text, flags)
+                        m = re.search(pattern, elem_text, flags)
                         if m:
                             try:
                                 num_str = m.group(1)
@@ -331,58 +498,88 @@ def extract_chapters(zf):
                     if chapter_num:
                         break
             
-            # Method 4: If no chapter number found, use file index
-            if not chapter_num and detected_pattern:
-                # If we detected a pattern but this file doesn't match,
-                # it might be a prologue/epilogue
-                continue
-            elif not chapter_num:
-                # Use file index as chapter number (1-based)
-                chapter_num = idx + 1
-                print(f"[DEBUG] No chapter marker found in {name}, using index {chapter_num}")
+            # If still no chapter number, assign next available
+            if not chapter_num:
+                chapter_num = len(chaps) + 1
+                while chapter_num in seen_chapters:
+                    chapter_num += 1
+                print(f"[DEBUG] No chapter number found in {name}, assigning: {chapter_num}")
             
-            # Skip if we already have this chapter number
-            if chapter_num in found_chapters:
-                print(f"[DEBUG] Duplicate chapter {chapter_num} found in {name}, skipping")
-                continue
+            # Handle duplicate chapter numbers
+            if chapter_num in seen_chapters:
+                existing_hash = seen_chapters[chapter_num]['hash']
+                if existing_hash != content_hash:
+                    # Different content with same chapter number
+                    original_num = chapter_num
+                    while chapter_num in seen_chapters:
+                        chapter_num += 1
+                    print(f"[WARNING] Chapter {original_num} already exists with different content, reassigning to {chapter_num}")
             
-            # Get title if not already set
+            # Get title
             if not chapter_title:
-                # Try to get title from headers
-                title_elem = soup.find(['h1', 'h2', 'h3', 'title'])
-                if title_elem:
-                    chapter_title = title_elem.get_text(strip=True)
-                else:
+                # Try to find a title from headers
+                for header_tag in ['h1', 'h2', 'h3', 'title']:
+                    title_elem = soup.find(header_tag)
+                    if title_elem:
+                        chapter_title = title_elem.get_text(strip=True)
+                        break
+                
+                if not chapter_title:
                     chapter_title = f"Chapter {chapter_num}"
             
-            # Get full body HTML
-            full_body_html = soup.body.decode_contents() if soup.body else str(soup)
+            # Clean and limit title length
+            chapter_title = re.sub(r'\s+', ' ', chapter_title).strip()
+            if len(chapter_title) > 100:
+                chapter_title = chapter_title[:97] + "..."
             
+            # Store chapter
             chapter_info = {
                 "num": chapter_num,
                 "title": chapter_title,
                 "body": full_body_html,
-                "filename": name
+                "filename": name,
+                "content_hash": content_hash
             }
             
             chaps.append(chapter_info)
-            found_chapters[chapter_num] = True
+            content_hashes[content_hash] = {
+                'filename': name,
+                'chapter_num': chapter_num
+            }
+            seen_chapters[chapter_num] = {
+                'hash': content_hash,
+                'filename': name
+            }
             
         except Exception as e:
-            print(f"[WARNING] Error processing {name}: {e}")
-            continue
+            print(f"[ERROR] Failed to process {name}: {e}")
+            # Add placeholder to maintain chapter sequence
+            chapter_info = {
+                "num": len(chaps) + 1,
+                "title": f"Error: {name}",
+                "body": f"<p>Error loading chapter from {name}: {str(e)}</p>",
+                "filename": name,
+                "content_hash": f"error_{idx}"
+            }
+            chaps.append(chapter_info)
     
     # Sort by chapter number
     chaps.sort(key=lambda x: x["num"])
     
-    # Debug output
-    print(f"[DEBUG] Found {len(chaps)} chapters out of {len(all_files)} HTML files")
+    # Final validation - check for gaps
     if chaps:
+        print(f"[DEBUG] Extracted {len(chaps)} unique chapters")
         print(f"[DEBUG] Chapter range: {chaps[0]['num']} to {chaps[-1]['num']}")
-        print(f"[DEBUG] First few chapters: {[c['title'][:30] + '...' for c in chaps[:5]]}")
+        
+        # Check for missing chapters
+        expected_chapters = set(range(chaps[0]['num'], chaps[-1]['num'] + 1))
+        actual_chapters = set(c['num'] for c in chaps)
+        missing = expected_chapters - actual_chapters
+        if missing:
+            print(f"[WARNING] Missing chapter numbers: {sorted(missing)}")
     
     return chaps
-    
+
 def save_glossary(output_dir, chapters, instructions, language="korean"):
     """Generate and save glossary from chapters with proper CJK support"""
     samples = []
@@ -437,7 +634,6 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
         
         elif language == "chinese":
             # Chinese names (2-4 character names, avoiding common words)
-            # More sophisticated pattern to avoid matching regular words
             chinese_names = []
             
             # Common Chinese surnames (top 100)
@@ -473,13 +669,12 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
             names.add(nm)
     
     # Filter and clean up results
-    # Remove very short entries and numbers
     names = [n for n in names if len(n) > 1 and not n.isdigit()]
     suffixes = [s for s in suffixes if len(s) > 1]
     terms = [t for t in terms if len(t) > 1]
     
     # Sort for consistency
-    names = sorted(list(set(names)))[:100]  # Limit to top 100 to avoid huge glossaries
+    names = sorted(list(set(names)))[:100]
     suffixes = sorted(list(set(suffixes)))[:50]
     terms = sorted(list(set(terms)))[:50]
     
@@ -541,48 +736,122 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     raise UnifiedClientError(f"API call timed out after {timeout} seconds")
 
 def remove_header_artifacts(chapters):
-    """Remove Gemini header artifacts from first chapter"""
+    """Remove AI response artifacts from ALL chapters"""
     if not chapters:
         return []
+    
+    all_removed_tags = []
+    
+    # Comprehensive patterns for AI artifacts
+    artifact_patterns = [
+        # AI response starters - more comprehensive
+        re.compile(r'^(?:okay|sure|understood|of course|got it|alright|certainly|I\'ll|I will|let me|here\'s|here is|here are)\b[^.!?]*?(?:translat|proceed|help|your|the)\b[^.!?\n]*[\n\r]+', re.IGNORECASE | re.MULTILINE),
+        # JSON artifacts
+        re.compile(r'```json\s*\n?', re.MULTILINE),
+        re.compile(r'\n?\s*```\s*$', re.MULTILINE),
+        re.compile(r'\{[^{}]*"role"\s*:\s*"[^"]+"\s*[^{}]*\}', re.DOTALL),
+        re.compile(r'\[\s*\{[^]]+\]\s*', re.DOTALL),
+        # System/Assistant markers
+        re.compile(r'^(?:System|Assistant|User|Human|AI|Model)\s*:\s*', re.IGNORECASE | re.MULTILINE),
+        # Part markers from chunking
+        re.compile(r'\[PART\s+\d+/\d+\]\s*', re.IGNORECASE),
+        # Common AI explanations
+        re.compile(r'^(?:Note|Explanation|Translation note|Translator\'s note)\s*:\s*[^\n]+\n', re.IGNORECASE | re.MULTILINE),
+        # Code blocks
+        re.compile(r'```[^`]*```', re.DOTALL),
+    ]
+    
+    # Process ALL chapters
+    for idx, chapter in enumerate(chapters):
+        removed_tags = []
+        original_body = chapter["body"]
         
-    first = chapters[0]["body"]
-    soup = BeautifulSoup(first, "html.parser")
-    removed_tags = []
-
-    # Simplified Gemini filler pattern
-    gemini_intro_re = re.compile(
-        r"^(okay|sure|understood|of course|got it|here.*?s)\b.*\b(translate|translation)\b",
-        re.IGNORECASE
-    )
-
-    # Remove Gemini filler from second+ <h1>
-    h1_tags = soup.find_all("h1")
-    if len(h1_tags) > 1:
-        for tag in h1_tags[1:]:
-            text = tag.get_text(strip=True)
-            if gemini_intro_re.search(text):
-                removed_tags.append(f"<h1>: {text[:60]}...")
-                tag.decompose()
-
-    # Remove Gemini filler from <p> or <div>
-    for tag in soup.find_all(["p", "div"]):
-        text = tag.get_text(strip=True)
-        if gemini_intro_re.search(text):
-            removed_tags.append(f"<{tag.name}>: {text[:60]}...")
-            tag.decompose()
-
-    # Remove leaked JSON blocks
-    text_preview = soup.get_text(strip=True)
-    if text_preview.lstrip().startswith("{") and text_preview.rstrip().endswith("}"):
-        try:
-            json.loads(text_preview)
-            soup.clear()
-            removed_tags.append("- Removed leaked JSON block in header")
-        except json.JSONDecodeError:
-            pass
-
-    chapters[0]["body"] = str(soup)
-    return removed_tags
+        # First pass: clean with BeautifulSoup
+        soup = BeautifulSoup(original_body, "html.parser")
+        
+        # Check all text-containing tags
+        for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'div', 'span']):
+            if not tag.get_text(strip=True):
+                continue
+            
+            tag_text = tag.get_text(strip=True)
+            
+            # Check if entire tag is an artifact
+            for pattern in artifact_patterns:
+                if pattern.search(tag_text):
+                    removed_tags.append(f"Removed <{tag.name}>: {tag_text[:60]}...")
+                    tag.decompose()
+                    break
+        
+        # Second pass: clean the HTML string directly
+        html_str = str(soup)
+        original_len = len(html_str)
+        
+        # Apply all artifact patterns
+        for pattern in artifact_patterns:
+            html_str = pattern.sub('', html_str)
+        
+        # Special handling for JSON at the beginning
+        # Check if content starts with JSON
+        temp_soup = BeautifulSoup(html_str, 'html.parser')
+        text_only = temp_soup.get_text(strip=True)
+        
+        if text_only and (text_only.strip().startswith('{') or text_only.strip().startswith('[')):
+            # Look for the end of JSON and remove it
+            lines = html_str.split('\n')
+            clean_lines = []
+            json_ended = False
+            bracket_count = 0
+            
+            for line in lines:
+                if not json_ended:
+                    # Count brackets to find end of JSON
+                    bracket_count += line.count('{') + line.count('[')
+                    bracket_count -= line.count('}') + line.count(']')
+                    
+                    if bracket_count <= 0 and ('}' in line or ']' in line):
+                        json_ended = True
+                        # Check if there's content after the JSON on the same line
+                        json_end = max(line.rfind('}'), line.rfind(']'))
+                        if json_end < len(line) - 1:
+                            remaining = line[json_end + 1:].strip()
+                            if remaining:
+                                clean_lines.append(remaining)
+                        continue
+                
+                if json_ended or (line.strip() and not any(char in line for char in ['{', '}', '[', ']', '"role"', '"content"'])):
+                    clean_lines.append(line)
+            
+            html_str = '\n'.join(clean_lines)
+            removed_tags.append("Removed JSON block from beginning")
+        
+        # Remove empty tags left behind
+        html_str = re.sub(r'<([^>]+)>\s*</\1>', '', html_str)
+        
+        # Final cleanup
+        html_str = html_str.strip()
+        
+        if len(html_str) < original_len * 0.9:
+            removed_tags.append(f"Cleaned {original_len - len(html_str)} characters of artifacts")
+        
+        chapters[idx]["body"] = html_str
+        
+        if removed_tags:
+            all_removed_tags.append((chapter['title'], chapter['num'], removed_tags))
+    
+    # Log all removals
+    if all_removed_tags:
+        output_dir = os.environ.get("EPUB_OUTPUT_DIR", ".")
+        removal_log_path = os.path.join(output_dir, "removal.txt")
+        with open(removal_log_path, "w", encoding="utf-8") as logf:
+            logf.write("=== AI Artifact Removal Log ===\n\n")
+            for title, num, tags in all_removed_tags:
+                logf.write(f"{title} (Chapter {num}):\n")
+                for tag in tags:
+                    logf.write(f"  - {tag}\n")
+                logf.write("\n")
+    
+    return all_removed_tags
 
 def parse_token_limit(env_value):
     """Parse token limit from environment variable"""
@@ -623,18 +892,55 @@ def build_system_prompt(user_prompt, glossary_path, instructions):
             entries = json.load(gf)
         glossary_block = json.dumps(entries, ensure_ascii=False, indent=2)
         system = (
-            instructions + "\n\n"  # ← Remove "You are a professional translator. " +
+            instructions + "\n\n"
             "Use the following glossary entries exactly as given:\n"
             f"{glossary_block}"
         )
     else:
-        system = instructions  # ← Remove "You are a professional translator. "
+        system = instructions
 
     return system
 
+def validate_chapter_continuity(chapters):
+    """Validate chapter continuity and warn about issues"""
+    if not chapters:
+        return
+    
+    issues = []
+    
+    # Check for duplicate chapter numbers
+    chapter_nums = [c['num'] for c in chapters]
+    duplicates = [num for num in chapter_nums if chapter_nums.count(num) > 1]
+    if duplicates:
+        issues.append(f"Duplicate chapter numbers found: {set(duplicates)}")
+    
+    # Check for missing chapters
+    min_num = min(chapter_nums)
+    max_num = max(chapter_nums)
+    expected = set(range(min_num, max_num + 1))
+    actual = set(chapter_nums)
+    missing = expected - actual
+    if missing:
+        issues.append(f"Missing chapter numbers: {sorted(missing)}")
+    
+    # Check for suspiciously similar titles
+    for i in range(len(chapters) - 1):
+        for j in range(i + 1, len(chapters)):
+            title1 = chapters[i]['title'].lower()
+            title2 = chapters[j]['title'].lower()
+            # Simple similarity check
+            if title1 == title2 and chapters[i]['num'] != chapters[j]['num']:
+                issues.append(f"Chapters {chapters[i]['num']} and {chapters[j]['num']} have identical titles")
+    
+    if issues:
+        print("\n⚠️  Chapter Validation Issues:")
+        for issue in issues:
+            print(f"  - {issue}")
+        print()
 
 def main(log_callback=None, stop_callback=None):
-    """Main translation function"""
+
+    """Main translation function with enhanced duplicate detection"""
     if log_callback:
         set_output_redirect(log_callback)
     
@@ -656,7 +962,13 @@ def main(log_callback=None, stop_callback=None):
     TEMP = float(os.getenv("TRANSLATION_TEMPERATURE", "0.3"))
     HIST_LIMIT = int(os.getenv("TRANSLATION_HISTORY_LIMIT", "20"))
     MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
-    
+    EMERGENCY_RESTORE = os.getenv("EMERGENCY_PARAGRAPH_RESTORE", "1") == "1"  # Default to enabled
+
+    # Log the setting
+    if EMERGENCY_RESTORE:
+        print("✅ Emergency paragraph restoration is ENABLED")
+    else:
+        print("⚠️ Emergency paragraph restoration is DISABLED")
     
     # Parse chapter range
     rng = os.getenv("CHAPTER_RANGE", "")
@@ -712,16 +1024,25 @@ def main(log_callback=None, stop_callback=None):
         os.remove(history_file)
         print(f"[DEBUG] Purged translation history → {history_file}")
         
-    # Load or init progress file - UPDATED to include chunk tracking
+    # Load or init progress file with enhanced tracking
     PROGRESS_FILE = os.path.join(payloads_dir, "translation_progress.json")
     if os.path.exists(PROGRESS_FILE):
         with open(PROGRESS_FILE, "r", encoding="utf-8") as pf:
             prog = json.load(pf)
-        # Ensure chapter_chunks exists in old progress files
+        # Ensure all required fields exist
         if "chapter_chunks" not in prog:
             prog["chapter_chunks"] = {}
+        if "content_hashes" not in prog:
+            prog["content_hashes"] = {}
+        if "chapter_metadata" not in prog:
+            prog["chapter_metadata"] = {}
     else:
-        prog = {"completed": [], "chapter_chunks": {}}
+        prog = {
+            "completed": [],
+            "chapter_chunks": {},
+            "content_hashes": {},
+            "chapter_metadata": {}
+        }
 
     def save_progress():
         with open(PROGRESS_FILE, "w", encoding="utf-8") as pf:
@@ -736,16 +1057,14 @@ def main(log_callback=None, stop_callback=None):
         metadata = extract_epub_metadata(zf)
         chapters = extract_chapters(zf)
 
+        # Validate chapters
+        validate_chapter_continuity(chapters)
+
         # Remove header artifacts if enabled
         if REMOVE_HEADER and chapters:
             removed_tags = remove_header_artifacts(chapters)
             if removed_tags:
-                removal_log_path = os.path.join(out, "removal.txt")
-                with open(removal_log_path, "a", encoding="utf-8") as logf:
-                    logf.write(f"{chapters[0]['title']} (Chapter {chapters[0]['num']})\n")
-                    for entry in removed_tags:
-                        logf.write(f"- {entry}\n")
-                    logf.write("\n")
+                print(f"[DEBUG] Removed artifacts from {len(removed_tags)} chapters")
 
         # Extract images
         imgdir = os.path.join(out, "images")
@@ -759,7 +1078,9 @@ def main(log_callback=None, stop_callback=None):
     if check_stop():
         return
 
-    # Write metadata
+    # Write metadata with chapter info
+    metadata["chapter_count"] = len(chapters)
+    metadata["chapter_titles"] = {str(c["num"]): c["title"] for c in chapters}
     with open(os.path.join(out, "metadata.json"), 'w', encoding='utf-8') as mf:
         json.dump(metadata, mf, ensure_ascii=False, indent=2)
         
@@ -768,15 +1089,12 @@ def main(log_callback=None, stop_callback=None):
     disable_auto_glossary = os.getenv("DISABLE_AUTO_GLOSSARY", "0") == "1"
 
     if manual_gloss and os.path.isfile(manual_gloss):
-        # Use manual glossary if provided
         shutil.copy(manual_gloss, os.path.join(out, "glossary.json"))
         print("📑 Using manual glossary")
     elif not disable_auto_glossary:
-        # Generate automatic glossary only if not disabled
-        save_glossary(out, chapters, instructions, TRANSLATION_LANG)  # Pass language
+        save_glossary(out, chapters, instructions, TRANSLATION_LANG)
         print("📑 Generated automatic glossary")
     else:
-        # Don't create any glossary file when disabled
         print("📑 Automatic glossary disabled - no glossary will be used")
 
     # Build system prompt
@@ -797,6 +1115,15 @@ def main(log_callback=None, stop_callback=None):
         # Apply chapter range filter
         if start is not None and not (start <= chap_num <= end):
             continue
+        
+        # Check if content was already translated (duplicate detection)
+        content_hash = c.get("content_hash") or get_content_hash(c["body"])
+        if content_hash in prog["content_hashes"]:
+            existing = prog["content_hashes"][content_hash]
+            if existing.get("completed_idx") in prog["completed"]:
+                print(f"[SKIP] Chapter {chap_num} has same content as already translated chapter {existing.get('chapter_num')}")
+                chunks_per_chapter[idx] = 0
+                continue
             
         # Skip already completed chapters
         if idx in prog["completed"]:
@@ -821,7 +1148,6 @@ def main(log_callback=None, stop_callback=None):
         # Count chunks needed for this chapter
         chapter_key = str(idx)
         if chapter_key in prog.get("chapter_chunks", {}):
-            # Count only remaining chunks
             completed_chunks = len(prog["chapter_chunks"][chapter_key].get("completed", []))
             chunks_needed = len(chunks) - completed_chunks
             chunks_per_chapter[idx] = max(0, chunks_needed)
@@ -854,10 +1180,18 @@ def main(log_callback=None, stop_callback=None):
             return
             
         chap_num = c["num"]
+        content_hash = c.get("content_hash") or get_content_hash(c["body"])
 
         # Apply chapter range filter
         if start is not None and not (start <= chap_num <= end):
             continue
+
+        # Check for duplicate content
+        if content_hash in prog["content_hashes"]:
+            existing = prog["content_hashes"][content_hash]
+            if existing.get("completed_idx") in prog["completed"]:
+                print(f"[SKIP] Chapter {chap_num} is duplicate of already translated chapter {existing.get('chapter_num')}")
+                continue
 
         # Skip already completed chapters
         if idx in prog["completed"]:
@@ -872,11 +1206,7 @@ def main(log_callback=None, stop_callback=None):
         
         # Calculate available tokens for content
         system_tokens = chapter_splitter.count_tokens(system)
-        
-        # Estimate tokens for history (rough approximation)
-        history_tokens = HIST_LIMIT * 2 * 1000  # Assume ~1000 tokens per history entry
-        
-        # Safety margin
+        history_tokens = HIST_LIMIT * 2 * 1000
         safety_margin = 1000
         
         # Determine if we need to split the chapter
@@ -884,7 +1214,6 @@ def main(log_callback=None, stop_callback=None):
             available_tokens = max_tokens_limit - system_tokens - history_tokens - safety_margin
             chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
         else:
-            # No limit, process as single chunk
             chunks = [(c["body"], 1, 1)]
         
         print(f"📄 Chapter will be processed in {len(chunks)} chunk(s)")
@@ -907,7 +1236,6 @@ def main(log_callback=None, stop_callback=None):
                 "chunks": {}
             }
         
-        # Update total chunks if different (in case of re-run with different settings)
         prog["chapter_chunks"][chapter_key]["total"] = len(chunks)
         
         translated_chunks = []
@@ -916,7 +1244,6 @@ def main(log_callback=None, stop_callback=None):
         for chunk_html, chunk_idx, total_chunks in chunks:
             # Check if this chunk was already translated
             if chunk_idx in prog["chapter_chunks"][chapter_key]["completed"]:
-                # Load previously translated chunk
                 saved_chunk = prog["chapter_chunks"][chapter_key]["chunks"].get(str(chunk_idx))
                 if saved_chunk:
                     translated_chunks.append((saved_chunk, chunk_idx, total_chunks))
@@ -932,14 +1259,12 @@ def main(log_callback=None, stop_callback=None):
             # Calculate progress and ETA
             progress_percent = (current_chunk_number / total_chunks_needed) * 100
             
-            # Calculate ETA if we have completed at least one chunk
             if chunks_completed > 0:
                 elapsed_time = time.time() - translation_start_time
                 avg_time_per_chunk = elapsed_time / chunks_completed
                 remaining_chunks = total_chunks_needed - current_chunk_number + 1
                 eta_seconds = remaining_chunks * avg_time_per_chunk
                 
-                # Format ETA
                 eta_hours = int(eta_seconds // 3600)
                 eta_minutes = int((eta_seconds % 3600) // 60)
                 eta_str = f"{eta_hours}h {eta_minutes}m" if eta_hours > 0 else f"{eta_minutes}m"
@@ -966,11 +1291,10 @@ def main(log_callback=None, stop_callback=None):
             else:
                 trimmed = []
                 
-            # Build messages - handle case where base_msg might be empty
+            # Build messages
             if base_msg:
                 msgs = base_msg + trimmed + [{"role": "user", "content": user_prompt}]
             else:
-                # No system message, start with history or user message
                 if trimmed:
                     msgs = trimmed + [{"role": "user", "content": user_prompt}]
                 else:
@@ -987,24 +1311,30 @@ def main(log_callback=None, stop_callback=None):
                     total_tokens = sum(chapter_splitter.count_tokens(m["content"]) for m in msgs)
                     print(f"    [DEBUG] Chunk {chunk_idx}/{total_chunks} tokens = {total_tokens:,} / {budget_str}")
                     
-                    client.context = 'translation'  # Set context on client
+                    client.context = 'translation'
                     result, finish_reason = send_with_interrupt(
                         msgs, client, TEMP, MAX_OUTPUT_TOKENS, check_stop
                     )
                     
                     if finish_reason == "length":
                         print(f"    [WARN] Output was truncated!")
-                        
-                    # Remove header artifacts if enabled
+                    
+                    # Clean AI artifacts aggressively
+                    result = clean_ai_artifacts(result)
+                    
+                    if EMERGENCY_RESTORE:
+                        result = emergency_restore_paragraphs(result, chunk_html)
+                    
+                    # Additional cleaning if remove header is enabled
                     if REMOVE_HEADER:
-                        lines = result.splitlines(True)
-                        intro_re = re.compile(
-                            r'^(?:okay|sure|understood|of course|got it|here.*?s)[^\n]*\b(?:translate|translation)\b',
-                            re.IGNORECASE
-                        )
-                        while lines and intro_re.match(lines[0]):
-                            lines.pop(0)
-                        result = "".join(lines)
+                        # Remove any remaining JSON or artifacts
+                        if result.strip().startswith('{') or result.strip().startswith('['):
+                            # Find first non-JSON line
+                            lines = result.split('\n')
+                            for i, line in enumerate(lines):
+                                if line.strip() and not any(char in line for char in ['{', '}', '[', ']', '"role"', '"content"']):
+                                    result = '\n'.join(lines[i:])
+                                    break
                     
                     # Remove chunk markers if present
                     result = re.sub(r'\[PART \d+/\d+\]\s*', '', result, flags=re.IGNORECASE)
@@ -1106,9 +1436,7 @@ def main(log_callback=None, stop_callback=None):
         # Merge all chunks back together
         if len(translated_chunks) > 1:
             print(f"  📎 Merging {len(translated_chunks)} chunks...")
-            # Sort by chunk index to ensure correct order
             translated_chunks.sort(key=lambda x: x[1])
-            # Merge the HTML content
             merged_result = chapter_splitter.merge_translated_chunks(translated_chunks)
         else:
             merged_result = translated_chunks[0][0] if translated_chunks else ""
@@ -1121,16 +1449,35 @@ def main(log_callback=None, stop_callback=None):
         cleaned = re.sub(r"^```(?:html)?\s*", "", merged_result, flags=re.MULTILINE)
         cleaned = re.sub(r"\s*```$", "", cleaned, flags=re.MULTILINE)
 
-        # Write HTML file without adding extra header
-        # The translator should preserve the original chapter structure
+        # Final artifact cleanup
+        cleaned = clean_ai_artifacts(cleaned)
+
+        # Write HTML file
         with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
             f.write(cleaned)
         
         final_title = c['title'] or safe_title
         print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved Chapter {c['num']}: {final_title}")
         
-        # Record completion
+        # Record completion with content tracking
         prog["completed"].append(idx)
+        prog["content_hashes"][content_hash] = {
+            "chapter_num": c["num"],
+            "completed_idx": idx,
+            "filename": fname
+        }
+        
+        # Save chapter metadata
+        if "chapter_metadata" not in prog:
+            prog["chapter_metadata"] = {}
+        
+        prog["chapter_metadata"][str(c["num"])] = {
+            "title": c["title"],
+            "filename": fname,
+            "content_hash": content_hash,
+            "processed_idx": idx
+        }
+        
         save_progress()
 
     # Check for stop before building EPUB
