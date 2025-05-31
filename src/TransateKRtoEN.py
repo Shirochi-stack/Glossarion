@@ -66,7 +66,7 @@ def set_output_redirect(log_callback=None):
 def get_instructions(lang):
     """Get minimal technical instructions only"""
     # Only return the technical requirement that applies to all languages
-    return "Preserve ALL HTML tags exactly as they appear in the source, including <h1>, <h2>, <p>, <br>, <div>, etc."
+    return "Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title> ,<h1>, <h2>, <p>, <br>, <div>, etc."
 
 # Modifications for TransateKRtoEN.py
 
@@ -273,91 +273,158 @@ def clean_ai_artifacts(text, remove_artifacts=True):
         
     original_text = text
     
-    # Strategy: Instead of looking for specific header patterns,
-    # we'll be more intelligent about what constitutes an AI artifact
+    # Philosophy: Only remove things that are CLEARLY AI artifacts
+    # Don't try to identify every possible header format - that's not scalable
     
-    # First, let's check if this looks like it starts with an AI response
-    ai_response_indicators = [
-        r'^(?:okay|sure|understood|of course|got it|alright|certainly),?\s+(?:I\'ll|I will|let me|here\'s|here is|here are)',
-        r'^(?:I\'ll translate|I will translate|Let me translate|Here\'s the translation|Here is the translation)',
-        r'^(?:System|Assistant|AI|User|Human|Model)\s*:\s*(?:okay|sure|I\'ll|let me)',
-    ]
-    
-    starts_with_ai_response = False
-    for pattern in ai_response_indicators:
-        if re.match(pattern, text.strip(), re.IGNORECASE):
-            starts_with_ai_response = True
-            break
-    
-    # If it clearly starts with an AI response, remove it
-    if starts_with_ai_response:
-        # Look for the end of the AI preamble (usually ends with a newline or the start of actual content)
-        ai_response_pattern = re.compile(
-            r'^.*?(?:translate|help|assist|proceed)[^.!?\n]*?[\n\r]+',
-            re.IGNORECASE | re.DOTALL
-        )
-        match = ai_response_pattern.match(text)
-        if match:
-            text = text[len(match.group(0)):]
-    
-    # Check if the text starts with a clear JSON artifact
-    if text.strip().startswith(('{', '[')) and '"role"' in text[:200]:
-        # This is likely a JSON artifact from the AI
-        json_end = max(text.find('}'), text.find(']'))
-        if json_end > 0:
-            # Find the actual content after the JSON
-            remaining = text[json_end + 1:].strip()
-            if remaining:
-                text = remaining
-    
-    # Remove markdown code fences ONLY if they wrap the entire content
-    if text.strip().startswith('```') and text.strip().endswith('```'):
-        text = re.sub(r'^```(?:json|html|xml)?\s*\n?', '', text.strip(), count=1)
-        text = re.sub(r'\n?```\s*$', '', text, count=1)
-    
-    # Remove part markers (these are definitely artifacts)
+    # 1. Remove [PART X/Y] markers - these are definitely artifacts
     text = re.sub(r'^\[PART\s+\d+/\d+\]\s*\n?', '', text, flags=re.IGNORECASE)
     
-    # For translation notes, only remove if they're clearly meta-notes
-    if text.strip().lower().startswith(('note:', 'translation note:', 'translator\'s note:')):
-        # Check if this looks like a meta-note about the translation
-        first_line = text.split('\n')[0]
-        if any(word in first_line.lower() for word in ['translat', 'romaniz', 'honorific', 'glossary']):
-            text = re.sub(r'^(?:Note|Translation note|Translator\'s note)\s*:[^\n]+\n', '', 
-                         text, flags=re.IGNORECASE, count=1)
+    # 2. Check if the text starts with a VERY CLEAR AI response pattern
+    # These are patterns that would NEVER appear in actual chapter content
+    clear_ai_prefixes = [
+        # AI acknowledgments with translation intent
+        r'^(?:Okay|Sure|Understood|Of course|Got it|Alright|Certainly),?\s+(?:I\'ll|I will|let me|here\'s|here is)\s+(?:translate|help|assist)',
+        # Direct translation announcements
+        r'^(?:I\'ll translate|I will translate|Let me translate|Here\'s the translation|Here is the translation)',
+        # System/role markers with AI responses
+        r'^(?:System|Assistant|AI|User|Human|Model)\s*:\s*(?:Okay|Sure|I\'ll|Let me)',
+        # Translation notes that are clearly meta
+        r'^(?:Note|Translation note|Translator\'s note)\s*:\s*(?:I\'ve|I have|I will|The following)',
+    ]
     
-    # Clean up any glossary JSON arrays that leaked through
-    if text.strip().startswith('[') and '"original_name"' in text[:500]:
-        # Find the end of the JSON array
-        bracket_count = 0
-        json_end_pos = -1
+    for pattern in clear_ai_prefixes:
+        match = re.match(pattern, text.strip(), re.IGNORECASE)
+        if match:
+            # Remove the AI prefix and continue checking
+            text = text[len(match.group(0)):].strip()
+            break
+    
+    # 3. Remove JSON artifacts ONLY if they're at the very beginning AND contain "role"
+    if text.strip().startswith(('{', '[')) and '"role"' in text[:200]:
+        # This is likely a JSON artifact from the AI
+        # Find the end of the JSON
+        bracket_stack = []
+        json_end = -1
         
+        for i, char in enumerate(text):
+            if char in '{[':
+                bracket_stack.append(char)
+            elif char == '}' and bracket_stack and bracket_stack[-1] == '{':
+                bracket_stack.pop()
+                if not bracket_stack:
+                    json_end = i
+                    break
+            elif char == ']' and bracket_stack and bracket_stack[-1] == '[':
+                bracket_stack.pop()
+                if not bracket_stack:
+                    json_end = i
+                    break
+        
+        if json_end > 0 and json_end < len(text) - 1:
+            text = text[json_end + 1:].strip()
+    
+    # 4. Remove markdown code fences ONLY if they appear to wrap JSON or are at the very start
+    if text.strip().startswith('```'):
+        # Check if this is a code fence wrapping JSON or the entire content
+        code_fence_match = re.match(r'^```(?:json|html|xml)?\s*\n(.*?)\n```', text.strip(), re.DOTALL)
+        if code_fence_match:
+            inner_content = code_fence_match.group(1)
+            # Only remove if it's JSON or if there's content after the fence
+            if '"role"' in inner_content or text.strip().endswith('```'):
+                text = inner_content
+    
+    # 5. Clean up any glossary JSON arrays that clearly leaked through
+    if text.strip().startswith('[') and '"original_name"' in text[:500] and '"traits"' in text[:500]:
+        # This is definitely a glossary JSON response
+        # Find the end of the array and remove it
+        bracket_count = 0
         for i, char in enumerate(text):
             if char == '[':
                 bracket_count += 1
             elif char == ']':
                 bracket_count -= 1
                 if bracket_count == 0:
-                    json_end_pos = i
+                    if i < len(text) - 1:
+                        text = text[i + 1:].strip()
                     break
-        
-        if json_end_pos > 0:
-            text = text[json_end_pos + 1:].strip()
     
-    # Remove empty lines at the start only
+    # 6. Remove empty lines at the start only
     text = re.sub(r'^\s*\n+', '', text, count=1)
     
-    # Final safety check: if we removed too much (more than 50% of the original),
-    # something went wrong - restore the original
-    if len(text) < len(original_text) * 0.5:
-        # But still try to remove obvious AI prefixes
+    # 7. Final safety check: if we removed everything or almost everything, restore original
+    # But keep obvious AI prefix removals
+    if len(text.strip()) < 10 and len(original_text.strip()) > 50:
         text = original_text
-        # Only remove the most obvious AI response patterns
+        # Still remove the most obvious AI acknowledgments
         text = re.sub(
-            r'^(?:Okay|Sure|Understood|Of course),?\s+(?:I\'ll|I will|let me)\s+translate[^.!?\n]*?[\n\r]+',
+            r'^(?:Okay|Sure|Understood),\s+(?:I\'ll|I will)\s+translate[^.!?\n]*?[\n\r]+',
             '', text, flags=re.IGNORECASE, count=1
         )
+    
+    return text
+
+
+def detect_and_wrap_headers(text):
+    """
+    Detect plain text headers and wrap them in proper HTML header tags.
+    This is especially useful for CJK novels where headers might be plain text.
+    """
+    # Don't process if we already have HTML headers
+    if re.search(r'<h[1-6][^>]*>', text[:500]):  # Only check the beginning
+        return text
+    
+    # Check if the first line/element looks like a header
+    lines = text.strip().split('\n')
+    if not lines:
+        return text
+    
+    first_line = lines[0].strip()
+    
+    # Remove any HTML tags for analysis
+    first_line_text = re.sub(r'<[^>]+>', '', first_line).strip()
+    
+    # Heuristics to determine if this is likely a header:
+    # 1. It's relatively short (headers are usually < 100 chars)
+    # 2. It doesn't end with typical sentence punctuation
+    # 3. It's followed by a break or significant whitespace
+    # 4. It contains chapter/episode markers OR looks like a title
+    
+    is_likely_header = (
+        len(first_line_text) < 100 and
+        first_line_text and
+        not first_line_text.endswith(('.', '。', '？', '！', '?', '!')) and
+        (
+            # Has chapter/episode markers
+            re.search(r'(?:Chapter|第|제|その|Episode|エピソード|에피소드|Part|Ch\.|C\d+|E\d+|Ep\d+)', first_line_text, re.IGNORECASE) or
+            # Has number markers
+            re.search(r'(?:^\d+|[-:：]\s*\d+$|\d+\s*[-:：])', first_line_text) or
+            # Is followed by HTML breaks
+            '<br' in first_line or '<hr' in first_line or
+            # Is short and starts with capital/CJK
+            (len(first_line_text) < 50 and (first_line_text[0].isupper() or ord(first_line_text[0]) > 127))
+        )
+    )
+    
+    if is_likely_header and not first_line.startswith('<h'):
+        # Extract just the text content for the header
+        header_text = first_line_text
         
+        # Reconstruct the text with the header wrapped
+        remaining_lines = lines[1:] if len(lines) > 1 else []
+        
+        # Check if the first line had HTML breaks that should go after the header
+        breaks = ''
+        if '<br' in first_line or '<hr' in first_line:
+            # Extract the breaks
+            breaks = re.findall(r'(?:<br\s*/?>|<hr\s*/?>)+', first_line)
+            breaks = ''.join(breaks)
+        
+        new_text = f'<h2>{header_text}</h2>{breaks}'
+        if remaining_lines:
+            new_text += '\n' + '\n'.join(remaining_lines)
+        
+        print(f"✅ Wrapped header in HTML: <h2>{header_text[:50]}{'...' if len(header_text) > 50 else ''}</h2>")
+        return new_text
     
     return text
 
