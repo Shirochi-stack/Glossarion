@@ -403,62 +403,125 @@ def extract_chapters(zf):
     return chaps
     
 def save_glossary(output_dir, chapters, instructions, language="korean"):
-    """Generate and save glossary from chapters"""
+    """Generate and save glossary from chapters with proper CJK support"""
     samples = []
     for c in chapters:
         samples.append(c["body"])
     
-    names = []
+    names = set()
     suffixes = set()
+    terms = set()
+    
+    # Remove HTML tags for better text processing
+    def clean_html(html_text):
+        soup = BeautifulSoup(html_text, 'html.parser')
+        return soup.get_text()
     
     for txt in samples:
-        # Extract names (works for all languages)
-        for nm in re.findall(r"\b[A-Z][a-z]{2,20}\b", txt):
-            names.append(nm)
+        clean_text = clean_html(txt)
         
-        # Language-specific suffix/honorific patterns
         if language == "korean":
+            # Korean names (2-4 character Korean names)
+            korean_names = re.findall(r'[가-힣]{2,4}(?:님|씨|야|아|이|군|양)?', clean_text)
+            names.update(korean_names)
+            
             # Korean suffixes
-            for s in re.findall(r"\b\w+[-~]?(?:nim|ssi|ah|ya|ie|hyung|noona|unnie|oppa|sunbae|hoobae|gun|yang)\b", txt, re.I):
+            korean_suffixes = re.findall(r'[가-힣]+(?:님|씨|야|아|이|형|누나|언니|오빠|선배|후배|군|양)', clean_text)
+            suffixes.update(korean_suffixes)
+            
+            # Also catch romanized versions
+            for s in re.findall(r"\b\w+[-~]?(?:nim|ssi|ah|ya|ie|hyung|noona|unnie|oppa|sunbae|hoobae|gun|yang)\b", clean_text, re.I):
                 suffixes.add(s)
         
         elif language == "japanese":
-            # Japanese honorifics and suffixes
-            for s in re.findall(r"\b\w+[-~]?(?:san|sama|chan|kun|senpai|kouhai|sensei|dono|tan|chin|bo|rin|pyon)\b", txt, re.I):
-                suffixes.add(s)
-            # Also catch standalone honorifics
-            for s in re.findall(r"\b(?:Onii|Onee|Oji|Oba|Nii|Nee)[-~]?(?:san|sama|chan|kun)?\b", txt, re.I):
+            # Japanese names (kanji names, usually 2-4 characters)
+            japanese_names = re.findall(r'[\u4e00-\u9fff]{2,4}(?:さん|様|ちゃん|君|先生|殿)?', clean_text)
+            names.update(japanese_names)
+            
+            # Hiragana/Katakana names
+            kana_names = re.findall(r'[\u3040-\u309f\u30a0-\u30ff]{2,8}(?:さん|様|ちゃん|君)?', clean_text)
+            names.update(kana_names)
+            
+            # Japanese honorifics (in Japanese script)
+            jp_honorifics = re.findall(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]+(?:さん|様|ちゃん|君|先輩|後輩|先生|殿)', clean_text)
+            suffixes.update(jp_honorifics)
+            
+            # Family terms
+            jp_family = re.findall(r'(?:お兄|お姉|おじ|おば|兄|姉)(?:さん|様|ちゃん)?', clean_text)
+            terms.update(jp_family)
+            
+            # Also catch romanized versions
+            for s in re.findall(r"\b\w+[-~]?(?:san|sama|chan|kun|senpai|kouhai|sensei|dono)\b", clean_text, re.I):
                 suffixes.add(s)
         
         elif language == "chinese":
+            # Chinese names (2-4 character names, avoiding common words)
+            # More sophisticated pattern to avoid matching regular words
+            chinese_names = []
+            
+            # Common Chinese surnames (top 100)
+            surnames = '王李张刘陈杨赵黄周吴徐孙胡朱高林何郭马罗梁宋郑谢韩唐冯于董萧程曹袁邓许傅沈曾彭吕苏卢蒋蔡贾丁魏薛叶阎余潘杜戴夏钟汪田任姜范方石姚谭廖邹熊金陆郝孔白崔康毛邱秦江史顾侯邵孟龙万段章钱汤尹黎易常武乔贺赖龚文'
+            
+            # Find names starting with common surnames
+            for match in re.finditer(f'[{surnames}][\u4e00-\u9fff]{{1,3}}', clean_text):
+                name = match.group()
+                # Filter out common words that might match pattern
+                if len(name) <= 4:
+                    chinese_names.append(name)
+            
+            names.update(chinese_names)
+            
             # Chinese titles and honorifics
-            # Common suffixes/titles in pinyin or English
-            for s in re.findall(r"\b\w+[-~]?(?:ge|gege|jie|jiejie|di|didi|mei|meimei|xiong|da|xiao|lao|shao)\b", txt, re.I):
-                suffixes.add(s)
-            # Titles
-            for s in re.findall(r"\b(?:Shizun|Shifu|Daozhang|Gongzi|Guniang|Xiaojie|Furen|Niangniang)\b", txt, re.I):
-                suffixes.add(s)
+            chinese_titles = re.findall(r'[\u4e00-\u9fff]{2,4}(?:公子|小姐|夫人|先生|大人|少爷|姑娘|老爷)', clean_text)
+            terms.update(chinese_titles)
+            
+            # Cultivation/xianxia terms if present
+            cultivation_terms = re.findall(r'(?:师尊|师父|师傅|道长|真人|上人|尊者|圣人|仙人|掌门|宗主|长老)', clean_text)
+            terms.update(cultivation_terms)
+            
             # Family terms
-            for s in re.findall(r"\b(?:A-|Ah-)?(?:Niang|Die|Ba|Ma|Ye|Nai|Gong|Po)\b", txt, re.I):
-                suffixes.add(s)
+            family_terms = re.findall(r'(?:阿|啊)?(?:爹|娘|爷|奶|公|婆|哥|姐|弟|妹|叔|姨|舅)', clean_text)
+            terms.update(family_terms)
+            
+            # Also check for pinyin names
+            pinyin_names = re.findall(r'\b[A-Z][a-z]+\s+[A-Z][a-z]+\b', clean_text)
+            names.update(pinyin_names)
+        
+        # Also extract any romanized names for all languages
+        for nm in re.findall(r"\b[A-Z][a-z]{2,20}\b", clean_text):
+            names.add(nm)
     
-    # Remove duplicates and sort
-    unique_names = list(set(names))
-    sorted_suffixes = sorted(suffixes)
+    # Filter and clean up results
+    # Remove very short entries and numbers
+    names = [n for n in names if len(n) > 1 and not n.isdigit()]
+    suffixes = [s for s in suffixes if len(s) > 1]
+    terms = [t for t in terms if len(t) > 1]
     
-    # Build glossary with language-specific labels
-    gloss = {
-        "Characters": unique_names,
-        "Instructions": instructions
-    }
+    # Sort for consistency
+    names = sorted(list(set(names)))[:100]  # Limit to top 100 to avoid huge glossaries
+    suffixes = sorted(list(set(suffixes)))[:50]
+    terms = sorted(list(set(terms)))[:50]
     
-    # Add language-specific sections
+    # Build glossary based on language
+    gloss = {}
+    
     if language == "korean":
-        gloss["Korean_Honorifics_Suffixes"] = sorted_suffixes
+        gloss["Korean_Names"] = names
+        gloss["Korean_Honorifics"] = suffixes
     elif language == "japanese":
-        gloss["Japanese_Honorifics_Suffixes"] = sorted_suffixes
+        gloss["Japanese_Names"] = names
+        gloss["Japanese_Honorifics"] = suffixes
+        if terms:
+            gloss["Japanese_Family_Terms"] = terms
     elif language == "chinese":
-        gloss["Chinese_Titles_Terms"] = sorted_suffixes
+        gloss["Chinese_Names"] = names
+        if terms:
+            gloss["Chinese_Titles"] = terms
+        if suffixes:
+            gloss["Chinese_Terms"] = suffixes
+    
+    # Add a note about the glossary
+    gloss["_note"] = f"Auto-generated glossary for {language} text"
     
     with open(os.path.join(output_dir, "glossary.json"), 'w', encoding='utf-8') as f:
         json.dump(gloss, f, ensure_ascii=False, indent=2)
@@ -942,7 +1005,7 @@ def main(log_callback=None, stop_callback=None):
                     total_tokens = sum(chapter_splitter.count_tokens(m["content"]) for m in msgs)
                     print(f"    [DEBUG] Chunk {chunk_idx}/{total_chunks} tokens = {total_tokens:,} / {budget_str}")
                     
-                    # Send request with interrupt capability
+                    client.context = 'translation'  # Set context on client
                     result, finish_reason = send_with_interrupt(
                         msgs, client, TEMP, MAX_OUTPUT_TOKENS, check_stop
                     )
