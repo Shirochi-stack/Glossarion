@@ -294,11 +294,11 @@ class TranslatorGUI:
             width=15
         ).grid(row=7, column=4, sticky=tk.EW, padx=5, pady=5)
         
-        # Remove Header checkbox
+        # Remove AI Artificats checkbox
         self.remove_header_var = tk.BooleanVar(value=self.config.get('remove_header', False))
         tb.Checkbutton(
             self.frame,
-            text="Remove Header",
+            text="Remove AI Artifacts",
             variable=self.remove_header_var,
             bootstyle="round-toggle"
         ).grid(row=7, column=0, columnspan=5, sticky=tk.W, padx=5, pady=(0,5))
