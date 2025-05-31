@@ -172,7 +172,7 @@ All settings are saved in `config.json`.
 
 ## 💬 Acknowledgments
 
-Built with ❤️ using OpenAI & Gemini APIs. Designed with ChatGPT.
+Built with ❤️ using OpenAI, Gemini & Claude APIs. Designed with ChatGPT & Claude.
 
 ---
 
