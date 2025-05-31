@@ -83,12 +83,17 @@ class HistoryManager:
                         os.remove(temp_path)
                     raise e
     
-    def append_to_history(self, user_content, assistant_content, hist_limit):
-        """Append to history with automatic trimming"""
+    def append_to_history(self, user_content, assistant_content, hist_limit, reset_on_limit=True):
+        """Append to history with automatic reset when limit is reached"""
         history = self.load_history()
         
-        # Trim old entries if needed
-        history = history[-(hist_limit * 2 - 2):]  # Keep room for new entry
+        # Count current exchanges (each exchange = 2 messages: user + assistant)
+        current_exchanges = len(history) // 2
+        
+        # Reset completely when limit is reached
+        if reset_on_limit and hist_limit > 0 and current_exchanges >= hist_limit:
+            history = []  # Complete reset
+            print(f"🔄 Reset history after reaching limit of {hist_limit} exchanges")
         
         # Append new entries
         history.append({"role": "user", "content": user_content})
@@ -96,3 +101,11 @@ class HistoryManager:
         
         self.save_history(history)
         return history
+        
+    def will_reset_on_next_append(self, hist_limit):
+        """Check if the next append will trigger a reset"""
+        if hist_limit <= 0:
+            return False
+        history = self.load_history()
+        current_exchanges = len(history) // 2
+        return current_exchanges >= hist_limit
