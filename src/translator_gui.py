@@ -55,7 +55,7 @@ class TranslatorGUI:
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
-        master.title("Glossarion v1.5.1")
+        master.title("Glossarion v1.5.2")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1400, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
@@ -1197,7 +1197,7 @@ class TranslatorGUI:
             self.config['glossary_temperature'] = float(self.glossary_temp.get())
             self.config['glossary_history_limit'] = int(self.glossary_history.get())
             self.config['api_key'] = self.api_key_entry.get()
-            self.config['remove_ai_artifacts'] = self.remove_ai_artifacts_var.get()
+            self.config['remove_ai_artifacts'] = self.REMOVE_AI_ARTIFACTS_var.get()
             self.config['chapter_range'] = self.chapter_range_entry.get().strip()
             self.config['use_rolling_summary'] = self.rolling_summary_var.get()
             self.config['summary_role'] = self.summary_role_var.get()
