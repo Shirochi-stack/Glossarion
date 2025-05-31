@@ -273,68 +273,98 @@ def clean_ai_artifacts(text, remove_artifacts=True):
         
     original_text = text
     
-    # Only remove AI prefixes at the very beginning of the response
-    # These patterns should ONLY match at the start of the entire text
-    if text.strip().lower().startswith(('okay,', 'sure,', 'understood,', 'of course,', 'alright,', 'certainly,')):
-        # Look for common AI response patterns
+    # Strategy: Instead of looking for specific header patterns,
+    # we'll be more intelligent about what constitutes an AI artifact
+    
+    # First, let's check if this looks like it starts with an AI response
+    ai_response_indicators = [
+        r'^(?:okay|sure|understood|of course|got it|alright|certainly),?\s+(?:I\'ll|I will|let me|here\'s|here is|here are)',
+        r'^(?:I\'ll translate|I will translate|Let me translate|Here\'s the translation|Here is the translation)',
+        r'^(?:System|Assistant|AI|User|Human|Model)\s*:\s*(?:okay|sure|I\'ll|let me)',
+    ]
+    
+    starts_with_ai_response = False
+    for pattern in ai_response_indicators:
+        if re.match(pattern, text.strip(), re.IGNORECASE):
+            starts_with_ai_response = True
+            break
+    
+    # If it clearly starts with an AI response, remove it
+    if starts_with_ai_response:
+        # Look for the end of the AI preamble (usually ends with a newline or the start of actual content)
         ai_response_pattern = re.compile(
-            r'^(?:okay|sure|understood|of course|got it|alright|certainly),?\s+'
-            r'(?:I\'ll|I will|let me|here\'s|here is|here are)\s+'
-            r'(?:translate|help|assist|proceed)[^.!?\n]*?[\n\r]+',
-            re.IGNORECASE
+            r'^.*?(?:translate|help|assist|proceed)[^.!?\n]*?[\n\r]+',
+            re.IGNORECASE | re.DOTALL
         )
-        text = ai_response_pattern.sub('', text, count=1)  # Only remove first occurrence
+        match = ai_response_pattern.match(text)
+        if match:
+            text = text[len(match.group(0)):]
     
-    # Remove JSON blocks ONLY if they appear to be AI artifacts
-    # Check if the text starts with JSON
-    if text.strip().startswith(('{', '[')):
-        # Look for JSON that contains "role" - this is likely an AI artifact
-        json_artifact_pattern = re.compile(r'^\s*\{[^{}]*"role"\s*:\s*"[^"]+"\s*[^{}]*\}', re.DOTALL)
-        if json_artifact_pattern.match(text):
-            text = json_artifact_pattern.sub('', text, count=1)
+    # Check if the text starts with a clear JSON artifact
+    if text.strip().startswith(('{', '[')) and '"role"' in text[:200]:
+        # This is likely a JSON artifact from the AI
+        json_end = max(text.find('}'), text.find(']'))
+        if json_end > 0:
+            # Find the actual content after the JSON
+            remaining = text[json_end + 1:].strip()
+            if remaining:
+                text = remaining
     
-    # Remove markdown code fences
-    text = re.sub(r'^```(?:json|html|xml)?\s*\n', '', text, flags=re.MULTILINE, count=1)
-    text = re.sub(r'\n```\s*$', '', text, flags=re.MULTILINE, count=1)
+    # Remove markdown code fences ONLY if they wrap the entire content
+    if text.strip().startswith('```') and text.strip().endswith('```'):
+        text = re.sub(r'^```(?:json|html|xml)?\s*\n?', '', text.strip(), count=1)
+        text = re.sub(r'\n?```\s*$', '', text, count=1)
     
-    # Remove part markers
+    # Remove part markers (these are definitely artifacts)
     text = re.sub(r'^\[PART\s+\d+/\d+\]\s*\n?', '', text, flags=re.IGNORECASE)
     
-    # Remove system/assistant markers ONLY at the beginning of lines
-    text = re.sub(r'^(?:System|Assistant|AI|User|Human|Model)\s*:\s*', '', 
-                 text, flags=re.IGNORECASE | re.MULTILINE, count=1)
+    # For translation notes, only remove if they're clearly meta-notes
+    if text.strip().lower().startswith(('note:', 'translation note:', 'translator\'s note:')):
+        # Check if this looks like a meta-note about the translation
+        first_line = text.split('\n')[0]
+        if any(word in first_line.lower() for word in ['translat', 'romaniz', 'honorific', 'glossary']):
+            text = re.sub(r'^(?:Note|Translation note|Translator\'s note)\s*:[^\n]+\n', '', 
+                         text, flags=re.IGNORECASE, count=1)
     
-    # Remove translation notes ONLY if they're at the beginning
-    text = re.sub(r'^(?:Note|Translation note|Translator\'s note)\s*:[^\n]+\n', '', 
-                 text, flags=re.IGNORECASE, count=1)
-    
-    # Clean up any JSON arrays that might have leaked through
-    # But ONLY if they look like glossary JSON
-    if text.strip().startswith('[') and '"original_name"' in text[:200]:  # Check only first 200 chars
-        # This looks like glossary JSON
-        lines = text.split('\n')
-        cleaned_lines = []
-        json_ended = False
+    # Clean up any glossary JSON arrays that leaked through
+    if text.strip().startswith('[') and '"original_name"' in text[:500]:
+        # Find the end of the JSON array
+        bracket_count = 0
+        json_end_pos = -1
         
-        for line in lines:
-            if not json_ended and (']' in line or '}' in line):
-                json_ended = True
-                continue
-            if json_ended or (not any(char in line for char in ['{', '}', '[', ']', '"'])):
-                cleaned_lines.append(line)
+        for i, char in enumerate(text):
+            if char == '[':
+                bracket_count += 1
+            elif char == ']':
+                bracket_count -= 1
+                if bracket_count == 0:
+                    json_end_pos = i
+                    break
         
-        text = '\n'.join(cleaned_lines)
+        if json_end_pos > 0:
+            text = text[json_end_pos + 1:].strip()
     
     # Remove empty lines at the start only
     text = re.sub(r'^\s*\n+', '', text, count=1)
+    
+    # Final safety check: if we removed too much (more than 50% of the original),
+    # something went wrong - restore the original
+    if len(text) < len(original_text) * 0.5:
+        # But still try to remove obvious AI prefixes
+        text = original_text
+        # Only remove the most obvious AI response patterns
+        text = re.sub(
+            r'^(?:Okay|Sure|Understood|Of course),?\s+(?:I\'ll|I will|let me)\s+translate[^.!?\n]*?[\n\r]+',
+            '', text, flags=re.IGNORECASE, count=1
+        )
+        
     
     return text
 
 
 def restore_missing_headers(translated_text, original_html):
     """
-    Restore headers that may have been lost during translation.
-    This function checks if headers from the original are missing in the translation.
+    Enhanced version that better preserves headers including custom ones.
     """
     # Parse both texts
     original_soup = BeautifulSoup(original_html, 'html.parser')
@@ -355,41 +385,41 @@ def restore_missing_headers(translated_text, original_html):
         # Get the first header from original
         first_header = original_headers[0]
         header_tag = first_header.name
-        header_text = first_header.get_text(strip=True)
         
-        # Try to find where this header text might be in the translation
-        trans_text = trans_soup.get_text()
+        # Get the translation text
+        trans_text = translated_text.strip()
+        lines = trans_text.split('\n')
         
-        # Look for the header text at the beginning of the translation
-        # It might have been converted to plain text
-        lines = translated_text.split('\n')
-        restored = False
+        # Check if the first line looks like it could be a header
+        # (short, no HTML tags, not starting with lowercase)
+        if lines and len(lines[0]) < 200 and not lines[0].strip().startswith('<') and lines[0].strip() and lines[0].strip()[0].isupper():
+            # This first line is probably the header
+            header_text = lines[0].strip()
+            remaining_lines = lines[1:] if len(lines) > 1 else []
+            
+            # Reconstruct with proper header tag
+            restored = f'<{header_tag}>{header_text}</{header_tag}>\n'
+            if remaining_lines:
+                restored += '\n'.join(remaining_lines)
+            
+            print(f"✅ Restored header: <{header_tag}>{header_text[:50]}...</{header_tag}>")
+            return restored
         
-        for i, line in enumerate(lines[:5]):  # Check first 5 lines
-            line_text = BeautifulSoup(line, 'html.parser').get_text(strip=True)
-            # Check if this line contains something that looks like a header
-            if line_text and len(line_text) < 200:  # Headers are usually short
-                # Check if it's not already in a paragraph tag
-                if not line.strip().startswith('<p>') and not line.strip().startswith('<h'):
-                    # This might be our header - wrap it in the appropriate tag
-                    lines[i] = f'<{header_tag}>{line_text}</{header_tag}>'
-                    restored = True
-                    print(f"✅ Restored header: <{header_tag}>{line_text[:50]}...</{header_tag}>")
-                    break
-                elif line.strip().startswith('<p>') and line.strip().endswith('</p>'):
-                    # It's in a paragraph tag - convert to header
-                    content = BeautifulSoup(line, 'html.parser').get_text(strip=True)
-                    if len(content) < 200:  # Likely a header
-                        lines[i] = f'<{header_tag}>{content}</{header_tag}>'
-                        restored = True
-                        print(f"✅ Converted paragraph to header: <{header_tag}>{content[:50]}...</{header_tag}>")
-                        break
-        
-        if restored:
-            return '\n'.join(lines)
+        # Alternative: Check if first paragraph might actually be the header
+        first_p = trans_soup.find('p')
+        if first_p:
+            p_text = first_p.get_text(strip=True)
+            # If it's short and looks like a title (no period at end, titlecase, etc)
+            if (len(p_text) < 100 and 
+                not p_text.endswith('.') and 
+                not p_text.endswith('。') and
+                p_text[0].isupper()):
+                
+                # Convert this paragraph to a header
+                first_p.name = header_tag
+                print(f"✅ Converted paragraph to header: <{header_tag}>{p_text[:50]}...</{header_tag}>")
+                return str(trans_soup)
     
-    # If translation has headers but they're in the wrong tags (e.g., all headers became <p>)
-    # This is a more complex case - for now just return as is
     return translated_text
     
 def debug_headers(text, label=""):
