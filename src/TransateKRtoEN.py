@@ -64,28 +64,9 @@ def set_output_redirect(log_callback=None):
 # Remove old load_history and save_history functions since we'll use HistoryManager
 
 def get_instructions(lang):
-    """Get language-specific translation instructions"""
-    if lang == "japanese":
-        return (
-            "- Retain Japanese suffixes like -san, -sama, -chan, -kun\n"
-            "- Preserve onomatopoeia and speech tone\n"
-            "- Use Romaji for untranslatable sounds\n"
-            "- Preserve all HTML tags and image references"
-        )
-    elif lang == "chinese":
-        return (
-            "- Preserve Chinese tone, family terms, and idioms\n"
-            "- Do not add un-present honorifics\n"
-            "- Preserve slang and tone\n"
-            "- Preserve all HTML tags and image references"
-        )
-    else:  # korean
-        return (
-            "- Retain Korean suffixes like -nim, -ssi, oppa, hyung\n"
-            "- Preserve dialects, speech tone, and slang\n"
-            "- Convert onomatopoeia to Romaji\n"
-            "- Preserve all HTML tags and image references"
-        )
+    """Get minimal technical instructions only"""
+    # Only return the technical requirement that applies to all languages
+    return "Preserve all HTML tags and image references exactly as they appear in the source."
 
 def extract_epub_metadata(zf):
     """Extract metadata from EPUB file"""
@@ -636,18 +617,19 @@ def build_system_prompt(user_prompt, glossary_path, instructions):
                 "\n\nUse the following glossary entries exactly as given:\n"
                 f"{glossary_block}"
             )
+            
     elif os.path.exists(glossary_path):
         with open(glossary_path, "r", encoding="utf-8") as gf:
             entries = json.load(gf)
         glossary_block = json.dumps(entries, ensure_ascii=False, indent=2)
         system = (
-            "You are a professional translator. " + instructions + "\n\n"
+            instructions + "\n\n"  # ← Remove "You are a professional translator. " +
             "Use the following glossary entries exactly as given:\n"
             f"{glossary_block}"
         )
     else:
-        system = f"You are a professional translator. {instructions}"
-    
+        system = instructions  # ← Remove "You are a professional translator. "
+
     return system
 
 
