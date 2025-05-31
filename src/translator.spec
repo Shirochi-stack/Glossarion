@@ -111,7 +111,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='Glossarion v1.4.5',  # Updated version
+    name='Glossarion v1.4.8',  # Updated version
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
