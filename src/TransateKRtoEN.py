@@ -1323,7 +1323,9 @@ def main(log_callback=None, stop_callback=None):
                     translated_chunks.append((saved_chunk, chunk_idx, total_chunks))
                     print(f"  [SKIP] Chunk {chunk_idx}/{total_chunks} already translated")
                     continue
-            
+            # NEW: Check if history will reset on this chapter
+            if CONTEXTUAL and history_manager.will_reset_on_next_append(HIST_LIMIT):
+                print(f"  📌 History will reset after this chunk (current: {len(history_manager.load_history())//2}/{HIST_LIMIT} exchanges)")            
             if check_stop():
                 print(f"❌ Translation stopped during chapter {idx+1}, chunk {chunk_idx}")
                 return
@@ -1425,20 +1427,21 @@ def main(log_callback=None, stop_callback=None):
                     # Increment completed chunks counter
                     chunks_completed += 1
                         
-                    # Update history using thread-safe manager
-                    history = history_manager.load_history()
-                    old_len = len(history)
-                    history = history[-HIST_LIMIT * 2:]
-                    history_trimmed = len(history) < old_len
-                    
+                    # Update history using thread-safe manager with reset functionality
+                    history = history_manager.append_to_history(
+                        user_prompt, 
+                        result, 
+                        HIST_LIMIT if CONTEXTUAL else 0,  # 0 means no history
+                        reset_on_limit=True
+                    )
+
+                    # Check if history was reset (will be only 2 entries if just reset)
+                    history_trimmed = len(history) == 2 and HIST_LIMIT > 0
+
                     if history_trimmed:
-                        print(f"    [DBG] Trimmed translation history from {old_len} to {len(history)} entries.")
+                        print(f"    [DBG] History was reset to maintain prompt adherence")
 
-                    history.append({"role": "user", "content": user_prompt})
-                    history.append({"role": "assistant", "content": result})
-                    history_manager.save_history(history)
-
-                    # Handle rolling summary if enabled and history was trimmed
+                    # Handle rolling summary if enabled and history was reset
                     if history_trimmed and os.getenv("USE_ROLLING_SUMMARY", "0") == "1":
                         if check_stop():
                             print(f"❌ Translation stopped during summary generation for chapter {idx+1}")
