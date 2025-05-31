@@ -66,7 +66,7 @@ def set_output_redirect(log_callback=None):
 def get_instructions(lang):
     """Get minimal technical instructions only"""
     # Only return the technical requirement that applies to all languages
-    return "Preserve ALL HTML tags exactly as they appear in the source, including <p>, <br>, <div>, etc."
+    return "Preserve ALL HTML tags exactly as they appear in the source, including <h1>, <h2>, <p>, <br>, <div>, etc."
 
 # Modifications for TransateKRtoEN.py
 
