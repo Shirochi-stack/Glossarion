@@ -719,7 +719,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     raise UnifiedClientError(f"API call timed out after {timeout} seconds")
 
 def remove_header_artifacts(chapters):
-    """Remove AI response artifacts from ALL chapters"""
+    """Remove AI response artifacts from ALL chapters while preserving chapter headers"""
     if not chapters:
         return []
     
@@ -744,6 +744,39 @@ def remove_header_artifacts(chapters):
         re.compile(r'```[^`]*```', re.DOTALL),
     ]
     
+    # Chapter header patterns to PRESERVE
+    chapter_patterns = [
+        re.compile(r'^Chapter\s+\d+', re.IGNORECASE),
+        re.compile(r'^Chapter\s+[IVXLCDM]+', re.IGNORECASE),  # Roman numerals
+        re.compile(r'第\s*\d+\s*[章节話话回]'),  # Chinese
+        re.compile(r'제\s*\d+\s*[장화권부]'),   # Korean
+        re.compile(r'第\s*\d+\s*話'),           # Japanese
+        re.compile(r'^\d+\s*[-–—.]\s*\w+'),     # Numbered chapters like "1. Title"
+        re.compile(r'^Part\s+\d+', re.IGNORECASE),
+        re.compile(r'^Episode\s+\d+', re.IGNORECASE),
+        re.compile(r'^Prologue', re.IGNORECASE),
+        re.compile(r'^Epilogue', re.IGNORECASE),
+    ]
+    
+    def is_chapter_header(text):
+        """Check if text appears to be a chapter header"""
+        # First check if it matches known chapter patterns
+        for pattern in chapter_patterns:
+            if pattern.search(text):
+                return True
+        
+        # Additional heuristics for chapter headers
+        # Short text (less than 100 chars) that doesn't contain AI artifacts
+        if len(text) < 100:
+            # Check if it contains typical AI response words
+            ai_words = ['translate', 'help', 'assist', 'proceed', 'sure', 'okay', 'understood']
+            text_lower = text.lower()
+            if not any(word in text_lower for word in ai_words):
+                # Might be a chapter title
+                return True
+        
+        return False
+    
     # Process ALL chapters
     for idx, chapter in enumerate(chapters):
         removed_tags = []
@@ -759,19 +792,34 @@ def remove_header_artifacts(chapters):
             
             tag_text = tag.get_text(strip=True)
             
-            # Check if entire tag is an artifact
-            for pattern in artifact_patterns:
-                if pattern.search(tag_text):
-                    removed_tags.append(f"Removed <{tag.name}>: {tag_text[:60]}...")
-                    tag.decompose()
-                    break
+            # IMPORTANT: Skip if this looks like a chapter header
+            if tag.name in ['h1', 'h2', 'h3', 'h4'] and is_chapter_header(tag_text):
+                continue  # Don't remove chapter headers!
+            
+            # For paragraphs and divs, only remove if the ENTIRE content is an artifact
+            if tag.name in ['p', 'div', 'span']:
+                # Check if entire tag is ONLY an artifact
+                for pattern in artifact_patterns:
+                    if pattern.match(tag_text) and pattern.search(tag_text).group(0) == tag_text:
+                        removed_tags.append(f"Removed <{tag.name}>: {tag_text[:60]}...")
+                        tag.decompose()
+                        break
+            else:
+                # For other tags, check if they match artifact patterns
+                for pattern in artifact_patterns:
+                    if pattern.search(tag_text):
+                        removed_tags.append(f"Removed <{tag.name}>: {tag_text[:60]}...")
+                        tag.decompose()
+                        break
         
         # Second pass: clean the HTML string directly
         html_str = str(soup)
         original_len = len(html_str)
         
-        # Apply all artifact patterns
+        # Apply all artifact patterns to the raw HTML
+        # But be more careful to not remove content within legitimate tags
         for pattern in artifact_patterns:
+            # Only apply to standalone lines, not content within tags
             html_str = pattern.sub('', html_str)
         
         # Special handling for JSON at the beginning
