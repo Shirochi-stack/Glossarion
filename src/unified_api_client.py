@@ -3,8 +3,9 @@ import os
 import json
 import requests
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 import logging
+import re
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -47,11 +48,89 @@ class UnifiedClientError(Exception):
         super().__init__(message)
         self.http_status = http_status
 
+class PromptReinforcer:
+    """Handles prompt reinforcement logic for all APIs"""
+    
+    def __init__(self):
+        self.translation_keywords = [
+            'translate', 'translation', 'translator',
+            'korean', 'japanese', 'chinese', 
+            'retain honorifics', 'preserve html',
+            'context rich', 'natural translation'
+        ]
+        
+    def needs_reinforcement(self, messages: List[Dict], context: str = None) -> bool:
+        """Determine if prompt reinforcement is needed"""
+        if not messages:
+            return False
+            
+        # Check context
+        if context == 'glossary':
+            return False  # Glossary extraction doesn't need reinforcement
+            
+        # Check message count (more than 10 messages suggests ongoing conversation)
+        if len(messages) > 10:
+            return True
+            
+        # Check if this appears to be a translation task
+        all_content = ' '.join([m.get('content', '') for m in messages]).lower()
+        return any(keyword in all_content for keyword in self.translation_keywords)
+    
+    def extract_key_rules(self, system_content: str) -> List[str]:
+        """Extract key rules from system prompt"""
+        rules = []
+        content_lower = system_content.lower()
+        
+        # Extract key translation rules
+        if 'retain honorifics' in content_lower or 'suffixes like' in content_lower:
+            rules.append("retain all honorifics and suffixes")
+        if 'preserve html' in content_lower or 'html tags' in content_lower:
+            rules.append("preserve ALL HTML tags exactly")
+        if 'context rich' in content_lower or 'natural translation' in content_lower:
+            rules.append("use natural, context-rich translation")
+        if 'original intent' in content_lower:
+            rules.append("preserve original intent and tone")
+        if 'onomatopoeia' in content_lower:
+            rules.append("retain onomatopoeia in Romaji")
+            
+        # Check for language-specific rules
+        if 'korean' in content_lower:
+            if '-nim' in system_content or '-ssi' in system_content:
+                rules.append("keep Korean honorifics (-nim, -ssi, etc.)")
+        elif 'japanese' in content_lower:
+            if '-san' in system_content or '-sama' in system_content:
+                rules.append("keep Japanese honorifics (-san, -sama, -chan, -kun)")
+        elif 'chinese' in content_lower:
+            if 'cultivation' in content_lower or 'xianxia' in content_lower:
+                rules.append("maintain cultivation/xianxia terminology")
+                
+        return rules
+    
+    def create_reinforcement_prompt(self, system_content: str, concise: bool = True) -> str:
+        """Create a reinforcement reminder"""
+        rules = self.extract_key_rules(system_content)
+        
+        if not rules:
+            return ""
+            
+        if concise:
+            return f"[REMINDER: {'; '.join(rules[:3])}]"  # Top 3 rules
+        else:
+            reminder = "IMPORTANT REMINDERS:\n"
+            for rule in rules:
+                reminder += f"• {rule}\n"
+            return reminder.strip()
+
 class UnifiedClient:
     def __init__(self, model: str, api_key: str):
         self.model = model.lower()
         self.api_key = api_key
-        self.context = None  # Add context as instance variable
+        self.context = None
+        self.reinforcer = PromptReinforcer()
+        
+        # History tracking for reinforcement decisions
+        self.message_count = 0
+        self.last_reinforcement_count = 0
 
         if 'gpt' in self.model:
             if openai is None:
@@ -76,13 +155,17 @@ class UnifiedClient:
 
     def send(self, messages, temperature=0.3, max_tokens=8192, context=None) -> Tuple[str, Optional[str]]:
         """
-        Send messages to the API
+        Send messages to the API with automatic prompt reinforcement
         Returns: (content, finish_reason) tuple for backward compatibility
         """
-        self.context = context or self.context  # Use provided context or instance context
+        self.context = context or self.context
+        self.message_count += 1
         
         try:
             os.makedirs("Payloads", exist_ok=True)
+            
+            # Apply prompt reinforcement if needed
+            messages = self._apply_reinforcement(messages)
             
             # Determine payload filename based on context
             payload_name, response_name = self._get_file_names(messages, context)
@@ -104,6 +187,147 @@ class UnifiedClient:
         except Exception as e:
             logger.error(f"UnifiedClient error: {e}")
             raise UnifiedClientError(f"UnifiedClient error: {e}") from e
+
+    def _apply_reinforcement(self, messages: List[Dict]) -> List[Dict]:
+        """Apply prompt reinforcement based on API type and context"""
+        if not self.reinforcer.needs_reinforcement(messages, self.context):
+            return messages
+            
+        # Find system message
+        system_msg = None
+        system_idx = None
+        for i, msg in enumerate(messages):
+            if msg.get('role') == 'system':
+                system_msg = msg
+                system_idx = i
+                break
+                
+        if not system_msg:
+            return messages  # No system message to reinforce
+            
+        # Determine reinforcement frequency
+        reinforce_every = 10  # Reinforce every 10 messages
+        if self.client_type == 'gemini':
+            reinforce_every = 5  # More frequent for Gemini
+            
+        # Check if it's time to reinforce
+        if self.message_count - self.last_reinforcement_count < reinforce_every:
+            return messages
+            
+        self.last_reinforcement_count = self.message_count
+        
+        # Apply reinforcement based on client type
+        if self.client_type == 'openai' or self.client_type == 'deepseek':
+            return self._reinforce_openai_format(messages, system_msg, system_idx)
+        elif self.client_type == 'gemini':
+            return self._reinforce_gemini_format(messages, system_msg)
+        elif self.client_type == 'anthropic':
+            return self._reinforce_anthropic_format(messages, system_msg)
+        else:
+            return messages
+    
+    def _reinforce_openai_format(self, messages: List[Dict], system_msg: Dict, system_idx: int) -> List[Dict]:
+        """Reinforce prompts for OpenAI-style APIs"""
+        reinforced_messages = messages.copy()
+        
+        # For OpenAI, we can add reinforcement to the system message
+        reinforcement = self.reinforcer.create_reinforcement_prompt(system_msg['content'], concise=False)
+        
+        if reinforcement:
+            # Create enhanced system message
+            enhanced_content = system_msg['content']
+            if reinforcement not in enhanced_content:
+                enhanced_content = f"{system_msg['content']}\n\n{reinforcement}"
+            
+            reinforced_messages[system_idx] = {
+                'role': 'system',
+                'content': enhanced_content
+            }
+            
+            print(f"🔄 Reinforced system prompt for {self.client_type}")
+            
+        return reinforced_messages
+    
+    def _reinforce_gemini_format(self, messages: List[Dict], system_msg: Dict) -> List[Dict]:
+        """Special reinforcement for Gemini (which concatenates everything)"""
+        # For Gemini, we need to restructure the messages
+        system_content = system_msg['content']
+        rules = self.reinforcer.extract_key_rules(system_content)
+        
+        # Keep only recent history for Gemini (last 6 messages)
+        recent_messages = []
+        non_system_messages = [m for m in messages if m.get('role') != 'system']
+        
+        if len(non_system_messages) > 6:
+            recent_messages = non_system_messages[-6:]
+        else:
+            recent_messages = non_system_messages
+            
+        # Create a reformatted message list with reinforcement
+        reinforced_messages = []
+        
+        # Always start with system instructions
+        reinforced_messages.append({
+            'role': 'system',
+            'content': f"ACTIVE TRANSLATION RULES:\n{system_content}"
+        })
+        
+        # Add recent context with labels
+        if len(recent_messages) > 2:
+            reinforced_messages.append({
+                'role': 'context',
+                'content': "RECENT TRANSLATION CONTEXT:"
+            })
+            
+        # Add recent messages except the last one
+        for msg in recent_messages[:-1]:
+            reinforced_messages.append(msg)
+            
+        # Add reminder before the current request
+        if rules:
+            reminder = f"[CONTINUE FOLLOWING: {'; '.join(rules[:3])}]"
+            last_msg = recent_messages[-1].copy()
+            last_msg['content'] = f"{reminder}\n\n{last_msg['content']}"
+            reinforced_messages.append(last_msg)
+        else:
+            reinforced_messages.append(recent_messages[-1])
+            
+        print(f"🔄 Restructured prompt for Gemini (kept {len(recent_messages)} recent messages)")
+        
+        return reinforced_messages
+    
+    def _reinforce_anthropic_format(self, messages: List[Dict], system_msg: Dict) -> List[Dict]:
+        """Reinforce prompts for Anthropic Claude"""
+        # For Claude, we need to handle system messages differently
+        system_content = system_msg['content']
+        reinforcement = self.reinforcer.create_reinforcement_prompt(system_content, concise=True)
+        
+        reinforced_messages = []
+        for msg in messages:
+            if msg.get('role') == 'system':
+                # Skip original system message, we'll prepend to first user message
+                continue
+            elif msg.get('role') == 'user' and len(reinforced_messages) == 0:
+                # First user message gets the full system content
+                enhanced_content = f"{system_content}\n\n{msg['content']}"
+                reinforced_messages.append({
+                    'role': 'user',
+                    'content': enhanced_content
+                })
+            elif msg.get('role') == 'user' and reinforcement:
+                # Later user messages get brief reminders
+                enhanced_content = f"{reinforcement}\n\n{msg['content']}"
+                reinforced_messages.append({
+                    'role': 'user',
+                    'content': enhanced_content
+                })
+                reinforcement = None  # Only add once
+            else:
+                reinforced_messages.append(msg)
+                
+        print(f"🔄 Reinforced prompts for Anthropic")
+        
+        return reinforced_messages
 
     def _get_file_names(self, messages, context) -> Tuple[str, str]:
         """Determine appropriate filenames for payload and response"""
@@ -184,9 +408,10 @@ class UnifiedClient:
             raise UnifiedClientError(f"OpenAI API error: {e}")
 
     def _send_gemini(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to Gemini API with retry logic"""
-        parts = [m["content"] for m in messages]
-        prompt = "\n\n".join(parts)
+        """Send request to Gemini API with special formatting"""
+        # Apply Gemini-specific message formatting
+        formatted_prompt = self._format_gemini_prompt(messages)
+        
         model = genai.GenerativeModel(self.model)
         
         # Retry loop with exponential backoff
@@ -200,7 +425,7 @@ class UnifiedClient:
         while attempt < attempts:
             try:
                 response = model.generate_content(
-                    prompt,
+                    formatted_prompt,
                     generation_config={
                         "temperature": temperature,
                         "max_output_tokens": current_tokens
@@ -247,6 +472,36 @@ class UnifiedClient:
             finish_reason=finish_reason,
             raw_response=response if 'response' in locals() else None
         )
+    
+    def _format_gemini_prompt(self, messages) -> str:
+        """Format messages specifically for Gemini's concatenation approach"""
+        formatted_parts = []
+        
+        # Separate messages by role
+        system_messages = [m for m in messages if m.get('role') == 'system']
+        context_messages = [m for m in messages if m.get('role') == 'context']
+        other_messages = [m for m in messages if m.get('role') not in ['system', 'context']]
+        
+        # System instructions first
+        if system_messages:
+            formatted_parts.append(system_messages[-1]['content'])  # Use most recent system message
+            
+        # Context marker if present
+        if context_messages:
+            formatted_parts.extend([m['content'] for m in context_messages])
+            
+        # Other messages with role labels
+        for msg in other_messages:
+            role = msg.get('role', 'user').upper()
+            content = msg['content']
+            
+            # Don't label if it's a reminder or context marker
+            if content.startswith('[') or content.startswith('RECENT'):
+                formatted_parts.append(content)
+            else:
+                formatted_parts.append(f"{role}: {content}")
+        
+        return "\n\n".join(formatted_parts)
 
     def _send_deepseek(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to DeepSeek API"""
@@ -393,17 +648,12 @@ class UnifiedClient:
     def _process_anthropic_messages(self, messages):
         """Process messages for Anthropic API (handle system messages)"""
         processed = []
-        system_content = None
         
         for msg in messages:
-            if msg["role"] == "system":
-                system_content = msg["content"]
+            if msg["role"] in ["system", "context"]:
+                # Skip system/context messages, they've been prepended to user messages
+                continue
             else:
-                if msg["role"] == "user" and system_content:
-                    # Prepend system content to first user message
-                    msg = msg.copy()
-                    msg["content"] = system_content + "\n\n" + msg["content"]
-                    system_content = None
                 processed.append(msg)
         
         return processed
@@ -419,6 +669,10 @@ class UnifiedClient:
         
         try:
             os.makedirs("Payloads", exist_ok=True)
+            
+            # Apply prompt reinforcement if needed
+            messages = self._apply_reinforcement(messages)
+            
             payload_name, response_name = self._get_file_names(messages, context)
             self._save_payload(messages, payload_name)
             return self._get_response(messages, temperature, max_tokens, response_name)
