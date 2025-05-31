@@ -402,22 +402,64 @@ def extract_chapters(zf):
     
     return chaps
     
-def save_glossary(output_dir, chapters, instructions):
+def save_glossary(output_dir, chapters, instructions, language="korean"):
     """Generate and save glossary from chapters"""
     samples = []
     for c in chapters:
         samples.append(c["body"])
-    names, suffixes = [], set()
+    
+    names = []
+    suffixes = set()
+    
     for txt in samples:
+        # Extract names (works for all languages)
         for nm in re.findall(r"\b[A-Z][a-z]{2,20}\b", txt):
             names.append(nm)
-        for s in re.findall(r"\b\w+-(?:nim|ssi)\b|\boppa\b|\bhyung\b", txt, re.I):
-            suffixes.add(s)
+        
+        # Language-specific suffix/honorific patterns
+        if language == "korean":
+            # Korean suffixes
+            for s in re.findall(r"\b\w+[-~]?(?:nim|ssi|ah|ya|ie|hyung|noona|unnie|oppa|sunbae|hoobae|gun|yang)\b", txt, re.I):
+                suffixes.add(s)
+        
+        elif language == "japanese":
+            # Japanese honorifics and suffixes
+            for s in re.findall(r"\b\w+[-~]?(?:san|sama|chan|kun|senpai|kouhai|sensei|dono|tan|chin|bo|rin|pyon)\b", txt, re.I):
+                suffixes.add(s)
+            # Also catch standalone honorifics
+            for s in re.findall(r"\b(?:Onii|Onee|Oji|Oba|Nii|Nee)[-~]?(?:san|sama|chan|kun)?\b", txt, re.I):
+                suffixes.add(s)
+        
+        elif language == "chinese":
+            # Chinese titles and honorifics
+            # Common suffixes/titles in pinyin or English
+            for s in re.findall(r"\b\w+[-~]?(?:ge|gege|jie|jiejie|di|didi|mei|meimei|xiong|da|xiao|lao|shao)\b", txt, re.I):
+                suffixes.add(s)
+            # Titles
+            for s in re.findall(r"\b(?:Shizun|Shifu|Daozhang|Gongzi|Guniang|Xiaojie|Furen|Niangniang)\b", txt, re.I):
+                suffixes.add(s)
+            # Family terms
+            for s in re.findall(r"\b(?:A-|Ah-)?(?:Niang|Die|Ba|Ma|Ye|Nai|Gong|Po)\b", txt, re.I):
+                suffixes.add(s)
+    
+    # Remove duplicates and sort
+    unique_names = list(set(names))
+    sorted_suffixes = sorted(suffixes)
+    
+    # Build glossary with language-specific labels
     gloss = {
-        "Characters": list(set(names)),
-        "Honorifics/Suffixes": sorted(suffixes),
+        "Characters": unique_names,
         "Instructions": instructions
     }
+    
+    # Add language-specific sections
+    if language == "korean":
+        gloss["Korean_Honorifics_Suffixes"] = sorted_suffixes
+    elif language == "japanese":
+        gloss["Japanese_Honorifics_Suffixes"] = sorted_suffixes
+    elif language == "chinese":
+        gloss["Chinese_Titles_Terms"] = sorted_suffixes
+    
     with open(os.path.join(output_dir, "glossary.json"), 'w', encoding='utf-8') as f:
         json.dump(gloss, f, ensure_ascii=False, indent=2)
 
@@ -516,6 +558,11 @@ def parse_token_limit(env_value):
 
 def build_system_prompt(user_prompt, glossary_path, instructions):
     """Build the system prompt with glossary"""
+    # Check if system prompt is disabled
+    if os.getenv("DISABLE_SYSTEM_PROMPT", "0") == "1":
+        # Return user prompt as-is when system prompt is disabled
+        return user_prompt if user_prompt else ""
+    
     if user_prompt:
         system = user_prompt
         if os.path.exists(glossary_path):
@@ -540,6 +587,7 @@ def build_system_prompt(user_prompt, glossary_path, instructions):
     
     return system
 
+
 def main(log_callback=None, stop_callback=None):
     """Main translation function"""
     if log_callback:
@@ -563,6 +611,7 @@ def main(log_callback=None, stop_callback=None):
     TEMP = float(os.getenv("TRANSLATION_TEMPERATURE", "0.3"))
     HIST_LIMIT = int(os.getenv("TRANSLATION_HISTORY_LIMIT", "20"))
     MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
+    
     
     # Parse chapter range
     rng = os.getenv("CHAPTER_RANGE", "")
@@ -671,10 +720,19 @@ def main(log_callback=None, stop_callback=None):
         
     # Handle glossary
     manual_gloss = os.getenv("MANUAL_GLOSSARY")
+    disable_auto_glossary = os.getenv("DISABLE_AUTO_GLOSSARY", "0") == "1"
+
     if manual_gloss and os.path.isfile(manual_gloss):
+        # Use manual glossary if provided
         shutil.copy(manual_gloss, os.path.join(out, "glossary.json"))
+        print("📑 Using manual glossary")
+    elif not disable_auto_glossary:
+        # Generate automatic glossary only if not disabled
+        save_glossary(out, chapters, instructions, TRANSLATION_LANG)  # Pass language
+        print("📑 Generated automatic glossary")
     else:
-        save_glossary(out, chapters, instructions)
+        # Don't create any glossary file when disabled
+        print("📑 Automatic glossary disabled - no glossary will be used")
 
     # Build system prompt
     glossary_path = os.path.join(out, "glossary.json")
@@ -862,7 +920,16 @@ def main(log_callback=None, stop_callback=None):
                 trimmed = history[-HIST_LIMIT*2:]
             else:
                 trimmed = []
-            msgs = base_msg + trimmed + [{"role": "user", "content": user_prompt}]
+                
+            # Build messages - handle case where base_msg might be empty
+            if base_msg:
+                msgs = base_msg + trimmed + [{"role": "user", "content": user_prompt}]
+            else:
+                # No system message, start with history or user message
+                if trimmed:
+                    msgs = trimmed + [{"role": "user", "content": user_prompt}]
+                else:
+                    msgs = [{"role": "user", "content": user_prompt}]
 
             while True:
                 # Check for stop before API call
