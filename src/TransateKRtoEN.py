@@ -923,14 +923,33 @@ def parse_token_limit(env_value):
 
 def build_system_prompt(user_prompt, glossary_path, instructions):
     """Build the system prompt with glossary"""
+    # Check if we should append glossary (default is True if not set)
+    append_glossary = os.getenv("APPEND_GLOSSARY", "1") == "1"
+    
     # Check if system prompt is disabled
     if os.getenv("DISABLE_SYSTEM_PROMPT", "0") == "1":
-        # Return user prompt as-is when system prompt is disabled
-        return user_prompt if user_prompt else ""
+        # Use only user prompt, but still append glossary if enabled
+        system = user_prompt if user_prompt else ""
+        
+        # Append glossary if the toggle is on
+        if append_glossary and os.path.exists(glossary_path):
+            with open(glossary_path, "r", encoding="utf-8") as gf:
+                entries = json.load(gf)
+            glossary_block = json.dumps(entries, ensure_ascii=False, indent=2)
+            if system:
+                system += "\n\n"
+            system += (
+                "Use the following glossary entries exactly as given:\n"
+                f"{glossary_block}"
+            )
+        
+        return system
     
+    # Normal flow when hardcoded prompts are enabled
     if user_prompt:
         system = user_prompt
-        if os.path.exists(glossary_path):
+        # Append glossary if the toggle is on
+        if append_glossary and os.path.exists(glossary_path):
             with open(glossary_path, "r", encoding="utf-8") as gf:
                 entries = json.load(gf)
             glossary_block = json.dumps(entries, ensure_ascii=False, indent=2)
@@ -939,7 +958,7 @@ def build_system_prompt(user_prompt, glossary_path, instructions):
                 f"{glossary_block}"
             )
             
-    elif os.path.exists(glossary_path):
+    elif os.path.exists(glossary_path) and append_glossary:
         with open(glossary_path, "r", encoding="utf-8") as gf:
             entries = json.load(gf)
         glossary_block = json.dumps(entries, ensure_ascii=False, indent=2)
