@@ -1028,23 +1028,40 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, aggressive_mode=Tru
     try:
         with open(prog_path, "r", encoding="utf-8") as pf:
             prog = json.load(pf)
-            existing = prog.get("completed", [])
     except FileNotFoundError:
-        existing = []
-
+        prog = {"completed": []}
+    
+    # Get existing completed list
+    existing = prog.get("completed", [])
+    
     # Build list of FILE INDICES that have issues
     faulty_indices = [row["file_index"] for row in results if row["issues"]]
-
+    
     # Remove faulty indices from the completed list
     updated = [idx for idx in existing if idx not in faulty_indices]
-
-    # Write back the pruned history
+    
+    # Update the progress while preserving all other data
+    prog["completed"] = updated
+    
+    # Also remove chunk data for faulty chapters if it exists
+    if "chapter_chunks" in prog:
+        for faulty_idx in faulty_indices:
+            chapter_key = str(faulty_idx)
+            if chapter_key in prog["chapter_chunks"]:
+                del prog["chapter_chunks"][chapter_key]
+                log(f"   └─ Removed chunk data for chapter {faulty_idx + 1}")
+    
+    # Write back the complete progress data
     with open(prog_path, "w", encoding="utf-8") as pf:
-        json.dump({"completed": updated}, pf, indent=2)
-
+        json.dump(prog, pf, indent=2)
+    
     log(f"\n✅ Scan complete!")
     log(f"📁 Reports saved to: {output_path}")
     log(f"🔧 Removed {len(faulty_indices)} anomalies from progress tracking")
+    
+    # Log which chapters were affected
+    if faulty_indices:
+        log(f"📝 Chapters marked for re-translation: {', '.join(str(i+1) for i in sorted(faulty_indices))}")
 
 def launch_gui():
     def run_scan():
