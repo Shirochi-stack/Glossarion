@@ -388,7 +388,7 @@ def main(log_callback=None, stop_callback=None):
             
             def api_call():
                 try:
-                    result = client.send(msgs, temperature=temp, max_tokens=mtoks)
+                    result = client.send(msgs, temperature=temp, max_tokens=mtoks, context='glossary')
                     result_queue.put(result)
                 except Exception as e:
                     result_queue.put(e)
