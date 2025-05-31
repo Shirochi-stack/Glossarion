@@ -305,8 +305,16 @@ def main(log_callback=None, stop_callback=None):
     )
 
     config = load_config(args.config)
-    client = UnifiedClient(model=config['model'], api_key=config['api_key'])
-    model = config.get('model', 'gpt-4.1-mini')
+    # Get model from environment variable (set by GUI) or config file
+    model = os.getenv("MODEL") or config.get('model', 'gemini-1.5-flash')
+    # Get API key from environment variables (set by GUI) or config file
+    api_key = (os.getenv("API_KEY") or 
+               os.getenv("OPENAI_API_KEY") or 
+               os.getenv("OPENAI_OR_Gemini_API_KEY") or
+               os.getenv("GEMINI_API_KEY") or
+               config.get('api_key'))
+
+    client = UnifiedClient(model=model, api_key=api_key)
     temp = config.get('temperature', 0.3)
     env_max_output = os.getenv("MAX_OUTPUT_TOKENS")
     if env_max_output and env_max_output.isdigit():
