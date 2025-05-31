@@ -55,7 +55,7 @@ class TranslatorGUI:
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
-        master.title("Glossarion v1.4.5")
+        master.title("Glossarion v1.4.6")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1400, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
@@ -118,7 +118,14 @@ class TranslatorGUI:
         self.disable_auto_glossary_var = tk.BooleanVar(
             value=self.config.get('disable_auto_glossary', False)
         )
-
+        self.disable_auto_glossary_var = tk.BooleanVar(
+            value=self.config.get('disable_auto_glossary', False)
+        )
+        # Append Glossary:
+        self.append_glossary_var = tk.BooleanVar(
+            value=self.config.get('append_glossary', True)  # Default to True
+        )        
+        
         # Default prompts
         self.default_prompts = {
             "korean": "You are a professional Korean to English novel translator, please output only English/HTML text while following these rules:\n- Use a context rich and natural translation style.\n- Retain honorifics, and suffixes like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
@@ -439,6 +446,12 @@ class TranslatorGUI:
                     self.append_log("⚠️ Hardcoded prompts disabled")
                 if self.disable_auto_glossary_var.get():
                     self.append_log("⚠️ Automatic glossary disabled")
+                    
+                # Log glossary status
+                if self.append_glossary_var.get():
+                    self.append_log("✅ Glossary will be appended to prompts")
+                else:
+                    self.append_log("⚠️ Glossary appending is disabled")
                 
                 # Set environment variables - FIXED: Use multiple API key variables
                 os.environ.update({
@@ -462,6 +475,7 @@ class TranslatorGUI:
                     # ─── NEW: Add environment variables for new toggles ───
                     'DISABLE_SYSTEM_PROMPT': "1" if self.disable_system_prompt_var.get() else "0",
                     'DISABLE_AUTO_GLOSSARY': "1" if self.disable_auto_glossary_var.get() else "0",
+                    'APPEND_GLOSSARY': "1" if self.append_glossary_var.get() else "0",
                     'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var.get() else "0"
                 })
                 
@@ -899,6 +913,16 @@ class TranslatorGUI:
         # Disable Hardcoded Prompts checkbox
         tb.Checkbutton(top, text="Disable Hardcoded Prompts", variable=self.disable_system_prompt_var,
                        bootstyle="round-toggle").pack(anchor=tk.W, padx=10, pady=10)
+                       
+        # Append Glossary checkbox
+        tb.Checkbutton(top, text="Append Glossary", variable=self.append_glossary_var,
+                       bootstyle="round-toggle").pack(anchor=tk.W, padx=10, pady=10)
+
+        # Add description
+        desc_label = tk.Label(top, 
+                             text="Include glossary in prompts for consistent character names",
+                             wraplength=500, justify=tk.LEFT, font=('TkDefaultFont', 9), fg='gray')
+        desc_label.pack(anchor=tk.W, padx=30, pady=(0, 10))
         
         # Disable Auto Glossary checkbox
         tb.Checkbutton(top, text="Disable Auto Glossary", variable=self.disable_auto_glossary_var,
@@ -926,11 +950,12 @@ class TranslatorGUI:
             self.config['summary_role'] = self.summary_role_var.get()
             self.config['disable_system_prompt'] = self.disable_system_prompt_var.get()
             self.config['disable_auto_glossary'] = self.disable_auto_glossary_var.get()
-            self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()  # NEW
-            
+            self.config['append_glossary'] = self.append_glossary_var.get()
+            self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()            
             os.environ["USE_ROLLING_SUMMARY"] = "1" if self.rolling_summary_var.get() else "0"
             os.environ["SUMMARY_ROLE"] = self.summary_role_var.get()
-            os.environ["EMERGENCY_PARAGRAPH_RESTORE"] = "1" if self.emergency_restore_var.get() else "0"  # NEW
+            os.environ["APPEND_GLOSSARY"] = "1" if self.append_glossary_var.get() else "0"
+            os.environ["EMERGENCY_PARAGRAPH_RESTORE"] = "1" if self.emergency_restore_var.get() else "0"  
             
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, ensure_ascii=False, indent=2)
@@ -1180,6 +1205,7 @@ class TranslatorGUI:
             # ─── NEW: Save new toggle states ───
             self.config['disable_system_prompt'] = self.disable_system_prompt_var.get()
             self.config['disable_auto_glossary'] = self.disable_auto_glossary_var.get()
+            self.config['append_glossary'] = self.append_glossary_var.get()
             self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()
             
             _tl = self.token_limit_entry.get().strip()
