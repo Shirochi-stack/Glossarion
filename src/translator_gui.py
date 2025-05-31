@@ -55,7 +55,7 @@ class TranslatorGUI:
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
-        master.title("Glossarion v1.5.0")
+        master.title("Glossarion v1.5.1")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1400, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
@@ -302,11 +302,11 @@ class TranslatorGUI:
         ).grid(row=7, column=4, sticky=tk.EW, padx=5, pady=5)
         
         # Remove AI Artificats checkbox
-        self.remove_header_var = tk.BooleanVar(value=self.config.get('remove_header', False))
+        self.REMOVE_AI_ARTIFACTS_var = tk.BooleanVar(value=self.config.get('REMOVE_AI_ARTIFACTS', False))
         tb.Checkbutton(
             self.frame,
             text="Remove AI Artifacts",
-            variable=self.remove_header_var,
+            variable=self.REMOVE_AI_ARTIFACTS_var,
             bootstyle="round-toggle"
         ).grid(row=7, column=0, columnspan=5, sticky=tk.W, padx=5, pady=(0,5))
         
@@ -465,7 +465,7 @@ class TranslatorGUI:
                     'OPENAI_OR_Gemini_API_KEY': api_key,   # Fallback name
                     'GEMINI_API_KEY': api_key,             # Gemini
                     'SYSTEM_PROMPT': self.prompt_text.get("1.0", "end").strip(),
-                    'REMOVE_HEADER': "1" if self.remove_header_var.get() else "0",
+                    'REMOVE_AI_ARTIFACTS': "1" if self.REMOVE_AI_ARTIFACTS_var.get() else "0",
                     'USE_ROLLING_SUMMARY': "1" if self.config.get('use_rolling_summary') else "0",
                     'SUMMARY_ROLE': self.config.get('summary_role', 'user'),
                     'TRANSLATION_LANG': self.lang_var.get().lower(),
@@ -1197,7 +1197,7 @@ class TranslatorGUI:
             self.config['glossary_temperature'] = float(self.glossary_temp.get())
             self.config['glossary_history_limit'] = int(self.glossary_history.get())
             self.config['api_key'] = self.api_key_entry.get()
-            self.config['remove_header'] = self.remove_header_var.get()
+            self.config['remove_ai_artifacts'] = self.remove_ai_artifacts_var.get()
             self.config['chapter_range'] = self.chapter_range_entry.get().strip()
             self.config['use_rolling_summary'] = self.rolling_summary_var.get()
             self.config['summary_role'] = self.summary_role_var.get()
