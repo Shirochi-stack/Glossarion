@@ -1149,11 +1149,6 @@ def main(log_callback=None, stop_callback=None):
         # Validate chapters
         validate_chapter_continuity(chapters)
 
-        # Remove header artifacts if enabled
-        if REMOVE_HEADER and chapters:
-            removed_tags = remove_header_artifacts(chapters)
-            if removed_tags:
-                print(f"[DEBUG] Removed artifacts from {len(removed_tags)} chapters")
 
         # Extract images
         imgdir = os.path.join(out, "images")
