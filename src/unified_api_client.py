@@ -47,53 +47,82 @@ class UnifiedClient:
         else:
             raise ValueError("Unsupported model type. Use a model starting with 'gpt', 'gemini', 'deepseek', or 'sonnet'")
 
-    def send(self, messages, temperature=0.3, max_tokens=8192):
+    def send(self, messages, temperature=0.3, max_tokens=8192, context=None):
+        """
+        Send messages to the API
+        context: Optional context string to help with payload naming (e.g., 'translation', 'glossary')
+        """
         try:
             os.makedirs("Payloads", exist_ok=True)
-            with open("Payloads/glossary_payload.json", "w", encoding="utf-8") as pf:
+            
+            # Determine payload filename based on context or message content
+            if context:
+                payload_name = f"{context}_payload.json"
+                response_name = f"{context}_response.txt"
+            else:
+                # Try to auto-detect context from messages
+                messages_str = str(messages).lower()
+                if 'glossary' in messages_str or 'character' in messages_str:
+                    payload_name = "glossary_payload.json"
+                    response_name = "glossary_response.txt"
+                elif 'translat' in messages_str:
+                    payload_name = "translation_payload.json"
+                    response_name = "translation_response.txt"
+                else:
+                    # Default generic names with timestamp
+                    import time
+                    timestamp = int(time.time())
+                    payload_name = f"api_payload_{timestamp}.json"
+                    response_name = f"api_response_{timestamp}.txt"
+            
+            # Save the payload
+            with open(f"Payloads/{payload_name}", "w", encoding="utf-8") as pf:
                 json.dump({"model": self.model, "messages": messages}, pf, ensure_ascii=False, indent=2)
 
             if self.client_type == 'openai':
-                return self._send_openai(messages, temperature, max_tokens)
+                return self._send_openai(messages, temperature, max_tokens, response_name)
             elif self.client_type == 'gemini':
-                result = self._send_gemini(messages, temperature, max_tokens)
+                result = self._send_gemini(messages, temperature, max_tokens, response_name)
                 return result, None
             elif self.client_type == 'deepseek':
-                result = self._send_openai_compatible(messages, temperature, max_tokens, base_url="https://api.deepseek.com/v1")
+                result = self._send_openai_compatible(messages, temperature, max_tokens, 
+                                                     base_url="https://api.deepseek.com/v1",
+                                                     response_name=response_name)
                 return result, None
             elif self.client_type == 'anthropic':
-                result = self._send_anthropic(messages, temperature, max_tokens)
+                result = self._send_anthropic(messages, temperature, max_tokens, response_name)
                 return result, None
 
         except Exception as e:
             raise UnifiedClientError(f"UnifiedClient error: {e}") from e
 
-    def _send_openai(self, messages, temperature, max_tokens):
-        resp   = openai.chat.completions.create(
+    def _send_openai(self, messages, temperature, max_tokens, response_name="response.txt"):
+        resp = openai.chat.completions.create(
             model=self.model,
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens
         )
         choice = resp.choices[0]
-        text   = choice.message.content
+        text = choice.message.content
         reason = choice.finish_reason
 
-        with open("Payloads/glossary_response.txt", "w", encoding="utf-8") as rf:
+        with open(f"Payloads/{response_name}", "w", encoding="utf-8") as rf:
             rf.write(text)
 
         return text, reason
 
-    def _send_gemini(self, messages, temperature, max_tokens):
+    def _send_gemini(self, messages, temperature, max_tokens, response_name="response.txt"):
         parts = [m["content"] for m in messages]
         prompt = "\n\n".join(parts)
         model = genai.GenerativeModel(self.model)
-        # —— RETRY LOOP WITH INITIAL BOOST —— #
-        BOOST_FACTOR = 4                   # ← change this to 3 or 4 to boost harder
-        attempts     = 4
-        attempt      = 0
-        result       = None
-        current_tok  = max_tokens * BOOST_FACTOR
+        
+        # RETRY LOOP WITH INITIAL BOOST
+        BOOST_FACTOR = 4
+        attempts = 4
+        attempt = 0
+        result = None
+        current_tok = max_tokens * BOOST_FACTOR
 
         while attempt < attempts:
             response = model.generate_content(
@@ -113,27 +142,27 @@ class UnifiedClient:
                     result = getattr(cand, 'content', None) or getattr(cand, 'text', "")
                 else:
                     # warn and prepare to retry
-                    print(f"⚠️ Attempt {attempt+1}: no text/candidates at {max_tokens} tokens")
+                    print(f"⚠️ Attempt {attempt+1}: no text/candidates at {current_tok} tokens")
                     result = None
-            # if we got something non‐empty, break out
+            # if we got something non-empty, break out
             if result:
                 break
             # otherwise shrink the budget and retry
-            max_tokens = max(256, max_tokens // 2)
+            current_tok = max(256, current_tok // 2)
             attempt += 1
-            print(f"🔄 Retrying Gemini with max_output_tokens={max_tokens}")
+            print(f"🔄 Retrying Gemini with max_output_tokens={current_tok}")
 
         if not result:
             # after exhausting retries, fall back to empty array
             print("⚠️ All retries failed; returning empty array")
             result = "[]"
 
-        with open("Payloads/gemini_response.txt", "w", encoding="utf-8") as rf:
+        with open(f"Payloads/{response_name}", "w", encoding="utf-8") as rf:
             rf.write(result)
 
         return result
 
-    def _send_openai_compatible(self, messages, temperature, max_tokens, base_url):
+    def _send_openai_compatible(self, messages, temperature, max_tokens, base_url, response_name="response.txt"):
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}"
@@ -157,12 +186,12 @@ class UnifiedClient:
         choice = json_resp["choices"][0]
         result = choice.get("message", {}).get("content") or choice.get("content", "")
 
-        with open("Payloads/openai_compatible_response.txt", "w", encoding="utf-8") as rf:
+        with open(f"Payloads/{response_name}", "w", encoding="utf-8") as rf:
             rf.write(result)
 
         return result
 
-    def _send_anthropic(self, messages, temperature, max_tokens):
+    def _send_anthropic(self, messages, temperature, max_tokens, response_name="response.txt"):
         headers = {
             "Content-Type": "application/json",
             "x-api-key": self.api_key,
@@ -198,7 +227,8 @@ class UnifiedClient:
             result = "".join(part.get("text", "") for part in raw)
         else:
             result = str(raw)
-        with open("Payloads/anthropic_response.txt", "w", encoding="utf-8") as rf:
+            
+        with open(f"Payloads/{response_name}", "w", encoding="utf-8") as rf:
             rf.write(str(result))
 
         return result
