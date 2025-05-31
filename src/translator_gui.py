@@ -271,6 +271,10 @@ class TranslatorGUI:
         self.loc_trim = tb.Entry(self.frame, width=6)
         self.loc_trim.insert(0, str(self.config.get('locations_trim_count', 1)))
 
+        # Emergency restore
+        self.emergency_restore_var = tk.BooleanVar(
+        value=self.config.get('emergency_paragraph_restore', True)  # Default to enabled
+)
         # API Key - FIXED: Load from config properly  
         tb.Label(self.frame, text="OpenAI / Gemini API Key:").grid(row=8, column=0, sticky=tk.W, padx=5, pady=5)
         self.api_key_entry = tb.Entry(self.frame, show='*')
@@ -457,7 +461,8 @@ class TranslatorGUI:
                     'EPUB_OUTPUT_DIR': os.getcwd(),
                     # ─── NEW: Add environment variables for new toggles ───
                     'DISABLE_SYSTEM_PROMPT': "1" if self.disable_system_prompt_var.get() else "0",
-                    'DISABLE_AUTO_GLOSSARY': "1" if self.disable_auto_glossary_var.get() else "0"
+                    'DISABLE_AUTO_GLOSSARY': "1" if self.disable_auto_glossary_var.get() else "0",
+                    'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var.get() else "0"
                 })
                 
                 # Set chapter range if specified
@@ -876,8 +881,8 @@ class TranslatorGUI:
 
     def open_other_settings(self):
         top = tk.Toplevel(self.master)
-        top.title("Advanced Settings")
-        top.geometry("400x370")
+        top.title("Other Settings")
+        top.geometry("550x550")  # Increased height for new toggle
 
         # Rolling summary checkbox  
         tb.Checkbutton(top, text="Use Rolling Summary", variable=self.rolling_summary_var,
@@ -891,26 +896,48 @@ class TranslatorGUI:
         # Add separator
         ttk.Separator(top, orient='horizontal').pack(fill='x', padx=10, pady=10)
         
-        # Disable Hardcoded Prompts checkbox (removes "You are a professional translator..." prefix)
+        # Disable Hardcoded Prompts checkbox
         tb.Checkbutton(top, text="Disable Hardcoded Prompts", variable=self.disable_system_prompt_var,
                        bootstyle="round-toggle").pack(anchor=tk.W, padx=10, pady=10)
         
         # Disable Auto Glossary checkbox
         tb.Checkbutton(top, text="Disable Auto Glossary", variable=self.disable_auto_glossary_var,
                        bootstyle="round-toggle").pack(anchor=tk.W, padx=10, pady=10)
+        
+        # Add separator before emergency restore section
+        ttk.Separator(top, orient='horizontal').pack(fill='x', padx=10, pady=10)
+        
+        # NEW: Emergency Paragraph Restoration checkbox with description
+        restoration_frame = tk.Frame(top)
+        restoration_frame.pack(anchor=tk.W, padx=10, pady=10, fill='x')
+        
+        tb.Checkbutton(restoration_frame, text="Emergency Paragraph Restoration", 
+                       variable=self.emergency_restore_var,
+                       bootstyle="round-toggle").pack(anchor=tk.W)
+        
+        # Add description label
+        desc_label = tk.Label(restoration_frame, 
+                             text="Automatically fix wall-of-text issues when AI ignores paragraph breaks",
+                             wraplength=350, justify=tk.LEFT, font=('TkDefaultFont', 9), fg='gray')
+        desc_label.pack(anchor=tk.W, padx=20, pady=(5, 0))
 
         def save_and_close():
             self.config['use_rolling_summary'] = self.rolling_summary_var.get()
             self.config['summary_role'] = self.summary_role_var.get()
             self.config['disable_system_prompt'] = self.disable_system_prompt_var.get()
             self.config['disable_auto_glossary'] = self.disable_auto_glossary_var.get()
+            self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()  # NEW
+            
             os.environ["USE_ROLLING_SUMMARY"] = "1" if self.rolling_summary_var.get() else "0"
             os.environ["SUMMARY_ROLE"] = self.summary_role_var.get()
+            os.environ["EMERGENCY_PARAGRAPH_RESTORE"] = "1" if self.emergency_restore_var.get() else "0"  # NEW
+            
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, ensure_ascii=False, indent=2)
             top.destroy()
 
         tb.Button(top, text="Save", command=save_and_close).pack(pady=20)
+
 
     def on_profile_select(self, event=None):
         """Load the selected profile's prompt into the text area."""
@@ -1153,6 +1180,7 @@ class TranslatorGUI:
             # ─── NEW: Save new toggle states ───
             self.config['disable_system_prompt'] = self.disable_system_prompt_var.get()
             self.config['disable_auto_glossary'] = self.disable_auto_glossary_var.get()
+            self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()
             
             _tl = self.token_limit_entry.get().strip()
             if _tl.isdigit():
