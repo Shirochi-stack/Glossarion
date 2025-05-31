@@ -80,176 +80,168 @@ def emergency_restore_paragraphs(text, original_html=None, verbose=True):
         original_html: The original HTML to compare structure (optional)
         verbose: Whether to print debug messages (default True)
     """
+    # Store original print function before any modifications
+    original_print = print
+    
     # Handle verbose mode
     if not verbose:
         # Suppress print statements if not verbose
-        original_print = print
         print = lambda *args, **kwargs: None
     
-    # Check if we already have proper paragraph structure
-    if text.count('</p>') >= 3:  # Assume 3+ paragraphs means structure is OK
-        if not verbose:
-            print = original_print
-        return text
-    
-    # If we have the original HTML, try to match its structure
-    if original_html:
-        original_para_count = original_html.count('<p>')
-        current_para_count = text.count('<p>')
+    try:
+        # Check if we already have proper paragraph structure
+        if text.count('</p>') >= 3:  # Assume 3+ paragraphs means structure is OK
+            return text
         
-        if current_para_count < original_para_count / 2:  # Less than half the expected paragraphs
-            print(f"⚠️ Paragraph mismatch! Original: {original_para_count}, Current: {current_para_count}")
-            print("🔧 Attempting emergency paragraph restoration...")
-    
-    # If no paragraph tags found and text is long, we have a problem
-    if '</p>' not in text and len(text) > 300:
-        print("❌ No paragraph tags found - applying emergency restoration")
-        
-        # First, try to preserve any existing HTML tags
-        has_html = '<' in text and '>' in text
-        
-        # Clean up any broken tags
-        text = text.replace('</p><p>', '</p>\n<p>')  # Ensure line breaks between paragraphs
-        
-        # Strategy 1: Look for double line breaks (often indicates paragraph break)
-        if '\n\n' in text:
-            parts = text.split('\n\n')
-            paragraphs = ['<p>' + part.strip() + '</p>' for part in parts if part.strip()]
-            if not verbose:
-                print = original_print
-            return '\n'.join(paragraphs)
-        
-        # Strategy 2: Look for dialogue patterns (quotes often start new paragraphs)
-        dialogue_pattern = r'(?<=[.!?])\s+(?=[""\u201c\u201d])'
-        if re.search(dialogue_pattern, text):
-            parts = re.split(dialogue_pattern, text)
-            paragraphs = []
-            for part in parts:
-                part = part.strip()
-                if part:
-                    # Check if it already has tags
-                    if not part.startswith('<p>'):
-                        part = '<p>' + part
-                    if not part.endswith('</p>'):
-                        part = part + '</p>'
-                    paragraphs.append(part)
-            if not verbose:
-                print = original_print
-            return '\n'.join(paragraphs)
-        
-        # Strategy 3: Split by sentence patterns
-        # Look for: period/exclamation/question mark + space + capital letter
-        sentence_boundary = r'(?<=[.!?])\s+(?=[A-Z\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af])'
-        sentences = re.split(sentence_boundary, text)
-        
-        if len(sentences) > 1:
-            # Group sentences into paragraphs
-            # Aim for 3-5 sentences per paragraph, or natural breaks
-            paragraphs = []
-            current_para = []
+        # If we have the original HTML, try to match its structure
+        if original_html:
+            original_para_count = original_html.count('<p>')
+            current_para_count = text.count('<p>')
             
-            for sentence in sentences:
-                sentence = sentence.strip()
-                if not sentence:
-                    continue
+            if current_para_count < original_para_count / 2:  # Less than half the expected paragraphs
+                print(f"⚠️ Paragraph mismatch! Original: {original_para_count}, Current: {current_para_count}")
+                print("🔧 Attempting emergency paragraph restoration...")
+        
+        # If no paragraph tags found and text is long, we have a problem
+        if '</p>' not in text and len(text) > 300:
+            print("❌ No paragraph tags found - applying emergency restoration")
+            
+            # First, try to preserve any existing HTML tags
+            has_html = '<' in text and '>' in text
+            
+            # Clean up any broken tags
+            text = text.replace('</p><p>', '</p>\n<p>')  # Ensure line breaks between paragraphs
+            
+            # Strategy 1: Look for double line breaks (often indicates paragraph break)
+            if '\n\n' in text:
+                parts = text.split('\n\n')
+                paragraphs = ['<p>' + part.strip() + '</p>' for part in parts if part.strip()]
+                return '\n'.join(paragraphs)
+            
+            # Strategy 2: Look for dialogue patterns (quotes often start new paragraphs)
+            dialogue_pattern = r'(?<=[.!?])\s+(?=[""\u201c\u201d])'
+            if re.search(dialogue_pattern, text):
+                parts = re.split(dialogue_pattern, text)
+                paragraphs = []
+                for part in parts:
+                    part = part.strip()
+                    if part:
+                        # Check if it already has tags
+                        if not part.startswith('<p>'):
+                            part = '<p>' + part
+                        if not part.endswith('</p>'):
+                            part = part + '</p>'
+                        paragraphs.append(part)
+                return '\n'.join(paragraphs)
+            
+            # Strategy 3: Split by sentence patterns
+            # Look for: period/exclamation/question mark + space + capital letter
+            sentence_boundary = r'(?<=[.!?])\s+(?=[A-Z\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af])'
+            sentences = re.split(sentence_boundary, text)
+            
+            if len(sentences) > 1:
+                # Group sentences into paragraphs
+                # Aim for 3-5 sentences per paragraph, or natural breaks
+                paragraphs = []
+                current_para = []
+                
+                for sentence in sentences:
+                    sentence = sentence.strip()
+                    if not sentence:
+                        continue
+                        
+                    current_para.append(sentence)
                     
-                current_para.append(sentence)
+                    # Create new paragraph if:
+                    # - We have 3-4 sentences
+                    # - Current sentence ends with closing quote
+                    # - Next sentence would start with quote
+                    # - Current sentence seems like scene break
+                    should_break = (
+                        len(current_para) >= 3 or
+                        sentence.rstrip().endswith(('"', '"', '"')) or
+                        '* * *' in sentence or
+                        '***' in sentence or
+                        '---' in sentence
+                    )
+                    
+                    if should_break:
+                        para_text = ' '.join(current_para)
+                        if not para_text.startswith('<p>'):
+                            para_text = '<p>' + para_text
+                        if not para_text.endswith('</p>'):
+                            para_text = para_text + '</p>'
+                        paragraphs.append(para_text)
+                        current_para = []
                 
-                # Create new paragraph if:
-                # - We have 3-4 sentences
-                # - Current sentence ends with closing quote
-                # - Next sentence would start with quote
-                # - Current sentence seems like scene break
-                should_break = (
-                    len(current_para) >= 3 or
-                    sentence.rstrip().endswith(('"', '"', '"')) or
-                    '* * *' in sentence or
-                    '***' in sentence or
-                    '---' in sentence
-                )
-                
-                if should_break:
+                # Don't forget the last paragraph
+                if current_para:
                     para_text = ' '.join(current_para)
                     if not para_text.startswith('<p>'):
                         para_text = '<p>' + para_text
                     if not para_text.endswith('</p>'):
                         para_text = para_text + '</p>'
                     paragraphs.append(para_text)
-                    current_para = []
+                
+                result = '\n'.join(paragraphs)
+                print(f"✅ Restored {len(paragraphs)} paragraphs from wall of text")
+                return result
             
-            # Don't forget the last paragraph
-            if current_para:
-                para_text = ' '.join(current_para)
-                if not para_text.startswith('<p>'):
-                    para_text = '<p>' + para_text
-                if not para_text.endswith('</p>'):
-                    para_text = para_text + '</p>'
-                paragraphs.append(para_text)
-            
-            result = '\n'.join(paragraphs)
-            print(f"✅ Restored {len(paragraphs)} paragraphs from wall of text")
-            if not verbose:
-                print = original_print
-            return result
+            # Strategy 4: Last resort - fixed size chunks
+            # Split into chunks of ~150-200 words
+            words = text.split()
+            if len(words) > 100:
+                paragraphs = []
+                words_per_para = max(100, len(words) // 10)  # Aim for ~10 paragraphs
+                
+                for i in range(0, len(words), words_per_para):
+                    chunk = ' '.join(words[i:i + words_per_para])
+                    if chunk.strip():
+                        paragraphs.append('<p>' + chunk.strip() + '</p>')
+                
+                return '\n'.join(paragraphs)
         
-        # Strategy 4: Last resort - fixed size chunks
-        # Split into chunks of ~150-200 words
-        words = text.split()
-        if len(words) > 100:
-            paragraphs = []
-            words_per_para = max(100, len(words) // 10)  # Aim for ~10 paragraphs
+        # If text has some structure but seems incomplete
+        elif '<p>' in text and text.count('<p>') < 3 and len(text) > 1000:
+            print("⚠️ Very few paragraphs for long text - checking if more breaks needed")
             
-            for i in range(0, len(words), words_per_para):
-                chunk = ' '.join(words[i:i + words_per_para])
-                if chunk.strip():
-                    paragraphs.append('<p>' + chunk.strip() + '</p>')
+            # Extract existing paragraphs
+            soup = BeautifulSoup(text, 'html.parser')
+            existing_paras = soup.find_all('p')
             
-            if not verbose:
-                print = original_print
-            return '\n'.join(paragraphs)
-    
-    # If text has some structure but seems incomplete
-    elif '<p>' in text and text.count('<p>') < 3 and len(text) > 1000:
-        print("⚠️ Very few paragraphs for long text - checking if more breaks needed")
-        
-        # Extract existing paragraphs
-        soup = BeautifulSoup(text, 'html.parser')
-        existing_paras = soup.find_all('p')
-        
-        # Check if any paragraph is too long
-        new_paragraphs = []
-        for para in existing_paras:
-            para_text = para.get_text()
-            if len(para_text) > 500:  # Paragraph seems too long
-                # Split this paragraph
-                sentences = re.split(r'(?<=[.!?])\s+', para_text)
-                if len(sentences) > 5:
-                    # Re-group into smaller paragraphs
-                    chunks = []
-                    current = []
-                    for sent in sentences:
-                        current.append(sent)
-                        if len(current) >= 3:
+            # Check if any paragraph is too long
+            new_paragraphs = []
+            for para in existing_paras:
+                para_text = para.get_text()
+                if len(para_text) > 500:  # Paragraph seems too long
+                    # Split this paragraph
+                    sentences = re.split(r'(?<=[.!?])\s+', para_text)
+                    if len(sentences) > 5:
+                        # Re-group into smaller paragraphs
+                        chunks = []
+                        current = []
+                        for sent in sentences:
+                            current.append(sent)
+                            if len(current) >= 3:
+                                chunks.append('<p>' + ' '.join(current) + '</p>')
+                                current = []
+                        if current:
                             chunks.append('<p>' + ' '.join(current) + '</p>')
-                            current = []
-                    if current:
-                        chunks.append('<p>' + ' '.join(current) + '</p>')
-                    new_paragraphs.extend(chunks)
+                        new_paragraphs.extend(chunks)
+                    else:
+                        new_paragraphs.append(str(para))
                 else:
                     new_paragraphs.append(str(para))
-            else:
-                new_paragraphs.append(str(para))
+            
+            return '\n'.join(new_paragraphs)
         
+        # Return original text if no restoration needed
+        return text
+        
+    finally:
+        # Always restore the original print function
         if not verbose:
             print = original_print
-        return '\n'.join(new_paragraphs)
-    
-    # Restore print function if verbose was disabled
-    if not verbose:
-        print = original_print
-    
-    # Return original text if no restoration needed
-    return text  
     
 def extract_epub_metadata(zf):
     """Extract metadata from EPUB file"""
