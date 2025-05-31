@@ -268,41 +268,29 @@ def get_content_hash(html_content):
 def clean_ai_artifacts(text, remove_artifacts=True):
     """Remove AI response artifacts from text - but ONLY when enabled"""
     if not remove_artifacts:
-        # If artifact removal is disabled, just return the text as-is
         return text
         
     original_text = text
     
-    # Philosophy: Only remove things that are CLEARLY AI artifacts
-    # Don't try to identify every possible header format - that's not scalable
-    
-    # 1. Remove [PART X/Y] markers - these are definitely artifacts
+    # 1. Remove [PART X/Y] markers
     text = re.sub(r'^\[PART\s+\d+/\d+\]\s*\n?', '', text, flags=re.IGNORECASE)
     
-    # 2. Check if the text starts with a VERY CLEAR AI response pattern
-    # These are patterns that would NEVER appear in actual chapter content
+    # 2. Remove clear AI response patterns
     clear_ai_prefixes = [
-        # AI acknowledgments with translation intent
         r'^(?:Okay|Sure|Understood|Of course|Got it|Alright|Certainly),?\s+(?:I\'ll|I will|let me|here\'s|here is)\s+(?:translate|help|assist)',
-        # Direct translation announcements
         r'^(?:I\'ll translate|I will translate|Let me translate|Here\'s the translation|Here is the translation)',
-        # System/role markers with AI responses
         r'^(?:System|Assistant|AI|User|Human|Model)\s*:\s*(?:Okay|Sure|I\'ll|Let me)',
-        # Translation notes that are clearly meta
         r'^(?:Note|Translation note|Translator\'s note)\s*:\s*(?:I\'ve|I have|I will|The following)',
     ]
     
     for pattern in clear_ai_prefixes:
         match = re.match(pattern, text.strip(), re.IGNORECASE)
         if match:
-            # Remove the AI prefix and continue checking
             text = text[len(match.group(0)):].strip()
             break
     
-    # 3. Remove JSON artifacts ONLY if they're at the very beginning AND contain "role"
+    # 3. Remove JSON artifacts
     if text.strip().startswith(('{', '[')) and '"role"' in text[:200]:
-        # This is likely a JSON artifact from the AI
-        # Find the end of the JSON
         bracket_stack = []
         json_end = -1
         
@@ -323,20 +311,16 @@ def clean_ai_artifacts(text, remove_artifacts=True):
         if json_end > 0 and json_end < len(text) - 1:
             text = text[json_end + 1:].strip()
     
-    # 4. Remove markdown code fences ONLY if they appear to wrap JSON or are at the very start
+    # 4. Remove markdown code fences
     if text.strip().startswith('```'):
-        # Check if this is a code fence wrapping JSON or the entire content
         code_fence_match = re.match(r'^```(?:json|html|xml)?\s*\n(.*?)\n```', text.strip(), re.DOTALL)
         if code_fence_match:
             inner_content = code_fence_match.group(1)
-            # Only remove if it's JSON or if there's content after the fence
             if '"role"' in inner_content or text.strip().endswith('```'):
                 text = inner_content
     
-    # 5. Clean up any glossary JSON arrays that clearly leaked through
+    # 5. Remove glossary JSON arrays
     if text.strip().startswith('[') and '"original_name"' in text[:500] and '"traits"' in text[:500]:
-        # This is definitely a glossary JSON response
-        # Find the end of the array and remove it
         bracket_count = 0
         for i, char in enumerate(text):
             if char == '[':
@@ -348,20 +332,72 @@ def clean_ai_artifacts(text, remove_artifacts=True):
                         text = text[i + 1:].strip()
                     break
     
-    # 6. Remove empty lines at the start only
+    # 6. Check for AI artifacts before HTML headers
+    header_patterns = [
+        r'<h[1-6][^>]*>',  # HTML headers
+        r'Chapter\s+\d+',   # Plain text chapter markers
+        r'第\s*\d+\s*[章节話话回]',  # Chinese chapter markers
+        r'제\s*\d+\s*[장화]',  # Korean chapter markers
+    ]
+    
+    # Find the first header in the text
+    first_header_pos = float('inf')
+    for pattern in header_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match and match.start() < first_header_pos:
+            first_header_pos = match.start()
+    
+    # If we found a header and there's text before it
+    if first_header_pos < float('inf') and first_header_pos > 0:
+        pre_header_text = text[:first_header_pos].strip()
+        
+        # Check if the pre-header text looks like AI commentary
+        ai_commentary_patterns = [
+            r'(?:Here\'s|Here is|This is|I\'ve translated)',
+            r'(?:The following|Below is|Find below)',
+            r'(?:Translation of|Translated from)',
+            r'(?:Chapter \d+ of|From the)',
+            r'(?:Continuing with|Moving on to)',
+        ]
+        
+        found_ai_commentary = False
+        for pattern in ai_commentary_patterns:
+            if re.search(pattern, pre_header_text, re.IGNORECASE):
+                # Remove everything before the header
+                text = text[first_header_pos:]
+                print(f"✂️ Removed AI commentary before header: '{pre_header_text[:50]}...'")
+                found_ai_commentary = True
+                break
+        
+        # Also check if pre-header text is suspiciously short (likely AI artifact)
+        if not found_ai_commentary and len(pre_header_text) < 100 and not re.search(r'<[^>]+>', pre_header_text):
+            # Short non-HTML text before header is likely an artifact
+            text = text[first_header_pos:]
+            print(f"✂️ Removed short text before header: '{pre_header_text}'")
+    
+    # 7. Remove empty lines at the start
     text = re.sub(r'^\s*\n+', '', text, count=1)
     
-    # 7. Final safety check: if we removed everything or almost everything, restore original
-    # But keep obvious AI prefix removals
+    # 8. Remove any remaining "Here's the translation:" type phrases
+    simple_ai_phrases = [
+        r'^Here\'s the (?:translated |translation[:\s])',
+        r'^The translated (?:chapter|text)[:\s]',
+        r'^Translation[:\s]',
+        r'^Translated[:\s]',
+    ]
+    
+    for phrase in simple_ai_phrases:
+        text = re.sub(phrase, '', text.strip(), flags=re.IGNORECASE)
+    
+    # 9. Final safety check
     if len(text.strip()) < 10 and len(original_text.strip()) > 50:
         text = original_text
-        # Still remove the most obvious AI acknowledgments
         text = re.sub(
             r'^(?:Okay|Sure|Understood),\s+(?:I\'ll|I will)\s+translate[^.!?\n]*?[\n\r]+',
             '', text, flags=re.IGNORECASE, count=1
         )
     
-    return text
+    return text.strip()
 
 
 def detect_and_wrap_headers(text):
@@ -1029,7 +1065,7 @@ def main(log_callback=None, stop_callback=None):
     CONTEXTUAL = os.getenv("CONTEXTUAL", "1") == "1"
     DELAY = int(os.getenv("SEND_INTERVAL_SECONDS", "2"))
     SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "").strip()
-    REMOVE_HEADER = os.getenv("REMOVE_HEADER", "0") == "1"
+    REMOVE_AI_ARTIFACTS = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
     TEMP = float(os.getenv("TRANSLATION_TEMPERATURE", "0.3"))
     HIST_LIMIT = int(os.getenv("TRANSLATION_HISTORY_LIMIT", "20"))
     MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
@@ -1042,9 +1078,9 @@ def main(log_callback=None, stop_callback=None):
         print("⚠️ Emergency paragraph restoration is DISABLED")
     
     # Add debug logging
-    print(f"[DEBUG] REMOVE_HEADER environment variable: {os.getenv('REMOVE_HEADER', 'NOT SET')}")
-    print(f"[DEBUG] REMOVE_HEADER parsed value: {REMOVE_HEADER}")
-    if REMOVE_HEADER:
+    print(f"[DEBUG] REMOVE_AI_ARTIFACTS environment variable: {os.getenv('REMOVE_AI_ARTIFACTS', 'NOT SET')}")
+    print(f"[DEBUG] REMOVE_AI_ARTIFACTS parsed value: {REMOVE_AI_ARTIFACTS}")
+    if REMOVE_AI_ARTIFACTS:
         print("⚠️ AI artifact removal is ENABLED - will clean AI response artifacts")
     else:
         print("✅ AI artifact removal is DISABLED - preserving all content as-is")
@@ -1396,14 +1432,14 @@ def main(log_callback=None, stop_callback=None):
                         print(f"    [WARN] Output was truncated!")
                     
                     # Clean AI artifacts ONLY if the toggle is enabled
-                    if REMOVE_HEADER:
+                    if REMOVE_AI_ARTIFACTS:
                         result = clean_ai_artifacts(result)
                     
                     if EMERGENCY_RESTORE:
                         result = emergency_restore_paragraphs(result, chunk_html)
                     
                     # Additional cleaning if remove header is enabled
-                    if REMOVE_HEADER:
+                    if REMOVE_AI_ARTIFACTS:
                         # Remove any remaining JSON or artifacts
                         if result.strip().startswith('{') or result.strip().startswith('['):
                             # Find first non-JSON line
@@ -1528,7 +1564,7 @@ def main(log_callback=None, stop_callback=None):
         cleaned = re.sub(r"\s*```$", "", cleaned, flags=re.MULTILINE)
 
         # Final artifact cleanup - NOW RESPECTS THE TOGGLE
-        cleaned = clean_ai_artifacts(cleaned, remove_artifacts=REMOVE_HEADER)
+        cleaned = clean_ai_artifacts(cleaned, remove_artifacts=REMOVE_AI_ARTIFACTS)
 
         # Debug the final result
         if idx < 3:  # Debug first 3 chapters
