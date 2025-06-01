@@ -1232,7 +1232,7 @@ class TranslatorGUI:
             self.config['glossary_temperature'] = float(self.glossary_temp.get())
             self.config['glossary_history_limit'] = int(self.glossary_history.get())
             self.config['api_key'] = self.api_key_entry.get()
-            self.config['remove_ai_artifacts'] = self.REMOVE_AI_ARTIFACTS_var.get()
+            self.config['REMOVE_AI_ARTIFACTS'] = self.REMOVE_AI_ARTIFACTS_var.get()
             self.config['chapter_range'] = self.chapter_range_entry.get().strip()
             self.config['use_rolling_summary'] = self.rolling_summary_var.get()
             self.config['summary_role'] = self.summary_role_var.get()
