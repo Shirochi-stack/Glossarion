@@ -1542,44 +1542,7 @@ def main(log_callback=None, stop_callback=None):
                         reset_on_limit=True
                     )
 
-                    # Log if history was reset
-                    if will_reset and CONTEXTUAL:
-                        print(f"🔄 History was reset after {HIST_LIMIT} exchanges")
-                        if check_stop():
-                            print(f"❌ Translation stopped during summary generation for chapter {idx+1}")
-                            return
-                            
-                        # Generate summary
-                        recent_entries = [h for h in history[-2:] if h["role"] == "assistant"]
-                        summary_prompt = (
-                            "Summarize the key events, tone, and terminology used in the following translation.\n"
-                            "The summary will be used to maintain consistency in the next chapter.\n\n"
-                            + "\n\n".join(e["content"] for e in recent_entries)
-                        )
 
-                        summary_msgs = [
-                            {"role": "system", "content": "You are a summarizer."},
-                            {"role": "user", "content": summary_prompt}
-                        ]
-                        
-                        summary_resp, _ = send_with_interrupt(
-                            summary_msgs, client, TEMP, MAX_OUTPUT_TOKENS, check_stop
-                        )
-
-                        # Save summary
-                        summary_file = os.path.join(out, "rolling_summary.txt")
-                        with open(summary_file, "w", encoding="utf-8") as sf:
-                            sf.write(summary_resp.strip())
-
-                        # Inject summary into base prompt
-                        base_msg.insert(1, {
-                            "role": os.getenv("SUMMARY_ROLE", "user"),
-                            "content": (
-                                "Here is a concise summary of the previous chapter. "
-                                "Use this to ensure accurate tone, terminology, and character continuity:\n\n"
-                                f"{summary_resp.strip()}"
-                            )
-                        })
 
                     # Delay between chunks/API calls
                     if chunk_idx < total_chunks:
