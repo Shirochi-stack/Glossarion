@@ -272,67 +272,7 @@ def clean_ai_artifacts(text, remove_artifacts=True):
         
     original_text = text
     
-    # 1. Remove [PART X/Y] markers
-    text = re.sub(r'^\[PART\s+\d+/\d+\]\s*\n?', '', text, flags=re.IGNORECASE)
-    
-    # 2. Remove clear AI response patterns
-    clear_ai_prefixes = [
-        r'^(?:Okay|Sure|Understood|Of course|Got it|Alright|Certainly),?\s+(?:I\'ll|I will|let me|here\'s|here is)\s+(?:translate|help|assist)',
-        r'^(?:I\'ll translate|I will translate|Let me translate|Here\'s the translation|Here is the translation)',
-        r'^(?:System|Assistant|AI|User|Human|Model)\s*:\s*(?:Okay|Sure|I\'ll|Let me)',
-        r'^(?:Note|Translation note|Translator\'s note)\s*:\s*(?:I\'ve|I have|I will|The following)',
-    ]
-    
-    for pattern in clear_ai_prefixes:
-        match = re.match(pattern, text.strip(), re.IGNORECASE)
-        if match:
-            text = text[len(match.group(0)):].strip()
-            break
-    
-    # 3. Remove JSON artifacts
-    if text.strip().startswith(('{', '[')) and '"role"' in text[:200]:
-        bracket_stack = []
-        json_end = -1
-        
-        for i, char in enumerate(text):
-            if char in '{[':
-                bracket_stack.append(char)
-            elif char == '}' and bracket_stack and bracket_stack[-1] == '{':
-                bracket_stack.pop()
-                if not bracket_stack:
-                    json_end = i
-                    break
-            elif char == ']' and bracket_stack and bracket_stack[-1] == '[':
-                bracket_stack.pop()
-                if not bracket_stack:
-                    json_end = i
-                    break
-        
-        if json_end > 0 and json_end < len(text) - 1:
-            text = text[json_end + 1:].strip()
-    
-    # 4. Remove markdown code fences
-    if text.strip().startswith('```'):
-        code_fence_match = re.match(r'^```(?:json|html|xml)?\s*\n(.*?)\n```', text.strip(), re.DOTALL)
-        if code_fence_match:
-            inner_content = code_fence_match.group(1)
-            if '"role"' in inner_content or text.strip().endswith('```'):
-                text = inner_content
-    
-    # 5. Remove glossary JSON arrays
-    if text.strip().startswith('[') and '"original_name"' in text[:500] and '"traits"' in text[:500]:
-        bracket_count = 0
-        for i, char in enumerate(text):
-            if char == '[':
-                bracket_count += 1
-            elif char == ']':
-                bracket_count -= 1
-                if bracket_count == 0:
-                    if i < len(text) - 1:
-                        text = text[i + 1:].strip()
-                    break
-    
-    # 6. Check for AI artifacts before HTML headers
+    # Find the first header tag (h1-h6) or chapter marker
     header_patterns = [
         r'<h[1-6][^>]*>',  # HTML headers
         r'Chapter\s+\d+',   # Plain text chapter markers
@@ -340,204 +280,41 @@ def clean_ai_artifacts(text, remove_artifacts=True):
         r'제\s*\d+\s*[장화]',  # Korean chapter markers
     ]
     
-    # Find the first header in the text
+    # Find the position of the first header
     first_header_pos = float('inf')
     for pattern in header_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match and match.start() < first_header_pos:
             first_header_pos = match.start()
     
-    # If we found a header and there's text before it
+    # If we found a header and there's content before it
     if first_header_pos < float('inf') and first_header_pos > 0:
         pre_header_text = text[:first_header_pos].strip()
         
-        # Check if the pre-header text looks like AI commentary
-        ai_commentary_patterns = [
-            r'(?:Here\'s|Here is|This is|I\'ve translated)',
-            r'(?:The following|Below is|Find below)',
-            r'(?:Translation of|Translated from)',
-            r'(?:Chapter \d+ of|From the)',
-            r'(?:Continuing with|Moving on to)',
-        ]
-        
-        found_ai_commentary = False
-        for pattern in ai_commentary_patterns:
-            if re.search(pattern, pre_header_text, re.IGNORECASE):
-                # Remove everything before the header
-                text = text[first_header_pos:]
-                print(f"✂️ Removed AI commentary before header: '{pre_header_text[:50]}...'")
-                found_ai_commentary = True
-                break
-        
-        # Also check if pre-header text is suspiciously short (likely AI artifact)
-        if not found_ai_commentary and len(pre_header_text) < 100 and not re.search(r'<[^>]+>', pre_header_text):
-            # Short non-HTML text before header is likely an artifact
-            text = text[first_header_pos:]
-            print(f"✂️ Removed short text before header: '{pre_header_text}'")
+        # If pre-header text exists and looks like AI artifacts
+        if pre_header_text and len(pre_header_text) < 500:  # Reasonable length for AI preamble
+            # Check if it contains typical AI phrases
+            ai_patterns = [
+                r'(?:Sure|Okay|Understood|Of course|Got it|Alright|Certainly)',
+                r'(?:I\'ll|I will|let me|here\'s|here is)',
+                r'(?:translate|help|assist)',
+                r'(?:System|Assistant|AI|User|Human|Model)\s*:',
+                r'^\[PART\s+\d+/\d+\]',
+                r'Translation note:',
+                r'Here\'s the translation',
+            ]
+            
+            # If it matches AI patterns, remove everything before the header
+            for pattern in ai_patterns:
+                if re.search(pattern, pre_header_text, re.IGNORECASE):
+                    cleaned_text = text[first_header_pos:]
+                    print(f"✂️ Removed {first_header_pos} chars of AI artifacts before header")
+                    return cleaned_text
     
-    # 7. Remove empty lines at the start
-    text = re.sub(r'^\s*\n+', '', text, count=1)
-    
-    # 8. Remove any remaining "Here's the translation:" type phrases
-    simple_ai_phrases = [
-        r'^Here\'s the (?:translated |translation[:\s])',
-        r'^The translated (?:chapter|text)[:\s]',
-        r'^Translation[:\s]',
-        r'^Translated[:\s]',
-    ]
-    
-    for phrase in simple_ai_phrases:
-        text = re.sub(phrase, '', text.strip(), flags=re.IGNORECASE)
-    
-    # 9. Final safety check
-    if len(text.strip()) < 10 and len(original_text.strip()) > 50:
-        text = original_text
-        text = re.sub(
-            r'^(?:Okay|Sure|Understood),\s+(?:I\'ll|I will)\s+translate[^.!?\n]*?[\n\r]+',
-            '', text, flags=re.IGNORECASE, count=1
-        )
-    
-    return text.strip()
-
-
-def detect_and_wrap_headers(text):
-    """
-    Detect plain text headers and wrap them in proper HTML header tags.
-    This is especially useful for CJK novels where headers might be plain text.
-    """
-    # Don't process if we already have HTML headers
-    if re.search(r'<h[1-6][^>]*>', text[:500]):  # Only check the beginning
-        return text
-    
-    # Check if the first line/element looks like a header
-    lines = text.strip().split('\n')
-    if not lines:
-        return text
-    
-    first_line = lines[0].strip()
-    
-    # Remove any HTML tags for analysis
-    first_line_text = re.sub(r'<[^>]+>', '', first_line).strip()
-    
-    # Heuristics to determine if this is likely a header:
-    # 1. It's relatively short (headers are usually < 100 chars)
-    # 2. It doesn't end with typical sentence punctuation
-    # 3. It's followed by a break or significant whitespace
-    # 4. It contains chapter/episode markers OR looks like a title
-    
-    is_likely_header = (
-        len(first_line_text) < 100 and
-        first_line_text and
-        not first_line_text.endswith(('.', '。', '？', '！', '?', '!')) and
-        (
-            # Has chapter/episode markers
-            re.search(r'(?:Chapter|第|제|その|Episode|エピソード|에피소드|Part|Ch\.|C\d+|E\d+|Ep\d+)', first_line_text, re.IGNORECASE) or
-            # Has number markers
-            re.search(r'(?:^\d+|[-:：]\s*\d+$|\d+\s*[-:：])', first_line_text) or
-            # Is followed by HTML breaks
-            '<br' in first_line or '<hr' in first_line or
-            # Is short and starts with capital/CJK
-            (len(first_line_text) < 50 and (first_line_text[0].isupper() or ord(first_line_text[0]) > 127))
-        )
-    )
-    
-    if is_likely_header and not first_line.startswith('<h'):
-        # Extract just the text content for the header
-        header_text = first_line_text
-        
-        # Reconstruct the text with the header wrapped
-        remaining_lines = lines[1:] if len(lines) > 1 else []
-        
-        # Check if the first line had HTML breaks that should go after the header
-        breaks = ''
-        if '<br' in first_line or '<hr' in first_line:
-            # Extract the breaks
-            breaks = re.findall(r'(?:<br\s*/?>|<hr\s*/?>)+', first_line)
-            breaks = ''.join(breaks)
-        
-        new_text = f'<h2>{header_text}</h2>{breaks}'
-        if remaining_lines:
-            new_text += '\n' + '\n'.join(remaining_lines)
-        
-        print(f"✅ Wrapped header in HTML: <h2>{header_text[:50]}{'...' if len(header_text) > 50 else ''}</h2>")
-        return new_text
-    
+    # If no headers found or no AI artifacts detected, return original
     return text
 
 
-def restore_missing_headers(translated_text, original_html):
-    """
-    Enhanced version that better preserves headers including custom ones.
-    """
-    # Parse both texts
-    original_soup = BeautifulSoup(original_html, 'html.parser')
-    trans_soup = BeautifulSoup(translated_text, 'html.parser')
-    
-    # Find all headers in original
-    original_headers = original_soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
-    if not original_headers:
-        return translated_text  # No headers to restore
-    
-    # Check if translation has any headers
-    trans_headers = trans_soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
-    
-    # If original has headers but translation doesn't, we need to restore them
-    if original_headers and not trans_headers:
-        print("⚠️ Headers missing in translation - attempting restoration")
-        
-        # Get the first header from original
-        first_header = original_headers[0]
-        header_tag = first_header.name
-        
-        # Get the translation text
-        trans_text = translated_text.strip()
-        lines = trans_text.split('\n')
-        
-        # Check if the first line looks like it could be a header
-        # (short, no HTML tags, not starting with lowercase)
-        if lines and len(lines[0]) < 200 and not lines[0].strip().startswith('<') and lines[0].strip() and lines[0].strip()[0].isupper():
-            # This first line is probably the header
-            header_text = lines[0].strip()
-            remaining_lines = lines[1:] if len(lines) > 1 else []
-            
-            # Reconstruct with proper header tag
-            restored = f'<{header_tag}>{header_text}</{header_tag}>\n'
-            if remaining_lines:
-                restored += '\n'.join(remaining_lines)
-            
-            print(f"✅ Restored header: <{header_tag}>{header_text[:50]}...</{header_tag}>")
-            return restored
-        
-        # Alternative: Check if first paragraph might actually be the header
-        first_p = trans_soup.find('p')
-        if first_p:
-            p_text = first_p.get_text(strip=True)
-            # If it's short and looks like a title (no period at end, titlecase, etc)
-            if (len(p_text) < 100 and 
-                not p_text.endswith('.') and 
-                not p_text.endswith('。') and
-                p_text[0].isupper()):
-                
-                # Convert this paragraph to a header
-                first_p.name = header_tag
-                print(f"✅ Converted paragraph to header: <{header_tag}>{p_text[:50]}...</{header_tag}>")
-                return str(trans_soup)
-    
-    return translated_text
-    
-def debug_headers(text, label=""):
-    """Debug function to check header presence"""
-    soup = BeautifulSoup(text, 'html.parser')
-    headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
-    if headers:
-        print(f"[DEBUG-HEADERS] {label} - Found {len(headers)} headers:")
-        for h in headers[:3]:  # Show first 3
-            print(f"  - <{h.name}>{h.get_text(strip=True)[:50]}...</{h.name}>")
-    else:
-        print(f"[DEBUG-HEADERS] {label} - No headers found!")
-        # Check if header text exists but without tags
-        text_start = soup.get_text(strip=True)[:200]
-        print(f"  - Text start: {text_start[:100]}...")
         
 def extract_chapters(zf):
     """Extract chapters from EPUB file with robust duplicate detection"""
@@ -1595,9 +1372,6 @@ def main(log_callback=None, stop_callback=None):
         # Final artifact cleanup - NOW RESPECTS THE TOGGLE
         cleaned = clean_ai_artifacts(cleaned, remove_artifacts=REMOVE_AI_ARTIFACTS)
 
-        # Debug the final result
-        if idx < 3:  # Debug first 3 chapters
-            debug_headers(cleaned, f"Chapter {idx+1} - Final before save")
 
         # Write HTML file
         with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
