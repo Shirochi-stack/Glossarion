@@ -1402,10 +1402,15 @@ def main(log_callback=None, stop_callback=None):
                 trimmed = history[-HIST_LIMIT*2:]
             else:
                 trimmed = []
-                
-            # Build messages
+
+            # Build messages - FILTER OUT OLD SUMMARIES
             if base_msg:
-                msgs = base_msg + trimmed + [{"role": "user", "content": user_prompt}]
+                # Remove any existing summary messages if rolling summary is disabled
+                if os.getenv("USE_ROLLING_SUMMARY", "0") == "0":
+                    filtered_base = [msg for msg in base_msg if "summary of the previous" not in msg.get("content", "")]
+                    msgs = filtered_base + trimmed + [{"role": "user", "content": user_prompt}]
+                else:
+                    msgs = base_msg + trimmed + [{"role": "user", "content": user_prompt}]
             else:
                 if trimmed:
                     msgs = trimmed + [{"role": "user", "content": user_prompt}]
