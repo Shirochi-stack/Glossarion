@@ -304,10 +304,36 @@ class UnifiedClient:
         
         # Try to auto-detect context from messages
         messages_str = str(messages).lower()
-        if 'glossary' in messages_str or 'character' in messages_str:
+        
+        # Check for summary generation first (most specific)
+        if any(phrase in messages_str for phrase in [
+            'summarize the key events',
+            'concise summary',
+            'summary of the previous',
+            'create a concise summary',
+            'summarizer'
+        ]):
+            return "rolling_summary_payload.json", "rolling_summary_response.txt"
+        
+        # Check for glossary extraction
+        elif any(phrase in messages_str for phrase in [
+            'glossary extractor',
+            'extract character information',
+            'original_name',
+            'traits'
+        ]):
             return "glossary_payload.json", "glossary_response.txt"
-        elif 'translat' in messages_str:
+        
+        # Check for translation
+        elif any(phrase in messages_str for phrase in [
+            'translat',
+            'korean to english',
+            'japanese to english',
+            'chinese to english',
+            'novel translator'
+        ]):
             return "translation_payload.json", "translation_response.txt"
+        
         else:
             # Default generic names with timestamp
             import time
