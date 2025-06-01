@@ -83,6 +83,17 @@ def fallback_compile_epub(base_dir, log_callback=None):
         IMAGES_DIR = os.path.join(OUTPUT_DIR, "images")
         METADATA = os.path.join(OUTPUT_DIR, "metadata.json")
 
+        # Debug: Check what files exist
+        log(f"[DEBUG] Scanning directory: {OUTPUT_DIR}")
+        all_files = os.listdir(OUTPUT_DIR)
+        html_files = [f for f in all_files if f.startswith("response_") and f.endswith(".html")]
+        log(f"[DEBUG] Found {len(html_files)} translated HTML files")
+        
+        if not html_files:
+            log("❌ No translated HTML files found (files starting with 'response_' and ending with '.html')")
+            log(f"[DEBUG] Files in directory: {[f for f in all_files if f.endswith('.html')][:5]}...")
+            raise Exception("No translated chapters found to compile into EPUB")
+
         # Load metadata
         if os.path.exists(METADATA):
             try:
@@ -109,6 +120,7 @@ def fallback_compile_epub(base_dir, log_callback=None):
         spine = []
         toc = []
         processed_images = {}  # Track processed images to avoid duplicates
+        chapters_added = 0  # Track how many chapters we actually add
 
         # Embed images with better error handling
         image_files = []
@@ -123,6 +135,7 @@ def fallback_compile_epub(base_dir, log_callback=None):
                             safe_name = sanitize_filename(img)
                             image_files.append(safe_name)
                             processed_images[img] = safe_name
+                            log(f"[DEBUG] Found image: {img} -> {safe_name}")
             except OSError as e:
                 log(f"[WARNING] Error reading images directory: {e}")
 
@@ -173,26 +186,41 @@ def fallback_compile_epub(base_dir, log_callback=None):
                     with open(cover_path, 'rb') as fp:
                         cover_data = fp.read()
                     
-                    book.add_item(epub.EpubItem(
+                    # Create the cover image item
+                    cover_img = epub.EpubItem(
                         uid="cover-image",
                         file_name=f"images/{cover_file}",
                         media_type=mimetypes.guess_type(cover_path)[0] or "image/jpeg",
                         content=cover_data
-                    ))
+                    )
+                    book.add_item(cover_img)
                     
+                    # IMPORTANT: Set this image as the book's cover
+                    book.set_cover("cover.jpg", cover_data)
+                    
+                    # Also add cover page for readers that need it
                     cover_page = epub.EpubHtml(
                         title="Cover",
                         file_name="cover.xhtml",
                         lang=meta.get("language", "en")
                     )
                     cover_page.content = (
-                        "<html><body style='text-align:center;padding-top:50px;'>"
-                        f"<img src='images/{cover_file}' alt='Cover'/>"
-                        "</body></html>"
+                        '<!DOCTYPE html>'
+                        '<html xmlns="http://www.w3.org/1999/xhtml">'
+                        '<head><title>Cover</title></head>'
+                        '<body style="text-align:center;padding:0;margin:0;">'
+                        f'<img src="images/{cover_file}" alt="Cover" style="max-width:100%;height:auto;"/>'
+                        '</body></html>'
                     )
                     book.add_item(cover_page)
-                    spine.append(cover_page)
-                    toc.append(cover_page)
+                    
+                    # Add to spine and toc ONLY ONCE at the beginning
+                    spine.insert(0, cover_page)
+                    toc.insert(0, cover_page)
+                    chapters_added += 1
+                    
+                    log(f"✅ Set cover image: {cover_file}")
+                    
                 except (IOError, OSError) as e:
                     log(f"[WARNING] Failed to add cover image: {e}")
 
@@ -201,30 +229,38 @@ def fallback_compile_epub(base_dir, log_callback=None):
         chapter_seen = set()  # Track seen chapter numbers to avoid true duplicates
         
         try:
-            for fn in os.listdir(OUTPUT_DIR):
-                if fn.startswith("response_") and fn.endswith(".html"):
-                    m = re.match(r"response_(\d+)_", fn)
-                    if m:
-                        num = int(m.group(1))
-                        # Only add if we haven't seen this chapter number
-                        if num not in chapter_seen:
-                            chapter_tuples.append((num, fn))
-                            chapter_seen.add(num)
-                        else:
-                            log(f"[WARNING] Skipping duplicate chapter {num}: {fn}")
+            for fn in sorted(html_files):  # Use the html_files we already found
+                log(f"[DEBUG] Processing file: {fn}")
+                m = re.match(r"response_(\d+)_", fn)
+                if m:
+                    num = int(m.group(1))
+                    # Only add if we haven't seen this chapter number
+                    if num not in chapter_seen:
+                        chapter_tuples.append((num, fn))
+                        chapter_seen.add(num)
+                    else:
+                        log(f"[WARNING] Skipping duplicate chapter {num}: {fn}")
+                else:
+                    log(f"[WARNING] File doesn't match expected pattern: {fn}")
         except OSError as e:
             log(f"[ERROR] Failed to read output directory: {e}")
             raise
 
         # Sort chapters by actual number (handles missing chapters correctly)
         chapter_tuples.sort(key=lambda x: x[0])
+        log(f"[DEBUG] Found {len(chapter_tuples)} unique chapters to process")
 
         # Add chapters to book
         for num, fn in chapter_tuples:
             path = os.path.join(OUTPUT_DIR, fn)
             try:
+                log(f"[DEBUG] Reading chapter {num} from {fn}")
                 with open(path, 'r', encoding='utf-8') as f:
                     raw = f.read()
+                
+                if not raw.strip():
+                    log(f"[WARNING] Chapter {num} is empty, skipping")
+                    continue
                 
                 soup = BeautifulSoup(raw, 'html.parser')
                 
@@ -247,10 +283,19 @@ def fallback_compile_epub(base_dir, log_callback=None):
                 book.add_item(chap)
                 spine.append(chap)
                 toc.append(chap)
+                chapters_added += 1
+                log(f"✅ Added chapter {num}: {title}")
                 
             except (IOError, OSError) as e:
                 log(f"[WARNING] Failed to add chapter {num} from {fn}: {e}")
                 continue
+
+        # Check if we have any content
+        if chapters_added == 0:
+            log("❌ No chapters were successfully added to the EPUB")
+            raise Exception("No chapters could be added to the EPUB - all files were empty or unreadable")
+
+        log(f"[DEBUG] Total chapters added: {chapters_added}")
 
         # Optional gallery for extra images
         gallery_images = [img for img in image_files if img != cover_file]
@@ -275,21 +320,19 @@ def fallback_compile_epub(base_dir, log_callback=None):
 
         # Finalize TOC and spine
         book.toc = toc
-        if cover_file and 'cover_page' in locals():
-            chapter_spine = [item for item in spine if item is not cover_page]
-            book.spine = [cover_page, 'nav'] + chapter_spine
-        else:
-            book.spine = ['nav'] + spine
+        book.spine = ['nav'] + spine
 
         # Add navigation files
         book.add_item(epub.EpubNav())
         book.add_item(epub.EpubNcx())
 
         # Write out final EPUB with error handling
-        out_path = os.path.join(OUTPUT_DIR, "translated_fallback.epub")
+        base_name = os.path.basename(OUTPUT_DIR)
+        out_path = os.path.join(OUTPUT_DIR, f"{base_name}.epub")
         try:
+            log(f"[DEBUG] Writing EPUB to: {out_path}")
             epub.write_epub(out_path, book)
-            log(f"✅ Fallback EPUB created at: {out_path}")
+            log(f"✅ EPUB created at: {out_path}")
         except Exception as e:
             log(f"❌ Failed to write EPUB: {e}")
             raise
@@ -297,13 +340,3 @@ def fallback_compile_epub(base_dir, log_callback=None):
     except Exception as e:
         log(f"❌ EPUB compilation failed with error: {e}")
         raise
-
-if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python epub_converter.py [output_folder]")
-    else:
-        try:
-            fallback_compile_epub(sys.argv[1])
-        except Exception as e:
-            print(f"❌ Failed to compile EPUB: {e}")
-            sys.exit(1)
