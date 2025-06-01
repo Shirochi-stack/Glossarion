@@ -1463,22 +1463,83 @@ def main(log_callback=None, stop_callback=None):
                     # Increment completed chunks counter
                     chunks_completed += 1
                         
-                    # Update history using thread-safe manager with reset functionality
+                    # NEW: Check if we're about to reset history BEFORE appending
+                    will_reset = history_manager.will_reset_on_next_append(HIST_LIMIT if CONTEXTUAL else 0)
+
+                    # NEW: Generate rolling summary BEFORE history reset
+                    if will_reset and os.getenv("USE_ROLLING_SUMMARY", "0") == "1" and CONTEXTUAL:
+                        if check_stop():
+                            print(f"❌ Translation stopped during summary generation for chapter {idx+1}")
+                            return
+                        
+                        # Get current history before it's cleared
+                        current_history = history_manager.load_history()
+                        if len(current_history) >= 4:  # At least 2 exchanges
+                            # Extract recent assistant responses
+                            assistant_responses = []
+                            for h in current_history[-8:]:  # Last 4 exchanges
+                                if h.get("role") == "assistant":
+                                    assistant_responses.append(h["content"])
+                            
+                            if assistant_responses:
+                                # Generate summary
+                                summary_prompt = (
+                                    "Summarize the key events, characters, tone, and important details from these translations. "
+                                    "Focus on: character names/relationships, plot developments, and any special terminology used.\n\n"
+                                    + "\n---\n".join(assistant_responses[-3:])  # Last 3 responses
+                                )
+                                
+                                summary_msgs = [
+                                    {"role": "system", "content": "Create a concise summary for context continuity."},
+                                    {"role": "user", "content": summary_prompt}
+                                ]
+                                
+                                try:
+                                    summary_resp, _ = send_with_interrupt(
+                                        summary_msgs, client, TEMP, min(2000, MAX_OUTPUT_TOKENS), check_stop
+                                    )
+                                    
+                                    # Save summary to file
+                                    summary_file = os.path.join(out, "rolling_summary.txt")
+                                    with open(summary_file, "a", encoding="utf-8") as sf:  # Append mode
+                                        sf.write(f"\n\n=== Summary before chapter {idx+1}, chunk {chunk_idx} ===\n")
+                                        sf.write(summary_resp.strip())
+                                    
+                                    # Update base_msg to include summary
+                                    # First, remove any existing summary message
+                                    base_msg[:] = [msg for msg in base_msg if "summary of the previous" not in msg.get("content", "")]
+                                    
+                                    # Add new summary
+                                    summary_msg = {
+                                        "role": os.getenv("SUMMARY_ROLE", "user"),
+                                        "content": (
+                                            "Here is a summary of the previous context to maintain continuity:\n\n"
+                                            f"{summary_resp.strip()}"
+                                        )
+                                    }
+                                    
+                                    # Insert after system message
+                                    if base_msg and base_msg[0].get("role") == "system":
+                                        base_msg.insert(1, summary_msg)
+                                    else:
+                                        base_msg.insert(0, summary_msg)
+                                    
+                                    print(f"📝 Generated rolling summary before history reset")
+                                    
+                                except Exception as e:
+                                    print(f"⚠️ Failed to generate rolling summary: {e}")
+
+                    # NOW append to history (which may reset it)
                     history = history_manager.append_to_history(
                         user_prompt, 
                         result, 
-                        HIST_LIMIT if CONTEXTUAL else 0,  # 0 means no history
+                        HIST_LIMIT if CONTEXTUAL else 0,
                         reset_on_limit=True
                     )
 
-                    # Check if history was reset (will be only 2 entries if just reset)
-                    history_trimmed = len(history) == 2 and HIST_LIMIT > 0
-
-                    if history_trimmed:
-                        print(f"    [DBG] History was reset to maintain prompt adherence")
-
-                    # Handle rolling summary if enabled and history was reset
-                    if history_trimmed and os.getenv("USE_ROLLING_SUMMARY", "0") == "1":
+                    # Log if history was reset
+                    if will_reset and CONTEXTUAL:
+                        print(f"🔄 History was reset after {HIST_LIMIT} exchanges")
                         if check_stop():
                             print(f"❌ Translation stopped during summary generation for chapter {idx+1}")
                             return
