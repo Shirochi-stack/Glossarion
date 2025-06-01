@@ -55,7 +55,7 @@ class TranslatorGUI:
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
-        master.title("Glossarion v1.5.2")
+        master.title("Glossarion v1.5.3")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1400, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
@@ -124,8 +124,12 @@ class TranslatorGUI:
         # Append Glossary:
         self.append_glossary_var = tk.BooleanVar(
             value=self.config.get('append_glossary', True)  # Default to True
-        )        
+        )   
         
+        # Add after the other variable initializations
+        self.reinforcement_freq_var = tk.StringVar(
+            value=str(self.config.get('reinforcement_frequency', '10'))
+)
         # Default prompts
         self.default_prompts = {
             "korean": "You are a professional Korean to English novel translator, you must strictly output only English/HTML text while following these rules:\n- Use a context rich and natural translation style.\n- Retain honorifics, and suffixes like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
@@ -476,7 +480,9 @@ class TranslatorGUI:
                     'DISABLE_SYSTEM_PROMPT': "1" if self.disable_system_prompt_var.get() else "0",
                     'DISABLE_AUTO_GLOSSARY': "1" if self.disable_auto_glossary_var.get() else "0",
                     'APPEND_GLOSSARY': "1" if self.append_glossary_var.get() else "0",
-                    'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var.get() else "0"
+                    'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var.get() else "0",
+                    # In the os.environ.update section, add:
+                    'REINFORCEMENT_FREQUENCY': self.reinforcement_freq_var.get(),
                 })
                 
                 # Set chapter range if specified
@@ -792,8 +798,10 @@ class TranslatorGUI:
             # Call the EPUB converter function directly with callback
             fallback_compile_epub(folder, log_callback=self.append_log)
             
-            out_file = os.path.join(folder, "translated_fallback.epub")
-            self.append_log(f"✅ EPUB created at: {out_file}")
+            # Update to use the new filename format
+            base_name = os.path.basename(folder)
+            out_file = os.path.join(folder, f"{base_name}.epub")
+            # Remove the duplicate log message (epub_converter already logs success)
             messagebox.showinfo("EPUB Compilation Success", f"Created: {out_file}")
             
         except Exception as e:
@@ -896,7 +904,7 @@ class TranslatorGUI:
     def open_other_settings(self):
         top = tk.Toplevel(self.master)
         top.title("Other Settings")
-        top.geometry("550x650")  # Increased height for new toggle
+        top.geometry("600x900")  # Increased height for new control
 
         # Rolling summary checkbox  
         tb.Checkbutton(top, text="Use Rolling Summary", variable=self.rolling_summary_var,
@@ -906,6 +914,30 @@ class TranslatorGUI:
         tk.Label(top, text="Summary Role:").pack(anchor=tk.W, padx=10)
         ttk.Combobox(top, textvariable=self.summary_role_var,
                      values=["user", "system"], state="readonly").pack(anchor=tk.W, padx=10, pady=(0, 10))
+        
+        # Add separator
+        ttk.Separator(top, orient='horizontal').pack(fill='x', padx=10, pady=10)
+        
+        # NEW: Prompt Reinforcement Frequency
+        reinforce_frame = tk.Frame(top)
+        reinforce_frame.pack(anchor=tk.W, padx=10, pady=10, fill='x')
+        
+        tk.Label(reinforce_frame, text="Prompt Reinforcement Frequency:").pack(anchor=tk.W)
+        
+        freq_input_frame = tk.Frame(reinforce_frame)
+        freq_input_frame.pack(anchor=tk.W, padx=20, pady=(5, 0))
+        
+        tk.Label(freq_input_frame, text="Reinforce every").pack(side=tk.LEFT)
+        freq_entry = tb.Entry(freq_input_frame, width=6, textvariable=self.reinforcement_freq_var)
+        freq_entry.pack(side=tk.LEFT, padx=5)
+        tk.Label(freq_input_frame, text="messages (0 = disabled)").pack(side=tk.LEFT)
+        
+        # Add description
+        desc_label = tk.Label(reinforce_frame, 
+                         text="Periodically reminds the AI of your system prompt to maintain consistency.\n"
+                              "Lower = more frequent reminders. Set based on your model's needs.",
+                         wraplength=500, justify=tk.LEFT, font=('TkDefaultFont', 9), fg='gray')
+        desc_label.pack(anchor=tk.W, padx=20, pady=(5, 0))
         
         # Add separator
         ttk.Separator(top, orient='horizontal').pack(fill='x', padx=10, pady=10)
@@ -931,7 +963,7 @@ class TranslatorGUI:
         # Add separator before emergency restore section
         ttk.Separator(top, orient='horizontal').pack(fill='x', padx=10, pady=10)
         
-        # NEW: Emergency Paragraph Restoration checkbox with description
+        # Emergency Paragraph Restoration checkbox with description
         restoration_frame = tk.Frame(top)
         restoration_frame.pack(anchor=tk.W, padx=10, pady=10, fill='x')
         
@@ -951,11 +983,14 @@ class TranslatorGUI:
             self.config['disable_system_prompt'] = self.disable_system_prompt_var.get()
             self.config['disable_auto_glossary'] = self.disable_auto_glossary_var.get()
             self.config['append_glossary'] = self.append_glossary_var.get()
-            self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()            
+            self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()
+            self.config['reinforcement_frequency'] = int(self.reinforcement_freq_var.get())
+            
             os.environ["USE_ROLLING_SUMMARY"] = "1" if self.rolling_summary_var.get() else "0"
             os.environ["SUMMARY_ROLE"] = self.summary_role_var.get()
             os.environ["APPEND_GLOSSARY"] = "1" if self.append_glossary_var.get() else "0"
-            os.environ["EMERGENCY_PARAGRAPH_RESTORE"] = "1" if self.emergency_restore_var.get() else "0"  
+            os.environ["EMERGENCY_PARAGRAPH_RESTORE"] = "1" if self.emergency_restore_var.get() else "0"
+            os.environ["REINFORCEMENT_FREQUENCY"] = self.reinforcement_freq_var.get()
             
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, ensure_ascii=False, indent=2)
@@ -1207,6 +1242,8 @@ class TranslatorGUI:
             self.config['disable_auto_glossary'] = self.disable_auto_glossary_var.get()
             self.config['append_glossary'] = self.append_glossary_var.get()
             self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()
+            self.config['reinforcement_frequency'] = int(self.reinforcement_freq_var.get())
+
             
             _tl = self.token_limit_entry.get().strip()
             if _tl.isdigit():
