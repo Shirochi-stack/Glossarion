@@ -68,8 +68,13 @@ class PromptReinforcer:
         if context == 'glossary':
             return False  # Glossary extraction doesn't need reinforcement
             
-        # Check message count (more than 10 messages suggests ongoing conversation)
-        if len(messages) > 10:
+        # Get reinforcement frequency from environment
+        reinforce_freq = int(os.environ.get('REINFORCEMENT_FREQUENCY', '0'))
+        if reinforce_freq == 0:
+            return False  # Reinforcement disabled
+            
+        # Check message count
+        if len(messages) > reinforce_freq:
             return True
             
         # Check if this appears to be a translation task
@@ -77,49 +82,12 @@ class PromptReinforcer:
         return any(keyword in all_content for keyword in self.translation_keywords)
     
     def extract_key_rules(self, system_content: str) -> List[str]:
-        """Extract key rules from system prompt"""
-        rules = []
-        content_lower = system_content.lower()
-        
-        # Extract key translation rules
-        if 'retain honorifics' in content_lower or 'suffixes like' in content_lower:
-            rules.append("retain all honorifics and suffixes")
-        if 'preserve html' in content_lower or 'html tags' in content_lower:
-            rules.append("preserve ALL HTML tags exactly")
-        if 'context rich' in content_lower or 'natural translation' in content_lower:
-            rules.append("use natural, context-rich translation")
-        if 'original intent' in content_lower:
-            rules.append("preserve original intent and tone")
-        if 'onomatopoeia' in content_lower:
-            rules.append("retain onomatopoeia in Romaji")
-            
-        # Check for language-specific rules
-        if 'korean' in content_lower:
-            if '-nim' in system_content or '-ssi' in system_content:
-                rules.append("keep Korean honorifics (-nim, -ssi, etc.)")
-        elif 'japanese' in content_lower:
-            if '-san' in system_content or '-sama' in system_content:
-                rules.append("keep Japanese honorifics (-san, -sama, -chan, -kun)")
-        elif 'chinese' in content_lower:
-            if 'cultivation' in content_lower or 'xianxia' in content_lower:
-                rules.append("maintain cultivation/xianxia terminology")
-                
-        return rules
+        """Extract key rules from system prompt - kept for compatibility"""
+        return [system_content] if system_content else []
     
     def create_reinforcement_prompt(self, system_content: str, concise: bool = True) -> str:
-        """Create a reinforcement reminder"""
-        rules = self.extract_key_rules(system_content)
-        
-        if not rules:
-            return ""
-            
-        if concise:
-            return f"[REMINDER: {'; '.join(rules[:3])}]"  # Top 3 rules
-        else:
-            reminder = "IMPORTANT REMINDERS:\n"
-            for rule in rules:
-                reminder += f"• {rule}\n"
-            return reminder.strip()
+        """Just return the system prompt as-is for reinforcement"""
+        return system_content
 
 class UnifiedClient:
     def __init__(self, model: str, api_key: str):
@@ -205,13 +173,13 @@ class UnifiedClient:
         if not system_msg:
             return messages  # No system message to reinforce
             
-        # Determine reinforcement frequency
-        reinforce_every = 10  # Reinforce every 10 messages
-        if self.client_type == 'gemini':
-            reinforce_every = 5  # More frequent for Gemini
+        # Get reinforcement frequency from environment
+        reinforce_freq = int(os.environ.get('REINFORCEMENT_FREQUENCY', '10'))
+        if reinforce_freq == 0:
+            return messages  # Disabled
             
         # Check if it's time to reinforce
-        if self.message_count - self.last_reinforcement_count < reinforce_every:
+        if self.message_count - self.last_reinforcement_count < reinforce_freq:
             return messages
             
         self.last_reinforcement_count = self.message_count
