@@ -529,6 +529,10 @@ class TranslatorGUI:
                 # Print environment check right before calling
                 self.append_log(f"[DEBUG] Right before translation_main: MAX_INPUT_TOKENS = '{os.environ.get('MAX_INPUT_TOKENS', 'NOT SET')}'")
                 
+                # Ensure Payloads directory exists in current working directory
+                os.makedirs("Payloads", exist_ok=True)
+                self.append_log(f"[DEBUG] Created Payloads directory in: {os.getcwd()}")
+
                 # Call the translation main function directly with callbacks
                 translation_main(
                     log_callback=self.append_log,
