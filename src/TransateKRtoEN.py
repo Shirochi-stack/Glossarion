@@ -68,17 +68,157 @@ def get_instructions(lang):
     # Only return the technical requirement that applies to all languages
     return "Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title> ,<h1>, <h2>, <p>, <br>, <div>, etc."
 
-# Modifications for TransateKRtoEN.py
+def init_progress_tracking(payloads_dir):
+    """Initialize or load progress tracking with improved structure"""
+    PROGRESS_FILE = os.path.join(payloads_dir, "translation_progress.json")
+    
+    if os.path.exists(PROGRESS_FILE):
+        with open(PROGRESS_FILE, "r", encoding="utf-8") as pf:
+            prog = json.load(pf)
+        
+        # Migrate old format to new format if needed
+        if "chapters" not in prog:
+            prog["chapters"] = {}
+            
+            # Migrate from old completed list
+            for idx in prog.get("completed", []):
+                prog["chapters"][str(idx)] = {
+                    "status": "completed",
+                    "timestamp": None
+                }
+        
+        # Ensure all required fields exist
+        if "content_hashes" not in prog:
+            prog["content_hashes"] = {}
+        if "chapter_chunks" not in prog:
+            prog["chapter_chunks"] = {}
+            
+    else:
+        prog = {
+            "chapters": {},          # Main tracking: idx -> chapter info
+            "content_hashes": {},    # Content deduplication
+            "chapter_chunks": {},    # Chunk tracking for large chapters
+            "version": "2.0"         # Track format version
+        }
+    
+    return prog, PROGRESS_FILE
+
+def check_chapter_status(prog, chapter_idx, chapter_num, content_hash, output_dir):
+    """
+    Check if a chapter needs translation
+    Returns: (needs_translation, skip_reason, existing_file)
+    """
+    chapter_key = str(chapter_idx)
+    
+    # Check if we have any record of this chapter
+    if chapter_key in prog["chapters"]:
+        chapter_info = prog["chapters"][chapter_key]
+        
+        # Check if output file exists (and is not None)
+        output_file = chapter_info.get("output_file")
+        if output_file:  # Only check if output_file is not None
+            output_path = os.path.join(output_dir, output_file)
+            if os.path.exists(output_path):
+                # File exists, chapter is truly complete
+                return False, f"Chapter {chapter_num} already translated (file exists: {output_file})", output_file
+            else:
+                # File missing, needs re-translation
+                return True, None, None
+        elif chapter_info.get("status") == "in_progress":
+            # Chapter is currently being processed
+            return True, None, None
+    
+    # Check for duplicate content
+    if content_hash in prog["content_hashes"]:
+        duplicate_info = prog["content_hashes"][content_hash]
+        duplicate_idx = duplicate_info.get("chapter_idx")
+        
+        # Check if the duplicate's file exists
+        if str(duplicate_idx) in prog["chapters"]:
+            dup_chapter = prog["chapters"][str(duplicate_idx)]
+            dup_output_file = dup_chapter.get("output_file")
+            if dup_output_file:  # Only check if not None
+                dup_path = os.path.join(output_dir, dup_output_file)
+                if os.path.exists(dup_path):
+                    return False, f"Chapter {chapter_num} has same content as chapter {duplicate_info.get('chapter_num')} (already translated)", None
+    
+    # Chapter needs translation
+    return True, None, None
+
+def update_progress(prog, chapter_idx, chapter_num, content_hash, output_filename=None, status="completed"):
+    """Update progress tracking after successful translation"""
+    chapter_key = str(chapter_idx)
+    
+    # Update main chapter tracking
+    prog["chapters"][chapter_key] = {
+        "chapter_num": chapter_num,
+        "content_hash": content_hash,
+        "output_file": output_filename,  # Can be None for in_progress
+        "status": status,
+        "timestamp": time.time()
+    }
+    
+    # Only update content hash mapping if we have a completed file
+    if output_filename and status == "completed":
+        prog["content_hashes"][content_hash] = {
+            "chapter_idx": chapter_idx,
+            "chapter_num": chapter_num,
+            "output_file": output_filename
+        }
+    
+    return prog
+
+def cleanup_progress_tracking(prog, output_dir):
+    """Remove entries for files that no longer exist"""
+    cleaned_count = 0
+    
+    # Check each chapter entry
+    for chapter_key, chapter_info in list(prog["chapters"].items()):
+        # Only check if output_file exists and is not None
+        if chapter_info.get("output_file"):
+            output_path = os.path.join(output_dir, chapter_info["output_file"])
+            if not os.path.exists(output_path):
+                # File is missing, mark as incomplete
+                chapter_info["status"] = "file_missing"
+                cleaned_count += 1
+                print(f"🧹 Marked chapter {chapter_info.get('chapter_num', chapter_key)} as missing (file not found: {chapter_info['output_file']})")
+    
+    if cleaned_count > 0:
+        print(f"🧹 Found {cleaned_count} chapters with missing files")
+    
+    return prog
+
+def get_translation_stats(prog, output_dir):
+    """Get statistics about translation progress"""
+    stats = {
+        "total_tracked": len(prog["chapters"]),
+        "completed": 0,
+        "missing_files": 0,
+        "in_progress": 0
+    }
+    
+    for chapter_info in prog["chapters"].values():
+        status = chapter_info.get("status")
+        output_file = chapter_info.get("output_file")
+        
+        if status == "completed" and output_file:
+            # Verify file exists
+            output_path = os.path.join(output_dir, output_file)
+            if os.path.exists(output_path):
+                stats["completed"] += 1
+            else:
+                stats["missing_files"] += 1
+        elif status == "in_progress":
+            stats["in_progress"] += 1
+        elif status == "file_missing":
+            stats["missing_files"] += 1
+    
+    return stats
 
 def emergency_restore_paragraphs(text, original_html=None, verbose=True):
     """
     Emergency restoration when AI returns wall of text without proper paragraph tags.
     This function attempts to restore paragraph structure using various heuristics.
-    
-    Args:
-        text: The translated text that may have lost formatting
-        original_html: The original HTML to compare structure (optional)
-        verbose: Whether to print debug messages (default True)
     """
     # Helper function for logging
     def log(message):
@@ -247,7 +387,7 @@ def extract_epub_metadata(zf):
     return meta
 
 def get_content_hash(html_content):
-    """Create a hash of content to detect duplicates"""
+    """Create a comprehensive hash of content to detect duplicates"""
     soup = BeautifulSoup(html_content, 'html.parser')
     text = soup.get_text(strip=True).lower()
     
@@ -261,61 +401,121 @@ def get_content_hash(html_content):
     # Normalize whitespace
     text = re.sub(r'\s+', ' ', text).strip()
     
-    # Use first 1000 chars for fingerprint
-    fingerprint = text[:1000]
-    return hashlib.md5(fingerprint.encode('utf-8')).hexdigest()
+    # Sample from multiple parts of the chapter
+    samples = []
+    text_length = len(text)
+    
+    if text_length > 100:
+        # Take beginning (first 500 chars)
+        samples.append(text[:500])
+        
+        # Take middle section (500 chars from the middle)
+        if text_length > 1000:
+            middle_start = (text_length // 2) - 250
+            middle_end = middle_start + 500
+            samples.append(text[middle_start:middle_end])
+        
+        # Take end (last 500 chars)
+        if text_length > 500:
+            samples.append(text[-500:])
+        
+        # Take some key sentences throughout the text
+        sentences = [s.strip() for s in re.split(r'[.!?]+', text) if len(s.strip()) > 50]
+        if len(sentences) > 10:
+            # Take sentences at strategic positions
+            key_positions = [
+                len(sentences) // 4,      # 25%
+                len(sentences) // 2,      # 50%
+                3 * len(sentences) // 4,  # 75%
+            ]
+            for pos in key_positions:
+                if pos < len(sentences):
+                    samples.append(sentences[pos])
+    
+    # Combine all samples with separator
+    fingerprint = '|||'.join(samples)
+    
+    # Generate multiple hash types for comprehensive checking
+    main_hash = hashlib.md5(fingerprint.encode('utf-8')).hexdigest()
+    
+    # Also create a structure hash (paragraph count, average length)
+    para_count = len(soup.find_all('p'))
+    avg_para_length = sum(len(p.get_text()) for p in soup.find_all('p')) // max(1, para_count)
+    structure_sig = f"{para_count}_{avg_para_length}_{text_length}"
+    
+    # Combine both for final hash
+    combined = f"{main_hash}_{hashlib.md5(structure_sig.encode()).hexdigest()[:8]}"
+    return combined
 
 def clean_ai_artifacts(text, remove_artifacts=True):
     """Remove AI response artifacts from text - but ONLY when enabled"""
     if not remove_artifacts:
         return text
-        
-    original_text = text
     
-    # Find the first header tag (h1-h6) or chapter marker
-    header_patterns = [
-        r'<h[1-6][^>]*>',  # HTML headers
-        r'Chapter\s+\d+',   # Plain text chapter markers
-        r'第\s*\d+\s*[章节話话回]',  # Chinese chapter markers
-        r'제\s*\d+\s*[장화]',  # Korean chapter markers
+    # Only remove the first sentence/line if it looks like an AI artifact
+    lines = text.split('\n', 2)  # Split into max 3 parts (first line, second line, rest)
+    
+    if len(lines) < 2:
+        return text  # Nothing to remove if there's only one line
+    
+    first_line = lines[0].strip()
+    
+    # Skip if first line is empty
+    if not first_line:
+        # Check second line if first is empty
+        if len(lines) > 1:
+            first_line = lines[1].strip()
+            if not first_line:
+                return text
+            lines = lines[1:]  # Adjust for empty first line
+        else:
+            return text
+    
+    # Common AI artifact patterns - be very specific
+    ai_patterns = [
+        # Direct AI responses
+        r'^(?:Sure|Okay|Understood|Of course|Got it|Alright|Certainly|Here\'s|Here is)',
+        r'^(?:I\'ll|I will|Let me) (?:translate|help|assist)',
+        # Role markers
+        r'^(?:System|Assistant|AI|User|Human|Model)\s*:',
+        # Part markers
+        r'^\[PART\s+\d+/\d+\]',
+        # Common AI explanations
+        r'^(?:Translation note|Note|Here\'s the translation|I\'ve translated)',
+        # HTML/Code markers at the very start
+        r'^```(?:html)?',
+        r'^<!DOCTYPE',  # Sometimes AI starts with this unnecessarily
     ]
     
-    # Find the position of the first header
-    first_header_pos = float('inf')
-    for pattern in header_patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match and match.start() < first_header_pos:
-            first_header_pos = match.start()
-    
-    # If we found a header and there's content before it
-    if first_header_pos < float('inf') and first_header_pos > 0:
-        pre_header_text = text[:first_header_pos].strip()
-        
-        # If pre-header text exists and looks like AI artifacts
-        if pre_header_text and len(pre_header_text) < 500:  # Reasonable length for AI preamble
-            # Check if it contains typical AI phrases
-            ai_patterns = [
-                r'(?:Sure|Okay|Understood|Of course|Got it|Alright|Certainly)',
-                r'(?:I\'ll|I will|let me|here\'s|here is)',
-                r'(?:translate|help|assist)',
-                r'(?:System|Assistant|AI|User|Human|Model)\s*:',
-                r'^\[PART\s+\d+/\d+\]',
-                r'Translation note:',
-                r'Here\'s the translation',
-            ]
+    # Check if the first line matches ANY of these patterns
+    for pattern in ai_patterns:
+        if re.search(pattern, first_line, re.IGNORECASE):
+            # Only remove the first line/sentence
+            remaining_text = '\n'.join(lines[1:]) if len(lines) > 1 else ''
             
-            # If it matches AI patterns, remove everything before the header
-            for pattern in ai_patterns:
-                if re.search(pattern, pre_header_text, re.IGNORECASE):
-                    cleaned_text = text[first_header_pos:]
-                    print(f"✂️ Removed {first_header_pos} chars of AI artifacts before header")
-                    return cleaned_text
+            # Make sure we're not removing actual content
+            # Check if what remains starts with a chapter header or has substantial content
+            if remaining_text.strip():
+                # Verify remaining text has actual chapter content
+                if (re.search(r'<h[1-6]', remaining_text, re.IGNORECASE) or 
+                    re.search(r'Chapter\s+\d+', remaining_text, re.IGNORECASE) or
+                    re.search(r'第\s*\d+\s*[章节話话回]', remaining_text) or
+                    re.search(r'제\s*\d+\s*[장화]', remaining_text) or
+                    len(remaining_text.strip()) > 100):  # Has substantial content
+                    
+                    print(f"✂️ Removed AI artifact: {first_line[:50]}...")
+                    return remaining_text.lstrip()
     
-    # If no headers found or no AI artifacts detected, return original
+    # Additional check: if first line is just "html" or similar single words
+    if first_line.lower() in ['html', 'text', 'content', 'translation', 'output']:
+        remaining_text = '\n'.join(lines[1:]) if len(lines) > 1 else ''
+        if remaining_text.strip():
+            print(f"✂️ Removed single word artifact: {first_line}")
+            return remaining_text.lstrip()
+    
+    # No artifacts detected, return original
     return text
 
-
-        
 def extract_chapters(zf):
     """Extract chapters from EPUB file with robust duplicate detection"""
     chaps = []
@@ -716,8 +916,6 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     
     raise UnifiedClientError(f"API call timed out after {timeout} seconds")
 
-
-
 def parse_token_limit(env_value):
     """Parse token limit from environment variable"""
     if not env_value or env_value.strip() == "":
@@ -822,8 +1020,8 @@ def validate_chapter_continuity(chapters):
             print(f"  - {issue}")
         print()
 
-def main(log_callback=None, stop_callback=None):
 
+def main(log_callback=None, stop_callback=None):
     """Main translation function with enhanced duplicate detection"""
     if log_callback:
         set_output_redirect(log_callback)
@@ -916,29 +1114,16 @@ def main(log_callback=None, stop_callback=None):
         os.remove(history_file)
         print(f"[DEBUG] Purged translation history → {history_file}")
         
-    # Load or init progress file with enhanced tracking
-    PROGRESS_FILE = os.path.join(payloads_dir, "translation_progress.json")
-    if os.path.exists(PROGRESS_FILE):
-        with open(PROGRESS_FILE, "r", encoding="utf-8") as pf:
-            prog = json.load(pf)
-        # Ensure all required fields exist
-        if "chapter_chunks" not in prog:
-            prog["chapter_chunks"] = {}
-        if "content_hashes" not in prog:
-            prog["content_hashes"] = {}
-        if "chapter_metadata" not in prog:
-            prog["chapter_metadata"] = {}
-    else:
-        prog = {
-            "completed": [],
-            "chapter_chunks": {},
-            "content_hashes": {},
-            "chapter_metadata": {}
-        }
-
+    # Initialize improved progress tracking
+    prog, PROGRESS_FILE = init_progress_tracking(payloads_dir)
+    
     def save_progress():
         with open(PROGRESS_FILE, "w", encoding="utf-8") as pf:
             json.dump(prog, pf, ensure_ascii=False, indent=2)
+    
+    # Clean up any orphaned entries at startup
+    prog = cleanup_progress_tracking(prog, out)
+    save_progress()
 
     # Check for stop before starting
     if check_stop():
@@ -952,7 +1137,6 @@ def main(log_callback=None, stop_callback=None):
         # Validate chapters
         validate_chapter_continuity(chapters)
 
-
         # Extract images
         imgdir = os.path.join(out, "images")
         os.makedirs(imgdir, exist_ok=True)
@@ -960,6 +1144,31 @@ def main(log_callback=None, stop_callback=None):
             if n.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.svg')):
                 with open(os.path.join(imgdir, os.path.basename(n)), 'wb') as f:
                     f.write(zf.read(n))
+        
+        # NEW: Extract CSS files
+        cssdir = os.path.join(out, "css")
+        os.makedirs(cssdir, exist_ok=True)
+        css_files = []
+        for n in zf.namelist():
+            if n.lower().endswith('.css'):
+                css_filename = os.path.basename(n)
+                css_files.append(css_filename)
+                with open(os.path.join(cssdir, css_filename), 'wb') as f:
+                    f.write(zf.read(n))
+                print(f"📄 Extracted CSS: {css_filename}")
+        
+        # NEW: Extract fonts
+        fontsdir = os.path.join(out, "fonts")
+        if any('.ttf' in n.lower() or '.otf' in n.lower() or '.woff' in n.lower() for n in zf.namelist()):
+            os.makedirs(fontsdir, exist_ok=True)
+            for n in zf.namelist():
+                if n.lower().endswith(('.ttf', '.otf', '.woff', '.woff2')):
+                    with open(os.path.join(fontsdir, os.path.basename(n)), 'wb') as f:
+                        f.write(zf.read(n))
+                    print(f"📄 Extracted font: {os.path.basename(n)}")
+        
+        # Store CSS files in metadata
+        metadata["css_files"] = css_files
 
     # Check for stop after file processing
     if check_stop():
@@ -998,24 +1207,26 @@ def main(log_callback=None, stop_callback=None):
     
     for idx, c in enumerate(chapters):
         chap_num = c["num"]
+        content_hash = c.get("content_hash") or get_content_hash(c["body"])
         
         # Apply chapter range filter
         if start is not None and not (start <= chap_num <= end):
             continue
         
-        # Check if content was already translated (duplicate detection)
-        content_hash = c.get("content_hash") or get_content_hash(c["body"])
-        if content_hash in prog["content_hashes"]:
-            existing = prog["content_hashes"][content_hash]
-            if existing.get("completed_idx") in prog["completed"]:
-                print(f"[SKIP] Chapter {chap_num} has same content as already translated chapter {existing.get('chapter_num')}")
-                chunks_per_chapter[idx] = 0
-                continue
-            
-        # Skip already completed chapters
-        if idx in prog["completed"]:
+        # Check chapter status
+        needs_translation, skip_reason, _ = check_chapter_status(
+            prog, idx, chap_num, content_hash, out
+        )
+        
+        if not needs_translation:
             chunks_per_chapter[idx] = 0
             continue
+        
+        # For in-progress chapters, check if they have partial chunks completed
+        chapter_key = str(idx)
+        if chapter_key in prog["chapters"] and prog["chapters"][chapter_key].get("status") == "in_progress":
+            # Chapter is in progress, calculate remaining chunks
+            pass  # Will be handled below
         
         # Parse token limit for counting
         _tok_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
@@ -1033,9 +1244,9 @@ def main(log_callback=None, stop_callback=None):
             chunks = [(c["body"], 1, 1)]
         
         # Count chunks needed for this chapter
-        chapter_key = str(idx)
-        if chapter_key in prog.get("chapter_chunks", {}):
-            completed_chunks = len(prog["chapter_chunks"][chapter_key].get("completed", []))
+        chapter_key_str = str(idx)
+        if chapter_key_str in prog.get("chapter_chunks", {}):
+            completed_chunks = len(prog["chapter_chunks"][chapter_key_str].get("completed", []))
             chunks_needed = len(chunks) - completed_chunks
             chunks_per_chapter[idx] = max(0, chunks_needed)
         else:
@@ -1073,19 +1284,20 @@ def main(log_callback=None, stop_callback=None):
         if start is not None and not (start <= chap_num <= end):
             continue
 
-        # Check for duplicate content
-        if content_hash in prog["content_hashes"]:
-            existing = prog["content_hashes"][content_hash]
-            if existing.get("completed_idx") in prog["completed"]:
-                print(f"[SKIP] Chapter {chap_num} is duplicate of already translated chapter {existing.get('chapter_num')}")
-                continue
-
-        # Skip already completed chapters
-        if idx in prog["completed"]:
-            print(f"[SKIP] Chapter #{idx+1} (EPUB-num {chap_num}) already done, skipping.")
+        # Check chapter status with improved logic
+        needs_translation, skip_reason, existing_file = check_chapter_status(
+            prog, idx, chap_num, content_hash, out
+        )
+        
+        if not needs_translation:
+            print(f"[SKIP] {skip_reason}")
             continue
 
         print(f"\n🔄 Processing Chapter {idx+1}/{total_chapters}: {c['title']}")
+        
+        # Mark as in-progress (output_filename is None until completed)
+        update_progress(prog, idx, chap_num, content_hash, output_filename=None, status="in_progress")
+        save_progress()
 
         # Parse token limit
         _tok_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
@@ -1115,30 +1327,32 @@ def main(log_callback=None, stop_callback=None):
                 print(f"   ℹ️ Chapter size: {chapter_tokens:,} tokens (within limit of {available_tokens:,} tokens)")
         
         # Track translated chunks for this chapter
-        chapter_key = str(idx)
-        if chapter_key not in prog["chapter_chunks"]:
-            prog["chapter_chunks"][chapter_key] = {
+        chapter_key_str = str(idx)
+        if chapter_key_str not in prog["chapter_chunks"]:
+            prog["chapter_chunks"][chapter_key_str] = {
                 "total": len(chunks),
                 "completed": [],
                 "chunks": {}
             }
         
-        prog["chapter_chunks"][chapter_key]["total"] = len(chunks)
+        prog["chapter_chunks"][chapter_key_str]["total"] = len(chunks)
         
         translated_chunks = []
         
         # Process each chunk
         for chunk_html, chunk_idx, total_chunks in chunks:
             # Check if this chunk was already translated
-            if chunk_idx in prog["chapter_chunks"][chapter_key]["completed"]:
-                saved_chunk = prog["chapter_chunks"][chapter_key]["chunks"].get(str(chunk_idx))
+            if chunk_idx in prog["chapter_chunks"][chapter_key_str]["completed"]:
+                saved_chunk = prog["chapter_chunks"][chapter_key_str]["chunks"].get(str(chunk_idx))
                 if saved_chunk:
                     translated_chunks.append((saved_chunk, chunk_idx, total_chunks))
                     print(f"  [SKIP] Chunk {chunk_idx}/{total_chunks} already translated")
                     continue
-            # NEW: Check if history will reset on this chapter
+                    
+            # Check if history will reset on this chapter
             if CONTEXTUAL and history_manager.will_reset_on_next_append(HIST_LIMIT):
-                print(f"  📌 History will reset after this chunk (current: {len(history_manager.load_history())//2}/{HIST_LIMIT} exchanges)")            
+                print(f"  📌 History will reset after this chunk (current: {len(history_manager.load_history())//2}/{HIST_LIMIT} exchanges)")
+                
             if check_stop():
                 print(f"❌ Translation stopped during chapter {idx+1}, chunk {chunk_idx}")
                 return
@@ -1220,16 +1434,29 @@ def main(log_callback=None, stop_callback=None):
                     if EMERGENCY_RESTORE:
                         result = emergency_restore_paragraphs(result, chunk_html)
                     
-                    # Additional cleaning if remove header is enabled
+                    # Additional cleaning if remove artifacts is enabled
                     if REMOVE_AI_ARTIFACTS:
-                        # Remove any remaining JSON or artifacts
-                        if result.strip().startswith('{') or result.strip().startswith('['):
-                            # Find first non-JSON line
-                            lines = result.split('\n')
-                            for i, line in enumerate(lines):
-                                if line.strip() and not any(char in line for char in ['{', '}', '[', ']', '"role"', '"content"']):
-                                    result = '\n'.join(lines[i:])
-                                    break
+                        # Remove any JSON artifacts at the very beginning
+                        lines = result.split('\n')
+                        
+                        # Only check the first few lines for JSON artifacts
+                        json_line_count = 0
+                        for i, line in enumerate(lines[:5]):  # Only check first 5 lines
+                            if line.strip() and any(pattern in line for pattern in [
+                                '"role":', '"content":', '"messages":', 
+                                '{"role"', '{"content"', '[{', '}]'
+                            ]):
+                                json_line_count = i + 1
+                            else:
+                                # Found a non-JSON line, stop here
+                                break
+                        
+                        if json_line_count > 0 and json_line_count < len(lines):
+                            # Only remove if we found JSON and there's content after it
+                            remaining = '\n'.join(lines[json_line_count:])
+                            if remaining.strip() and len(remaining) > 100:
+                                result = remaining
+                                print(f"✂️ Removed {json_line_count} lines of JSON artifacts")
                     
                     # Remove chunk markers if present
                     result = re.sub(r'\[PART \d+/\d+\]\s*', '', result, flags=re.IGNORECASE)
@@ -1238,17 +1465,17 @@ def main(log_callback=None, stop_callback=None):
                     translated_chunks.append((result, chunk_idx, total_chunks))
                     
                     # Update progress for this chunk
-                    prog["chapter_chunks"][chapter_key]["completed"].append(chunk_idx)
-                    prog["chapter_chunks"][chapter_key]["chunks"][str(chunk_idx)] = result
+                    prog["chapter_chunks"][chapter_key_str]["completed"].append(chunk_idx)
+                    prog["chapter_chunks"][chapter_key_str]["chunks"][str(chunk_idx)] = result
                     save_progress()
                     
                     # Increment completed chunks counter
                     chunks_completed += 1
                         
-                    # NEW: Check if we're about to reset history BEFORE appending
+                    # Check if we're about to reset history BEFORE appending
                     will_reset = history_manager.will_reset_on_next_append(HIST_LIMIT if CONTEXTUAL else 0)
 
-                    # NEW: Generate rolling summary BEFORE history reset
+                    # Generate rolling summary BEFORE history reset
                     if will_reset and os.getenv("USE_ROLLING_SUMMARY", "0") == "1" and CONTEXTUAL:
                         if check_stop():
                             print(f"❌ Translation stopped during summary generation for chapter {idx+1}")
@@ -1319,8 +1546,6 @@ def main(log_callback=None, stop_callback=None):
                         reset_on_limit=True
                     )
 
-
-
                     # Delay between chunks/API calls
                     if chunk_idx < total_chunks:
                         for i in range(DELAY):
@@ -1365,13 +1590,12 @@ def main(log_callback=None, stop_callback=None):
         safe_title = re.sub(r'\W+', '_', c['title'])[:40]
         fname = f"response_{c['num']:03d}_{safe_title}.html"
 
-        # Clean up code fences
-        cleaned = re.sub(r"^```(?:html)?\s*", "", merged_result, flags=re.MULTILINE)
-        cleaned = re.sub(r"\s*```$", "", cleaned, flags=re.MULTILINE)
+        # Clean up code fences only
+        cleaned = re.sub(r"^```(?:html)?\s*\n?", "", merged_result, count=1, flags=re.MULTILINE)
+        cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
 
-        # Final artifact cleanup - NOW RESPECTS THE TOGGLE
+        # Final artifact cleanup - NOW RESPECTS THE TOGGLE and is conservative
         cleaned = clean_ai_artifacts(cleaned, remove_artifacts=REMOVE_AI_ARTIFACTS)
-
 
         # Write HTML file
         with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
@@ -1380,25 +1604,8 @@ def main(log_callback=None, stop_callback=None):
         final_title = c['title'] or safe_title
         print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved Chapter {c['num']}: {final_title}")
         
-        # Record completion with content tracking
-        prog["completed"].append(idx)
-        prog["content_hashes"][content_hash] = {
-            "chapter_num": c["num"],
-            "completed_idx": idx,
-            "filename": fname
-        }
-        
-        # Save chapter metadata
-        if "chapter_metadata" not in prog:
-            prog["chapter_metadata"] = {}
-        
-        prog["chapter_metadata"][str(c["num"])] = {
-            "title": c["title"],
-            "filename": fname,
-            "content_hash": content_hash,
-            "processed_idx": idx
-        }
-        
+        # Update progress with completed status
+        update_progress(prog, idx, chap_num, content_hash, fname, status="completed")
         save_progress()
 
     # Check for stop before building EPUB
@@ -1425,6 +1632,14 @@ def main(log_callback=None, stop_callback=None):
         if chunks_completed > 0:
             avg_time = total_time / chunks_completed
             print(f"   • Average time per chunk: {avg_time:.1f} seconds")
+        
+        # Print progress tracking statistics
+        stats = get_translation_stats(prog, out)
+        print(f"\n📊 Progress Tracking Summary:")
+        print(f"   • Total chapters tracked: {stats['total_tracked']}")
+        print(f"   • Successfully completed: {stats['completed']}")
+        print(f"   • Missing files: {stats['missing_files']}")
+        print(f"   • In progress: {stats['in_progress']}")
             
     except Exception as e:
         print("❌ EPUB build failed:", e)
