@@ -55,7 +55,7 @@ class TranslatorGUI:
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
-        master.title("Glossarion v1.5.9")
+        master.title("Glossarion v1.6.0")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1400, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
@@ -129,7 +129,20 @@ class TranslatorGUI:
         # Add after the other variable initializations
         self.reinforcement_freq_var = tk.StringVar(
             value=str(self.config.get('reinforcement_frequency', '10'))
-)
+        )
+        
+        # |Reset failed chapters
+        self.reset_failed_chapters_var = tk.BooleanVar(
+            value=self.config.get('reset_failed_chapters', True)  # Default to True
+        )
+        
+        self.retry_truncated_var = tk.BooleanVar(
+            value=self.config.get('retry_truncated', True)  # Default to True
+        )
+        self.max_retry_tokens_var = tk.StringVar(
+            value=str(self.config.get('max_retry_tokens', 16384))  # Default max
+        )        
+        
         # Default prompts
         self.default_prompts = {
             "korean": "You are a professional Korean to English novel translator, you must strictly output only English/HTML text while following these rules:\n- Use a context rich and natural translation style.\n- Retain honorifics, and suffixes like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
@@ -230,7 +243,7 @@ class TranslatorGUI:
         self.delay_entry.grid(row=4, column=1, sticky=tk.W, padx=5, pady=5)
         
         # Chapter Range field
-        tb.Label(self.frame, text="Chapter range:").grid(row=5, column=0, sticky=tk.W, padx=5, pady=5)
+        tb.Label(self.frame, text="Chapter range (e.g., 5-10):").grid(row=5, column=0, sticky=tk.W, padx=5, pady=5)
         self.chapter_range_entry = tb.Entry(self.frame, width=12)
         self.chapter_range_entry.insert(0, self.config.get('chapter_range', ''))
         self.chapter_range_entry.grid(row=5, column=1, sticky=tk.W, padx=5, pady=5)
@@ -481,8 +494,10 @@ class TranslatorGUI:
                     'DISABLE_AUTO_GLOSSARY': "1" if self.disable_auto_glossary_var.get() else "0",
                     'APPEND_GLOSSARY': "1" if self.append_glossary_var.get() else "0",
                     'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var.get() else "0",
-                    # In the os.environ.update section, add:
                     'REINFORCEMENT_FREQUENCY': self.reinforcement_freq_var.get(),
+                    'RESET_FAILED_CHAPTERS': "1" if self.reset_failed_chapters_var.get() else "0",
+                    'RETRY_TRUNCATED': "1" if self.retry_truncated_var.get() else "0",
+                    'MAX_RETRY_TOKENS': self.max_retry_tokens_var.get()
                 })
                 
                 # Set chapter range if specified
@@ -908,79 +923,106 @@ class TranslatorGUI:
     def open_other_settings(self):
         top = tk.Toplevel(self.master)
         top.title("Other Settings")
-        top.geometry("600x900")  # Increased height for new control
-
-        # Rolling summary checkbox  
-        tb.Checkbutton(top, text="Use Rolling Summary", variable=self.rolling_summary_var,
-                       bootstyle="round-toggle").pack(anchor=tk.W, padx=10, pady=10)
-
-        # Summary role dropdown
-        tk.Label(top, text="Summary Role:").pack(anchor=tk.W, padx=10)
-        ttk.Combobox(top, textvariable=self.summary_role_var,
-                     values=["user", "system"], state="readonly").pack(anchor=tk.W, padx=10, pady=(0, 10))
+        top.geometry("600x920")  # Fixed width, reasonable height
         
-        # Add separator
-        ttk.Separator(top, orient='horizontal').pack(fill='x', padx=10, pady=10)
+        # Create a canvas and scrollbar for scrolling
+        canvas = tk.Canvas(top)
+        scrollbar = ttk.Scrollbar(top, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
         
-        # NEW: Prompt Reinforcement Frequency
-        reinforce_frame = tk.Frame(top)
-        reinforce_frame.pack(anchor=tk.W, padx=10, pady=10, fill='x')
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
         
-        tk.Label(reinforce_frame, text="Prompt Reinforcement Frequency:").pack(anchor=tk.W)
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
         
-        freq_input_frame = tk.Frame(reinforce_frame)
-        freq_input_frame.pack(anchor=tk.W, padx=20, pady=(5, 0))
+        # Pack canvas and scrollbar
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
         
-        tk.Label(freq_input_frame, text="Reinforce every").pack(side=tk.LEFT)
-        freq_entry = tb.Entry(freq_input_frame, width=6, textvariable=self.reinforcement_freq_var)
-        freq_entry.pack(side=tk.LEFT, padx=5)
-        tk.Label(freq_input_frame, text="messages (0 = disabled)").pack(side=tk.LEFT)
+        # --- CONTENT STARTS HERE ---
         
-        # Add description
-        desc_label = tk.Label(reinforce_frame, 
-                         text="Periodically reminds the AI of your system prompt to maintain consistency.\n"
-                              "Lower = more frequent reminders. Set based on your model's needs.",
-                         wraplength=500, justify=tk.LEFT, font=('TkDefaultFont', 9), fg='gray')
-        desc_label.pack(anchor=tk.W, padx=20, pady=(5, 0))
+        # Section 1: Rolling Summary
+        section1_frame = tk.LabelFrame(scrollable_frame, text="Context Management", padx=10, pady=10)
+        section1_frame.pack(fill="x", padx=10, pady=(10, 5))
         
-        # Add separator
-        ttk.Separator(top, orient='horizontal').pack(fill='x', padx=10, pady=10)
-        
-        # Disable Hardcoded Prompts checkbox
-        tb.Checkbutton(top, text="Disable Hardcoded Prompts", variable=self.disable_system_prompt_var,
-                       bootstyle="round-toggle").pack(anchor=tk.W, padx=10, pady=10)
-                       
-        # Append Glossary checkbox
-        tb.Checkbutton(top, text="Append Glossary", variable=self.append_glossary_var,
-                       bootstyle="round-toggle").pack(anchor=tk.W, padx=10, pady=10)
-
-        # Add description
-        desc_label = tk.Label(top, 
-                             text="Include glossary in prompts for consistent character names",
-                             wraplength=500, justify=tk.LEFT, font=('TkDefaultFont', 9), fg='gray')
-        desc_label.pack(anchor=tk.W, padx=30, pady=(0, 10))
-        
-        # Disable Auto Glossary checkbox
-        tb.Checkbutton(top, text="Disable Auto Glossary", variable=self.disable_auto_glossary_var,
-                       bootstyle="round-toggle").pack(anchor=tk.W, padx=10, pady=10)
-        
-        # Add separator before emergency restore section
-        ttk.Separator(top, orient='horizontal').pack(fill='x', padx=10, pady=10)
-        
-        # Emergency Paragraph Restoration checkbox with description
-        restoration_frame = tk.Frame(top)
-        restoration_frame.pack(anchor=tk.W, padx=10, pady=10, fill='x')
-        
-        tb.Checkbutton(restoration_frame, text="Emergency Paragraph Restoration", 
-                       variable=self.emergency_restore_var,
+        tb.Checkbutton(section1_frame, text="Use Rolling Summary", 
+                       variable=self.rolling_summary_var,
                        bootstyle="round-toggle").pack(anchor=tk.W)
         
-        # Add description label
-        desc_label = tk.Label(restoration_frame, 
-                             text="Automatically fix wall-of-text issues when AI ignores paragraph breaks",
-                             wraplength=350, justify=tk.LEFT, font=('TkDefaultFont', 9), fg='gray')
-        desc_label.pack(anchor=tk.W, padx=20, pady=(5, 0))
-
+        summary_frame = tk.Frame(section1_frame)
+        summary_frame.pack(anchor=tk.W, padx=20, pady=(5, 0))
+        tk.Label(summary_frame, text="Summary Role:").pack(side=tk.LEFT)
+        ttk.Combobox(summary_frame, textvariable=self.summary_role_var,
+                     values=["user", "system"], state="readonly", width=10).pack(side=tk.LEFT, padx=5)
+        
+        # Section 2: Response Handling
+        section2_frame = tk.LabelFrame(scrollable_frame, text="Response Handling", padx=10, pady=10)
+        section2_frame.pack(fill="x", padx=10, pady=5)
+        
+        tb.Checkbutton(section2_frame, text="Auto-retry Truncated Responses", 
+                       variable=self.retry_truncated_var,
+                       bootstyle="round-toggle").pack(anchor=tk.W)
+        
+        retry_frame = tk.Frame(section2_frame)
+        retry_frame.pack(anchor=tk.W, padx=20, pady=(5, 0))
+        tk.Label(retry_frame, text="Max retry tokens:").pack(side=tk.LEFT)
+        tb.Entry(retry_frame, width=8, textvariable=self.max_retry_tokens_var).pack(side=tk.LEFT, padx=5)
+        
+        tk.Label(section2_frame, 
+                 text="Automatically retry when API response is cut off",
+                 font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, padx=20)
+        
+        # Section 3: Prompt Management
+        section3_frame = tk.LabelFrame(scrollable_frame, text="Prompt Management", padx=10, pady=10)
+        section3_frame.pack(fill="x", padx=10, pady=5)
+        
+        # Reinforcement frequency
+        reinforce_frame = tk.Frame(section3_frame)
+        reinforce_frame.pack(anchor=tk.W, pady=(0, 10))
+        tk.Label(reinforce_frame, text="Reinforce every").pack(side=tk.LEFT)
+        tb.Entry(reinforce_frame, width=6, textvariable=self.reinforcement_freq_var).pack(side=tk.LEFT, padx=5)
+        tk.Label(reinforce_frame, text="messages (0 = disabled)").pack(side=tk.LEFT)
+        
+        tk.Label(section3_frame, 
+                 text="Periodically reminds the AI of your system prompt",
+                 font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(0, 10))
+        
+        tb.Checkbutton(section3_frame, text="Disable Hardcoded System Prompts", 
+                       variable=self.disable_system_prompt_var,
+                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+        
+        # Section 4: Glossary Settings
+        section4_frame = tk.LabelFrame(scrollable_frame, text="Glossary Settings", padx=10, pady=10)
+        section4_frame.pack(fill="x", padx=10, pady=5)
+        
+        tb.Checkbutton(section4_frame, text="Disable Automatic Glossary Generation", 
+                       variable=self.disable_auto_glossary_var,
+                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+        
+        tb.Checkbutton(section4_frame, text="Append Glossary to System Prompt", 
+                       variable=self.append_glossary_var,
+                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+        
+        # Section 5: Processing Options
+        section5_frame = tk.LabelFrame(scrollable_frame, text="Processing Options", padx=10, pady=10)
+        section5_frame.pack(fill="x", padx=10, pady=5)
+        
+        tb.Checkbutton(section5_frame, text="Emergency Paragraph Restoration", 
+                       variable=self.emergency_restore_var,
+                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+        
+        tb.Checkbutton(section5_frame, text="Reset Failed Chapters on Start", 
+                       variable=self.reset_failed_chapters_var,
+                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+        
+        tk.Label(section5_frame, 
+                 text="Automatically retry failed chapters on each run",
+                 font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, padx=20)
+        
+        # Save and close function
         def save_and_close():
             self.config['use_rolling_summary'] = self.rolling_summary_var.get()
             self.config['summary_role'] = self.summary_role_var.get()
@@ -989,18 +1031,41 @@ class TranslatorGUI:
             self.config['append_glossary'] = self.append_glossary_var.get()
             self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()
             self.config['reinforcement_frequency'] = int(self.reinforcement_freq_var.get())
+            self.config['reset_failed_chapters'] = self.reset_failed_chapters_var.get()
+            self.config['retry_truncated'] = self.retry_truncated_var.get()
+            self.config['max_retry_tokens'] = int(self.max_retry_tokens_var.get())
             
+            # Set environment variables
             os.environ["USE_ROLLING_SUMMARY"] = "1" if self.rolling_summary_var.get() else "0"
             os.environ["SUMMARY_ROLE"] = self.summary_role_var.get()
             os.environ["APPEND_GLOSSARY"] = "1" if self.append_glossary_var.get() else "0"
             os.environ["EMERGENCY_PARAGRAPH_RESTORE"] = "1" if self.emergency_restore_var.get() else "0"
             os.environ["REINFORCEMENT_FREQUENCY"] = self.reinforcement_freq_var.get()
+            os.environ["RESET_FAILED_CHAPTERS"] = "1" if self.reset_failed_chapters_var.get() else "0"
+            os.environ["RETRY_TRUNCATED"] = "1" if self.retry_truncated_var.get() else "0"
+            os.environ["MAX_RETRY_TOKENS"] = self.max_retry_tokens_var.get()
             
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, ensure_ascii=False, indent=2)
             top.destroy()
-
-        tb.Button(top, text="Save", command=save_and_close).pack(pady=20)
+        
+        # Save button at the bottom
+        tb.Button(scrollable_frame, text="Save", command=save_and_close, 
+                  bootstyle="success").pack(pady=20)
+        
+        # Enable mouse wheel scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        
+        # Bind mouse wheel to canvas
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        
+        # Unbind when window is closed
+        def on_close():
+            canvas.unbind_all("<MouseWheel>")
+            top.destroy()
+        
+        top.protocol("WM_DELETE_WINDOW", on_close)
 
 
     def on_profile_select(self, event=None):
@@ -1247,6 +1312,7 @@ class TranslatorGUI:
             self.config['append_glossary'] = self.append_glossary_var.get()
             self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()
             self.config['reinforcement_frequency'] = int(self.reinforcement_freq_var.get())
+            self.config['reset_failed_chapters'] = self.reset_failed_chapters_var.get()
 
             
             _tl = self.token_limit_entry.get().strip()
