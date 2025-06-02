@@ -12,6 +12,7 @@ from tkinter import filedialog, messagebox
 import threading
 import re
 import unicodedata
+import time
 
 # Global flag to allow stopping the scan externally
 _stop_flag = False
@@ -1023,41 +1024,105 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, aggressive_mode=Tru
     with open(os.path.join(output_path, "validation_results.html"), "w", encoding="utf-8") as html_file:
         html_file.write(html_report)
 
-    # Update progress file
+    # Update progress file with support for both old and new formats
     prog_path = os.path.join(folder_path, "translation_progress.json")
+    
     try:
         with open(prog_path, "r", encoding="utf-8") as pf:
             prog = json.load(pf)
     except FileNotFoundError:
-        prog = {"completed": []}
-    
-    # Get existing completed list
-    existing = prog.get("completed", [])
+        log("[INFO] No progress file found - nothing to update")
+        log(f"\n✅ Scan complete!")
+        log(f"📁 Reports saved to: {output_path}")
+        return
     
     # Build list of FILE INDICES that have issues
     faulty_indices = [row["file_index"] for row in results if row["issues"]]
     
-    # Remove faulty indices from the completed list
-    updated = [idx for idx in existing if idx not in faulty_indices]
-    
-    # Update the progress while preserving all other data
-    prog["completed"] = updated
-    
-    # Also remove chunk data for faulty chapters if it exists
-    if "chapter_chunks" in prog:
-        for faulty_idx in faulty_indices:
-            chapter_key = str(faulty_idx)
-            if chapter_key in prog["chapter_chunks"]:
-                del prog["chapter_chunks"][chapter_key]
-                log(f"   └─ Removed chunk data for chapter {faulty_idx + 1}")
-    
-    # Write back the complete progress data
-    with open(prog_path, "w", encoding="utf-8") as pf:
-        json.dump(prog, pf, indent=2)
+    if not faulty_indices:
+        log("✅ No faulty chapters found - progress unchanged")
+    else:
+        # Detect progress format version
+        is_new_format = "chapters" in prog and isinstance(prog.get("chapters"), dict)
+        
+        if is_new_format:
+            # Handle new format (v2.0)
+            log("[INFO] Detected new progress format")
+            
+            # Update chapter statuses
+            updated_count = 0
+            for faulty_idx in faulty_indices:
+                chapter_key = str(faulty_idx)
+                
+                # Update chapter status if it exists
+                if chapter_key in prog["chapters"]:
+                    chapter_info = prog["chapters"][chapter_key]
+                    old_status = chapter_info.get("status", "unknown")
+                    
+                    # Mark as needing re-translation
+                    chapter_info["status"] = "qa_failed"
+                    chapter_info["qa_issues"] = True
+                    chapter_info["qa_timestamp"] = time.time()
+                    
+                    updated_count += 1
+                    log(f"   └─ Marked chapter {faulty_idx + 1} as qa_failed (was: {old_status})")
+                    
+                    # Remove from content_hashes if present
+                    content_hash = chapter_info.get("content_hash")
+                    if content_hash and content_hash in prog.get("content_hashes", {}):
+                        del prog["content_hashes"][content_hash]
+                
+                # Also remove chunk data if it exists
+                if "chapter_chunks" in prog and chapter_key in prog["chapter_chunks"]:
+                    del prog["chapter_chunks"][chapter_key]
+                    log(f"   └─ Removed chunk data for chapter {faulty_idx + 1}")
+            
+            log(f"🔧 Updated {updated_count} chapters in new format")
+            
+        else:
+            # Handle old format (legacy)
+            log("[INFO] Detected legacy progress format")
+            
+            # Get existing completed list
+            existing = prog.get("completed", [])
+            
+            # Remove faulty indices from the completed list
+            updated = [idx for idx in existing if idx not in faulty_indices]
+            removed_count = len(existing) - len(updated)
+            
+            # Update the progress
+            prog["completed"] = updated
+            
+            # Also remove chunk data for faulty chapters if it exists
+            if "chapter_chunks" in prog:
+                for faulty_idx in faulty_indices:
+                    chapter_key = str(faulty_idx)
+                    if chapter_key in prog["chapter_chunks"]:
+                        del prog["chapter_chunks"][chapter_key]
+                        log(f"   └─ Removed chunk data for chapter {faulty_idx + 1}")
+            
+            # Remove from content_hashes if present
+            if "content_hashes" in prog:
+                # In old format, we need to check each hash entry
+                hashes_to_remove = []
+                for hash_val, hash_info in prog["content_hashes"].items():
+                    if hash_info.get("completed_idx") in faulty_indices:
+                        hashes_to_remove.append(hash_val)
+                
+                for hash_val in hashes_to_remove:
+                    del prog["content_hashes"][hash_val]
+                    log(f"   └─ Removed content hash entry")
+            
+            log(f"🔧 Removed {removed_count} chapters from legacy completed list")
+        
+        # Write back the updated progress data
+        with open(prog_path, "w", encoding="utf-8") as pf:
+            json.dump(prog, pf, indent=2, ensure_ascii=False)
+        
+        log(f"📝 Chapters marked for re-translation: {', '.join(str(i+1) for i in sorted(faulty_indices))}")
     
     log(f"\n✅ Scan complete!")
     log(f"📁 Reports saved to: {output_path}")
-    log(f"🔧 Removed {len(faulty_indices)} anomalies from progress tracking")
     
     # Log which chapters were affected
     if faulty_indices:
