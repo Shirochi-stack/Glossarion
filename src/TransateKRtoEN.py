@@ -12,6 +12,8 @@ from collections import Counter
 from unified_api_client import UnifiedClient, UnifiedClientError
 import hashlib
 import unicodedata
+from difflib import SequenceMatcher
+
 
 # Import the new modules
 from history_manager import HistoryManager
@@ -1535,7 +1537,19 @@ def main(log_callback=None, stop_callback=None):
                                 for header in result_soup.find_all(['h1', 'h2', 'h3', 'title']):
                                     header.decompose()
                                 
-                                result_body = result_soup.get_text(strip=True)[:1000]  # First 1000 chars of body
+                                # Get more content for comparison (not just 1000 chars)
+                                result_body = result_soup.get_text(strip=True)
+                                
+                                # Normalize the text for better comparison
+                                def normalize_text(text):
+                                    # Remove extra whitespace
+                                    text = re.sub(r'\s+', ' ', text).strip()
+                                    # Remove numbers that might be chapter numbers
+                                    text = re.sub(r'\b\d+\b', '', text)
+                                    # Take first 2000 chars for comparison
+                                    return text[:2000].lower()
+                                
+                                normalized_result = normalize_text(result_body)
                                 
                                 # Check against previously translated chapters
                                 lookback_chapters = int(os.getenv("DUPLICATE_LOOKBACK_CHAPTERS", "5"))
@@ -1555,22 +1569,37 @@ def main(log_callback=None, stop_callback=None):
                                                 prev_soup = BeautifulSoup(prev_content, 'html.parser')
                                                 for header in prev_soup.find_all(['h1', 'h2', 'h3', 'title']):
                                                     header.decompose()
-                                                prev_body = prev_soup.get_text(strip=True)[:1000]
+                                                prev_body = prev_soup.get_text(strip=True)
                                                 
-                                                # Check similarity
-                                                if result_body and prev_body and result_body == prev_body:
+                                                normalized_prev = normalize_text(prev_body)
+                                                
+                                                # Calculate similarity instead of exact match
+                                                from difflib import SequenceMatcher
+                                                similarity = SequenceMatcher(None, normalized_result, normalized_prev).ratio()
+                                                
+                                                # If similarity is very high (>85%), it's likely a duplicate
+                                                if similarity > 0.85:
                                                     retry_needed = True
-                                                    retry_reason = f"duplicate body content (matches chapter {chapters[prev_idx]['num']})"
+                                                    retry_reason = f"duplicate body content (matches chapter {chapters[prev_idx]['num']} with {int(similarity*100)}% similarity)"
                                                     
-                                                    # Increase temperature
-                                                    TEMP = min(TEMP + 0.2, 1.0)
+                                                    # Increase temperature more aggressively
+                                                    TEMP = min(TEMP + 0.3, 1.0)
                                                     
-                                                    # Modify user prompt to be more explicit
+                                                    # Create a more specific prompt
                                                     user_prompt = f"""[CRITICAL: This is Chapter {c['num']} titled "{c['title']}". 
-You MUST translate the UNIQUE content below. This chapter has DIFFERENT events than Chapter {chapters[prev_idx]['num']}.
-Do NOT repeat content from any previous chapters. Each chapter has its own unique story progression.]
+                        The previous response was {int(similarity*100)}% similar to Chapter {chapters[prev_idx]['num']}.
 
-{chunk_html}"""
+                        You MUST translate the UNIQUE content below for Chapter {c['num']}. This chapter contains DIFFERENT events than Chapter {chapters[prev_idx]['num']}.
+
+                        Key differences to focus on:
+                        - This is a DIFFERENT chapter with its own unique story progression
+                        - Characters may be in different situations
+                        - Events should progress from where Chapter {c['num']-1} ended
+                        - Do NOT repeat any content from Chapter {chapters[prev_idx]['num']}
+
+                        IMPORTANT: Each chapter in this novel has its own unique content. Even if chapter titles seem similar, the actual events and story progression are different.]
+
+                        {chunk_html}"""
                                                     
                                                     # Update messages with new prompt
                                                     msgs[-1] = {"role": "user", "content": user_prompt}
