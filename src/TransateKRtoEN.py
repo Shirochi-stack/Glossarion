@@ -389,20 +389,47 @@ def extract_epub_metadata(zf):
 def get_content_hash(html_content):
     """Create a comprehensive hash of content to detect duplicates"""
     soup = BeautifulSoup(html_content, 'html.parser')
+    
+    # First, remove header tags that likely contain chapter titles
+    for tag in soup.find_all(['h1', 'h2', 'h3', 'title']):
+        tag_text = tag.get_text().lower()
+        if any(word in tag_text for word in ['chapter', 'part', 'mixture', '장', '章', '话', '편', '부']):
+            tag.decompose()
+    
+    # Now extract text after removing headers
     text = soup.get_text(strip=True).lower()
     
     # Remove ALL chapter markers more aggressively
-    # Remove "Chapter X: Title" patterns
-    text = re.sub(r'chapter\s*\d+\s*:\s*[^\.]+', '', text, flags=re.IGNORECASE)
-    # Remove "Part X" patterns
-    text = re.sub(r'part\s*\d+', '', text, flags=re.IGNORECASE)
-    # Remove parenthetical part numbers
-    text = re.sub(r'\(part\s*\d+\)', '', text, flags=re.IGNORECASE)
-    # Remove all numbers at the start of lines
-    text = re.sub(r'^\s*\d+\s*', '', text, flags=re.MULTILINE)
+    # Remove entire lines that look like chapter headers
+    text = re.sub(r'^.*chapter\s*\d+.*$', '', text, flags=re.IGNORECASE | re.MULTILINE)
+    text = re.sub(r'^.*제\s*\d+\s*장.*$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^.*第\s*\d+\s*[章话節回].*$', '', text, flags=re.MULTILINE)
+    
+    # Remove any line containing "part" and a number
+    text = re.sub(r'^.*part\s*\d+.*$', '', text, flags=re.IGNORECASE | re.MULTILINE)
+    text = re.sub(r'^.*\(part\s*\d+\).*$', '', text, flags=re.IGNORECASE | re.MULTILINE)
+    text = re.sub(r'^.*파트\s*\d+.*$', '', text, flags=re.MULTILINE)  # Korean "part"
+    text = re.sub(r'^.*편\s*\d+.*$', '', text, flags=re.MULTILINE)     # Korean "part/volume"
+    
+    # Remove common title patterns (like "Mixture") with part numbers
+    text = re.sub(r'^.*mixture.*part.*$', '', text, flags=re.IGNORECASE | re.MULTILINE)
+    text = re.sub(r'^.*혼합.*부.*$', '', text, flags=re.MULTILINE)      # Korean equivalent
+    
+    # Remove lines that are just numbers or chapter numbers
+    text = re.sub(r'^\s*\d+\s*[:.-]?\s*$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^\s*chapter\s*\d+\s*$', '', text, flags=re.IGNORECASE | re.MULTILINE)
+    
+    # Remove common novel navigation text
+    text = re.sub(r'previous\s*chapter|next\s*chapter', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'table\s*of\s*contents', '', text, flags=re.IGNORECASE)
     
     # Normalize whitespace
     text = re.sub(r'\s+', ' ', text).strip()
+    
+    # If text is now too short after aggressive removal, use original but still normalized
+    if len(text) < 50:
+        text = soup.get_text(strip=True).lower()
+        text = re.sub(r'\s+', ' ', text).strip()
     
     # Sample from multiple parts of the chapter
     samples = []
@@ -1120,6 +1147,32 @@ def main(log_callback=None, stop_callback=None):
     # Initialize improved progress tracking
     prog, PROGRESS_FILE = init_progress_tracking(payloads_dir)
     
+    # Reset failed chapters if toggle is enabled
+    if os.getenv("RESET_FAILED_CHAPTERS", "1") == "1":
+        reset_count = 0
+        for chapter_key, chapter_info in prog["chapters"].items():
+            status = chapter_info.get("status")
+            
+            # Reset chapters that failed or have QA issues
+            if status in ["failed", "qa_failed", "file_missing", "error"]:
+                # Remove the chapter from progress to force re-translation
+                del prog["chapters"][chapter_key]
+                
+                # Also remove from content hashes
+                content_hash = chapter_info.get("content_hash")
+                if content_hash and content_hash in prog["content_hashes"]:
+                    del prog["content_hashes"][content_hash]
+                
+                # Remove chunk data if exists
+                if chapter_key in prog.get("chapter_chunks", {}):
+                    del prog["chapter_chunks"][chapter_key]
+                    
+                reset_count += 1
+        
+        if reset_count > 0:
+            print(f"🔄 Reset {reset_count} failed chapters for re-translation")
+            save_progress()
+    
     def save_progress():
         with open(PROGRESS_FILE, "w", encoding="utf-8") as pf:
             json.dump(prog, pf, ensure_ascii=False, indent=2)
@@ -1439,12 +1492,116 @@ def main(log_callback=None, stop_callback=None):
                     print(f"    [DEBUG] Chunk {chunk_idx}/{total_chunks} tokens = {total_tokens:,} / {budget_str}")
                     
                     client.context = 'translation'
-                    result, finish_reason = send_with_interrupt(
-                        msgs, client, TEMP, MAX_OUTPUT_TOKENS, check_stop
-                    )
                     
-                    if finish_reason == "length":
-                        print(f"    [WARN] Output was truncated!")
+                    # Initialize retry variables
+                    retry_count = 0
+                    max_retries = 3
+                    
+                    # Store original values for retry
+                    original_max_tokens = MAX_OUTPUT_TOKENS
+                    original_temp = TEMP
+                    original_user_prompt = user_prompt
+                    
+                    while retry_count <= max_retries:
+                        # Use current values (may be modified by retry logic)
+                        current_max_tokens = MAX_OUTPUT_TOKENS
+                        current_temp = TEMP
+                        current_user_prompt = user_prompt
+                        
+                        # Make API call
+                        result, finish_reason = send_with_interrupt(
+                            msgs, client, current_temp, current_max_tokens, check_stop
+                        )
+                        
+                        # Check if retry is needed
+                        retry_needed = False
+                        retry_reason = ""
+                        
+                        # Check for truncation (existing toggle)
+                        if finish_reason == "length" and os.getenv("RETRY_TRUNCATED", "0") == "1":
+                            if retry_count < max_retries:
+                                retry_needed = True
+                                retry_reason = "truncated output"
+                                retry_max_tokens = int(os.getenv("MAX_RETRY_TOKENS", "16384"))
+                                MAX_OUTPUT_TOKENS = min(MAX_OUTPUT_TOKENS * 2, retry_max_tokens)
+                        
+                        # Check for duplicate body content (new toggle)
+                        if not retry_needed and os.getenv("RETRY_DUPLICATE_BODIES", "1") == "1":
+                            if retry_count < max_retries:
+                                # Extract body from the result (remove headers)
+                                result_soup = BeautifulSoup(result, 'html.parser')
+                                
+                                # Remove headers to get just body content
+                                for header in result_soup.find_all(['h1', 'h2', 'h3', 'title']):
+                                    header.decompose()
+                                
+                                result_body = result_soup.get_text(strip=True)[:1000]  # First 1000 chars of body
+                                
+                                # Check against previously translated chapters
+                                lookback_chapters = int(os.getenv("DUPLICATE_LOOKBACK_CHAPTERS", "5"))
+                                
+                                for prev_idx in range(max(0, idx - lookback_chapters), idx):
+                                    prev_key = str(prev_idx)
+                                    if prev_key in prog["chapters"] and prog["chapters"][prev_key].get("output_file"):
+                                        prev_file = prog["chapters"][prev_key]["output_file"]
+                                        prev_path = os.path.join(out, prev_file)
+                                        
+                                        if os.path.exists(prev_path):
+                                            try:
+                                                with open(prev_path, 'r', encoding='utf-8') as f:
+                                                    prev_content = f.read()
+                                                
+                                                # Extract body from previous chapter
+                                                prev_soup = BeautifulSoup(prev_content, 'html.parser')
+                                                for header in prev_soup.find_all(['h1', 'h2', 'h3', 'title']):
+                                                    header.decompose()
+                                                prev_body = prev_soup.get_text(strip=True)[:1000]
+                                                
+                                                # Check similarity
+                                                if result_body and prev_body and result_body == prev_body:
+                                                    retry_needed = True
+                                                    retry_reason = f"duplicate body content (matches chapter {chapters[prev_idx]['num']})"
+                                                    
+                                                    # Increase temperature
+                                                    TEMP = min(TEMP + 0.2, 1.0)
+                                                    
+                                                    # Modify user prompt to be more explicit
+                                                    user_prompt = f"""[CRITICAL: This is Chapter {c['num']} titled "{c['title']}". 
+You MUST translate the UNIQUE content below. This chapter has DIFFERENT events than Chapter {chapters[prev_idx]['num']}.
+Do NOT repeat content from any previous chapters. Each chapter has its own unique story progression.]
+
+{chunk_html}"""
+                                                    
+                                                    # Update messages with new prompt
+                                                    msgs[-1] = {"role": "user", "content": user_prompt}
+                                                    
+                                                    break
+                                            except Exception as e:
+                                                print(f"    [WARN] Error checking previous chapter: {e}")
+                        
+                        # If no retry needed or max retries reached, break
+                        if not retry_needed or retry_count >= max_retries:
+                            if retry_needed and retry_count >= max_retries:
+                                print(f"    ❌ Still getting {retry_reason} after {max_retries} retries, proceeding anyway")
+                            break
+                        
+                        # Retry needed
+                        retry_count += 1
+                        print(f"    ⚠️ Detected {retry_reason}!")
+                        print(f"    🔄 Retrying translation (attempt {retry_count}/{max_retries})")
+                        
+                        if "duplicate" in retry_reason:
+                            print(f"    📊 Increased temperature to {TEMP}")
+                        elif "truncated" in retry_reason:
+                            print(f"    📊 Increased max tokens to {MAX_OUTPUT_TOKENS}")
+                        
+                        # Brief delay before retry
+                        time.sleep(2)
+                    
+                    # Restore original values after retry loop
+                    MAX_OUTPUT_TOKENS = original_max_tokens
+                    TEMP = original_temp
+                    user_prompt = original_user_prompt
                     
                     # Clean AI artifacts ONLY if the toggle is enabled
                     if REMOVE_AI_ARTIFACTS:
