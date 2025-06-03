@@ -391,12 +391,15 @@ def get_content_hash(html_content):
     soup = BeautifulSoup(html_content, 'html.parser')
     text = soup.get_text(strip=True).lower()
     
-    # Remove all types of chapter markers for better duplicate detection
-    text = re.sub(r'chapter\s*\d+\s*:?\s*', '', text)
-    text = re.sub(r'第\s*\d+\s*[章节話话回]', '', text)
-    text = re.sub(r'제\s*\d+\s*[장화권부]', '', text)
-    text = re.sub(r'第\s*\d+\s*話', '', text)
-    text = re.sub(r'\bch\.?\s*\d+\b', '', text)
+    # Remove ALL chapter markers more aggressively
+    # Remove "Chapter X: Title" patterns
+    text = re.sub(r'chapter\s*\d+\s*:\s*[^\.]+', '', text, flags=re.IGNORECASE)
+    # Remove "Part X" patterns
+    text = re.sub(r'part\s*\d+', '', text, flags=re.IGNORECASE)
+    # Remove parenthetical part numbers
+    text = re.sub(r'\(part\s*\d+\)', '', text, flags=re.IGNORECASE)
+    # Remove all numbers at the start of lines
+    text = re.sub(r'^\s*\d+\s*', '', text, flags=re.MULTILINE)
     
     # Normalize whitespace
     text = re.sub(r'\s+', ' ', text).strip()
@@ -1133,6 +1136,22 @@ def main(log_callback=None, stop_callback=None):
     with zipfile.ZipFile(epub_path, 'r') as zf:
         metadata = extract_epub_metadata(zf)
         chapters = extract_chapters(zf)
+        
+        # Detect duplicates BEFORE translation
+        content_groups = {}
+        for idx, chapter in enumerate(chapters):
+            content_hash = get_content_hash(chapter['body'])
+            if content_hash not in content_groups:
+                content_groups[content_hash] = []
+            content_groups[content_hash].append(idx)
+
+        # Mark duplicate chapters
+        for hash_val, chapter_indices in content_groups.items():
+            if len(chapter_indices) > 1:
+                print(f"⚠️ Found {len(chapter_indices)} chapters with identical content: {chapter_indices}")
+                # Keep first, mark others as duplicates
+                for dup_idx in chapter_indices[1:]:
+                    chapters[dup_idx]['is_duplicate_of'] = chapter_indices[0]
 
         # Validate chapters
         validate_chapter_continuity(chapters)
