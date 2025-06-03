@@ -143,6 +143,14 @@ class TranslatorGUI:
             value=str(self.config.get('max_retry_tokens', 16384))  # Default max
         )        
         
+        # Add after the other toggle variables
+        self.retry_duplicate_var = tk.BooleanVar(
+            value=self.config.get('retry_duplicate_bodies', True)  # Default to True
+        )
+        self.duplicate_lookback_var = tk.StringVar(
+            value=str(self.config.get('duplicate_lookback_chapters', '5'))  # Check last 5 chapters
+        )     
+        
         # Default prompts
         self.default_prompts = {
             "korean": "You are a professional Korean to English novel translator, you must strictly output only English/HTML text while following these rules:\n- Use a context rich and natural translation style.\n- Retain honorifics, and suffixes like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
@@ -923,7 +931,7 @@ class TranslatorGUI:
     def open_other_settings(self):
         top = tk.Toplevel(self.master)
         top.title("Other Settings")
-        top.geometry("600x920")  # Fixed width, reasonable height
+        top.geometry("730x1050")  # Fixed width, reasonable height
         
         # Create a canvas and scrollbar for scrolling
         canvas = tk.Canvas(top)
@@ -958,7 +966,7 @@ class TranslatorGUI:
         ttk.Combobox(summary_frame, textvariable=self.summary_role_var,
                      values=["user", "system"], state="readonly", width=10).pack(side=tk.LEFT, padx=5)
         
-        # Section 2: Response Handling
+        # Section 2: Response Handling, after the truncated response checkbox:
         section2_frame = tk.LabelFrame(scrollable_frame, text="Response Handling", padx=10, pady=10)
         section2_frame.pack(fill="x", padx=10, pady=5)
         
@@ -975,6 +983,21 @@ class TranslatorGUI:
                  text="Automatically retry when API response is cut off",
                  font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, padx=20)
         
+        
+        tb.Checkbutton(section2_frame, text="Auto-retry Duplicate Body Content", 
+                       variable=self.retry_duplicate_var,
+                       bootstyle="round-toggle").pack(anchor=tk.W, pady=(10, 0))
+
+        duplicate_frame = tk.Frame(section2_frame)
+        duplicate_frame.pack(anchor=tk.W, padx=20, pady=(5, 0))
+        tk.Label(duplicate_frame, text="Check last").pack(side=tk.LEFT)
+        tb.Entry(duplicate_frame, width=4, textvariable=self.duplicate_lookback_var).pack(side=tk.LEFT, padx=5)
+        tk.Label(duplicate_frame, text="chapters for duplicates").pack(side=tk.LEFT)
+
+        tk.Label(section2_frame, 
+                 text="Detects when AI returns same content for different chapters",
+                 font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, padx=20)
+                 
         # Section 3: Prompt Management
         section3_frame = tk.LabelFrame(scrollable_frame, text="Prompt Management", padx=10, pady=10)
         section3_frame.pack(fill="x", padx=10, pady=5)
@@ -1034,6 +1057,8 @@ class TranslatorGUI:
             self.config['reset_failed_chapters'] = self.reset_failed_chapters_var.get()
             self.config['retry_truncated'] = self.retry_truncated_var.get()
             self.config['max_retry_tokens'] = int(self.max_retry_tokens_var.get())
+            self.config['retry_duplicate_bodies'] = self.retry_duplicate_var.get()
+            self.config['duplicate_lookback_chapters'] = int(self.duplicate_lookback_var.get())
             
             # Set environment variables
             os.environ["USE_ROLLING_SUMMARY"] = "1" if self.rolling_summary_var.get() else "0"
@@ -1044,6 +1069,8 @@ class TranslatorGUI:
             os.environ["RESET_FAILED_CHAPTERS"] = "1" if self.reset_failed_chapters_var.get() else "0"
             os.environ["RETRY_TRUNCATED"] = "1" if self.retry_truncated_var.get() else "0"
             os.environ["MAX_RETRY_TOKENS"] = self.max_retry_tokens_var.get()
+            os.environ["RETRY_DUPLICATE_BODIES"] = "1" if self.retry_duplicate_var.get() else "0"
+            os.environ["DUPLICATE_LOOKBACK_CHAPTERS"] = self.duplicate_lookback_var.get()
             
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, ensure_ascii=False, indent=2)
@@ -1055,7 +1082,31 @@ class TranslatorGUI:
         
         # Enable mouse wheel scrolling
         def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            # Check if canvas still exists before trying to scroll
+            try:
+                canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            except tk.TclError:
+                # Canvas was destroyed, unbind the event
+                canvas.unbind_all("<MouseWheel>")
+
+        # Bind mouse wheel to canvas (use bind instead of bind_all)
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        # Also bind to the scrollable frame
+        scrollable_frame.bind("<MouseWheel>", _on_mousewheel)
+
+        # Make sure canvas has focus to receive wheel events
+        canvas.focus_set()
+
+        # Unbind when window is closed
+        def on_close():
+            try:
+                canvas.unbind("<MouseWheel>")
+                scrollable_frame.unbind("<MouseWheel>")
+            except:
+                pass
+            top.destroy()
+
+        top.protocol("WM_DELETE_WINDOW", on_close)
         
         # Bind mouse wheel to canvas
         canvas.bind_all("<MouseWheel>", _on_mousewheel)
@@ -1313,6 +1364,8 @@ class TranslatorGUI:
             self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()
             self.config['reinforcement_frequency'] = int(self.reinforcement_freq_var.get())
             self.config['reset_failed_chapters'] = self.reset_failed_chapters_var.get()
+            self.config['retry_duplicate_bodies'] = self.retry_duplicate_var.get()
+            self.config['duplicate_lookback_chapters'] = int(self.duplicate_lookback_var.get())
 
             
             _tl = self.token_limit_entry.get().strip()
