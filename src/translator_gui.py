@@ -55,7 +55,7 @@ class TranslatorGUI:
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
-        master.title("Glossarion v1.6.3")
+        master.title("Glossarion v1.6.4")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1550, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
@@ -411,7 +411,7 @@ class TranslatorGUI:
         # Create dialog to select chapters
         dialog = tk.Toplevel(self.master)
         dialog.title("Force Retranslation")
-        dialog.geometry("600x400")
+        dialog.geometry("800x600")
         
         # Instructions
         tk.Label(dialog, text="Select chapters to retranslate:", font=('Arial', 12)).pack(pady=10)
