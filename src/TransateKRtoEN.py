@@ -112,40 +112,129 @@ def check_chapter_status(prog, chapter_idx, chapter_num, content_hash, output_di
     """
     chapter_key = str(chapter_idx)
     
-    # Check if we have any record of this chapter
+    # FIRST: Always check if the actual output file exists
+    # This is the most important check - if file is deleted, we must retranslate
     if chapter_key in prog["chapters"]:
         chapter_info = prog["chapters"][chapter_key]
-        
-        # Check if output file exists (and is not None)
         output_file = chapter_info.get("output_file")
-        if output_file:  # Only check if output_file is not None
+        
+        if output_file:
             output_path = os.path.join(output_dir, output_file)
-            if os.path.exists(output_path):
-                # File exists, chapter is truly complete
-                return False, f"Chapter {chapter_num} already translated (file exists: {output_file})", output_file
-            else:
-                # File missing, needs re-translation
+            if not os.path.exists(output_path):
+                # File was deleted! Mark chapter as needing retranslation
+                print(f"⚠️ Output file missing for chapter {chapter_num}: {output_file}")
+                print(f"🔄 Chapter {chapter_num} will be retranslated")
+                
+                # Clean up progress tracking for this chapter
+                # Remove from content hashes to prevent duplicate detection issues
+                if content_hash in prog["content_hashes"]:
+                    stored_info = prog["content_hashes"][content_hash]
+                    if stored_info.get("chapter_idx") == chapter_idx:
+                        del prog["content_hashes"][content_hash]
+                
+                # Mark chapter as needing retranslation
+                chapter_info["status"] = "file_deleted"
+                chapter_info["output_file"] = None  # Clear the reference
+                
+                # Also clear any chunk data
+                if str(chapter_idx) in prog.get("chapter_chunks", {}):
+                    del prog["chapter_chunks"][str(chapter_idx)]
+                
                 return True, None, None
+            else:
+                # File exists, check if it's a valid translation
+                try:
+                    # Verify file is not empty or corrupted
+                    with open(output_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                        if len(content.strip()) < 100:  # Suspiciously short
+                            print(f"⚠️ Output file for chapter {chapter_num} seems corrupted/empty")
+                            return True, None, None
+                except Exception as e:
+                    print(f"⚠️ Error reading output file for chapter {chapter_num}: {e}")
+                    return True, None, None
+                
+                # File exists and is valid
+                return False, f"Chapter {chapter_num} already translated (file exists: {output_file})", output_file
+        
         elif chapter_info.get("status") == "in_progress":
             # Chapter is currently being processed
             return True, None, None
+        elif chapter_info.get("status") == "file_deleted":
+            # Chapter was marked for retranslation due to deleted file
+            return True, None, None
     
-    # Check for duplicate content
+    # Check for duplicate content ONLY if we haven't already determined we need to translate
+    # This prevents skipping chapters when their duplicate's file also doesn't exist
     if content_hash in prog["content_hashes"]:
         duplicate_info = prog["content_hashes"][content_hash]
         duplicate_idx = duplicate_info.get("chapter_idx")
         
-        # Check if the duplicate's file exists
+        # Only skip if the duplicate's file ACTUALLY exists
         if str(duplicate_idx) in prog["chapters"]:
             dup_chapter = prog["chapters"][str(duplicate_idx)]
             dup_output_file = dup_chapter.get("output_file")
-            if dup_output_file:  # Only check if not None
+            if dup_output_file:
                 dup_path = os.path.join(output_dir, dup_output_file)
                 if os.path.exists(dup_path):
+                    # Verify the duplicate file is also valid
+                    try:
+                        with open(dup_path, 'r', encoding='utf-8') as f:
+                            dup_content = f.read()
+                            if len(dup_content.strip()) < 100:
+                                # Duplicate file is corrupted, don't rely on it
+                                return True, None, None
+                    except:
+                        # Can't read duplicate file, need to translate this one
+                        return True, None, None
+                    
                     return False, f"Chapter {chapter_num} has same content as chapter {duplicate_info.get('chapter_num')} (already translated)", None
+                else:
+                    # Duplicate's file doesn't exist either, need to translate
+                    return True, None, None
     
     # Chapter needs translation
     return True, None, None
+
+
+def cleanup_missing_files(prog, output_dir):
+    """
+    Scan progress tracking and clean up any references to missing files
+    This ensures deleted files will trigger retranslation
+    """
+    cleaned_count = 0
+    
+    # Check each chapter entry
+    for chapter_key, chapter_info in list(prog["chapters"].items()):
+        output_file = chapter_info.get("output_file")
+        
+        if output_file:
+            output_path = os.path.join(output_dir, output_file)
+            if not os.path.exists(output_path):
+                # File is missing!
+                print(f"🧹 Found missing file for chapter {chapter_info.get('chapter_num', chapter_key)}: {output_file}")
+                
+                # Mark chapter for retranslation
+                chapter_info["status"] = "file_deleted"
+                chapter_info["output_file"] = None
+                
+                # Remove from content hashes
+                content_hash = chapter_info.get("content_hash")
+                if content_hash and content_hash in prog["content_hashes"]:
+                    stored_info = prog["content_hashes"][content_hash]
+                    if stored_info.get("chapter_idx") == int(chapter_key):
+                        del prog["content_hashes"][content_hash]
+                
+                # Remove chunk data
+                if chapter_key in prog.get("chapter_chunks", {}):
+                    del prog["chapter_chunks"][chapter_key]
+                
+                cleaned_count += 1
+    
+    if cleaned_count > 0:
+        print(f"🔄 Marked {cleaned_count} chapters for retranslation due to missing files")
+    
+    return prog
 
 def update_progress(prog, chapter_idx, chapter_num, content_hash, output_filename=None, status="completed"):
     """Update progress tracking after successful translation"""
@@ -1148,15 +1237,27 @@ def main(log_callback=None, stop_callback=None):
         
     # Initialize improved progress tracking
     prog, PROGRESS_FILE = init_progress_tracking(payloads_dir)
-    
+
+
+    def save_progress():
+        with open(PROGRESS_FILE, "w", encoding="utf-8") as pf:
+            json.dump(prog, pf, ensure_ascii=False, indent=2)
+
+    # NEW: Always scan for missing files at startup
+    print("🔍 Checking for deleted output files...")
+    prog = cleanup_missing_files(prog, out)
+
+    # Save the cleaned progress immediately
+    save_progress()
+
     # Reset failed chapters if toggle is enabled
     if os.getenv("RESET_FAILED_CHAPTERS", "1") == "1":
         reset_count = 0
-        for chapter_key, chapter_info in prog["chapters"].items():
+        for chapter_key, chapter_info in list(prog["chapters"].items()):
             status = chapter_info.get("status")
             
-            # Reset chapters that failed or have QA issues
-            if status in ["failed", "qa_failed", "file_missing", "error"]:
+            # Reset chapters that failed, have QA issues, or had files deleted
+            if status in ["failed", "qa_failed", "file_missing", "error", "file_deleted"]:
                 # Remove the chapter from progress to force re-translation
                 del prog["chapters"][chapter_key]
                 
@@ -1172,13 +1273,9 @@ def main(log_callback=None, stop_callback=None):
                 reset_count += 1
         
         if reset_count > 0:
-            print(f"🔄 Reset {reset_count} failed chapters for re-translation")
-            save_progress()
-    
-    def save_progress():
-        with open(PROGRESS_FILE, "w", encoding="utf-8") as pf:
-            json.dump(prog, pf, ensure_ascii=False, indent=2)
-    
+            print(f"🔄 Reset {reset_count} failed/deleted chapters for re-translation")
+            save_progress()  # Now this will work because save_progress is defined above
+
     # Clean up any orphaned entries at startup
     prog = cleanup_progress_tracking(prog, out)
     save_progress()
