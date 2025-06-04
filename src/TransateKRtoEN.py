@@ -75,8 +75,54 @@ def init_progress_tracking(payloads_dir):
     PROGRESS_FILE = os.path.join(payloads_dir, "translation_progress.json")
     
     if os.path.exists(PROGRESS_FILE):
-        with open(PROGRESS_FILE, "r", encoding="utf-8") as pf:
-            prog = json.load(pf)
+        try:
+            with open(PROGRESS_FILE, "r", encoding="utf-8") as pf:
+                prog = json.load(pf)
+        except json.JSONDecodeError as e:
+            print(f"⚠️ Warning: Progress file is corrupted: {e}")
+            print("🔧 Attempting to fix JSON syntax...")
+            
+            # Try to fix common JSON errors
+            try:
+                with open(PROGRESS_FILE, "r", encoding="utf-8") as pf:
+                    content = pf.read()
+                
+                # Fix trailing commas in arrays
+                import re
+                # Fix trailing commas before closing brackets
+                content = re.sub(r',\s*\]', ']', content)
+                # Fix trailing commas before closing braces
+                content = re.sub(r',\s*\}', '}', content)
+                
+                # Try to parse the fixed content
+                prog = json.loads(content)
+                
+                # Save the fixed content back
+                with open(PROGRESS_FILE, "w", encoding="utf-8") as pf:
+                    json.dump(prog, pf, ensure_ascii=False, indent=2)
+                print("✅ Successfully fixed and saved progress file")
+                
+            except Exception as fix_error:
+                print(f"❌ Could not fix progress file: {fix_error}")
+                print("🔄 Creating backup and starting fresh...")
+                
+                # Create a backup of the corrupted file
+                import time
+                backup_name = f"translation_progress_backup_{int(time.time())}.json"
+                backup_path = os.path.join(payloads_dir, backup_name)
+                try:
+                    shutil.copy(PROGRESS_FILE, backup_path)
+                    print(f"📁 Backup saved to: {backup_name}")
+                except:
+                    pass
+                
+                # Start with a fresh progress file
+                prog = {
+                    "chapters": {},
+                    "content_hashes": {},
+                    "chapter_chunks": {},
+                    "version": "2.0"
+                }
         
         # Migrate old format to new format if needed
         if "chapters" not in prog:
@@ -1240,8 +1286,24 @@ def main(log_callback=None, stop_callback=None):
 
 
     def save_progress():
-        with open(PROGRESS_FILE, "w", encoding="utf-8") as pf:
-            json.dump(prog, pf, ensure_ascii=False, indent=2)
+        try:
+            # Write to a temporary file first
+            temp_file = PROGRESS_FILE + '.tmp'
+            with open(temp_file, "w", encoding="utf-8") as pf:
+                json.dump(prog, pf, ensure_ascii=False, indent=2)
+            
+            # If successful, replace the original file
+            if os.path.exists(PROGRESS_FILE):
+                os.remove(PROGRESS_FILE)
+            os.rename(temp_file, PROGRESS_FILE)
+        except Exception as e:
+            print(f"⚠️ Warning: Failed to save progress: {e}")
+            # Clean up temp file if it exists
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except:
+                    pass
 
     # NEW: Always scan for missing files at startup
     print("🔍 Checking for deleted output files...")
