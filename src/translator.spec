@@ -20,78 +20,110 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=added_files,
-    hiddenimports=[
-        # Core modules
-        'TransateKRtoEN',
-        'extract_glossary_from_epub',
-        'epub_converter',
-        'scan_html_folder',
-        'unified_api_client',
-        'chapter_splitter',
-        'history_manager',
-        
-        # EPUB processing
-        'ebooklib',
-        'ebooklib.epub',
-        'bs4',
-        'BeautifulSoup',
-        'lxml',
-        'lxml.etree',
-        'lxml._elementpath',
-        'html5lib',
-        
-        # GUI
-        'ttkbootstrap',
-        'tkinter',
-        'tkinter.filedialog',
-        'tkinter.messagebox',
-        'tkinter.scrolledtext',
-        'tkinter.simpledialog',
-        'tkinter.ttk',
-        'PIL',
-        'PIL.Image',
-        'PIL.ImageTk',
-        
-        # AI/API clients
-        'google.generativeai',
-        'openai',
-        'tiktoken',
-        'tiktoken_ext',
-        'tiktoken_ext.openai_public',
-        
-        # Text processing
-        'langdetect',
-        'difflib',
-        
-        # Progress/UI
-        'tqdm',
-        
-        # Network
-        'requests',
-        'chardet',
-        'certifi',
-        'urllib3',
-        'idna',
-        
-        # Standard library modules that might be missed
-        'json',
-        'csv',
-        'hashlib',
-        'unicodedata',
-        'tempfile',
-        'shutil',
-        'threading',
-        'queue',
-        're',
-        'zipfile',
-        'mimetypes',
-        'collections',
-        'io',
-        'logging',
-        'time',
-        'os',
-        'sys',
-    ],
+hiddenimports=[
+    # Core modules
+    'TransateKRtoEN',
+    'extract_glossary_from_epub',
+    'epub_converter',
+    'scan_html_folder',
+    'unified_api_client',
+    'chapter_splitter',
+    'history_manager',
+    
+    # EPUB processing
+    'ebooklib',
+    'ebooklib.epub',
+    'bs4',
+    'BeautifulSoup',
+    'lxml',
+    'lxml.etree',
+    'lxml._elementpath',
+    'html5lib',
+    
+    # GUI
+    'ttkbootstrap',
+    'tkinter',
+    'tkinter.filedialog',
+    'tkinter.messagebox',
+    'tkinter.scrolledtext',
+    'tkinter.simpledialog',
+    'tkinter.ttk',
+    
+    # PIL/Pillow - EXPANDED
+    'PIL',
+    'PIL.Image',
+    'PIL.ImageTk',
+    'PIL._binary',
+    'PIL._imaging',
+    'PIL._imagingft',
+    'PIL._imagingmath',
+    'PIL._imagingtk',
+    'PIL.BmpImagePlugin',
+    'PIL.GifImagePlugin',
+    'PIL.JpegImagePlugin',
+    'PIL.PngImagePlugin',
+    'PIL.PpmImagePlugin',
+    'PIL.TiffImagePlugin',
+    'PIL.WebPImagePlugin',
+    'PIL.IcoImagePlugin',  # For your .ico file
+    'PIL.MicImagePlugin',  # The one causing the error
+    'olefile',  # FIXES THE ERROR - this is what MicImagePlugin needs
+    
+    # AI/API clients
+    'google.generativeai',
+    'google.ai',  # Sometimes needed for google.generativeai
+    'google.ai.generativelanguage',
+    'openai',
+    'tiktoken',
+    'tiktoken_ext',
+    'tiktoken_ext.openai_public',
+    
+    # Text processing
+    'langdetect',
+    'difflib',
+    
+    # Progress/UI
+    'tqdm',
+    
+    # Network
+    'requests',
+    'chardet',
+    'certifi',
+    'urllib3',
+    'idna',
+    
+    # Additional commonly missed modules
+    'pkg_resources',  # Often needed by various packages
+    'encodings',  # Character encodings
+    'encodings.utf_8',
+    'encodings.ascii',
+    'encodings.latin_1',
+    'codecs',  # Codec registry
+    
+    # Standard library modules that might be missed
+    'json',
+    'csv',
+    'hashlib',
+    'unicodedata',
+    'tempfile',
+    'shutil',
+    'threading',
+    'queue',
+    're',
+    'zipfile',
+    'mimetypes',
+    'collections',
+    'io',
+    'logging',
+    'time',
+    'os',
+    'sys',
+    'dataclasses',  # Used by your UnifiedResponse
+    'typing',  # Type hints
+    'argparse',  # Used by extract_glossary_from_epub.py
+    'subprocess',  # Might be used
+    'platform',  # System info
+],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -111,7 +143,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='Glossarion v1.6.2',  # Updated version
+    name='Glossarion v1.6.3',  # Updated version
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
