@@ -411,7 +411,7 @@ class TranslatorGUI:
         # Create dialog to select chapters
         dialog = tk.Toplevel(self.master)
         dialog.title("Force Retranslation")
-        dialog.geometry("700x600")
+        dialog.geometry("660x600")
         
         # Instructions
         tk.Label(dialog, text="Select chapters to retranslate:", font=('Arial', 12)).pack(pady=10)
