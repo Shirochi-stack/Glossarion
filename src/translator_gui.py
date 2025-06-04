@@ -47,7 +47,7 @@ except ImportError:
     print("Warning: Could not import scan_html_folder module")
 
 CONFIG_FILE = "config.json"
-BASE_WIDTH, BASE_HEIGHT = 1400, 1000
+BASE_WIDTH, BASE_HEIGHT = 1550, 1000
 
 class TranslatorGUI:
     def __init__(self, master):
@@ -55,9 +55,9 @@ class TranslatorGUI:
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
-        master.title("Glossarion v1.6.2")
+        master.title("Glossarion v1.6.3")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
-        master.minsize(1400, 1000)
+        master.minsize(1550, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
         master.bind('<Escape>', lambda e: master.attributes('-fullscreen', False))
         self.payloads_dir = os.path.join(os.getcwd(), "Payloads")        
@@ -384,7 +384,123 @@ class TranslatorGUI:
         self.on_profile_select()
 
         print("[DEBUG] GUI setup completed with config values loaded")  # Debug logging
-
+    def force_retranslation(self):
+        """Force retranslation of specific chapters"""
+        epub_path = self.entry_epub.get()
+        if not epub_path or not os.path.isfile(epub_path):
+            messagebox.showerror("Error", "Please select a valid EPUB file first.")
+            return
+        
+        # Get the output directory
+        epub_base = os.path.splitext(os.path.basename(epub_path))[0]
+        output_dir = epub_base
+        
+        if not os.path.exists(output_dir):
+            messagebox.showinfo("Info", "No translation output found for this EPUB.")
+            return
+        
+        # Load progress file
+        progress_file = os.path.join(output_dir, "translation_progress.json")
+        if not os.path.exists(progress_file):
+            messagebox.showinfo("Info", "No progress tracking found.")
+            return
+        
+        with open(progress_file, 'r', encoding='utf-8') as f:
+            prog = json.load(f)
+        
+        # Create dialog to select chapters
+        dialog = tk.Toplevel(self.master)
+        dialog.title("Force Retranslation")
+        dialog.geometry("600x400")
+        
+        # Instructions
+        tk.Label(dialog, text="Select chapters to retranslate:", font=('Arial', 12)).pack(pady=10)
+        
+        # Create frame with scrollbar
+        frame = tk.Frame(dialog)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        scrollbar = ttk.Scrollbar(frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Listbox for chapters
+        listbox = tk.Listbox(frame, selectmode=tk.MULTIPLE, yscrollcommand=scrollbar.set)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=listbox.yview)
+        
+        # Populate with chapters
+        chapter_keys = []
+        for chapter_key, chapter_info in sorted(prog.get("chapters", {}).items(), 
+                                               key=lambda x: int(x[0])):
+            chapter_num = chapter_info.get("chapter_num", "?")
+            status = chapter_info.get("status", "unknown")
+            output_file = chapter_info.get("output_file", "")
+            
+            # Check if file exists
+            file_exists = "✓" if output_file and os.path.exists(os.path.join(output_dir, output_file)) else "✗"
+            
+            display_text = f"Chapter {chapter_num} - {status} - File: {file_exists}"
+            listbox.insert(tk.END, display_text)
+            chapter_keys.append(chapter_key)
+        
+        def retranslate_selected():
+            selected_indices = listbox.curselection()
+            if not selected_indices:
+                messagebox.showwarning("Warning", "No chapters selected.")
+                return
+            
+            count = 0
+            for idx in selected_indices:
+                chapter_key = chapter_keys[idx]
+                
+                # Mark chapter for retranslation
+                if chapter_key in prog["chapters"]:
+                    chapter_info = prog["chapters"][chapter_key]
+                    
+                    # Clear the chapter data to force retranslation
+                    del prog["chapters"][chapter_key]
+                    
+                    # Remove from content hashes
+                    content_hash = chapter_info.get("content_hash")
+                    if content_hash and content_hash in prog.get("content_hashes", {}):
+                        if prog["content_hashes"][content_hash].get("chapter_idx") == int(chapter_key):
+                            del prog["content_hashes"][content_hash]
+                    
+                    # Remove chunk data
+                    if chapter_key in prog.get("chapter_chunks", {}):
+                        del prog["chapter_chunks"][chapter_key]
+                    
+                    # Delete the output file if it exists
+                    output_file = chapter_info.get("output_file")
+                    if output_file:
+                        output_path = os.path.join(output_dir, output_file)
+                        if os.path.exists(output_path):
+                            os.remove(output_path)
+                            self.append_log(f"🗑️ Deleted: {output_file}")
+                    
+                    count += 1
+            
+            # Save updated progress
+            with open(progress_file, 'w', encoding='utf-8') as f:
+                json.dump(prog, f, ensure_ascii=False, indent=2)
+            
+            self.append_log(f"🔄 Marked {count} chapters for retranslation")
+            messagebox.showinfo("Success", f"Marked {count} chapters for retranslation.\nRun translation to process them.")
+            dialog.destroy()
+        
+        # Buttons
+        button_frame = tk.Frame(dialog)
+        button_frame.pack(pady=10)
+        
+        tk.Button(button_frame, text="Select All", 
+                  command=lambda: listbox.select_set(0, tk.END)).pack(side=tk.LEFT, padx=5)
+        tk.Button(button_frame, text="Clear Selection", 
+                  command=lambda: listbox.select_clear(0, tk.END)).pack(side=tk.LEFT, padx=5)
+        tk.Button(button_frame, text="Retranslate Selected", 
+                  command=retranslate_selected, bg="#ff6b6b", fg="white").pack(side=tk.LEFT, padx=5)
+        tk.Button(button_frame, text="Cancel", 
+                  command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+                  
     def _make_bottom_toolbar(self):
         """Create the bottom toolbar with all action buttons"""
         btn_frame = tb.Frame(self.frame)
@@ -398,6 +514,7 @@ class TranslatorGUI:
             ("EPUB Converter",      self.epub_converter,               "info"),
             ("Extract Glossary",    self.run_glossary_extraction_thread, "warning"),
             ("Trim Glossary",       self.trim_glossary,               "secondary"),
+            ("Retranslate",   self.force_retranslation,         "warning"),  # NEW
             ("Save Config",         self.save_config,                 "secondary"),
             ("Load Glossary",       self.load_glossary,               "secondary"),
             ("Import Profiles",     self.import_profiles,             "secondary"),
