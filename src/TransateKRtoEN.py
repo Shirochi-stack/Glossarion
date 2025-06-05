@@ -22,7 +22,6 @@ from chapter_splitter import ChapterSplitter
 
 def make_safe_filename(title, chapter_num):
     """Create a safe filename that works across different filesystems"""
-    import unicodedata
     
     # First, try to clean the title
     if not title:
@@ -552,109 +551,725 @@ def emergency_restore_paragraphs(text, original_html=None, verbose=True):
     
     # Return original text if no restoration needed
     return text
-    
+
 def extract_epub_metadata(zf):
-    """Extract metadata from EPUB file"""
+    """Extract comprehensive metadata from EPUB file"""
     meta = {}
-    for n in zf.namelist():
-        if n.lower().endswith('.opf'):
-            soup = BeautifulSoup(zf.read(n), 'xml')
-            for t in ['title','creator','language']:
-                e = soup.find(t)
-                if e: meta[t] = e.get_text(strip=True)
-            break
+    try:
+        # Find OPF file
+        for name in zf.namelist():
+            if name.lower().endswith('.opf'):
+                opf_content = zf.read(name)
+                soup = BeautifulSoup(opf_content, 'xml')
+                
+                # Extract Dublin Core metadata
+                for tag in ['title', 'creator', 'language', 'publisher', 'date', 'subject']:
+                    element = soup.find(tag)
+                    if element:
+                        meta[tag] = element.get_text(strip=True)
+                
+                # Extract additional metadata
+                description = soup.find('description')
+                if description:
+                    meta['description'] = description.get_text(strip=True)
+                
+                # Extract series information if available
+                meta_tags = soup.find_all('meta')
+                for meta_tag in meta_tags:
+                    name = meta_tag.get('name', '').lower()
+                    content = meta_tag.get('content', '')
+                    if 'series' in name and content:
+                        meta['series'] = content
+                    elif 'calibre:series' in name and content:
+                        meta['series'] = content
+                
+                break
+    except Exception as e:
+        print(f"[WARNING] Failed to extract metadata: {e}")
+    
     return meta
+
+
+def detect_content_language(text_sample):
+    """Detect the primary language of content"""
+    # Count characters by script
+    scripts = {
+        'korean': 0,
+        'japanese_hiragana': 0,
+        'japanese_katakana': 0,
+        'chinese': 0,
+        'latin': 0
+    }
+    
+    for char in text_sample:
+        code = ord(char)
+        if 0xAC00 <= code <= 0xD7AF:  # Hangul syllables
+            scripts['korean'] += 1
+        elif 0x3040 <= code <= 0x309F:  # Hiragana
+            scripts['japanese_hiragana'] += 1
+        elif 0x30A0 <= code <= 0x30FF:  # Katakana
+            scripts['japanese_katakana'] += 1
+        elif 0x4E00 <= code <= 0x9FFF:  # CJK Unified Ideographs
+            scripts['chinese'] += 1
+        elif 0x0020 <= code <= 0x007F:  # Basic Latin
+            scripts['latin'] += 1
+    
+    # Determine primary language
+    total_cjk = scripts['korean'] + scripts['japanese_hiragana'] + scripts['japanese_katakana'] + scripts['chinese']
+    
+    if scripts['korean'] > total_cjk * 0.3:
+        return 'korean'
+    elif scripts['japanese_hiragana'] + scripts['japanese_katakana'] > total_cjk * 0.2:
+        return 'japanese'
+    elif scripts['chinese'] > total_cjk * 0.3:
+        return 'chinese'
+    elif scripts['latin'] > len(text_sample) * 0.7:
+        return 'english'
+    else:
+        return 'unknown'
+
+
+def extract_all_resources(zf, output_dir):
+    """Extract all resources (CSS, fonts, images) from EPUB"""
+    extracted_resources = {
+        'css': [],
+        'fonts': [],
+        'images': [],
+        'other': []
+    }
+    
+    # Create resource directories
+    for resource_type in ['css', 'fonts', 'images']:
+        resource_dir = os.path.join(output_dir, resource_type)
+        os.makedirs(resource_dir, exist_ok=True)
+    
+    print(f"📦 Extracting all resources from EPUB...")
+    
+    for file_path in zf.namelist():
+        # Skip directories
+        if file_path.endswith('/'):
+            continue
+            
+        file_name = os.path.basename(file_path)
+        if not file_name:
+            continue
+            
+        try:
+            file_data = zf.read(file_path)
+            resource_type = None
+            target_dir = None
+            
+            # Determine resource type
+            if file_path.lower().endswith('.css'):
+                resource_type = 'css'
+                target_dir = os.path.join(output_dir, 'css')
+            elif file_path.lower().endswith(('.ttf', '.otf', '.woff', '.woff2', '.eot')):
+                resource_type = 'fonts'
+                target_dir = os.path.join(output_dir, 'fonts')
+            elif file_path.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.svg', '.bmp', '.webp')):
+                resource_type = 'images'
+                target_dir = os.path.join(output_dir, 'images')
+            elif file_path.lower().endswith(('.js', '.xml', '.txt')):
+                resource_type = 'other'
+                target_dir = output_dir
+            
+            if resource_type and target_dir:
+                # Sanitize filename
+                safe_filename = sanitize_resource_filename(file_name)
+                target_path = os.path.join(target_dir, safe_filename)
+                
+                # Avoid overwriting files with same name
+                counter = 1
+                original_path = target_path
+                while os.path.exists(target_path):
+                    name, ext = os.path.splitext(safe_filename)
+                    target_path = os.path.join(target_dir, f"{name}_{counter}{ext}")
+                    counter += 1
+                
+                # Write file
+                with open(target_path, 'wb') as f:
+                    f.write(file_data)
+                
+                extracted_resources[resource_type].append(safe_filename)
+                print(f"   📄 Extracted {resource_type}: {safe_filename}")
+                
+        except Exception as e:
+            print(f"[WARNING] Failed to extract {file_path}: {e}")
+    
+    # Summary
+    total_extracted = sum(len(files) for files in extracted_resources.values())
+    print(f"✅ Extracted {total_extracted} resource files:")
+    for resource_type, files in extracted_resources.items():
+        if files:
+            print(f"   • {resource_type.title()}: {len(files)} files")
+    
+    return extracted_resources
+
+
+def sanitize_resource_filename(filename):
+    """Sanitize resource filenames for filesystem compatibility"""
+    # Normalize unicode
+    filename = unicodedata.normalize('NFC', filename)
+    
+    # Replace problematic characters
+    replacements = {
+        '/': '_', '\\': '_', ':': '_', '*': '_',
+        '?': '_', '"': '_', '<': '_', '>': '_',
+        '|': '_', '\0': '', '\n': '_', '\r': '_'
+    }
+    
+    for old, new in replacements.items():
+        filename = filename.replace(old, new)
+    
+    # Remove control characters
+    filename = ''.join(char for char in filename if ord(char) >= 32)
+    
+    # Limit length
+    name, ext = os.path.splitext(filename)
+    if len(name) > 50:
+        name = name[:50]
+    
+    if not name:
+        name = 'resource'
+    
+    return name + ext
+
+
+def extract_comprehensive_content_hash(html_content):
+    """Create a more comprehensive hash that captures content structure and meaning"""
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Extract different types of content separately
+        content_parts = []
+        
+        # 1. Text content (normalized)
+        text_content = soup.get_text(strip=True).lower()
+        # Remove chapter numbers and common markers
+        text_content = re.sub(r'chapter\s+\d+[:\-\s]*', '', text_content, flags=re.IGNORECASE)
+        text_content = re.sub(r'第\s*\d+\s*[章節话回][:\-\s]*', '', text_content)
+        text_content = re.sub(r'제\s*\d+\s*[장화][:\-\s]*', '', text_content)
+        text_content = re.sub(r'\s+', ' ', text_content).strip()
+        content_parts.append(text_content[:2000])  # First 2000 chars
+        
+        # 2. Structural elements
+        structure_info = []
+        for tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+            headers = soup.find_all(tag)
+            for header in headers:
+                header_text = header.get_text(strip=True).lower()
+                if header_text and len(header_text) < 200:
+                    structure_info.append(f"{tag}:{header_text}")
+        
+        # 3. Paragraph count and average length
+        paragraphs = soup.find_all('p')
+        if paragraphs:
+            total_p_length = sum(len(p.get_text()) for p in paragraphs)
+            avg_p_length = total_p_length // len(paragraphs)
+            structure_info.append(f"paragraphs:{len(paragraphs)}:{avg_p_length}")
+        
+        # 4. Image information
+        images = soup.find_all('img')
+        for img in images:
+            src = img.get('src', '')
+            alt = img.get('alt', '')
+            if src:
+                structure_info.append(f"img:{os.path.basename(src)}")
+            if alt:
+                structure_info.append(f"alt:{alt.lower()}")
+        
+        # 5. Link information  
+        links = soup.find_all('a')
+        for link in links:
+            href = link.get('href', '')
+            link_text = link.get_text(strip=True).lower()
+            if href and not href.startswith('#'):
+                structure_info.append(f"link:{href}")
+            if link_text:
+                structure_info.append(f"linktext:{link_text}")
+        
+        # Combine all parts
+        content_parts.extend(structure_info)
+        
+        # Create multiple hash signatures
+        combined_content = '|||'.join(content_parts)
+        
+        # Main content hash
+        main_hash = hashlib.md5(combined_content.encode('utf-8')).hexdigest()
+        
+        # Structural hash (for catching reordered content)
+        structure_hash = hashlib.md5(''.join(structure_info).encode('utf-8')).hexdigest()
+        
+        # Text-only hash (for catching text with different formatting)
+        text_hash = hashlib.md5(text_content.encode('utf-8')).hexdigest()
+        
+        # Combined signature
+        return f"{main_hash}_{structure_hash[:8]}_{text_hash[:8]}"
+        
+    except Exception as e:
+        print(f"[WARNING] Failed to create comprehensive hash: {e}")
+        # Fallback to simple text hash
+        simple_text = BeautifulSoup(html_content, 'html.parser').get_text()
+        return hashlib.md5(simple_text.encode('utf-8')).hexdigest()
+
+
+def extract_advanced_chapter_info(zf):
+    """Extract comprehensive chapter information with improved detection"""
+    chapters = []
+    
+    # Get all potential document files
+    html_files = []
+    for name in zf.namelist():
+        if name.lower().endswith(('.xhtml', '.html', '.htm')):
+            # Skip obvious non-content files
+            lower_name = name.lower()
+            if any(skip in lower_name for skip in [
+                'nav', 'toc', 'contents', 'cover', 'title', 'index',
+                'copyright', 'acknowledgment', 'dedication'
+            ]):
+                continue
+            html_files.append(name)
+    
+    print(f"📚 Found {len(html_files)} potential content files")
+    
+    # Enhanced chapter detection patterns
+    chapter_patterns = [
+        # English patterns
+        (r'chapter[\s_-]*(\d+)', re.IGNORECASE, 'english_chapter'),
+        (r'\bch\.?\s*(\d+)\b', re.IGNORECASE, 'english_ch'),
+        (r'part[\s_-]*(\d+)', re.IGNORECASE, 'english_part'),
+        (r'episode[\s_-]*(\d+)', re.IGNORECASE, 'english_episode'),
+        
+        # Chinese patterns
+        (r'第\s*(\d+)\s*[章节話话回]', 0, 'chinese_chapter'),
+        (r'第\s*([一二三四五六七八九十百千万]+)\s*[章节話话回]', 0, 'chinese_chapter_cn'),
+        (r'(\d+)[章节話话回]', 0, 'chinese_short'),
+        
+        # Japanese patterns
+        (r'第\s*(\d+)\s*話', 0, 'japanese_wa'),
+        (r'第\s*(\d+)\s*章', 0, 'japanese_chapter'),
+        (r'その\s*(\d+)', 0, 'japanese_sono'),
+        (r'(\d+)話目', 0, 'japanese_wame'),
+        
+        # Korean patterns
+        (r'제\s*(\d+)\s*[장화권부편]', 0, 'korean_chapter'),
+        (r'(\d+)\s*[장화권부편]', 0, 'korean_short'),
+        (r'에피소드\s*(\d+)', 0, 'korean_episode'),
+        
+        # Generic numeric patterns
+        (r'^\s*(\d+)\s*[-–—.\:]', re.MULTILINE, 'generic_numbered'),
+        (r'_(\d+)\.x?html?$', re.IGNORECASE, 'filename_number'),
+        (r'/(\d+)\.x?html?$', re.IGNORECASE, 'path_number'),
+        (r'(\d+)', 0, 'any_number'),  # Last resort
+    ]
+    
+    # Chinese number conversion table
+    chinese_nums = {
+        '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+        '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
+        '十一': 11, '十二': 12, '十三': 13, '十四': 14, '十五': 15,
+        '十六': 16, '十七': 17, '十八': 18, '十九': 19, '二十': 20,
+        '二十一': 21, '二十二': 22, '二十三': 23, '二十四': 24, '二十五': 25,
+        '三十': 30, '四十': 40, '五十': 50, '六十': 60,
+        '七十': 70, '八十': 80, '九十': 90, '百': 100,
+    }
+    
+    def convert_chinese_number(cn_num):
+        """Convert Chinese number to integer"""
+        if cn_num in chinese_nums:
+            return chinese_nums[cn_num]
+        
+        # Handle compound numbers
+        if '十' in cn_num:
+            parts = cn_num.split('十')
+            if len(parts) == 2:
+                tens = chinese_nums.get(parts[0], 1) if parts[0] else 1
+                ones = chinese_nums.get(parts[1], 0) if parts[1] else 0
+                return tens * 10 + ones
+        
+        return None
+    
+    # Content analysis for language detection
+    sample_texts = []
+    
+    # Track duplicates more comprehensively
+    content_hashes = {}
+    seen_chapters = {}
+    file_size_groups = {}
+    
+    print("🔍 Analyzing content files for chapters...")
+    
+    for idx, file_path in enumerate(sorted(html_files)):
+        try:
+            file_data = zf.read(file_path)
+            
+            # Try multiple encodings
+            html_content = None
+            for encoding in ['utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr']:
+                try:
+                    html_content = file_data.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            
+            if not html_content:
+                print(f"[WARNING] Could not decode {file_path}")
+                continue
+            
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Extract content for analysis
+            if soup.body:
+                content_html = soup.body.decode_contents()
+                content_text = soup.body.get_text(strip=True)
+            else:
+                content_html = str(soup)
+                content_text = soup.get_text(strip=True)
+            
+            # Skip very short files (likely not actual chapters)
+            if len(content_text.strip()) < 200:
+                print(f"[DEBUG] Skipping short file: {file_path} ({len(content_text)} chars)")
+                continue
+            
+            # Create comprehensive content hash
+            content_hash = extract_comprehensive_content_hash(content_html)
+            
+            # Group files by size (helps detect duplicates)
+            file_size = len(content_text)
+            if file_size not in file_size_groups:
+                file_size_groups[file_size] = []
+            file_size_groups[file_size].append(file_path)
+            
+            # Check for exact duplicates
+            if content_hash in content_hashes:
+                duplicate_info = content_hashes[content_hash]
+                print(f"[DEBUG] Skipping duplicate content: {file_path} (matches {duplicate_info['filename']})")
+                continue
+            
+            # Collect sample text for language detection
+            if len(sample_texts) < 5:
+                sample_texts.append(content_text[:1000])
+            
+            # Try to extract chapter number from various sources
+            chapter_num = None
+            chapter_title = None
+            detection_method = None
+            
+            # Method 1: Check filename
+            for pattern, flags, method in chapter_patterns:
+                if method.endswith('_number'):
+                    match = re.search(pattern, file_path, flags)
+                else:
+                    continue
+                
+                if match:
+                    try:
+                        num_str = match.group(1)
+                        if num_str.isdigit():
+                            chapter_num = int(num_str)
+                            detection_method = f"filename_{method}"
+                            break
+                        elif method == 'chinese_chapter_cn':
+                            converted = convert_chinese_number(num_str)
+                            if converted:
+                                chapter_num = converted
+                                detection_method = f"filename_{method}"
+                                break
+                    except (ValueError, IndexError):
+                        continue
+            
+            # Method 2: Check content headers and title
+            if not chapter_num:
+                # Look in title tag first
+                if soup.title and soup.title.string:
+                    title_text = soup.title.string.strip()
+                    for pattern, flags, method in chapter_patterns:
+                        if method.endswith('_number'):
+                            continue
+                        match = re.search(pattern, title_text, flags)
+                        if match:
+                            try:
+                                num_str = match.group(1)
+                                if num_str.isdigit():
+                                    chapter_num = int(num_str)
+                                    chapter_title = title_text
+                                    detection_method = f"title_{method}"
+                                    break
+                                elif method == 'chinese_chapter_cn':
+                                    converted = convert_chinese_number(num_str)
+                                    if converted:
+                                        chapter_num = converted
+                                        chapter_title = title_text
+                                        detection_method = f"title_{method}"
+                                        break
+                            except (ValueError, IndexError):
+                                continue
+                        if chapter_num:
+                            break
+                
+                # Look in headers if not found in title
+                if not chapter_num:
+                    for header_tag in ['h1', 'h2', 'h3']:
+                        headers = soup.find_all(header_tag)
+                        for header in headers:
+                            header_text = header.get_text(strip=True)
+                            if not header_text:
+                                continue
+                            
+                            for pattern, flags, method in chapter_patterns:
+                                if method.endswith('_number'):
+                                    continue
+                                match = re.search(pattern, header_text, flags)
+                                if match:
+                                    try:
+                                        num_str = match.group(1)
+                                        if num_str.isdigit():
+                                            chapter_num = int(num_str)
+                                            chapter_title = header_text
+                                            detection_method = f"header_{method}"
+                                            break
+                                        elif method == 'chinese_chapter_cn':
+                                            converted = convert_chinese_number(num_str)
+                                            if converted:
+                                                chapter_num = converted
+                                                chapter_title = header_text
+                                                detection_method = f"header_{method}"
+                                                break
+                                    except (ValueError, IndexError):
+                                        continue
+                            
+                            if chapter_num:
+                                break
+                        if chapter_num:
+                            break
+            
+            # Method 3: Check first few paragraphs
+            if not chapter_num:
+                first_elements = soup.find_all(['p', 'div'])[:5]
+                for elem in first_elements:
+                    elem_text = elem.get_text(strip=True)
+                    if not elem_text:
+                        continue
+                    
+                    for pattern, flags, method in chapter_patterns:
+                        if method.endswith('_number'):
+                            continue
+                        match = re.search(pattern, elem_text, flags)
+                        if match:
+                            try:
+                                num_str = match.group(1)
+                                if num_str.isdigit():
+                                    chapter_num = int(num_str)
+                                    detection_method = f"content_{method}"
+                                    break
+                                elif method == 'chinese_chapter_cn':
+                                    converted = convert_chinese_number(num_str)
+                                    if converted:
+                                        chapter_num = converted
+                                        detection_method = f"content_{method}"
+                                        break
+                            except (ValueError, IndexError):
+                                continue
+                    
+                    if chapter_num:
+                        break
+            
+            # Fallback: Assign sequential number
+            if not chapter_num:
+                chapter_num = len(chapters) + 1
+                while chapter_num in seen_chapters:
+                    chapter_num += 1
+                detection_method = "sequential_fallback"
+                print(f"[DEBUG] No chapter number found in {file_path}, assigning: {chapter_num}")
+            
+            # Handle duplicate chapter numbers
+            if chapter_num in seen_chapters:
+                existing_info = seen_chapters[chapter_num]
+                existing_hash = existing_info['content_hash']
+                
+                if existing_hash != content_hash:
+                    # Different content with same chapter number
+                    original_num = chapter_num
+                    while chapter_num in seen_chapters:
+                        chapter_num += 1
+                    print(f"[WARNING] Chapter {original_num} already exists with different content")
+                    print(f"[INFO] Reassigning {file_path} to chapter {chapter_num}")
+                    detection_method += "_reassigned"
+                else:
+                    # Same content, skip
+                    print(f"[DEBUG] Skipping duplicate chapter {chapter_num}: {file_path}")
+                    continue
+            
+            # Extract or generate title
+            if not chapter_title:
+                # Try to find a meaningful title
+                if soup.title and soup.title.string:
+                    chapter_title = soup.title.string.strip()
+                else:
+                    # Look for first header
+                    for header_tag in ['h1', 'h2', 'h3']:
+                        header = soup.find(header_tag)
+                        if header:
+                            chapter_title = header.get_text(strip=True)
+                            break
+                
+                # Fallback title
+                if not chapter_title:
+                    chapter_title = f"Chapter {chapter_num}"
+            
+            # Clean and validate title
+            chapter_title = re.sub(r'\s+', ' ', chapter_title).strip()
+            if len(chapter_title) > 150:
+                chapter_title = chapter_title[:147] + "..."
+            
+            # Store chapter information
+            chapter_info = {
+                "num": chapter_num,
+                "title": chapter_title,
+                "body": content_html,
+                "filename": file_path,
+                "content_hash": content_hash,
+                "detection_method": detection_method,
+                "file_size": file_size,
+                "language_sample": content_text[:500]  # For language detection
+            }
+            
+            chapters.append(chapter_info)
+            
+            # Update tracking
+            content_hashes[content_hash] = {
+                'filename': file_path,
+                'chapter_num': chapter_num
+            }
+            seen_chapters[chapter_num] = {
+                'content_hash': content_hash,
+                'filename': file_path
+            }
+            
+            print(f"[DEBUG] ✅ Chapter {chapter_num}: {chapter_title[:50]}... ({detection_method})")
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to process {file_path}: {e}")
+            continue
+    
+    # Sort chapters by number
+    chapters.sort(key=lambda x: x["num"])
+    
+    # Detect primary language
+    combined_sample = ' '.join(sample_texts)
+    detected_language = detect_content_language(combined_sample)
+    
+    # Final validation and reporting
+    if chapters:
+        print(f"\n📊 Chapter Extraction Summary:")
+        print(f"   • Total chapters extracted: {len(chapters)}")
+        print(f"   • Chapter range: {chapters[0]['num']} to {chapters[-1]['num']}")
+        print(f"   • Detected language: {detected_language}")
+        
+        # Check for missing chapters
+        expected_chapters = set(range(chapters[0]['num'], chapters[-1]['num'] + 1))
+        actual_chapters = set(c['num'] for c in chapters)
+        missing = expected_chapters - actual_chapters
+        if missing:
+            print(f"   ⚠️ Missing chapter numbers: {sorted(missing)}")
+        
+        # Show detection method statistics
+        method_stats = Counter(c['detection_method'] for c in chapters)
+        print(f"   📈 Detection methods used:")
+        for method, count in method_stats.most_common():
+            print(f"      • {method}: {count} chapters")
+        
+        # Show duplicate file size groups (potential duplicates)
+        large_groups = [size for size, files in file_size_groups.items() if len(files) > 1]
+        if large_groups:
+            print(f"   ⚠️ Found {len(large_groups)} file size groups with potential duplicates")
+    
+    return chapters, detected_language
+
+
+def enhanced_extract_chapters(zf, output_dir):
+    """Enhanced chapter extraction with comprehensive resource handling"""
+    
+    print("🚀 Starting enhanced chapter extraction...")
+    
+    # Step 1: Extract all resources
+    extracted_resources = extract_all_resources(zf, output_dir)
+    
+    # Step 2: Extract comprehensive metadata
+    metadata = extract_epub_metadata(zf)
+    print(f"📋 Extracted metadata: {list(metadata.keys())}")
+    
+    # Step 3: Extract chapters with advanced detection
+    chapters, detected_language = extract_advanced_chapter_info(zf)
+    
+    if not chapters:
+        print("❌ No chapters could be extracted!")
+        return []
+    
+    # Step 4: Enhance metadata with extracted information
+    metadata.update({
+        'chapter_count': len(chapters),
+        'detected_language': detected_language,
+        'extracted_resources': extracted_resources,
+        'extraction_summary': {
+            'total_chapters': len(chapters),
+            'chapter_range': f"{chapters[0]['num']}-{chapters[-1]['num']}",
+            'resources_extracted': sum(len(files) for files in extracted_resources.values())
+        }
+    })
+    
+    # Add chapter titles to metadata
+    metadata['chapter_titles'] = {
+        str(c['num']): c['title'] for c in chapters
+    }
+    
+    # Step 5: Save enhanced metadata
+    metadata_path = os.path.join(output_dir, 'metadata.json')
+    with open(metadata_path, 'w', encoding='utf-8') as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
+    
+    print(f"💾 Saved enhanced metadata to: {metadata_path}")
+    
+    # Step 6: Create extraction report
+    report_path = os.path.join(output_dir, 'extraction_report.txt')
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write("EPUB Extraction Report\n")
+        f.write("=" * 50 + "\n\n")
+        
+        f.write("METADATA:\n")
+        for key, value in metadata.items():
+            if key not in ['chapter_titles', 'extracted_resources']:
+                f.write(f"  {key}: {value}\n")
+        
+        f.write(f"\nCHAPTERS ({len(chapters)}):\n")
+        for chapter in chapters:
+            f.write(f"  {chapter['num']:3d}. {chapter['title']} ({chapter['detection_method']})\n")
+        
+        f.write(f"\nRESOURCES EXTRACTED:\n")
+        for resource_type, files in extracted_resources.items():
+            if files:
+                f.write(f"  {resource_type.title()}: {len(files)} files\n")
+                for file in files[:5]:  # Show first 5
+                    f.write(f"    - {file}\n")
+                if len(files) > 5:
+                    f.write(f"    ... and {len(files) - 5} more\n")
+    
+    print(f"📄 Saved extraction report to: {report_path}")
+    
+    print(f"\n✅ Enhanced extraction complete!")
+    print(f"   📚 Chapters: {len(chapters)}")
+    print(f"   🎨 Resources: {sum(len(files) for files in extracted_resources.values())}")
+    print(f"   🌍 Language: {detected_language}")
+    
+    return chapters
+
+
+# Make this the new default extract_chapters function
+extract_chapters = enhanced_extract_chapters
 
 def get_content_hash(html_content):
     """Create a comprehensive hash of content to detect duplicates"""
-    soup = BeautifulSoup(html_content, 'html.parser')
-    
-    # First, remove header tags that likely contain chapter titles
-    for tag in soup.find_all(['h1', 'h2', 'h3', 'title']):
-        tag_text = tag.get_text().lower()
-        if any(word in tag_text for word in ['chapter', 'part', 'mixture', '장', '章', '话', '편', '부']):
-            tag.decompose()
-    
-    # Now extract text after removing headers
-    text = soup.get_text(strip=True).lower()
-    
-    # Remove ALL chapter markers more aggressively
-    # Remove entire lines that look like chapter headers
-    text = re.sub(r'^.*chapter\s*\d+.*$', '', text, flags=re.IGNORECASE | re.MULTILINE)
-    text = re.sub(r'^.*제\s*\d+\s*장.*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^.*第\s*\d+\s*[章话節回].*$', '', text, flags=re.MULTILINE)
-    
-    # Remove any line containing "part" and a number
-    text = re.sub(r'^.*part\s*\d+.*$', '', text, flags=re.IGNORECASE | re.MULTILINE)
-    text = re.sub(r'^.*\(part\s*\d+\).*$', '', text, flags=re.IGNORECASE | re.MULTILINE)
-    text = re.sub(r'^.*파트\s*\d+.*$', '', text, flags=re.MULTILINE)  # Korean "part"
-    text = re.sub(r'^.*편\s*\d+.*$', '', text, flags=re.MULTILINE)     # Korean "part/volume"
-    
-    # Remove common title patterns (like "Mixture") with part numbers
-    text = re.sub(r'^.*mixture.*part.*$', '', text, flags=re.IGNORECASE | re.MULTILINE)
-    text = re.sub(r'^.*혼합.*부.*$', '', text, flags=re.MULTILINE)      # Korean equivalent
-    
-    # Remove lines that are just numbers or chapter numbers
-    text = re.sub(r'^\s*\d+\s*[:.-]?\s*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^\s*chapter\s*\d+\s*$', '', text, flags=re.IGNORECASE | re.MULTILINE)
-    
-    # Remove common novel navigation text
-    text = re.sub(r'previous\s*chapter|next\s*chapter', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'table\s*of\s*contents', '', text, flags=re.IGNORECASE)
-    
-    # Normalize whitespace
-    text = re.sub(r'\s+', ' ', text).strip()
-    
-    # If text is now too short after aggressive removal, use original but still normalized
-    if len(text) < 50:
-        text = soup.get_text(strip=True).lower()
-        text = re.sub(r'\s+', ' ', text).strip()
-    
-    # Sample from multiple parts of the chapter
-    samples = []
-    text_length = len(text)
-    
-    if text_length > 100:
-        # Take beginning (first 500 chars)
-        samples.append(text[:500])
-        
-        # Take middle section (500 chars from the middle)
-        if text_length > 1000:
-            middle_start = (text_length // 2) - 250
-            middle_end = middle_start + 500
-            samples.append(text[middle_start:middle_end])
-        
-        # Take end (last 500 chars)
-        if text_length > 500:
-            samples.append(text[-500:])
-        
-        # Take some key sentences throughout the text
-        sentences = [s.strip() for s in re.split(r'[.!?]+', text) if len(s.strip()) > 50]
-        if len(sentences) > 10:
-            # Take sentences at strategic positions
-            key_positions = [
-                len(sentences) // 4,      # 25%
-                len(sentences) // 2,      # 50%
-                3 * len(sentences) // 4,  # 75%
-            ]
-            for pos in key_positions:
-                if pos < len(sentences):
-                    samples.append(sentences[pos])
-    
-    # Combine all samples with separator
-    fingerprint = '|||'.join(samples)
-    
-    # Generate multiple hash types for comprehensive checking
-    main_hash = hashlib.md5(fingerprint.encode('utf-8')).hexdigest()
-    
-    # Also create a structure hash (paragraph count, average length)
-    para_count = len(soup.find_all('p'))
-    avg_para_length = sum(len(p.get_text()) for p in soup.find_all('p')) // max(1, para_count)
-    structure_sig = f"{para_count}_{avg_para_length}_{text_length}"
-    
-    # Combine both for final hash
-    combined = f"{main_hash}_{hashlib.md5(structure_sig.encode()).hexdigest()[:8]}"
-    return combined
+    return extract_comprehensive_content_hash(html_content)
 
 def clean_ai_artifacts(text, remove_artifacts=True):
     """Remove AI response artifacts from text - but ONLY when enabled"""
@@ -724,251 +1339,6 @@ def clean_ai_artifacts(text, remove_artifacts=True):
     
     # No artifacts detected, return original
     return text
-
-def extract_chapters(zf):
-    """Extract chapters from EPUB file with robust duplicate detection"""
-    chaps = []
-    
-    # Get all HTML files and sort them to maintain order
-    html_files = sorted([name for name in zf.namelist() 
-                        if name.lower().endswith(('.xhtml', '.html'))])
-    
-    print(f"[DEBUG] Processing {len(html_files)} HTML files from EPUB")
-    
-    # Track content to avoid duplicates
-    content_hashes = {}
-    seen_chapters = {}
-    chapter_patterns = [
-        # English patterns
-        (r'chapter[\s_-]*(\d+)', re.IGNORECASE),
-        (r'\bch\.?\s*(\d+)\b', re.IGNORECASE),
-        (r'part[\s_-]*(\d+)', re.IGNORECASE),
-        
-        # Chinese patterns
-        (r'第\s*(\d+)\s*[章节話话回]', 0),
-        (r'第\s*([一二三四五六七八九十百千]+)\s*[章节話话回]', 0),
-        (r'(\d+)[章节話话回]', 0),
-        
-        # Japanese patterns
-        (r'第\s*(\d+)\s*話', 0),
-        (r'第\s*(\d+)\s*章', 0),
-        (r'その\s*(\d+)', 0),
-        
-        # Korean patterns
-        (r'제\s*(\d+)\s*[장화권부]', 0),
-        (r'(\d+)\s*[장화권부]', 0),
-        
-        # Generic patterns
-        (r'^\s*(\d+)\s*[-–—.]', re.MULTILINE),
-        (r'_(\d+)\.x?html?$', re.IGNORECASE),
-        (r'(\d+)', 0),  # Last resort - any number
-    ]
-    
-    # Chinese number conversion
-    chinese_nums = {
-        '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
-        '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
-        '十一': 11, '十二': 12, '十三': 13, '十四': 14, '十五': 15,
-        '十六': 16, '十七': 17, '十八': 18, '十九': 19, '二十': 20,
-        '三十': 30, '四十': 40, '五十': 50, '六十': 60,
-        '七十': 70, '八十': 80, '九十': 90, '百': 100,
-    }
-    
-    def convert_chinese_number(cn_num):
-        """Convert Chinese number to integer"""
-        if cn_num in chinese_nums:
-            return chinese_nums[cn_num]
-        
-        # Handle compound numbers
-        if '十' in cn_num:
-            parts = cn_num.split('十')
-            if len(parts) == 2:
-                tens = chinese_nums.get(parts[0], 1) if parts[0] else 1
-                ones = chinese_nums.get(parts[1], 0) if parts[1] else 0
-                return tens * 10 + ones
-        
-        return None
-    
-    for idx, name in enumerate(html_files):
-        try:
-            raw = zf.read(name)
-            soup = BeautifulSoup(raw, 'html.parser')
-            
-            # Get body content
-            if soup.body:
-                full_body_html = soup.body.decode_contents()
-                body_text = soup.body.get_text(strip=True)
-            else:
-                full_body_html = str(soup)
-                body_text = soup.get_text(strip=True)
-            
-            # Skip empty or very short files
-            if len(body_text.strip()) < 100:
-                print(f"[DEBUG] Skipping short file: {name} ({len(body_text)} chars)")
-                continue
-            
-            # Create content hash to detect duplicates
-            content_hash = get_content_hash(full_body_html)
-            
-            # Check if we've seen this content before
-            if content_hash in content_hashes:
-                print(f"[DEBUG] Skipping duplicate content in {name} (matches {content_hashes[content_hash]['filename']})")
-                continue
-            
-            # Try to extract chapter number from various sources
-            chapter_num = None
-            chapter_title = None
-            
-            # Method 1: Check filename
-            for pattern, flags in chapter_patterns:
-                m = re.search(pattern, name, flags)
-                if m:
-                    try:
-                        num_str = m.group(1)
-                        if num_str.isdigit():
-                            chapter_num = int(num_str)
-                        else:
-                            # Try Chinese number conversion
-                            chapter_num = convert_chinese_number(num_str)
-                        
-                        if chapter_num:
-                            break
-                    except:
-                        continue
-            
-            # Method 2: Check content headers
-            if not chapter_num:
-                for header in soup.find_all(['h1', 'h2', 'h3', 'title']):
-                    header_text = header.get_text(strip=True)
-                    if not header_text:
-                        continue
-                    
-                    for pattern, flags in chapter_patterns:
-                        m = re.search(pattern, header_text, flags)
-                        if m:
-                            try:
-                                num_str = m.group(1)
-                                if num_str.isdigit():
-                                    chapter_num = int(num_str)
-                                else:
-                                    chapter_num = convert_chinese_number(num_str)
-                                
-                                if chapter_num:
-                                    chapter_title = header_text
-                                    break
-                            except:
-                                continue
-                    
-                    if chapter_num:
-                        break
-            
-            # Method 3: Check first few paragraphs
-            if not chapter_num:
-                first_elements = soup.find_all(['p', 'div'])[:5]
-                for elem in first_elements:
-                    elem_text = elem.get_text(strip=True)
-                    if not elem_text:
-                        continue
-                    
-                    for pattern, flags in chapter_patterns:
-                        m = re.search(pattern, elem_text, flags)
-                        if m:
-                            try:
-                                num_str = m.group(1)
-                                if num_str.isdigit():
-                                    chapter_num = int(num_str)
-                                else:
-                                    chapter_num = convert_chinese_number(num_str)
-                                
-                                if chapter_num:
-                                    break
-                            except:
-                                continue
-                    
-                    if chapter_num:
-                        break
-            
-            # If still no chapter number, assign next available
-            if not chapter_num:
-                chapter_num = len(chaps) + 1
-                while chapter_num in seen_chapters:
-                    chapter_num += 1
-                print(f"[DEBUG] No chapter number found in {name}, assigning: {chapter_num}")
-            
-            # Handle duplicate chapter numbers
-            if chapter_num in seen_chapters:
-                existing_hash = seen_chapters[chapter_num]['hash']
-                if existing_hash != content_hash:
-                    # Different content with same chapter number
-                    original_num = chapter_num
-                    while chapter_num in seen_chapters:
-                        chapter_num += 1
-                    print(f"[WARNING] Chapter {original_num} already exists with different content, reassigning to {chapter_num}")
-            
-            # Get title
-            if not chapter_title:
-                # Try to find a title from headers
-                for header_tag in ['h1', 'h2', 'h3', 'title']:
-                    title_elem = soup.find(header_tag)
-                    if title_elem:
-                        chapter_title = title_elem.get_text(strip=True)
-                        break
-                
-                if not chapter_title:
-                    chapter_title = f"Chapter {chapter_num}"
-            
-            # Clean and limit title length
-            chapter_title = re.sub(r'\s+', ' ', chapter_title).strip()
-            if len(chapter_title) > 100:
-                chapter_title = chapter_title[:97] + "..."
-            
-            # Store chapter
-            chapter_info = {
-                "num": chapter_num,
-                "title": chapter_title,
-                "body": full_body_html,
-                "filename": name,
-                "content_hash": content_hash
-            }
-            
-            chaps.append(chapter_info)
-            content_hashes[content_hash] = {
-                'filename': name,
-                'chapter_num': chapter_num
-            }
-            seen_chapters[chapter_num] = {
-                'hash': content_hash,
-                'filename': name
-            }
-            
-        except Exception as e:
-            print(f"[ERROR] Failed to process {name}: {e}")
-            # Add placeholder to maintain chapter sequence
-            chapter_info = {
-                "num": len(chaps) + 1,
-                "title": f"Error: {name}",
-                "body": f"<p>Error loading chapter from {name}: {str(e)}</p>",
-                "filename": name,
-                "content_hash": f"error_{idx}"
-            }
-            chaps.append(chapter_info)
-    
-    # Sort by chapter number
-    chaps.sort(key=lambda x: x["num"])
-    
-    # Final validation - check for gaps
-    if chaps:
-        print(f"[DEBUG] Extracted {len(chaps)} unique chapters")
-        print(f"[DEBUG] Chapter range: {chaps[0]['num']} to {chaps[-1]['num']}")
-        
-        # Check for missing chapters
-        expected_chapters = set(range(chaps[0]['num'], chaps[-1]['num'] + 1))
-        actual_chapters = set(c['num'] for c in chaps)
-        missing = expected_chapters - actual_chapters
-        if missing:
-            print(f"[WARNING] Missing chapter numbers: {sorted(missing)}")
-    
-    return chaps
 
 def save_glossary(output_dir, chapters, instructions, language="korean"):
     """Generate and save glossary from chapters with proper CJK support"""
@@ -1388,72 +1758,26 @@ def main(log_callback=None, stop_callback=None):
     if check_stop():
         return
 
-    # Extract EPUB contents
+    # Extract EPUB contents WITH ENHANCED EXTRACTION
     with zipfile.ZipFile(epub_path, 'r') as zf:
         metadata = extract_epub_metadata(zf)
-        chapters = extract_chapters(zf)
+        chapters = extract_chapters(zf, out)  # This now uses the enhanced extraction!
         
-        # Detect duplicates BEFORE translation
-        content_groups = {}
-        for idx, chapter in enumerate(chapters):
-            content_hash = get_content_hash(chapter['body'])
-            if content_hash not in content_groups:
-                content_groups[content_hash] = []
-            content_groups[content_hash].append(idx)
-
-        # Mark duplicate chapters
-        for hash_val, chapter_indices in content_groups.items():
-            if len(chapter_indices) > 1:
-                print(f"⚠️ Found {len(chapter_indices)} chapters with identical content: {chapter_indices}")
-                # Keep first, mark others as duplicates
-                for dup_idx in chapter_indices[1:]:
-                    chapters[dup_idx]['is_duplicate_of'] = chapter_indices[0]
-
+        # The enhanced extraction already handles duplicates more comprehensively
         # Validate chapters
         validate_chapter_continuity(chapters)
-
-        # Extract images
-        imgdir = os.path.join(out, "images")
-        os.makedirs(imgdir, exist_ok=True)
-        for n in zf.namelist():
-            if n.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.svg')):
-                with open(os.path.join(imgdir, os.path.basename(n)), 'wb') as f:
-                    f.write(zf.read(n))
-        
-        # NEW: Extract CSS files
-        cssdir = os.path.join(out, "css")
-        os.makedirs(cssdir, exist_ok=True)
-        css_files = []
-        for n in zf.namelist():
-            if n.lower().endswith('.css'):
-                css_filename = os.path.basename(n)
-                css_files.append(css_filename)
-                with open(os.path.join(cssdir, css_filename), 'wb') as f:
-                    f.write(zf.read(n))
-                print(f"📄 Extracted CSS: {css_filename}")
-        
-        # NEW: Extract fonts
-        fontsdir = os.path.join(out, "fonts")
-        if any('.ttf' in n.lower() or '.otf' in n.lower() or '.woff' in n.lower() for n in zf.namelist()):
-            os.makedirs(fontsdir, exist_ok=True)
-            for n in zf.namelist():
-                if n.lower().endswith(('.ttf', '.otf', '.woff', '.woff2')):
-                    with open(os.path.join(fontsdir, os.path.basename(n)), 'wb') as f:
-                        f.write(zf.read(n))
-                    print(f"📄 Extracted font: {os.path.basename(n)}")
-        
-        # Store CSS files in metadata
-        metadata["css_files"] = css_files
 
     # Check for stop after file processing
     if check_stop():
         return
 
-    # Write metadata with chapter info
-    metadata["chapter_count"] = len(chapters)
-    metadata["chapter_titles"] = {str(c["num"]): c["title"] for c in chapters}
-    with open(os.path.join(out, "metadata.json"), 'w', encoding='utf-8') as mf:
-        json.dump(metadata, mf, ensure_ascii=False, indent=2)
+    # Write metadata with chapter info (enhanced metadata is already saved by extract_chapters)
+    # Just ensure we have the basic metadata.json for backward compatibility
+    if not os.path.exists(os.path.join(out, "metadata.json")):
+        metadata["chapter_count"] = len(chapters)
+        metadata["chapter_titles"] = {str(c["num"]): c["title"] for c in chapters}
+        with open(os.path.join(out, "metadata.json"), 'w', encoding='utf-8') as mf:
+            json.dump(metadata, mf, ensure_ascii=False, indent=2)
         
     # Handle glossary
     manual_gloss = os.getenv("MANUAL_GLOSSARY")
@@ -1463,7 +1787,9 @@ def main(log_callback=None, stop_callback=None):
         shutil.copy(manual_gloss, os.path.join(out, "glossary.json"))
         print("📑 Using manual glossary")
     elif not disable_auto_glossary:
-        save_glossary(out, chapters, instructions, TRANSLATION_LANG)
+        # Use detected language from enhanced extraction
+        detected_lang = metadata.get('detected_language', TRANSLATION_LANG)
+        save_glossary(out, chapters, instructions, detected_lang)
         print("📑 Generated automatic glossary")
     else:
         print("📑 Automatic glossary disabled - no glossary will be used")
@@ -1696,16 +2022,19 @@ def main(log_callback=None, stop_callback=None):
                     
                     client.context = 'translation'
                     
-                    # Initialize retry variables
+                    # ENHANCED RETRY LOGIC WITH HISTORY PURGING
                     retry_count = 0
                     max_retries = 3
+                    duplicate_retry_count = 0  # Track duplicate-specific retries
+                    max_duplicate_retries = 6  # Total allowed duplicate retries (3 + 3 after history purge)
+                    history_purged = False  # Track if we've purged history
                     
                     # Store original values for retry
                     original_max_tokens = MAX_OUTPUT_TOKENS
                     original_temp = TEMP
                     original_user_prompt = user_prompt
                     
-                    while retry_count <= max_retries:
+                    while retry_count <= max_retries or (duplicate_retry_count < max_duplicate_retries):
                         # Use current values (may be modified by retry logic)
                         current_max_tokens = MAX_OUTPUT_TOKENS
                         current_temp = TEMP
@@ -1719,6 +2048,7 @@ def main(log_callback=None, stop_callback=None):
                         # Check if retry is needed
                         retry_needed = False
                         retry_reason = ""
+                        is_duplicate_retry = False
                         
                         # Check for truncation (existing toggle)
                         if finish_reason == "length" and os.getenv("RETRY_TRUNCATED", "0") == "1":
@@ -1728,9 +2058,9 @@ def main(log_callback=None, stop_callback=None):
                                 retry_max_tokens = int(os.getenv("MAX_RETRY_TOKENS", "16384"))
                                 MAX_OUTPUT_TOKENS = min(MAX_OUTPUT_TOKENS * 2, retry_max_tokens)
                         
-                        # Check for duplicate body content (new toggle)
+                        # Check for duplicate body content (enhanced logic)
                         if not retry_needed and os.getenv("RETRY_DUPLICATE_BODIES", "1") == "1":
-                            if retry_count < max_retries:
+                            if duplicate_retry_count < max_duplicate_retries:
                                 # Extract body from the result (remove headers)
                                 result_soup = BeautifulSoup(result, 'html.parser')
                                 
@@ -1781,10 +2111,29 @@ def main(log_callback=None, stop_callback=None):
                                                 # If similarity is very high (>85%), it's likely a duplicate
                                                 if similarity > 0.85:
                                                     retry_needed = True
+                                                    is_duplicate_retry = True
                                                     retry_reason = f"duplicate body content (matches chapter {chapters[prev_idx]['num']} with {int(similarity*100)}% similarity)"
                                                     
-                                                    # Increase temperature more aggressively
-                                                    TEMP = min(TEMP + 0.3, 1.0)
+                                                    # ENHANCED: After 3 duplicate retries, purge history and try again
+                                                    if duplicate_retry_count >= 3 and not history_purged:
+                                                        print(f"    🧹 Purging translation history after 3 duplicate attempts...")
+                                                        
+                                                        # Clear the history
+                                                        history_manager.save_history([])
+                                                        history = []
+                                                        trimmed = []
+                                                        history_purged = True
+                                                        
+                                                        # Rebuild messages without history
+                                                        if base_msg:
+                                                            msgs = base_msg + [{"role": "user", "content": user_prompt}]
+                                                        else:
+                                                            msgs = [{"role": "user", "content": user_prompt}]
+                                                        
+                                                        print(f"    🔄 Retrying with fresh history (attempt {duplicate_retry_count + 1}/{max_duplicate_retries})")
+                                                    else:
+                                                        # Regular duplicate retry - increase temperature more aggressively
+                                                        TEMP = min(TEMP + 0.3, 1.0)
                                                     
                                                     # Create a more specific prompt
                                                     user_prompt = f"""[CRITICAL: This is Chapter {c['num']} titled "{c['title']}". 
@@ -1810,20 +2159,34 @@ def main(log_callback=None, stop_callback=None):
                                                 print(f"    [WARN] Error checking previous chapter: {e}")
                         
                         # If no retry needed or max retries reached, break
-                        if not retry_needed or retry_count >= max_retries:
-                            if retry_needed and retry_count >= max_retries:
-                                print(f"    ❌ Still getting {retry_reason} after {max_retries} retries, proceeding anyway")
+                        if not retry_needed:
                             break
+                            
+                        # Check retry limits
+                        if is_duplicate_retry:
+                            duplicate_retry_count += 1
+                            if duplicate_retry_count > max_duplicate_retries:
+                                print(f"    ❌ Still getting {retry_reason} after {max_duplicate_retries} total attempts, proceeding anyway")
+                                break
+                        else:
+                            retry_count += 1
+                            if retry_count > max_retries:
+                                print(f"    ❌ Still getting {retry_reason} after {max_retries} retries, proceeding anyway")
+                                break
                         
                         # Retry needed
-                        retry_count += 1
                         print(f"    ⚠️ Detected {retry_reason}!")
-                        print(f"    🔄 Retrying translation (attempt {retry_count}/{max_retries})")
                         
-                        if "duplicate" in retry_reason:
-                            print(f"    📊 Increased temperature to {TEMP}")
-                        elif "truncated" in retry_reason:
-                            print(f"    📊 Increased max tokens to {MAX_OUTPUT_TOKENS}")
+                        if is_duplicate_retry:
+                            if history_purged:
+                                print(f"    🔄 Retrying with purged history (duplicate attempt {duplicate_retry_count}/{max_duplicate_retries})")
+                            else:
+                                print(f"    🔄 Retrying with increased temperature (duplicate attempt {duplicate_retry_count}/{max_duplicate_retries})")
+                                print(f"    📊 Increased temperature to {TEMP}")
+                        else:
+                            print(f"    🔄 Retrying translation (attempt {retry_count}/{max_retries})")
+                            if "truncated" in retry_reason:
+                                print(f"    📊 Increased max tokens to {MAX_OUTPUT_TOKENS}")
                         
                         # Brief delay before retry
                         time.sleep(2)
