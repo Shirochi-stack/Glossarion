@@ -4,12 +4,28 @@ import io
 import json
 import mimetypes
 import re
-from ebooklib import epub
+import zipfile
+from ebooklib import epub, ITEM_DOCUMENT, ITEM_IMAGE, ITEM_STYLE
 from bs4 import BeautifulSoup
 import unicodedata
+from xml.etree import ElementTree as ET
 
+# Handle Python 2/3 compatibility for HTML escaping
 try:
-    # Python 3.7+ lets us just reconfigure the existing stream
+    from html import escape, unescape
+    def safe_escape(text):
+        return escape(text)
+except ImportError:
+    # Python 2 compatibility
+    from cgi import escape as cgi_escape
+    import HTMLParser
+    h = HTMLParser.HTMLParser()
+    unescape = h.unescape
+    def safe_escape(text):
+        return cgi_escape(text, quote=True)
+
+# Configure stdout for UTF-8
+try:
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8', errors='ignore')
 except AttributeError:
@@ -22,42 +38,429 @@ except AttributeError:
         except:
             pass
 
-def sanitize_filename(filename):
+
+def sanitize_filename(filename, allow_unicode=False):
     """
     Sanitize filename to be safe for EPUB and filesystem.
-    Removes or replaces problematic characters.
+    More aggressive sanitization for better compatibility.
     """
-    # Normalize unicode characters
-    filename = unicodedata.normalize('NFKD', filename)
-    
-    # Replace problematic characters with safe alternatives
-    replacements = {
-        '/': '_',
-        '\\': '_',
-        ':': '_',
-        '*': '_',
-        '?': '_',
-        '"': '_',
-        '<': '_',
-        '>': '_',
-        '|': '_',
-        '\n': '_',
-        '\r': '_',
-        '\t': '_'
-    }
-    
-    for old, new in replacements.items():
-        filename = filename.replace(old, new)
-    
-    # Remove any remaining control characters
-    filename = ''.join(char for char in filename if ord(char) >= 32)
+    if allow_unicode:
+        # Keep Unicode characters but remove filesystem-unsafe ones
+        filename = unicodedata.normalize('NFC', filename)
+        
+        # Replace only the most problematic characters
+        replacements = {
+            '/': '_', '\\': '_', ':': '_', '*': '_',
+            '?': '_', '"': '_', '<': '_', '>': '_',
+            '|': '_', '\0': '_',
+        }
+        
+        for old, new in replacements.items():
+            filename = filename.replace(old, new)
+            
+        # Remove control characters but keep Unicode
+        filename = ''.join(char for char in filename if ord(char) >= 32 or ord(char) == 9)
+        
+    else:
+        # For internal EPUB files, convert to ASCII
+        filename = unicodedata.normalize('NFKD', filename)
+        
+        # Try to get ASCII representation
+        try:
+            filename = filename.encode('ascii', 'ignore').decode('ascii')
+        except:
+            # If that fails, replace non-ASCII with underscores
+            filename = ''.join(c if ord(c) < 128 else '_' for c in filename)
+        
+        # Replace problematic characters with safe alternatives
+        replacements = {
+            '/': '_', '\\': '_', ':': '_', '*': '_',
+            '?': '_', '"': '_', '<': '_', '>': '_',
+            '|': '_', '\n': '_', '\r': '_', '\t': '_',
+            '&': '_and_', '#': '_num_', ' ': '_',
+        }
+        
+        for old, new in replacements.items():
+            filename = filename.replace(old, new)
+        
+        # Remove any remaining control characters
+        filename = ''.join(char for char in filename if ord(char) >= 32)
+        
+        # Clean up multiple underscores
+        filename = re.sub(r'_+', '_', filename)
+        filename = filename.strip('_')
     
     # Limit length to avoid filesystem issues
     name, ext = os.path.splitext(filename)
-    if len(name) > 200:
-        name = name[:200]
+    if len(name) > 100:
+        name = name[:100]
+    
+    # Ensure we have a valid filename
+    if not name or name == '_':
+        name = 'file'
     
     return name + ext
+
+
+def fix_malformed_tags(html_content):
+    """
+    Fix various types of malformed tags that break XML parsing.
+    Consolidates all malformed tag fixes in one place.
+    """
+    # Pattern 1: <tag =="" word="">  ->  [tag: word]
+    html_content = re.sub(r'<(\w+)\s*=\s*""\s*(\w+)\s*=\s*"">', r'[\1: \2]', html_content)
+    html_content = re.sub(r'<(\w+)\s*=\s*""\s*([^">]+)\s*=?\s*"">', r'[\1: \2]', html_content)
+    
+    # Pattern 2: <tag =""" word="">  ->  remove
+    html_content = re.sub(r'<[^>]*?="""[^>]*?>', '', html_content)
+    
+    # Pattern 3: Multiple quotes in attributes
+    html_content = re.sub(r'<([^>]+?)=""[^"]*""([^>]*?)>', r'<\1\2>', html_content)
+    html_content = re.sub(r'="""\s*\w+\s*=""', '=""', html_content)
+    
+    # Pattern 4: Skill/ability/spell/detect tags with broken attributes
+    def fix_skill_tag(match):
+        tag_name = match.group(1)
+        attrs = match.group(2)
+        
+        # Try to extract skill name from various patterns
+        skill_match = re.search(r'(?:name\s*=\s*"([^"]+)"|"([^"]+)"|(\w+))', attrs)
+        if skill_match:
+            skill_name = skill_match.group(1) or skill_match.group(2) or skill_match.group(3)
+            return f'[{tag_name}: {skill_name}]'
+        return f'[{tag_name}]'
+    
+    html_content = re.sub(r'<(skill|ability|spell|detect)([^>]*?)/?>', fix_skill_tag, html_content)
+    html_content = re.sub(r'</(skill|ability|spell|detect)>', '', html_content)
+    
+    # Pattern 5: Clean up any remaining problematic patterns
+    html_content = re.sub(r'<(\w+)\s+=\s*""\s*([^">]+)\s*="">', r'[\1: \2]', html_content)
+    
+    return html_content
+
+
+def fix_self_closing_tags(content):
+    """Fix self-closing tags for XHTML compliance"""
+    # List of void elements that should be self-closed in XHTML
+    void_elements = ['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 
+                     'link', 'meta', 'param', 'source', 'track', 'wbr']
+    
+    for tag in void_elements:
+        # Fix simple tags without attributes
+        content = re.sub(f'<{tag}>', f'<{tag} />', content)
+        
+        # Fix tags with attributes
+        def replacer(match):
+            full_match = match.group(0)
+            # Check if it already ends with />
+            if full_match.rstrip().endswith('/>'):
+                return full_match
+            # Otherwise, add the self-closing /
+            return full_match[:-1] + ' />'
+        
+        pattern = f'<{tag}(\\s+[^>]*)?>'
+        content = re.sub(pattern, replacer, content)
+    
+    return content
+
+
+def clean_chapter_content(html_content):
+    """Clean and prepare chapter content for XHTML conversion"""
+    # Remove any existing XML declarations or DOCTYPE
+    html_content = re.sub(r'<\?xml[^>]*\?>', '', html_content)
+    html_content = re.sub(r'<!DOCTYPE[^>]*>', '', html_content)
+    
+    # Remove any namespace declarations from html tag
+    html_content = re.sub(r'<html[^>]*>', '<html>', html_content)
+    
+    # Decode HTML entities to their actual characters
+    try:
+        html_content = unescape(html_content)
+    except:
+        pass
+    
+    # Remove NULL bytes and control characters
+    html_content = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]', '', html_content)
+    
+    # Fix malformed tags
+    html_content = fix_malformed_tags(html_content)
+    
+    # Fix numeric entities that might be invalid
+    def fix_numeric_entity(match):
+        try:
+            num = int(match.group(1))
+            if is_valid_xml_char_code(num):
+                return chr(num)
+        except:
+            pass
+        return ''  # Remove invalid entity
+    
+    def fix_hex_entity(match):
+        try:
+            num = int(match.group(1), 16)
+            if is_valid_xml_char_code(num):
+                return chr(num)
+        except:
+            pass
+        return ''  # Remove invalid entity
+    
+    html_content = re.sub(r'&#(\d+);', fix_numeric_entity, html_content)
+    html_content = re.sub(r'&#x([0-9a-fA-F]+);', fix_hex_entity, html_content)
+    
+    # Remove any remaining invalid characters
+    html_content = ''.join(c for c in html_content if is_valid_xml_char(c))
+    
+    return html_content
+
+
+def is_valid_xml_char_code(codepoint):
+    """Check if a codepoint is valid for XML"""
+    return (
+        codepoint == 0x9 or 
+        codepoint == 0xA or 
+        codepoint == 0xD or 
+        (0x20 <= codepoint <= 0xD7FF) or 
+        (0xE000 <= codepoint <= 0xFFFD) or 
+        (0x10000 <= codepoint <= 0x10FFFF)
+    )
+
+
+def is_valid_xml_char(c):
+    """Check if a character is valid for XML"""
+    return is_valid_xml_char_code(ord(c))
+
+
+def ensure_bytes(content):
+    """Ensure content is bytes for ebooklib"""
+    if content is None:
+        return b''
+    if isinstance(content, bytes):
+        return content
+    # Convert to string first if it's not already
+    if not isinstance(content, str):
+        content = str(content)
+    return content.encode('utf-8')
+
+
+def ensure_xhtml_compliance(html_content, title="Chapter", css_links=None):
+    """
+    Ensure HTML content is XHTML-compliant for strict EPUB readers.
+    """
+    try:
+        # First, check if the content is already properly formatted XHTML
+        if html_content.strip().startswith('<?xml') and '<html xmlns=' in html_content:
+            return html_content
+        
+        # Clean the content
+        html_content = clean_chapter_content(html_content)
+        
+        # Parse with BeautifulSoup
+        if isinstance(html_content, bytes):
+            soup = BeautifulSoup(html_content, 'html.parser', from_encoding='utf-8')
+        else:
+            soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Extract title if available
+        if soup.title and soup.title.string:
+            title = str(soup.title.string).strip()
+        elif soup.h1:
+            title = soup.h1.get_text(strip=True)[:50]
+        
+        # Clean title
+        title = re.sub(r'[<>&"\']+', '', title)
+        if not title:
+            title = "Chapter"
+        
+        # Extract existing CSS links if not provided
+        if css_links is None and soup.head:
+            css_links = []
+            for link in soup.head.find_all('link', rel='stylesheet'):
+                href = link.get('href', '')
+                if href:
+                    css_links.append(href)
+        
+        # Extract body content
+        body_content = ""
+        if soup.body:
+            body_parts = []
+            for child in soup.body.children:
+                if hasattr(child, 'name'):  # It's a tag
+                    try:
+                        if hasattr(child, 'encode'):
+                            child_str = child.encode(formatter='html').decode('utf-8')
+                        else:
+                            child_str = str(child)
+                    except:
+                        child_str = str(child)
+                    
+                    # Fix self-closing tags
+                    child_str = fix_self_closing_tags(child_str)
+                    # Fix any remaining unescaped ampersands
+                    child_str = re.sub(r'&(?!amp;|lt;|gt;|quot;|apos;|#\d+;|#x[0-9a-fA-F]+;)', '&amp;', child_str)
+                    body_parts.append(child_str)
+                else:  # It's text
+                    text = str(child)
+                    if text.strip():
+                        # Escape XML special characters
+                        text = re.sub(r'&(?!amp;|lt;|gt;|quot;|apos;|#\d+;|#x[0-9a-fA-F]+;)', '&amp;', text)
+                        text = text.replace('<', '&lt;')
+                        text = text.replace('>', '&gt;')
+                        text = text.replace('"', '&quot;')
+                        text = text.replace("'", '&apos;')
+                        body_parts.append(text)
+            body_content = '\n'.join(body_parts)
+        else:
+            # If no body tag, try to extract meaningful content
+            for tag in soup(['script', 'style']):
+                tag.decompose()
+            
+            body_content = str(soup)
+            body_content = fix_self_closing_tags(body_content)
+        
+        # If body_content is still empty, add some default content
+        if not body_content.strip():
+            body_content = '<p>Empty chapter</p>'
+        
+        # Build proper XHTML document
+        xhtml_parts = []
+        
+        # XML declaration and DOCTYPE
+        xhtml_parts.append('<?xml version="1.0" encoding="utf-8"?>')
+        xhtml_parts.append('<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">')
+        xhtml_parts.append('<html xmlns="http://www.w3.org/1999/xhtml">')
+        xhtml_parts.append('<head>')
+        xhtml_parts.append('<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />')
+        xhtml_parts.append(f'<title>{safe_escape(title)}</title>')
+        
+        # Add CSS links
+        if css_links:
+            for css_link in css_links:
+                if css_link.startswith('<link'):
+                    # Extract href from existing link tag
+                    href_match = re.search(r'href="([^"]+)"', css_link)
+                    if href_match:
+                        css_link = href_match.group(1)
+                    else:
+                        continue
+                
+                xhtml_parts.append(f'<link rel="stylesheet" type="text/css" href="{safe_escape(css_link)}" />')
+        
+        xhtml_parts.append('</head>')
+        xhtml_parts.append('<body>')
+        xhtml_parts.append(body_content)
+        xhtml_parts.append('</body>')
+        xhtml_parts.append('</html>')
+        
+        return '\n'.join(xhtml_parts)
+        
+    except Exception as e:
+        # If anything fails, return a minimal but valid XHTML document
+        print(f"[WARNING] Failed to ensure XHTML compliance: {e}")
+        safe_title = re.sub(r'[<>&"\']+', '', str(title))
+        if not safe_title:
+            safe_title = "Chapter"
+            
+        return f'''<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<title>{safe_escape(safe_title)}</title>
+</head>
+<body>
+<p>Error processing content. Please check the source file.</p>
+</body>
+</html>'''
+
+
+def validate_xhtml(content):
+    """Validate XHTML content and fix common issues"""
+    # Ensure proper XML declaration
+    if not content.strip().startswith('<?xml'):
+        content = '<?xml version="1.0" encoding="utf-8"?>\n' + content
+    
+    # Remove NULL bytes and other control characters
+    content = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]', '', content)
+    
+    # Fix malformed tags one more time (safety net)
+    content = fix_malformed_tags(content)
+    
+    # Fix unescaped ampersands
+    content = re.sub(r'&(?!amp;|lt;|gt;|quot;|apos;|#\d+;|#x[0-9a-fA-F]+;)', '&amp;', content)
+    
+    # Fix self-closing tags
+    content = fix_self_closing_tags(content)
+    
+    # Fix unquoted attributes
+    content = re.sub(r'<([^>]+)\s+(\w+)=([^\s"\'>]+)([>\s])', r'<\1 \2="\3"\4', content)
+    
+    # Remove any invalid XML characters
+    content = ''.join(c for c in content if is_valid_xml_char(c))
+    
+    # Try to parse it to ensure it's valid
+    try:
+        ET.fromstring(content.encode('utf-8'))
+    except ET.ParseError as e:
+        print(f"[WARNING] XHTML validation failed: {e}")
+        
+        # Try to extract error context
+        try:
+            lines = content.split('\n')
+            error_line = getattr(e, 'position', (0, 0))[0] - 1
+            error_col = getattr(e, 'position', (0, 0))[1] - 1
+            
+            if 0 <= error_line < len(lines):
+                print(f"[DEBUG] Error context (line {error_line + 1}):")
+                print(f"[DEBUG] {lines[error_line]}")
+                if error_col >= 0:
+                    print(f"[DEBUG] {' ' * error_col}^")
+                    
+                # Check for specific patterns and try to fix
+                error_line_content = lines[error_line]
+                if '==""' in error_line_content:
+                    print("[DEBUG] Found malformed attribute pattern")
+                    lines[error_line] = fix_malformed_tags(error_line_content)
+                    content = '\n'.join(lines)
+                    
+                    # Try validation again
+                    try:
+                        ET.fromstring(content.encode('utf-8'))
+                        print("[INFO] XHTML auto-fixed by removing malformed attributes")
+                        return content
+                    except:
+                        pass
+        except:
+            pass
+        
+        # Try to fix with BeautifulSoup
+        try:
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            if soup.body:
+                body_content = str(soup.body)
+                # Re-wrap in proper XHTML
+                content = f'''<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<title>Chapter</title>
+</head>
+{body_content}
+</html>'''
+            
+            # Fix self-closing tags again
+            content = fix_self_closing_tags(content)
+            
+            # Try to validate again
+            ET.fromstring(content.encode('utf-8'))
+            print("[INFO] XHTML auto-fixed successfully")
+            
+        except Exception as e2:
+            print(f"[WARNING] Failed to auto-fix XHTML: {e2}")
+    
+    return content
+
 
 def verify_css_in_chapter(chapter_html, css_files):
     """Verify that CSS links are present in chapter HTML"""
@@ -72,19 +475,74 @@ def verify_css_in_chapter(chapter_html, css_files):
     
     return found_css
 
-def rewrite_img_paths(html):
-    soup = BeautifulSoup(html, 'html.parser')
-    for img in soup.find_all('img'):
-        src = img.get('src', '')
-        if src.startswith("http"):
-            filename = os.path.basename(src.split("?")[0])
-            img['src'] = f"images/{sanitize_filename(filename)}"
-        elif os.path.isfile(src):
-            img['src'] = f"images/{sanitize_filename(os.path.basename(src))}"
-    return str(soup)
+
+def preflight_check(base_dir, log_callback=None):
+    """Pre-flight check before EPUB conversion"""
+    def log(message):
+        if log_callback:
+            log_callback(message)
+        else:
+            print(message)
+    
+    log("\n📋 Pre-flight Check")
+    log("=" * 50)
+    
+    issues = []
+    
+    # Check directory exists
+    if not os.path.exists(base_dir):
+        issues.append(f"Directory does not exist: {base_dir}")
+        return False, issues
+    
+    # Check for HTML files
+    html_files = [f for f in os.listdir(base_dir) if f.endswith('.html')]
+    response_files = [f for f in html_files if f.startswith('response_')]
+    
+    if not html_files:
+        issues.append("No HTML files found in directory")
+    elif not response_files:
+        issues.append(f"Found {len(html_files)} HTML files but none start with 'response_'")
+        log(f"  Example files: {html_files[:3]}")
+    else:
+        log(f"✅ Found {len(response_files)} chapter files")
+        
+        # Check if files are empty
+        empty_files = []
+        for f in response_files[:5]:  # Check first 5
+            path = os.path.join(base_dir, f)
+            if os.path.getsize(path) < 100:
+                empty_files.append(f)
+        
+        if empty_files:
+            issues.append(f"Found empty chapter files: {empty_files}")
+    
+    # Check for metadata.json
+    metadata_path = os.path.join(base_dir, 'metadata.json')
+    if not os.path.exists(metadata_path):
+        log("⚠️  No metadata.json found (will use defaults)")
+    else:
+        log("✅ Found metadata.json")
+    
+    # Check for subdirectories
+    for subdir in ['css', 'images', 'fonts']:
+        path = os.path.join(base_dir, subdir)
+        if os.path.exists(path):
+            count = len(os.listdir(path))
+            log(f"✅ Found {subdir}/ with {count} files")
+    
+    # Report results
+    if issues:
+        log("\n❌ Pre-flight check FAILED:")
+        for issue in issues:
+            log(f"  • {issue}")
+        return False, issues
+    else:
+        log("\n✅ Pre-flight check PASSED")
+        return True, []
+
 
 def fallback_compile_epub(base_dir, log_callback=None):
-    """Modified to include CSS and maintain structure"""
+    """Compile translated HTML files into an EPUB with full support for CSS, fonts, and images"""
     def log(message):
         if log_callback:
             log_callback(message)
@@ -92,21 +550,58 @@ def fallback_compile_epub(base_dir, log_callback=None):
             print(message)
     
     try:
-        OUTPUT_DIR = base_dir
+        # Run pre-flight check
+        passed, issues = preflight_check(base_dir, log_callback)
+        if not passed:
+            raise Exception(f"Pre-flight check failed: {'; '.join(issues)}")
+        
+        # Set up paths
+        OUTPUT_DIR = os.path.abspath(base_dir)
         IMAGES_DIR = os.path.join(OUTPUT_DIR, "images")
         CSS_DIR = os.path.join(OUTPUT_DIR, "css")
         FONTS_DIR = os.path.join(OUTPUT_DIR, "fonts")
         METADATA = os.path.join(OUTPUT_DIR, "metadata.json")
+        
+        log(f"[DEBUG] Working with output directory: {OUTPUT_DIR}")
 
-        # Debug: Check what files exist
+        # Scan directory
         log(f"[DEBUG] Scanning directory: {OUTPUT_DIR}")
-        all_files = os.listdir(OUTPUT_DIR)
+        try:
+            all_files = os.listdir(OUTPUT_DIR)
+            log(f"[DEBUG] Total files in directory: {len(all_files)}")
+            
+            # Find HTML files
+            all_html_files = [f for f in all_files if f.endswith('.html')]
+            if all_html_files:
+                log(f"[DEBUG] All HTML files found: {all_html_files[:10]}...")
+            else:
+                log("[DEBUG] No HTML files found at all!")
+            
+        except Exception as e:
+            log(f"[ERROR] Cannot list directory contents: {e}")
+            raise Exception(f"Cannot access output directory: {OUTPUT_DIR}")
+            
         html_files = [f for f in all_files if f.startswith("response_") and f.endswith(".html")]
         log(f"[DEBUG] Found {len(html_files)} translated HTML files")
         
         if not html_files:
-            log("❌ No translated HTML files found (files starting with 'response_' and ending with '.html')")
-            log(f"[DEBUG] Files in directory: {[f for f in all_files if f.endswith('.html')][:5]}...")
+            log("❌ No translated HTML files found")
+            
+            # Check for alternate patterns
+            alternate_patterns = [
+                ("chapter_", ".html"),
+                ("Chapter", ".html"),
+                ("", ".html"),
+                ("response", ".html"),
+                ("translated_", ".html"),
+            ]
+            
+            for prefix, suffix in alternate_patterns:
+                alt_files = [f for f in all_files if f.startswith(prefix) and f.endswith(suffix)]
+                if alt_files:
+                    log(f"[INFO] Found {len(alt_files)} files with pattern '{prefix}*{suffix}'")
+                    log(f"[INFO] Example files: {alt_files[:3]}")
+            
             raise Exception("No translated chapters found to compile into EPUB")
 
         # Load metadata
@@ -114,17 +609,18 @@ def fallback_compile_epub(base_dir, log_callback=None):
             try:
                 with open(METADATA, 'r', encoding='utf-8') as f:
                     meta = json.load(f)
+                log("[DEBUG] Metadata loaded successfully")
             except (json.JSONDecodeError, IOError) as e:
                 log(f"[WARNING] Failed to load metadata.json: {e}")
                 meta = {}
         else:
-            log("[WARNING] metadata.json not found, using defaults.")
+            log("[WARNING] metadata.json not found, using defaults")
             meta = {}
 
-        # Initialize book with proper error handling
+        # Initialize book
         book = epub.EpubBook()
         
-        # Set book metadata with fallbacks
+        # Set book metadata
         book.set_identifier(meta.get("identifier", f"translated-{os.path.basename(base_dir)}"))
         book.set_title(meta.get("title", os.path.basename(base_dir)))
         book.set_language(meta.get("language", "en"))
@@ -134,10 +630,11 @@ def fallback_compile_epub(base_dir, log_callback=None):
 
         spine = []
         toc = []
-        processed_images = {}  # Track processed images to avoid duplicates
-        chapters_added = 0  # Track how many chapters we actually add
+        processed_images = {}
+        chapters_added = 0
+        empty_chapters = 0
 
-        # Add CSS files to EPUB
+        # Add CSS files
         css_items = []
         if os.path.isdir(CSS_DIR):
             css_files = [f for f in sorted(os.listdir(CSS_DIR)) if f.endswith('.css')]
@@ -149,14 +646,13 @@ def fallback_compile_epub(base_dir, log_callback=None):
                     with open(css_path, 'r', encoding='utf-8') as f:
                         css_content = f.read()
                     
-                    # Log CSS file size for debugging
                     log(f"[DEBUG] Reading CSS: {css_file} ({len(css_content)} bytes)")
                     
                     css_item = epub.EpubItem(
                         uid=f"css_{css_file}",
                         file_name=f"css/{css_file}",
                         media_type="text/css",
-                        content=css_content
+                        content=ensure_bytes(css_content)
                     )
                     book.add_item(css_item)
                     css_items.append(css_item)
@@ -164,7 +660,7 @@ def fallback_compile_epub(base_dir, log_callback=None):
                 except Exception as e:
                     log(f"[WARNING] Failed to add CSS {css_file}: {e}")
         
-        # Add fonts if they exist
+        # Add fonts
         if os.path.isdir(FONTS_DIR):
             for font_file in os.listdir(FONTS_DIR):
                 font_path = os.path.join(FONTS_DIR, font_file)
@@ -172,9 +668,11 @@ def fallback_compile_epub(base_dir, log_callback=None):
                     try:
                         mime_type = 'application/font-woff'
                         if font_file.endswith('.ttf'):
-                            mime_type = 'application/x-font-ttf'
+                            mime_type = 'font/ttf'
                         elif font_file.endswith('.otf'):
-                            mime_type = 'application/x-font-opentype'
+                            mime_type = 'font/otf'
+                        elif font_file.endswith('.woff2'):
+                            mime_type = 'font/woff2'
                         
                         with open(font_path, 'rb') as f:
                             book.add_item(epub.EpubItem(
@@ -187,7 +685,7 @@ def fallback_compile_epub(base_dir, log_callback=None):
                     except Exception as e:
                         log(f"[WARNING] Failed to add font {font_file}: {e}")
 
-        # Embed images with better error handling
+        # Process images
         image_files = []
         if os.path.isdir(IMAGES_DIR):
             try:
@@ -196,25 +694,36 @@ def fallback_compile_epub(base_dir, log_callback=None):
                     if os.path.isfile(path):
                         ctype, _ = mimetypes.guess_type(path)
                         if ctype and ctype.startswith("image"):
-                            # Sanitize the image filename
-                            safe_name = sanitize_filename(img)
+                            safe_name = sanitize_filename(img, allow_unicode=False)
+                            
+                            # Ensure proper extension
+                            if not os.path.splitext(safe_name)[1]:
+                                ext = os.path.splitext(img)[1]
+                                if ext:
+                                    safe_name += ext
+                                else:
+                                    if ctype == 'image/jpeg':
+                                        safe_name += '.jpg'
+                                    elif ctype == 'image/png':
+                                        safe_name += '.png'
+                                    elif ctype == 'image/gif':
+                                        safe_name += '.gif'
+                            
                             image_files.append(safe_name)
                             processed_images[img] = safe_name
                             log(f"[DEBUG] Found image: {img} -> {safe_name}")
             except OSError as e:
                 log(f"[WARNING] Error reading images directory: {e}")
 
-        # Determine cover file
+        # Find cover image
         cover_file = None
         cover_patterns = ['cover', 'Cover', 'COVER', 'front', 'Front']
         
-        # First, look for files with common cover names
         for pattern in cover_patterns:
             for ext in ["jpg", "jpeg", "png"]:
                 candidate = f"{pattern}.{ext}"
-                safe_candidate = sanitize_filename(candidate)
+                safe_candidate = sanitize_filename(candidate, allow_unicode=False)
                 
-                # Check if this file exists in processed images
                 if safe_candidate in image_files or candidate in processed_images:
                     cover_file = processed_images.get(candidate, safe_candidate)
                     log(f"[DEBUG] Found cover by name match: {cover_file}")
@@ -222,12 +731,11 @@ def fallback_compile_epub(base_dir, log_callback=None):
             if cover_file:
                 break
         
-        # If no cover found by name, use the first image
         if not cover_file and image_files:
             cover_file = image_files[0]
             log(f"[DEBUG] Using first image as cover: {cover_file}")
 
-        # Embed non-cover images
+        # Embed images (except cover)
         for original_name, safe_name in processed_images.items():
             if safe_name == cover_file:
                 continue
@@ -247,9 +755,8 @@ def fallback_compile_epub(base_dir, log_callback=None):
             except (IOError, OSError) as e:
                 log(f"[WARNING] Failed to embed image {original_name}: {e}")
 
-        # Embed cover image and page
+        # Add cover if found
         if cover_file:
-            # Find the original filename for the cover
             original_cover = None
             for orig, safe in processed_images.items():
                 if safe == cover_file:
@@ -262,7 +769,7 @@ def fallback_compile_epub(base_dir, log_callback=None):
                     with open(cover_path, 'rb') as fp:
                         cover_data = fp.read()
                     
-                    # Create the cover image item
+                    # Create cover image item
                     cover_img = epub.EpubItem(
                         uid="cover-image",
                         file_name=f"images/{cover_file}",
@@ -271,66 +778,53 @@ def fallback_compile_epub(base_dir, log_callback=None):
                     )
                     book.add_item(cover_img)
                     
-                    # IMPORTANT: Set this image as the book's cover
-                    # This adds proper metadata so readers recognize it
-                    book.set_cover("cover.jpg", cover_data)
+                    # Set cover metadata
+                    book.add_metadata('http://purl.org/dc/elements/1.1/', 'cover', 'cover-image')
                     
-                    # Also create a cover page for readers that need it
-                    
-                    # Also add cover page for readers that need it
+                    # Create cover page
                     cover_page = epub.EpubHtml(
                         title="Cover",
                         file_name="cover.xhtml",
                         lang=meta.get("language", "en")
                     )
                     
-                    # Build cover page HTML with CSS links
-                    cover_html_parts = [
-                        '<!DOCTYPE html>',
-                        '<html xmlns="http://www.w3.org/1999/xhtml">',
-                        '<head>',
-                        '<title>Cover</title>'
-                    ]
-                    
-                    # Add CSS links to cover page
+                    # Build cover page with CSS links
+                    cover_css_links = []
                     if css_items:
                         for css_item in css_items:
                             css_filename = css_item.file_name.split('/')[-1]
-                            cover_html_parts.append(f'<link rel="stylesheet" type="text/css" href="css/{css_filename}"/>')
+                            cover_css_links.append(f"css/{css_filename}")
                     
-                    cover_html_parts.extend([
-                        '</head>',
-                        '<body style="text-align:center;padding:0;margin:0;">',
-                        f'<img src="images/{cover_file}" alt="Cover" style="max-width:100%;height:auto;"/>',
-                        '</body></html>'
-                    ])
+                    cover_body = f'''<div style="text-align: center;">
+<img src="images/{cover_file}" alt="Cover" style="max-width: 100%; height: auto;" />
+</div>'''
                     
-                    cover_page.content = '\n'.join(cover_html_parts)
+                    # Ensure content is bytes
+                    cover_page.content = ensure_bytes(validate_xhtml(ensure_xhtml_compliance(
+                        cover_body, 
+                        title="Cover",
+                        css_links=cover_css_links
+                    )))
+                    
                     book.add_item(cover_page)
-                    
-                    # Add to spine at the beginning
                     spine.insert(0, cover_page)
-                    # Note: Not adding cover to TOC as most readers handle it separately
                     chapters_added += 1
                     
                     log(f"✅ Set cover image: {cover_file}")
-                    log("   • Cover will appear before Table of Contents")
-                    log("   • Cover is not listed in Table of Contents (standard practice)")
                     
                 except (IOError, OSError) as e:
                     log(f"[WARNING] Failed to add cover image: {e}")
 
-        # Collect translated HTML files and parse chapter numbers
-        chapter_tuples = []  # list of (chapter_number, filename)
-        chapter_seen = set()  # Track seen chapter numbers to avoid true duplicates
+        # Process chapters
+        chapter_tuples = []
+        chapter_seen = set()
         
         try:
-            for fn in sorted(html_files):  # Use the html_files we already found
+            for fn in sorted(html_files):
                 log(f"[DEBUG] Processing file: {fn}")
                 m = re.match(r"response_(\d+)_", fn)
                 if m:
                     num = int(m.group(1))
-                    # Only add if we haven't seen this chapter number
                     if num not in chapter_seen:
                         chapter_tuples.append((num, fn))
                         chapter_seen.add(num)
@@ -338,128 +832,229 @@ def fallback_compile_epub(base_dir, log_callback=None):
                         log(f"[WARNING] Skipping duplicate chapter {num}: {fn}")
                 else:
                     log(f"[WARNING] File doesn't match expected pattern: {fn}")
+                    # Try alternative patterns
+                    alt_match = re.search(r'(\d+)', fn)
+                    if alt_match:
+                        num = int(alt_match.group(1))
+                        if num not in chapter_seen:
+                            chapter_tuples.append((num, fn))
+                            chapter_seen.add(num)
+                            log(f"[INFO] Using alternative numbering for {fn}: Chapter {num}")
         except OSError as e:
             log(f"[ERROR] Failed to read output directory: {e}")
             raise
 
-        # Sort chapters by actual number (handles missing chapters correctly)
+        # Sort chapters
         chapter_tuples.sort(key=lambda x: x[0])
         log(f"[DEBUG] Found {len(chapter_tuples)} unique chapters to process")
 
-        # Add chapters to book
+        # Add chapters
+        log(f"\n📚 Processing {len(chapter_tuples)} chapters...")
         for num, fn in chapter_tuples:
             path = os.path.join(OUTPUT_DIR, fn)
+            log(f"\n[DEBUG] Processing chapter {num} from file: {fn}")
+            
             try:
-                log(f"[DEBUG] Reading chapter {num} from {fn}")
+                log(f"[DEBUG] Reading file: {path}")
                 with open(path, 'r', encoding='utf-8') as f:
                     raw = f.read()
                 
+                log(f"[DEBUG] File size: {len(raw)} characters")
+                
                 if not raw.strip():
                     log(f"[WARNING] Chapter {num} is empty, skipping")
+                    empty_chapters += 1
                     continue
                 
-                soup = BeautifulSoup(raw, 'html.parser')
+                # Debug: Show first 200 chars of raw content
+                preview = raw[:200] if len(raw) > 200 else raw
+                # Ensure it's printable
+                preview = ''.join(c if ord(c) < 127 else '?' for c in preview)
+                log(f"[DEBUG] First 200 chars: {preview}...")
                 
-                # Add CSS links to chapter if not present
+                # Clean the content
+                raw = clean_chapter_content(raw)
+                
+                # Get chapter title
+                title = meta.get("chapter_titles", {}).get(str(num), f"Chapter {num}")
+                
+                # Prepare CSS links
+                chapter_css_links = []
                 if css_items:
-                    # Check if chapter has a head tag, create one if not
-                    if not soup.head:
-                        head_tag = soup.new_tag('head')
-                        # Add a placeholder title tag
-                        title_tag = soup.new_tag('title')
-                        title_tag.string = f"Chapter {num}"  # Use chapter number as placeholder
-                        head_tag.append(title_tag)
-                        
-                        if soup.html:
-                            soup.html.insert(0, head_tag)
-                        else:
-                            # Create html tag if missing
-                            html_tag = soup.new_tag('html')
-                            html_tag.append(head_tag)
-                            if soup.body:
-                                html_tag.append(soup.body.extract())
-                            else:
-                                body_tag = soup.new_tag('body')
-                                # Move all content to body
-                                for child in list(soup.children):
-                                    body_tag.append(child.extract())
-                                html_tag.append(body_tag)
-                            soup.append(html_tag)
-                    
-                    # Add CSS links - check for existing ones first
-                    existing_css_hrefs = set()
-                    for existing_link in soup.find_all('link', rel='stylesheet'):
-                        href = existing_link.get('href', '')
-                        existing_css_hrefs.add(os.path.basename(href))
-                    
-                    # Add only missing CSS links
                     for css_item in css_items:
                         css_filename = css_item.file_name.split('/')[-1]
-                        if css_filename not in existing_css_hrefs:
-                            link_tag = soup.new_tag('link')
-                            link_tag['rel'] = 'stylesheet'
-                            link_tag['type'] = 'text/css'
-                            link_tag['href'] = f"css/{css_filename}"  # CSS files are in css/ subdirectory
-                            soup.head.append(link_tag)
+                        chapter_css_links.append(f"css/{css_filename}")
                 
-                # Fix image paths with sanitized names
+                # Convert to XHTML
+                try:
+                    xhtml_content = ensure_xhtml_compliance(raw, title=title, css_links=chapter_css_links)
+                except Exception as e:
+                    log(f"[ERROR] Failed to convert chapter {num} to XHTML: {e}")
+                    safe_title = re.sub(r'[<>&"\']+', '', title)
+                    xhtml_content = f'''<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<title>{safe_escape(safe_title)}</title>
+</head>
+<body>
+{raw}
+</body>
+</html>'''
+                
+                # Process images in content
+                try:
+                    soup = BeautifulSoup(xhtml_content, 'lxml-xml')
+                except:
+                    try:
+                        soup = BeautifulSoup(xhtml_content, 'lxml')
+                    except:
+                        try:
+                            soup = BeautifulSoup(xhtml_content, 'html.parser')
+                        except Exception as e:
+                            log(f"[ERROR] Failed to parse chapter {num}: {e}")
+                            continue
+                
+                # Fix image paths
+                changed = False
                 for img in soup.find_all('img'):
                     src = img.get('src', '')
                     basename = os.path.basename(src.split('?')[0])
-                    # Use the sanitized version if we have it
                     safe_name = processed_images.get(basename, sanitize_filename(basename))
-                    img['src'] = f"images/{safe_name}"
-
-                # Use metadata title mapping or default
-                title = meta.get("titles", {}).get(str(num), f"Chapter {num}")
+                    new_src = f"images/{safe_name}"
+                    if src != new_src:
+                        img['src'] = new_src
+                        changed = True
                 
-                # Update the title tag if it exists
-                if soup.head and soup.head.title:
-                    soup.head.title.string = title
-                elif soup.head and not soup.head.title:
-                    # Add title tag if head exists but no title
-                    title_tag = soup.new_tag('title')
-                    title_tag.string = title
-                    soup.head.insert(0, title_tag)
+                # Re-serialize if changed
+                if changed:
+                    try:
+                        final_content = soup.prettify(formatter='html')
+                    except:
+                        final_content = str(soup)
+                    
+                    # Ensure it's a regular string, not NavigableString
+                    final_content = str(final_content)
+                    
+                    if not final_content.strip().startswith('<?xml'):
+                        final_content = '<?xml version="1.0" encoding="utf-8"?>\n' + final_content
+                else:
+                    # Ensure xhtml_content is a regular string
+                    final_content = str(xhtml_content)
+                
+                # Create chapter
+                safe_fn = f"chapter_{num:03d}.xhtml"
                 
                 chap = epub.EpubHtml(
                     title=title,
-                    file_name=fn,
+                    file_name=safe_fn,
                     lang=meta.get("language", "en")
                 )
-                chap.content = str(soup)
                 
-                # Link CSS files to this chapter (don't use add_item)
-                # The CSS files are already added to the book, we just need to reference them
+                # Validate and set content
+                final_content = validate_xhtml(final_content)
+                
+                # Final safety check
+                try:
+                    ET.fromstring(final_content.encode('utf-8'))
+                except Exception as e:
+                    log(f"[ERROR] Chapter {num} XHTML is invalid: {e}")
+                    final_content = f'''<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<title>{safe_escape(title)}</title>
+</head>
+<body>
+<h1>{safe_escape(title)}</h1>
+<p>Chapter content could not be properly formatted. Please check the source file.</p>
+</body>
+</html>'''
+                
+                # CRITICAL FIX: Ensure content is bytes!
+                chap.content = ensure_bytes(final_content)
+                
+                # Debug: Verify content is set
+                log(f"   └─ Content size: {len(chap.content):,} bytes")
+                
+                # CRITICAL DEBUG: Verify content is actually set on the object
+                if not chap.content or len(chap.content) == 0:
+                    log(f"   ❌ ERROR: Chapter content is empty after setting!")
+                    log(f"   └─ Attempting to set content again...")
+                    # Try setting it again
+                    chap.content = ensure_bytes(final_content)
+                
+                # Debug: Verify content is set
+                content_before = len(chap.content) if hasattr(chap, 'content') and chap.content else 0
+                log(f"   └─ Content size before add_item: {content_before:,} bytes")
                 
                 book.add_item(chap)
+                
+                # Debug: Check content after adding
+                content_after = len(chap.content) if hasattr(chap, 'content') and chap.content else 0
+                log(f"   └─ Content size after add_item: {content_after:,} bytes")
+                if content_after == 0 and content_before > 0:
+                    log(f"   ❌ ERROR: Content was cleared when adding to book!")
+                    # Try using EpubItem as fallback
+                    log(f"   └─ Trying EpubItem fallback...")
+                    
+                    # Remove the broken item
+                    book.items.pop()
+                    
+                    # Create as generic item
+                    item = epub.EpubItem(
+                        uid=f"chapter_{num}",
+                        file_name=safe_fn,
+                        media_type="application/xhtml+xml",
+                        content=ensure_bytes(final_content)
+                    )
+                    book.add_item(item)
+                    chap = item  # Use this for spine/toc
+                
                 spine.append(chap)
                 toc.append(chap)
                 chapters_added += 1
                 
-                # Verify CSS links were added
+                log(f"✅ Added chapter {num}: {title} (File: {safe_fn})")
+                
+                # Verify CSS links
                 if css_items:
                     css_files = [item.file_name.split('/')[-1] for item in css_items]
                     found_css = verify_css_in_chapter(str(soup), css_files)
                     if found_css:
-                        log(f"✅ Added chapter {num}: {title} (CSS: {', '.join(found_css)})")
-                    else:
-                        log(f"⚠️ Added chapter {num}: {title} (WARNING: No CSS links found!)")
-                else:
-                    log(f"✅ Added chapter {num}: {title}")
+                        log(f"   └─ CSS files linked: {', '.join(found_css)}")
                 
             except (IOError, OSError) as e:
                 log(f"[WARNING] Failed to add chapter {num} from {fn}: {e}")
                 continue
 
-        # Check if we have any content
+        # Check if we have content
         if chapters_added == 0:
             log("❌ No chapters were successfully added to the EPUB")
-            raise Exception("No chapters could be added to the EPUB - all files were empty or unreadable")
+            if empty_chapters == len(chapter_tuples):
+                raise Exception("All chapter files were empty. Please check the translation output.")
+            else:
+                raise Exception("No chapters could be added to the EPUB")
 
+        # Debug: Verify chapters have content
+        log("\n[DEBUG] Verifying chapter content:")
+        for item in book.get_items():
+            if item.get_type() == ITEM_DOCUMENT:
+                content_size = len(item.content) if item.content else 0
+                log(f"  • {item.file_name}: {content_size:,} bytes")
+                if content_size == 0:
+                    log(f"    ⚠️ WARNING: Empty content!")
+
+        log(f"\n[DEBUG] Summary before writing EPUB:")
         log(f"[DEBUG] Total chapters added: {chapters_added}")
+        log(f"[DEBUG] Total items in spine: {len(spine)}")
+        log(f"[DEBUG] Total items in TOC: {len(toc)}")
+        log(f"[DEBUG] Total CSS files: {len(css_items)}")
+        log(f"[DEBUG] Cover image: {'Yes' if cover_file else 'No'}")
 
-        # Optional gallery for extra images
+        # Optional gallery
         gallery_images = [img for img in image_files if img != cover_file]
         if gallery_images:
             gallery_page = epub.EpubHtml(
@@ -467,78 +1062,126 @@ def fallback_compile_epub(base_dir, log_callback=None):
                 file_name="gallery.xhtml",
                 lang=meta.get("language", "en")
             )
-            html_parts = [
-                '<!DOCTYPE html>',
-                '<html xmlns="http://www.w3.org/1999/xhtml">',
-                '<head><title>Gallery</title>'
-            ]
             
-            # Add CSS links to gallery
+            gallery_body_parts = ['<h1>Image Gallery</h1>']
+            for img in gallery_images:
+                gallery_body_parts.append(
+                    f'<div style="text-align: center; margin: 20px;">'
+                    f'<img src="images/{img}" alt="{img}" />'
+                    f'</div>'
+                )
+            
+            gallery_body = '\n'.join(gallery_body_parts)
+            
+            gallery_css_links = []
             if css_items:
                 for css_item in css_items:
                     css_filename = css_item.file_name.split('/')[-1]
-                    html_parts.append(f'<link rel="stylesheet" type="text/css" href="css/{css_filename}"/>')
+                    gallery_css_links.append(f"css/{css_filename}")
             
-            html_parts.extend([
-                '</head>',
-                '<body>',
-                '<h1>Image Gallery</h1>'
-            ])
-            
-            for img in gallery_images:
-                html_parts.append(
-                    f'<div style="text-align:center;margin:20px;">'
-                    f'<img src="images/{img}" alt="{img}"/>'
-                    f'</div>'
-                )
-            html_parts.extend(['</body>', '</html>'])
-            
-            gallery_page.content = '\n'.join(html_parts)
+            # Ensure content is bytes
+            gallery_page.content = ensure_bytes(validate_xhtml(ensure_xhtml_compliance(
+                gallery_body,
+                title="Gallery",
+                css_links=gallery_css_links
+            )))
             
             book.add_item(gallery_page)
             spine.append(gallery_page)
             toc.append(gallery_page)
 
-        # Finalize TOC and spine
+        # Add navigation
+        log("\n[DEBUG] Adding navigation files...")
+        book.add_item(epub.EpubNav())
+        book.add_item(epub.EpubNcx())
+        log("[DEBUG] Navigation files added")
+        
+        # Set TOC and spine
         book.toc = toc
         
-        # Set spine with cover first (if it exists), then nav, then chapters
+        log(f"\n[DEBUG] Setting up spine...")
+        log(f"[DEBUG] Spine items before setup: {len(spine)}")
+        
         if spine and spine[0].title == "Cover":
-            # Cover is first in spine, so put it before nav
             book.spine = [spine[0], 'nav'] + spine[1:]
             log("📖 Reading order: Cover → Table of Contents → Chapters")
-            log("   Note: Some readers may still show ToC first based on their settings")
         else:
-            # No cover, nav comes first
             book.spine = ['nav'] + spine
             log("📖 Reading order: Table of Contents → Chapters")
         
-        log("\n📱 Cover Display by Reader:")
-        log("   • Calibre: Shows cover → ToC → Chapters")
-        log("   • Kindle: Usually shows cover first")
-        log("   • Apple Books: Shows cover in library, may start at ToC")
-        log("   • Adobe Digital Editions: Shows cover → ToC → Chapters")
+        log(f"[DEBUG] Final spine length: {len(book.spine)}")
 
-        # Add navigation files
-        book.add_item(epub.EpubNav())
-        book.add_item(epub.EpubNcx())
-        
-        # Add guide for cover (helps some readers)
+        # Add guide for cover
         if spine and spine[0].title == "Cover":
             book.guide = [
                 {"type": "cover", "title": "Cover", "href": spine[0].file_name}
             ]
 
-        # Write out final EPUB with error handling
+        # Write EPUB
         base_name = os.path.basename(OUTPUT_DIR)
         out_path = os.path.join(OUTPUT_DIR, f"{base_name}.epub")
         try:
             log(f"[DEBUG] Writing EPUB to: {out_path}")
             log(f"[DEBUG] Total CSS files included: {len(css_items)}")
-            epub.write_epub(out_path, book)
-            log(f"✅ EPUB created at: {out_path}")
             
-            # Verify EPUB contents
+            # Add debugging info
+            log(f"[DEBUG] Book metadata:")
+            log(f"  • Title: {book.title}")
+            log(f"  • Language: {book.language}")
+            log(f"  • Identifier: {book.uid}")
+            log(f"[DEBUG] Book contents:")
+            log(f"  • Items: {len(list(book.get_items()))}")
+            log(f"  • Spine length: {len(book.spine)}")
+            log(f"  • TOC entries: {len(book.toc)}")
+            
+            # Additional debug: Check all items have content
+            empty_items = []
+            for item in book.get_items():
+                if hasattr(item, 'content'):
+                    if not item.content or len(item.content) == 0:
+                        empty_items.append(item.file_name)
+            
+            if empty_items:
+                log(f"⚠️ WARNING: Found {len(empty_items)} empty items: {empty_items[:5]}")
+            
+            # Write the EPUB
+            log("\n[DEBUG] Writing EPUB file...")
+            epub.write_epub(out_path, book, {})
+            
+            # Verify the file was created
+            if os.path.exists(out_path):
+                file_size = os.path.getsize(out_path)
+                log(f"✅ EPUB created at: {out_path}")
+                log(f"📊 File size: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
+                
+                # Quick validation
+                try:
+                    with zipfile.ZipFile(out_path, 'r') as test_zip:
+                        if 'mimetype' in test_zip.namelist():
+                            log("✅ EPUB structure verified (mimetype present)")
+                            
+                            # Check actual content of chapters
+                            log("\n[DEBUG] Checking chapter content in EPUB:")
+                            xhtml_files = [f for f in test_zip.namelist() if f.endswith('.xhtml')]
+                            for xhtml in xhtml_files[:5]:  # Check first 5
+                                try:
+                                    content = test_zip.read(xhtml)
+                                    log(f"  • {xhtml}: {len(content):,} bytes")
+                                    if len(content) == 0:
+                                        log(f"    ❌ EMPTY FILE!")
+                                except:
+                                    log(f"  • {xhtml}: ERROR reading")
+                            
+                            if len(xhtml_files) > 5:
+                                log(f"  ... and {len(xhtml_files) - 5} more files")
+                        else:
+                            log("⚠️ WARNING: EPUB might be malformed (missing mimetype)")
+                except Exception as e:
+                    log(f"⚠️ WARNING: EPUB validation error: {e}")
+            else:
+                log("❌ ERROR: EPUB file was not created!")
+            
+            # Final notes
             if css_items:
                 log(f"✅ Successfully embedded {len(css_items)} CSS files")
                 for css_item in css_items:
@@ -548,10 +1191,13 @@ def fallback_compile_epub(base_dir, log_callback=None):
                 log("   2. Right-click and 'View' or 'Inspect' a chapter")
                 log("   3. Check the <head> section for CSS links")
                 log("   4. Verify styles are applied to the content")
-                log("\n⚠️  Note: Some EPUB readers may ignore or override CSS")
-                log("   - Kindle devices often ignore most CSS")
-                log("   - Some readers only support basic CSS")
-                log("   - Try Calibre or Adobe Digital Editions for best CSS support")
+            
+            log("\n📱 Compatibility Notes:")
+            log("   • XHTML 1.1 compliant for strict readers")
+            log("   • All tags properly self-closed")
+            log("   • Special characters properly escaped")
+            log("   • Malformed tags automatically fixed")
+            
         except Exception as e:
             log(f"❌ Failed to write EPUB: {e}")
             raise
@@ -559,3 +1205,237 @@ def fallback_compile_epub(base_dir, log_callback=None):
     except Exception as e:
         log(f"❌ EPUB compilation failed with error: {e}")
         raise
+
+
+# Additional utility functions
+
+def extract_chapter_titles(epub_path):
+    """Extract chapter titles from an EPUB file"""
+    try:
+        book = epub.read_epub(epub_path)
+        titles = {}
+        
+        for item in book.get_items():
+            if item.get_type() == ITEM_DOCUMENT:
+                soup = BeautifulSoup(item.get_content(), 'html.parser')
+                title = None
+                
+                if soup.title:
+                    title = soup.title.string
+                elif soup.h1:
+                    title = soup.h1.get_text(strip=True)
+                elif soup.h2:
+                    title = soup.h2.get_text(strip=True)
+                
+                if title:
+                    match = re.search(r'chapter_(\d+)', item.get_name())
+                    if match:
+                        chapter_num = int(match.group(1))
+                        titles[str(chapter_num)] = title.strip()
+        
+        return titles
+    except Exception as e:
+        print(f"Error extracting chapter titles: {e}")
+        return {}
+
+
+def convert_html_to_epub(html_file, output_path, metadata=None):
+    """Convert a single HTML file to EPUB format"""
+    try:
+        book = epub.EpubBook()
+        
+        # Set metadata
+        if metadata:
+            book.set_identifier(metadata.get('identifier', 'html-to-epub'))
+            book.set_title(metadata.get('title', 'Converted Book'))
+            book.set_language(metadata.get('language', 'en'))
+            if metadata.get('author'):
+                book.add_author(metadata['author'])
+        else:
+            book.set_identifier('html-to-epub')
+            book.set_title(os.path.splitext(os.path.basename(html_file))[0])
+            book.set_language('en')
+        
+        # Read HTML content
+        with open(html_file, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+        
+        # Clean and convert to XHTML
+        html_content = clean_chapter_content(html_content)
+        xhtml_content = ensure_xhtml_compliance(html_content)
+        
+        # Create chapter
+        chapter = epub.EpubHtml(
+            title='Chapter',
+            file_name='chapter.xhtml',
+            lang='en'
+        )
+        chapter.content = ensure_bytes(xhtml_content)
+        
+        # Add chapter to book
+        book.add_item(chapter)
+        book.spine = ['nav', chapter]
+        book.toc = [chapter]
+        
+        # Add navigation
+        book.add_item(epub.EpubNav())
+        book.add_item(epub.EpubNcx())
+        
+        # Write EPUB
+        epub.write_epub(output_path, book)
+        return True
+        
+    except Exception as e:
+        print(f"Error converting HTML to EPUB: {e}")
+        return False
+
+
+def merge_epubs(epub_files, output_path, metadata=None):
+    """Merge multiple EPUB files into one"""
+    try:
+        merged_book = epub.EpubBook()
+        
+        # Set metadata
+        if metadata:
+            merged_book.set_identifier(metadata.get('identifier', 'merged-epub'))
+            merged_book.set_title(metadata.get('title', 'Merged Book'))
+            merged_book.set_language(metadata.get('language', 'en'))
+            if metadata.get('author'):
+                merged_book.add_author(metadata['author'])
+        else:
+            merged_book.set_identifier('merged-epub')
+            merged_book.set_title('Merged Book')
+            merged_book.set_language('en')
+        
+        spine = []
+        toc = []
+        chapter_count = 0
+        
+        # Process each EPUB
+        for epub_file in epub_files:
+            book = epub.read_epub(epub_file)
+            
+            # Copy chapters
+            for item in book.get_items():
+                if item.get_type() == ITEM_DOCUMENT:
+                    # Skip navigation documents
+                    if 'nav' in item.get_name().lower():
+                        continue
+                    
+                    chapter_count += 1
+                    
+                    # Create new chapter with unique filename
+                    new_chapter = epub.EpubHtml(
+                        title=f'Chapter {chapter_count}',
+                        file_name=f'chapter_{chapter_count:03d}.xhtml',
+                        lang=item.lang or 'en'
+                    )
+                    content = item.get_content()
+                    new_chapter.content = ensure_bytes(content)
+                    
+                    merged_book.add_item(new_chapter)
+                    spine.append(new_chapter)
+                    toc.append(new_chapter)
+                
+                # Copy images
+                elif item.get_type() == ITEM_IMAGE:
+                    merged_book.add_item(item)
+                
+                # Copy CSS
+                elif item.get_type() == ITEM_STYLE:
+                    merged_book.add_item(item)
+        
+        # Add navigation
+        merged_book.add_item(epub.EpubNav())
+        merged_book.add_item(epub.EpubNcx())
+        
+        # Set spine and toc
+        merged_book.spine = ['nav'] + spine
+        merged_book.toc = toc
+        
+        # Write merged EPUB
+        epub.write_epub(output_path, merged_book)
+        return True
+        
+    except Exception as e:
+        print(f"Error merging EPUBs: {e}")
+        return False
+
+
+def validate_epub_structure(epub_path):
+    """Validate the structure of an EPUB file"""
+    try:
+        book = epub.read_epub(epub_path)
+        
+        validation_results = {
+            'valid': True,
+            'errors': [],
+            'warnings': [],
+            'info': {
+                'title': book.get_metadata('DC', 'title'),
+                'author': book.get_metadata('DC', 'creator'),
+                'language': book.get_metadata('DC', 'language'),
+                'chapter_count': 0,
+                'image_count': 0,
+                'css_count': 0
+            }
+        }
+        
+        # Count items
+        for item in book.get_items():
+            if item.get_type() == ITEM_DOCUMENT:
+                validation_results['info']['chapter_count'] += 1
+                
+                # Validate XHTML
+                try:
+                    ET.fromstring(item.get_content())
+                except Exception as e:
+                    validation_results['errors'].append(
+                        f"Invalid XHTML in {item.get_name()}: {str(e)}"
+                    )
+                    validation_results['valid'] = False
+                    
+            elif item.get_type() == ITEM_IMAGE:
+                validation_results['info']['image_count'] += 1
+            elif item.get_type() == ITEM_STYLE:
+                validation_results['info']['css_count'] += 1
+        
+        # Check for required elements
+        if validation_results['info']['chapter_count'] == 0:
+            validation_results['errors'].append("No chapters found in EPUB")
+            validation_results['valid'] = False
+        
+        if not book.get_metadata('DC', 'title'):
+            validation_results['warnings'].append("No title metadata found")
+        
+        if not book.get_metadata('DC', 'language'):
+            validation_results['warnings'].append("No language metadata found")
+        
+        return validation_results
+        
+    except Exception as e:
+        return {
+            'valid': False,
+            'errors': [f"Failed to read EPUB: {str(e)}"],
+            'warnings': [],
+            'info': {}
+        }
+
+
+# Legacy function alias
+compile_epub = fallback_compile_epub
+
+
+# Main execution
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python epub_converter.py <directory_path>")
+        sys.exit(1)
+    
+    directory_path = sys.argv[1]
+    
+    try:
+        compile_epub(directory_path)
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
