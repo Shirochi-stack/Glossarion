@@ -9,3 +9,4 @@ google-generativeai
 langdetect
 tqdm
 lxml
+olefile
