@@ -945,12 +945,23 @@ class TranslatorGUI:
             # Update to use the new filename format
             base_name = os.path.basename(folder)
             out_file = os.path.join(folder, f"{base_name}.epub")
-            # Remove the duplicate log message (epub_converter already logs success)
-            messagebox.showinfo("EPUB Compilation Success", f"Created: {out_file}")
+            
+            # Check if the file was actually created
+            if os.path.exists(out_file):
+                messagebox.showinfo("EPUB Compilation Success", f"Created: {out_file}")
+            else:
+                self.append_log("⚠️ EPUB file was not created. Check the logs for details.")
             
         except Exception as e:
-            self.append_log(f"❌ EPUB Converter error: {e}")
-            messagebox.showerror("EPUB Converter Failed", f"Error: {e}")
+            error_str = str(e)
+            self.append_log(f"❌ EPUB Converter error: {error_str}")
+            
+            # Don't show popup for "Document is empty" errors
+            if "Document is empty" not in error_str:
+                messagebox.showerror("EPUB Converter Failed", f"Error: {error_str}")
+            else:
+                # Just log it, no popup
+                self.append_log("📋 Check the log above for details about what went wrong.")
 
     def run_qa_scan(self):
         """Run QA scan directly without subprocess"""
