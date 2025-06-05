@@ -39,6 +39,234 @@ except AttributeError:
             pass
 
 
+def extract_translated_title_from_html(html_content, chapter_num=None, filename=None):
+    """
+    Extract the translated title from HTML content using multiple strategies
+    Returns: (title, confidence_score)
+    """
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        candidates = []
+        
+        # Strategy 1: Look for <title> tag (highest confidence)
+        title_tag = soup.find('title')
+        if title_tag and title_tag.string:
+            title_text = title_tag.string.strip()
+            if title_text and not title_text.lower() in ['untitled', 'chapter', '']:
+                candidates.append((title_text, 0.9, "title_tag"))
+        
+        # Strategy 2: Look for h1 tags (high confidence)
+        h1_tags = soup.find_all('h1')
+        for h1 in h1_tags:
+            h1_text = h1.get_text(strip=True)
+            if h1_text and len(h1_text) < 200:  # Reasonable title length
+                # Check if it looks like a chapter title
+                if any(pattern in h1_text.lower() for pattern in ['chapter', 'part', 'episode', ':']):
+                    candidates.append((h1_text, 0.85, "h1_chapter"))
+                else:
+                    candidates.append((h1_text, 0.7, "h1_generic"))
+        
+        # Strategy 3: Look for h2 tags (medium confidence)
+        h2_tags = soup.find_all('h2')
+        for h2 in h2_tags:
+            h2_text = h2.get_text(strip=True)
+            if h2_text and len(h2_text) < 150:
+                if any(pattern in h2_text.lower() for pattern in ['chapter', 'part', 'episode', ':']):
+                    candidates.append((h2_text, 0.7, "h2_chapter"))
+                else:
+                    candidates.append((h2_text, 0.5, "h2_generic"))
+        
+        # Strategy 4: Look for bold/strong text in first few elements (low confidence)
+        first_elements = soup.find_all(['p', 'div'])[:3]
+        for elem in first_elements:
+            bold_tags = elem.find_all(['b', 'strong'])
+            for bold in bold_tags:
+                bold_text = bold.get_text(strip=True)
+                if bold_text and len(bold_text) < 100:
+                    if any(pattern in bold_text.lower() for pattern in ['chapter', 'part', 'episode']):
+                        candidates.append((bold_text, 0.4, "bold_chapter"))
+        
+        # Strategy 5: Extract from filename if available (fallback)
+        if filename:
+            filename_match = re.search(r'response_\d+_(.+?)\.html', filename)
+            if filename_match:
+                filename_title = filename_match.group(1).replace('_', ' ').title()
+                candidates.append((filename_title, 0.3, "filename"))
+        
+        # Strategy 6: Look for patterns in first paragraph
+        first_p = soup.find('p')
+        if first_p:
+            p_text = first_p.get_text(strip=True)
+            # Look for patterns like "Chapter X: Title" at the beginning
+            chapter_pattern = re.match(r'^(Chapter\s+\d+\s*[:\-\u2013\u2014]\s*)(.{5,80})(?:\.|$)', p_text, re.IGNORECASE)
+            if chapter_pattern:
+                title_part = chapter_pattern.group(2).strip()
+                if title_part:
+                    candidates.append((f"Chapter {chapter_num}: {title_part}" if chapter_num else title_part, 0.8, "paragraph_pattern"))
+        
+        # Filter and rank candidates
+        if candidates:
+            # Remove duplicates and sort by confidence
+            unique_candidates = {}
+            for title, confidence, source in candidates:
+                # Clean title
+                title = clean_extracted_title(title)
+                if title and len(title) > 2:  # Minimum meaningful length
+                    if title not in unique_candidates or unique_candidates[title][1] < confidence:
+                        unique_candidates[title] = (title, confidence, source)
+            
+            if unique_candidates:
+                # Sort by confidence
+                sorted_candidates = sorted(unique_candidates.values(), key=lambda x: x[1], reverse=True)
+                best_title, best_confidence, best_source = sorted_candidates[0]
+                
+                # Validate the best title
+                if is_valid_title(best_title):
+                    return best_title, best_confidence
+        
+        # Fallback: generate from chapter number
+        if chapter_num:
+            return f"Chapter {chapter_num}", 0.1
+        else:
+            return "Untitled Chapter", 0.0
+            
+    except Exception as e:
+        print(f"[WARNING] Error extracting title from HTML: {e}")
+        if chapter_num:
+            return f"Chapter {chapter_num}", 0.1
+        else:
+            return "Untitled Chapter", 0.0
+
+
+def clean_extracted_title(title):
+    """Clean and normalize extracted title"""
+    if not title:
+        return ""
+    
+    # Remove HTML tags if any
+    title = re.sub(r'<[^>]+>', '', title)
+    
+    # Normalize whitespace
+    title = re.sub(r'\s+', ' ', title).strip()
+    
+    # Remove common prefixes that might be artifacts
+    prefixes_to_remove = [
+        r'^(Chapter\s+\d+\s*[:\-\u2013\u2014]\s*)+',  # Multiple "Chapter X:" prefixes
+        r'^[:\-\u2013\u2014\s]+',  # Leading punctuation
+    ]
+    
+    for pattern in prefixes_to_remove:
+        title = re.sub(pattern, '', title, flags=re.IGNORECASE).strip()
+    
+    # Truncate if too long
+    if len(title) > 100:
+        title = title[:97] + "..."
+    
+    return title
+
+
+def is_valid_title(title):
+    """Check if extracted title is valid and meaningful"""
+    if not title or len(title) < 3:
+        return False
+    
+    # Check for common invalid patterns
+    invalid_patterns = [
+        r'^\d+$',  # Just numbers
+        r'^[^\w]+$',  # Just punctuation
+        r'^(untitled|chapter|part)$',  # Generic words only
+        r'^[a-z\s]*$',  # All lowercase (might be generic)
+    ]
+    
+    for pattern in invalid_patterns:
+        if re.match(pattern, title.lower().strip()):
+            return False
+    
+    return True
+
+
+def extract_chapter_info_from_filename(filename):
+    """Extract chapter number and basic info from filename"""
+    # Pattern: response_001_title.html
+    match = re.match(r"response_(\d+)_(.+?)\.html", filename)
+    if match:
+        chapter_num = int(match.group(1))
+        title_part = match.group(2).replace('_', ' ').title()
+        return chapter_num, title_part
+    
+    # Fallback patterns
+    num_match = re.search(r'(\d+)', filename)
+    if num_match:
+        return int(num_match.group(1)), None
+    
+    return None, None
+
+
+def analyze_chapter_files(output_dir, log_callback=None):
+    """
+    Analyze all chapter files and extract titles with confidence scores
+    Returns: dict of {chapter_num: (title, confidence, filename)}
+    """
+    def log(message):
+        if log_callback:
+            log_callback(message)
+        else:
+            print(message)
+    
+    chapter_info = {}
+    
+    # Find all response HTML files
+    html_files = [f for f in os.listdir(output_dir) if f.startswith("response_") and f.endswith(".html")]
+    
+    if not html_files:
+        log("⚠️ No translated chapter files found!")
+        return chapter_info
+    
+    log(f"📖 Analyzing {len(html_files)} translated chapter files for titles...")
+    
+    for filename in sorted(html_files):
+        file_path = os.path.join(output_dir, filename)
+        
+        try:
+            # Extract chapter number from filename
+            chapter_num, filename_title = extract_chapter_info_from_filename(filename)
+            
+            if chapter_num is None:
+                log(f"⚠️ Could not extract chapter number from: {filename}")
+                continue
+            
+            # Read file content
+            with open(file_path, 'r', encoding='utf-8') as f:
+                html_content = f.read()
+            
+            # Extract title from content
+            extracted_title, confidence = extract_translated_title_from_html(
+                html_content, chapter_num, filename
+            )
+            
+            # Store result
+            chapter_info[chapter_num] = (extracted_title, confidence, filename)
+            
+            # Log result with confidence indicator
+            if confidence > 0.7:
+                indicator = "✅"
+            elif confidence > 0.4:
+                indicator = "🟡"
+            else:
+                indicator = "🔴"
+            
+            log(f"  {indicator} Chapter {chapter_num}: '{extracted_title}' (confidence: {confidence:.2f})")
+            
+        except Exception as e:
+            log(f"❌ Error processing {filename}: {e}")
+            # Add fallback entry
+            if chapter_num:
+                chapter_info[chapter_num] = (f"Chapter {chapter_num}", 0.0, filename)
+    
+    return chapter_info
+
+
 def sanitize_filename(filename, allow_unicode=False):
     """
     Sanitize filename to be safe for EPUB and filesystem.
@@ -260,11 +488,18 @@ def ensure_xhtml_compliance(html_content, title="Chapter", css_links=None):
         else:
             soup = BeautifulSoup(html_content, 'html.parser')
         
-        # Extract title if available
+        # Extract title if available (this is where we get the translated title)
+        extracted_title = None
         if soup.title and soup.title.string:
-            title = str(soup.title.string).strip()
+            extracted_title = str(soup.title.string).strip()
         elif soup.h1:
-            title = soup.h1.get_text(strip=True)[:50]
+            extracted_title = soup.h1.get_text(strip=True)
+        elif soup.h2:
+            extracted_title = soup.h2.get_text(strip=True)
+        
+        # Use extracted title if found, otherwise use provided title
+        if extracted_title:
+            title = extracted_title
         
         # Clean title
         title = re.sub(r'[<>&"\']+', '', title)
@@ -542,7 +777,7 @@ def preflight_check(base_dir, log_callback=None):
 
 
 def fallback_compile_epub(base_dir, log_callback=None):
-    """Compile translated HTML files into an EPUB with full support for CSS, fonts, and images"""
+    """Compile translated HTML files into an EPUB with extracted translated titles"""
     def log(message):
         if log_callback:
             log_callback(message)
@@ -564,7 +799,20 @@ def fallback_compile_epub(base_dir, log_callback=None):
         
         log(f"[DEBUG] Working with output directory: {OUTPUT_DIR}")
 
-        # Scan directory
+        # MAJOR IMPROVEMENT: Analyze chapter files to extract translated titles
+        log("\n📖 Extracting translated titles from chapter files...")
+        chapter_titles_info = analyze_chapter_files(OUTPUT_DIR, log_callback)
+        
+        if chapter_titles_info:
+            log(f"✅ Successfully extracted titles for {len(chapter_titles_info)} chapters")
+            
+            # Show summary of extracted titles
+            confident_titles = sum(1 for _, (_, confidence, _) in chapter_titles_info.items() if confidence > 0.5)
+            log(f"📊 Title extraction summary: {confident_titles}/{len(chapter_titles_info)} with high confidence")
+        else:
+            log("⚠️ No chapter titles could be extracted - will use fallback titles")
+
+        # Scan directory for files to process
         log(f"[DEBUG] Scanning directory: {OUTPUT_DIR}")
         try:
             all_files = os.listdir(OUTPUT_DIR)
@@ -815,7 +1063,7 @@ def fallback_compile_epub(base_dir, log_callback=None):
                 except (IOError, OSError) as e:
                     log(f"[WARNING] Failed to add cover image: {e}")
 
-        # Process chapters
+        # Process chapters WITH IMPROVED TITLE EXTRACTION
         chapter_tuples = []
         chapter_seen = set()
         
@@ -848,8 +1096,8 @@ def fallback_compile_epub(base_dir, log_callback=None):
         chapter_tuples.sort(key=lambda x: x[0])
         log(f"[DEBUG] Found {len(chapter_tuples)} unique chapters to process")
 
-        # Add chapters
-        log(f"\n📚 Processing {len(chapter_tuples)} chapters...")
+        # Add chapters WITH EXTRACTED TITLES
+        log(f"\n📚 Processing {len(chapter_tuples)} chapters with extracted titles...")
         for num, fn in chapter_tuples:
             path = os.path.join(OUTPUT_DIR, fn)
             log(f"\n[DEBUG] Processing chapter {num} from file: {fn}")
@@ -866,17 +1114,17 @@ def fallback_compile_epub(base_dir, log_callback=None):
                     empty_chapters += 1
                     continue
                 
-                # Debug: Show first 200 chars of raw content
-                preview = raw[:200] if len(raw) > 200 else raw
-                # Ensure it's printable
-                preview = ''.join(c if ord(c) < 127 else '?' for c in preview)
-                log(f"[DEBUG] First 200 chars: {preview}...")
-                
                 # Clean the content
                 raw = clean_chapter_content(raw)
                 
-                # Get chapter title
-                title = meta.get("chapter_titles", {}).get(str(num), f"Chapter {num}")
+                # IMPROVED: Get extracted title instead of metadata title
+                if num in chapter_titles_info:
+                    title, confidence, source_filename = chapter_titles_info[num]
+                    log(f"[DEBUG] Using extracted title: '{title}' (confidence: {confidence:.2f})")
+                else:
+                    # Fallback to filename or generic title
+                    title = f"Chapter {num}"
+                    log(f"[DEBUG] No extracted title found, using fallback: '{title}'")
                 
                 # Prepare CSS links
                 chapter_css_links = []
@@ -885,7 +1133,7 @@ def fallback_compile_epub(base_dir, log_callback=None):
                         css_filename = css_item.file_name.split('/')[-1]
                         chapter_css_links.append(f"css/{css_filename}")
                 
-                # Convert to XHTML
+                # Convert to XHTML (this will also extract title from content as backup)
                 try:
                     xhtml_content = ensure_xhtml_compliance(raw, title=title, css_links=chapter_css_links)
                 except Exception as e:
@@ -947,7 +1195,7 @@ def fallback_compile_epub(base_dir, log_callback=None):
                 safe_fn = f"chapter_{num:03d}.xhtml"
                 
                 chap = epub.EpubHtml(
-                    title=title,
+                    title=title,  # This now uses the extracted translated title!
                     file_name=safe_fn,
                     lang=meta.get("language", "en")
                 )
@@ -979,42 +1227,9 @@ def fallback_compile_epub(base_dir, log_callback=None):
                 # Debug: Verify content is set
                 log(f"   └─ Content size: {len(chap.content):,} bytes")
                 
-                # CRITICAL DEBUG: Verify content is actually set on the object
-                if not chap.content or len(chap.content) == 0:
-                    log(f"   ❌ ERROR: Chapter content is empty after setting!")
-                    log(f"   └─ Attempting to set content again...")
-                    # Try setting it again
-                    chap.content = ensure_bytes(final_content)
-                
-                # Debug: Verify content is set
-                content_before = len(chap.content) if hasattr(chap, 'content') and chap.content else 0
-                log(f"   └─ Content size before add_item: {content_before:,} bytes")
-                
                 book.add_item(chap)
-                
-                # Debug: Check content after adding
-                content_after = len(chap.content) if hasattr(chap, 'content') and chap.content else 0
-                log(f"   └─ Content size after add_item: {content_after:,} bytes")
-                if content_after == 0 and content_before > 0:
-                    log(f"   ❌ ERROR: Content was cleared when adding to book!")
-                    # Try using EpubItem as fallback
-                    log(f"   └─ Trying EpubItem fallback...")
-                    
-                    # Remove the broken item
-                    book.items.pop()
-                    
-                    # Create as generic item
-                    item = epub.EpubItem(
-                        uid=f"chapter_{num}",
-                        file_name=safe_fn,
-                        media_type="application/xhtml+xml",
-                        content=ensure_bytes(final_content)
-                    )
-                    book.add_item(item)
-                    chap = item  # Use this for spine/toc
-                
                 spine.append(chap)
-                toc.append(chap)
+                toc.append(chap)  # The TOC will now show the extracted translated title!
                 chapters_added += 1
                 
                 log(f"✅ Added chapter {num}: {title} (File: {safe_fn})")
@@ -1043,7 +1258,7 @@ def fallback_compile_epub(base_dir, log_callback=None):
         for item in book.get_items():
             if item.get_type() == ITEM_DOCUMENT:
                 content_size = len(item.content) if item.content else 0
-                log(f"  • {item.file_name}: {content_size:,} bytes")
+                log(f"  • {item.file_name}: {content_size:,} bytes (Title: '{item.title}')")
                 if content_size == 0:
                     log(f"    ⚠️ WARNING: Empty content!")
 
@@ -1097,7 +1312,7 @@ def fallback_compile_epub(base_dir, log_callback=None):
         log("[DEBUG] Navigation files added")
         
         # Set TOC and spine
-        book.toc = toc
+        book.toc = toc  # This will now contain chapters with extracted translated titles!
         
         log(f"\n[DEBUG] Setting up spine...")
         log(f"[DEBUG] Spine items before setup: {len(spine)}")
@@ -1134,15 +1349,20 @@ def fallback_compile_epub(base_dir, log_callback=None):
             log(f"  • Spine length: {len(book.spine)}")
             log(f"  • TOC entries: {len(book.toc)}")
             
-            # Additional debug: Check all items have content
-            empty_items = []
-            for item in book.get_items():
-                if hasattr(item, 'content'):
-                    if not item.content or len(item.content) == 0:
-                        empty_items.append(item.file_name)
-            
-            if empty_items:
-                log(f"⚠️ WARNING: Found {len(empty_items)} empty items: {empty_items[:5]}")
+            # Show final TOC with extracted titles
+            log(f"\n📚 Final Table of Contents with Extracted Titles:")
+            for i, item in enumerate(toc):
+                confidence_info = ""
+                if hasattr(item, 'file_name'):
+                    # Try to find confidence info
+                    chapter_match = re.search(r'chapter_(\d+)', item.file_name)
+                    if chapter_match:
+                        chapter_num = int(chapter_match.group(1))
+                        if chapter_num in chapter_titles_info:
+                            confidence = chapter_titles_info[chapter_num][1]
+                            confidence_info = f" (confidence: {confidence:.2f})"
+                
+                log(f"  {i+1:2d}. {item.title}{confidence_info}")
             
             # Write the EPUB
             log("\n[DEBUG] Writing EPUB file...")
@@ -1159,21 +1379,6 @@ def fallback_compile_epub(base_dir, log_callback=None):
                     with zipfile.ZipFile(out_path, 'r') as test_zip:
                         if 'mimetype' in test_zip.namelist():
                             log("✅ EPUB structure verified (mimetype present)")
-                            
-                            # Check actual content of chapters
-                            log("\n[DEBUG] Checking chapter content in EPUB:")
-                            xhtml_files = [f for f in test_zip.namelist() if f.endswith('.xhtml')]
-                            for xhtml in xhtml_files[:5]:  # Check first 5
-                                try:
-                                    content = test_zip.read(xhtml)
-                                    log(f"  • {xhtml}: {len(content):,} bytes")
-                                    if len(content) == 0:
-                                        log(f"    ❌ EMPTY FILE!")
-                                except:
-                                    log(f"  • {xhtml}: ERROR reading")
-                            
-                            if len(xhtml_files) > 5:
-                                log(f"  ... and {len(xhtml_files) - 5} more files")
                         else:
                             log("⚠️ WARNING: EPUB might be malformed (missing mimetype)")
                 except Exception as e:
@@ -1186,17 +1391,25 @@ def fallback_compile_epub(base_dir, log_callback=None):
                 log(f"✅ Successfully embedded {len(css_items)} CSS files")
                 for css_item in css_items:
                     log(f"   • {css_item.file_name}")
-                log("\n💡 To verify CSS is working:")
-                log("   1. Open the EPUB in a reader like Calibre")
-                log("   2. Right-click and 'View' or 'Inspect' a chapter")
-                log("   3. Check the <head> section for CSS links")
-                log("   4. Verify styles are applied to the content")
+            
+            # Show title extraction summary
+            if chapter_titles_info:
+                high_confidence = sum(1 for _, (_, conf, _) in chapter_titles_info.items() if conf > 0.7)
+                medium_confidence = sum(1 for _, (_, conf, _) in chapter_titles_info.items() if 0.4 < conf <= 0.7)
+                low_confidence = sum(1 for _, (_, conf, _) in chapter_titles_info.items() if conf <= 0.4)
+                
+                log(f"\n📊 Title Extraction Summary:")
+                log(f"   • High confidence (>70%): {high_confidence} chapters")
+                log(f"   • Medium confidence (40-70%): {medium_confidence} chapters")
+                log(f"   • Low confidence (≤40%): {low_confidence} chapters")
+                log(f"   • Total extracted: {len(chapter_titles_info)} chapters")
             
             log("\n📱 Compatibility Notes:")
             log("   • XHTML 1.1 compliant for strict readers")
             log("   • All tags properly self-closed")
             log("   • Special characters properly escaped")
             log("   • Malformed tags automatically fixed")
+            log("   • Table of Contents uses extracted translated titles")
             
         except Exception as e:
             log(f"❌ Failed to write EPUB: {e}")
@@ -1205,221 +1418,6 @@ def fallback_compile_epub(base_dir, log_callback=None):
     except Exception as e:
         log(f"❌ EPUB compilation failed with error: {e}")
         raise
-
-
-# Additional utility functions
-
-def extract_chapter_titles(epub_path):
-    """Extract chapter titles from an EPUB file"""
-    try:
-        book = epub.read_epub(epub_path)
-        titles = {}
-        
-        for item in book.get_items():
-            if item.get_type() == ITEM_DOCUMENT:
-                soup = BeautifulSoup(item.get_content(), 'html.parser')
-                title = None
-                
-                if soup.title:
-                    title = soup.title.string
-                elif soup.h1:
-                    title = soup.h1.get_text(strip=True)
-                elif soup.h2:
-                    title = soup.h2.get_text(strip=True)
-                
-                if title:
-                    match = re.search(r'chapter_(\d+)', item.get_name())
-                    if match:
-                        chapter_num = int(match.group(1))
-                        titles[str(chapter_num)] = title.strip()
-        
-        return titles
-    except Exception as e:
-        print(f"Error extracting chapter titles: {e}")
-        return {}
-
-
-def convert_html_to_epub(html_file, output_path, metadata=None):
-    """Convert a single HTML file to EPUB format"""
-    try:
-        book = epub.EpubBook()
-        
-        # Set metadata
-        if metadata:
-            book.set_identifier(metadata.get('identifier', 'html-to-epub'))
-            book.set_title(metadata.get('title', 'Converted Book'))
-            book.set_language(metadata.get('language', 'en'))
-            if metadata.get('author'):
-                book.add_author(metadata['author'])
-        else:
-            book.set_identifier('html-to-epub')
-            book.set_title(os.path.splitext(os.path.basename(html_file))[0])
-            book.set_language('en')
-        
-        # Read HTML content
-        with open(html_file, 'r', encoding='utf-8') as f:
-            html_content = f.read()
-        
-        # Clean and convert to XHTML
-        html_content = clean_chapter_content(html_content)
-        xhtml_content = ensure_xhtml_compliance(html_content)
-        
-        # Create chapter
-        chapter = epub.EpubHtml(
-            title='Chapter',
-            file_name='chapter.xhtml',
-            lang='en'
-        )
-        chapter.content = ensure_bytes(xhtml_content)
-        
-        # Add chapter to book
-        book.add_item(chapter)
-        book.spine = ['nav', chapter]
-        book.toc = [chapter]
-        
-        # Add navigation
-        book.add_item(epub.EpubNav())
-        book.add_item(epub.EpubNcx())
-        
-        # Write EPUB
-        epub.write_epub(output_path, book)
-        return True
-        
-    except Exception as e:
-        print(f"Error converting HTML to EPUB: {e}")
-        return False
-
-
-def merge_epubs(epub_files, output_path, metadata=None):
-    """Merge multiple EPUB files into one"""
-    try:
-        merged_book = epub.EpubBook()
-        
-        # Set metadata
-        if metadata:
-            merged_book.set_identifier(metadata.get('identifier', 'merged-epub'))
-            merged_book.set_title(metadata.get('title', 'Merged Book'))
-            merged_book.set_language(metadata.get('language', 'en'))
-            if metadata.get('author'):
-                merged_book.add_author(metadata['author'])
-        else:
-            merged_book.set_identifier('merged-epub')
-            merged_book.set_title('Merged Book')
-            merged_book.set_language('en')
-        
-        spine = []
-        toc = []
-        chapter_count = 0
-        
-        # Process each EPUB
-        for epub_file in epub_files:
-            book = epub.read_epub(epub_file)
-            
-            # Copy chapters
-            for item in book.get_items():
-                if item.get_type() == ITEM_DOCUMENT:
-                    # Skip navigation documents
-                    if 'nav' in item.get_name().lower():
-                        continue
-                    
-                    chapter_count += 1
-                    
-                    # Create new chapter with unique filename
-                    new_chapter = epub.EpubHtml(
-                        title=f'Chapter {chapter_count}',
-                        file_name=f'chapter_{chapter_count:03d}.xhtml',
-                        lang=item.lang or 'en'
-                    )
-                    content = item.get_content()
-                    new_chapter.content = ensure_bytes(content)
-                    
-                    merged_book.add_item(new_chapter)
-                    spine.append(new_chapter)
-                    toc.append(new_chapter)
-                
-                # Copy images
-                elif item.get_type() == ITEM_IMAGE:
-                    merged_book.add_item(item)
-                
-                # Copy CSS
-                elif item.get_type() == ITEM_STYLE:
-                    merged_book.add_item(item)
-        
-        # Add navigation
-        merged_book.add_item(epub.EpubNav())
-        merged_book.add_item(epub.EpubNcx())
-        
-        # Set spine and toc
-        merged_book.spine = ['nav'] + spine
-        merged_book.toc = toc
-        
-        # Write merged EPUB
-        epub.write_epub(output_path, merged_book)
-        return True
-        
-    except Exception as e:
-        print(f"Error merging EPUBs: {e}")
-        return False
-
-
-def validate_epub_structure(epub_path):
-    """Validate the structure of an EPUB file"""
-    try:
-        book = epub.read_epub(epub_path)
-        
-        validation_results = {
-            'valid': True,
-            'errors': [],
-            'warnings': [],
-            'info': {
-                'title': book.get_metadata('DC', 'title'),
-                'author': book.get_metadata('DC', 'creator'),
-                'language': book.get_metadata('DC', 'language'),
-                'chapter_count': 0,
-                'image_count': 0,
-                'css_count': 0
-            }
-        }
-        
-        # Count items
-        for item in book.get_items():
-            if item.get_type() == ITEM_DOCUMENT:
-                validation_results['info']['chapter_count'] += 1
-                
-                # Validate XHTML
-                try:
-                    ET.fromstring(item.get_content())
-                except Exception as e:
-                    validation_results['errors'].append(
-                        f"Invalid XHTML in {item.get_name()}: {str(e)}"
-                    )
-                    validation_results['valid'] = False
-                    
-            elif item.get_type() == ITEM_IMAGE:
-                validation_results['info']['image_count'] += 1
-            elif item.get_type() == ITEM_STYLE:
-                validation_results['info']['css_count'] += 1
-        
-        # Check for required elements
-        if validation_results['info']['chapter_count'] == 0:
-            validation_results['errors'].append("No chapters found in EPUB")
-            validation_results['valid'] = False
-        
-        if not book.get_metadata('DC', 'title'):
-            validation_results['warnings'].append("No title metadata found")
-        
-        if not book.get_metadata('DC', 'language'):
-            validation_results['warnings'].append("No language metadata found")
-        
-        return validation_results
-        
-    except Exception as e:
-        return {
-            'valid': False,
-            'errors': [f"Failed to read EPUB: {str(e)}"],
-            'warnings': [],
-            'info': {}
-        }
 
 
 # Legacy function alias
