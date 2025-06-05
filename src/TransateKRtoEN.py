@@ -13,11 +13,52 @@ from unified_api_client import UnifiedClient, UnifiedClientError
 import hashlib
 import unicodedata
 from difflib import SequenceMatcher
-
+import unicodedata
+import re
 
 # Import the new modules
 from history_manager import HistoryManager
 from chapter_splitter import ChapterSplitter
+
+def make_safe_filename(title, chapter_num):
+    """Create a safe filename that works across different filesystems"""
+    import unicodedata
+    
+    # First, try to clean the title
+    if not title:
+        return f"chapter_{chapter_num:03d}"
+    
+    # Normalize unicode
+    title = unicodedata.normalize('NFC', str(title))
+    
+    # Replace path separators and other dangerous characters
+    dangerous_chars = {
+        '/': '_', '\\': '_', ':': '_', '*': '_', '?': '_',
+        '"': '_', '<': '_', '>': '_', '|': '_', '\0': '',
+        '\n': ' ', '\r': ' ', '\t': ' '
+    }
+    
+    for old, new in dangerous_chars.items():
+        title = title.replace(old, new)
+    
+    # Remove control characters
+    title = ''.join(char for char in title if ord(char) >= 32)
+    
+    # Replace multiple spaces with single underscore
+    title = re.sub(r'\s+', '_', title)
+    
+    # Remove leading/trailing underscores and dots
+    title = title.strip('_.• \t')
+    
+    # Limit length (leave room for response_XXX_ prefix)
+    if len(title) > 40:
+        title = title[:40].rstrip('_.')
+    
+    # If title is empty after cleaning, use chapter number
+    if not title or title == '_' * len(title):
+        title = f"chapter_{chapter_num:03d}"
+    
+    return title
 
 # optional: turn on HTTP‐level debugging in the OpenAI client
 logging.basicConfig(level=logging.DEBUG)
@@ -38,6 +79,7 @@ except AttributeError:
 
 # Global stop flag for GUI integration
 _stop_requested = False
+
 
 def set_stop_flag(value):
     """Set the global stop flag"""
@@ -1951,7 +1993,7 @@ def main(log_callback=None, stop_callback=None):
             merged_result = translated_chunks[0][0] if translated_chunks else ""
 
         # Save translated chapter
-        safe_title = re.sub(r'\W+', '_', c['title'])[:40]
+        safe_title = make_safe_filename(c['title'], c['num'])   
         fname = f"response_{c['num']:03d}_{safe_title}.html"
 
         # Clean up code fences only
