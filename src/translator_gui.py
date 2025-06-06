@@ -157,9 +157,7 @@ class TranslatorGUI:
         self.disable_auto_glossary_var = tk.BooleanVar(
             value=self.config.get('disable_auto_glossary', False)
         )
-        self.disable_auto_glossary_var = tk.BooleanVar(
-            value=self.config.get('disable_auto_glossary', False)
-        )
+
         # Append Glossary:
         self.append_glossary_var = tk.BooleanVar(
             value=self.config.get('append_glossary', True)  # Default to True
@@ -1387,11 +1385,19 @@ class TranslatorGUI:
         # Section 4: Glossary Settings
         section4_frame = tk.LabelFrame(scrollable_frame, text="Glossary Settings", padx=10, pady=10)
         section4_frame.pack(fill="x", padx=10, pady=5)
-        
+
         tb.Checkbutton(section4_frame, text="Disable Automatic Glossary Generation", 
                        variable=self.disable_auto_glossary_var,
                        bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
-        
+
+        tb.Checkbutton(section4_frame, text="Disable Glossary Translation to English", 
+                       variable=self.disable_glossary_translation_var,
+                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+
+        tk.Label(section4_frame, 
+                 text="Disables automatic translation of foreign terms in glossary",
+                 font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, padx=20, pady=(0, 5))
+
         tb.Checkbutton(section4_frame, text="Append Glossary to System Prompt", 
                        variable=self.append_glossary_var,
                        bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
@@ -1440,6 +1446,7 @@ class TranslatorGUI:
             self.config['max_retry_tokens'] = int(self.max_retry_tokens_var.get())
             self.config['retry_duplicate_bodies'] = self.retry_duplicate_var.get()
             self.config['duplicate_lookback_chapters'] = int(self.duplicate_lookback_var.get())
+            self.config['disable_glossary_translation'] = self.disable_glossary_translation_var.get()
             
             # Set environment variables
             os.environ["USE_ROLLING_SUMMARY"] = "1" if self.rolling_summary_var.get() else "0"
@@ -1452,6 +1459,7 @@ class TranslatorGUI:
             os.environ["MAX_RETRY_TOKENS"] = self.max_retry_tokens_var.get()
             os.environ["RETRY_DUPLICATE_BODIES"] = "1" if self.retry_duplicate_var.get() else "0"
             os.environ["DUPLICATE_LOOKBACK_CHAPTERS"] = self.duplicate_lookback_var.get()
+            os.environ["DISABLE_GLOSSARY_TRANSLATION"] = "1" if self.disable_glossary_translation_var.get() else "0"
             
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, ensure_ascii=False, indent=2)
@@ -1793,6 +1801,7 @@ class TranslatorGUI:
             self.config['retry_duplicate_bodies'] = self.retry_duplicate_var.get()
             self.config['duplicate_lookback_chapters'] = int(self.duplicate_lookback_var.get())
             self.config['token_limit_disabled'] = self.token_limit_disabled
+            self.config['disable_glossary_translation'] = self.disable_glossary_translation_var.get()
 
 
             
