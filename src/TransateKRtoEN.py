@@ -1656,8 +1656,9 @@ def cleanup_previous_extraction(output_dir):
 # GLOSSARY MANAGEMENT
 # =============================================================================
 
+
 def save_glossary(output_dir, chapters, instructions, language="korean"):
-    """Generate and save glossary from chapters with proper CJK support"""
+    """Generate and save glossary from chapters with proper CJK support and improved translation"""
     samples = []
     for c in chapters:
         samples.append(c["body"])
@@ -1805,11 +1806,6 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
             names.add(nm)
     
     # Filter and clean up results
-    names = [n for n in names if len(n) > 1 and not n.isdigit()]
-    suffixes = [s for s in suffixes if len(s) > 1]
-    terms = [t for t in terms if len(t) > 1]
-    
-    # Filter and clean up results
     original_names_count = len(names)
     original_suffixes_count = len(suffixes)
     original_terms_count = len(terms)
@@ -1851,11 +1847,60 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
     names = sorted(list(set(names)))[:100]
     suffixes = sorted(list(set(suffixes)))[:50]
     terms = sorted(list(set(terms)))[:50]
+    
+    # ============================================================================
+    # APPLY TRANSLATION - THIS SECTION IS MISSING IN YOUR CODE!
+    # ============================================================================
 
-    # Simple translation function (only if enabled)
+    # Apply simple translation - NO MORE 20-term limit!
+    all_terms = list(names) + list(suffixes) + list(terms)
+    if all_terms:
+        print(f"📑 Attempting to translate {len(all_terms)} terms...")
+        translations = simple_translate_terms(all_terms, base_language)
+        
+        # Check if translation was successful by counting actual translations
+        successful_translations = 0
+        for original, translated in translations.items():
+            if translated != original and translated.strip():
+                successful_translations += 1
+        
+        translation_enabled = successful_translations > 0
+        
+        if translation_enabled:
+            print(f"📑 Successfully got {successful_translations} translations out of {len(all_terms)} terms")
+        else:
+            print(f"📑 No translations were generated (all terms remained unchanged)")
+    else:
+        translations = {}
+        translation_enabled = False
+
+    # Helper function to add translations - simplified
+    def add_translation(term_list):
+        if not translations:
+            return term_list
+        
+        formatted = []
+        for term in term_list:
+            if term in translations:
+                translated = translations[term]
+                if translated != term and translated.strip():
+                    # Show both original and translation
+                    formatted.append(f"{term} ({translated})")
+                else:
+                    # No translation available, just show original
+                    formatted.append(term)
+            else:
+                formatted.append(term)
+        return formatted    
+
+    # ============================================================================
+    # IMPROVED TRANSLATION FUNCTIONS
+    # ============================================================================
+
     def simple_translate_terms(term_list, source_lang):
-        """Simple translation using API - no complex batching"""
+        """Simple and robust translation using API"""
         if not term_list or os.getenv("DISABLE_GLOSSARY_TRANSLATION", "0") == "1":
+            print(f"📑 Glossary translation disabled or no terms to translate")
             return {term: term for term in term_list}
         
         try:
@@ -1867,116 +1912,174 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
                        os.getenv("GEMINI_API_KEY"))
             
             if not API_KEY:
+                print(f"📑 No API key found, skipping translation")
                 return {term: term for term in term_list}
             
-            # Simple translation for small lists only
-            if len(term_list) > 20:
-                return {term: term for term in term_list}
+            print(f"📑 Translating {len(term_list)} {source_lang} terms to English...")
             
             from unified_api_client import UnifiedClient
             client = UnifiedClient(model=MODEL, api_key=API_KEY)
             
-            terms_text = "\n".join(f"- {term}" for term in term_list)
+            # Process in batches of 15 to avoid token limits
+            batch_size = 15
+            all_translations = {}
             
-            system_prompt = f"Translate these {source_lang} names/terms to English. Format: Original → Translation"
-            user_prompt = f"Translate these {source_lang} terms:\n{terms_text}"
+            for i in range(0, len(term_list), batch_size):
+                batch = term_list[i:i + batch_size]
+                batch_num = (i // batch_size) + 1
+                total_batches = (len(term_list) + batch_size - 1) // batch_size
+                
+                print(f"📑 Processing batch {batch_num}/{total_batches} ({len(batch)} terms)...")
+                
+                # Create a simple numbered list
+                terms_text = ""
+                for idx, term in enumerate(batch, 1):
+                    terms_text += f"{idx}. {term}\n"
+                
+                # Very clear and simple prompt
+                system_prompt = (
+                    f"You are translating {source_lang} names and terms to English. "
+                    "For each numbered item, provide the English translation. "
+                    "Keep the same number format. If a term is a name, you can keep it as-is or provide pronunciation."
+                )
+                
+                user_prompt = (
+                    f"Translate these {source_lang} terms to English:\n\n"
+                    f"{terms_text}\n"
+                    "Please respond with the same numbered format, showing the English translation for each term."
+                )
+                
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ]
+                
+                try:
+                    response, _ = client.send(messages, temperature=0.1, max_tokens=2048)
+                    print(f"📑 API Response for batch {batch_num}:")
+                    print(f"   {response[:200]}..." if len(response) > 200 else f"   {response}")
+                    
+                    # Parse the response using multiple strategies
+                    batch_translations = parse_translation_response(response, batch)
+                    all_translations.update(batch_translations)
+                    
+                    # Small delay between batches
+                    if i + batch_size < len(term_list):
+                        time.sleep(1)
+                        
+                except Exception as e:
+                    print(f"⚠️ Translation failed for batch {batch_num}: {e}")
+                    # Add untranslated terms
+                    for term in batch:
+                        all_translations[term] = term
             
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
-            
-            response, _ = client.send(messages, temperature=0.1, max_tokens=1024)
-            
-            # Simple parsing
-            translations = {}
-            for line in response.split('\n'):
-                if '→' in line:
-                    parts = line.split('→', 1)
-                    if len(parts) == 2:
-                        original = parts[0].strip().lstrip('- ').strip()
-                        translation = parts[1].strip()
-                        for term in term_list:
-                            if term in original or original in term:
-                                translations[term] = translation
-                                break
-            
-            # Fill missing
+            # Ensure all terms are included
             for term in term_list:
-                if term not in translations:
-                    translations[term] = term
+                if term not in all_translations:
+                    all_translations[term] = term
             
-            return translations
+            # Count successful translations
+            translated_count = sum(1 for term, translation in all_translations.items() 
+                                 if translation != term and translation.strip())
+            
+            print(f"📑 Successfully translated {translated_count}/{len(term_list)} terms")
+            
+            return all_translations
             
         except Exception as e:
             print(f"⚠️ Translation failed: {e}")
             return {term: term for term in term_list}
 
-    # Apply simple translation
-    all_terms = list(names) + list(suffixes) + list(terms)
-    if all_terms and len(all_terms) <= 20:  # Only translate small lists
-        print(f"📑 Attempting to translate {len(all_terms)} terms...")
-        translations = simple_translate_terms(all_terms, base_language)
-        translation_enabled = len([t for t in translations.values() if '(' in t or t != list(translations.keys())[list(translations.values()).index(t)]]) > 0
-    else:
+    def parse_translation_response(response, original_terms):
+        """Parse translation response using multiple strategies"""
         translations = {}
-        translation_enabled = False
-
-    # Helper function to add translations
-    def add_translation(term_list):
-        if not translations:
-            return term_list
-        formatted = []
-        for term in term_list:
-            if term in translations and translations[term] != term:
-                formatted.append(f"{term} ({translations[term]})")
-            else:
-                formatted.append(term)
-        return formatted
-
-    # Build glossary based on detected base language
-    gloss = {}
-    
-    if base_language == "korean":
-        gloss["Korean_Names"] = add_translation(names)
-        gloss["Korean_Honorifics"] = add_translation(suffixes)
-        if terms:
-            gloss["Korean_Terms"] = add_translation(terms)
-    elif base_language == "japanese":
-        gloss["Japanese_Names"] = add_translation(names)
-        gloss["Japanese_Honorifics"] = add_translation(suffixes)
-        if terms:
-            gloss["Japanese_Family_Terms"] = add_translation(terms)
-    elif base_language == "chinese":
-        gloss["Chinese_Names"] = add_translation(names)
-        if terms:
-            gloss["Chinese_Titles"] = add_translation(terms)
-        if suffixes:
-            gloss["Chinese_Terms"] = add_translation(suffixes)
-    else:
-        # Generic/unknown language
-        gloss["Names"] = add_translation(names)
-        if suffixes:
-            gloss["Honorifics"] = add_translation(suffixes)
-        if terms:
-            gloss["Terms"] = add_translation(terms)
-
-    # Add a note about the glossary with original profile name
-    if translation_enabled:
-        gloss["_note"] = f"Auto-generated glossary for '{language}' (detected as {base_language}) with English translations"
-    else:
-        gloss["_note"] = f"Auto-generated glossary for '{language}' (detected as {base_language})"
-
-    glossary_path = os.path.join(output_dir, "glossary.json")
-    with open(glossary_path, 'w', encoding='utf-8') as f:
-        json.dump(gloss, f, ensure_ascii=False, indent=2)
-
-    if translation_enabled:
-        print(f"📑 Generated improved automatic glossary with translations for profile '{language}' → {len(names)} names, {len(suffixes)} honorifics, {len(terms)} terms")
-    else:
-        print(f"📑 Generated improved automatic glossary for profile '{language}' → {len(names)} names, {len(suffixes)} honorifics, {len(terms)} terms")
-    
-    return glossary_path
+        lines = response.strip().split('\n')
+        
+        # Strategy 1: Look for numbered format (1. term -> translation)
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Try numbered format with various separators
+            for separator in ['->', '→', ':', '-', '—']:
+                if separator in line and line[0].isdigit():
+                    try:
+                        # Extract number
+                        number_match = re.match(r'^(\d+)', line)
+                        if number_match:
+                            num = int(number_match.group(1)) - 1  # Convert to 0-based index
+                            if 0 <= num < len(original_terms):
+                                # Get the part after the separator
+                                parts = line.split(separator, 1)
+                                if len(parts) == 2:
+                                    translation = parts[1].strip()
+                                    # Clean up the translation
+                                    translation = re.sub(r'^\d+\.?\s*', '', translation)  # Remove leading numbers
+                                    translation = translation.strip('"\'()[]')  # Remove quotes and brackets
+                                    
+                                    if translation and translation != original_terms[num]:
+                                        translations[original_terms[num]] = translation
+                                        continue
+                    except (ValueError, IndexError):
+                        continue
+        
+        # Strategy 2: Look for the original term in the response
+        for original_term in original_terms:
+            if original_term in translations:
+                continue  # Already found
+                
+            for line in lines:
+                line = line.strip()
+                
+                # Skip if line doesn't contain the original term
+                if original_term not in line:
+                    continue
+                    
+                # Try different patterns
+                for separator in ['->', '→', ':', '-', '—', '=']:
+                    if separator in line and original_term in line:
+                        parts = line.split(separator)
+                        
+                        # Find which part contains the original term
+                        original_part = None
+                        translation_part = None
+                        
+                        for i, part in enumerate(parts):
+                            if original_term in part.strip():
+                                original_part = i
+                                # Translation should be the next part
+                                if i + 1 < len(parts):
+                                    translation_part = i + 1
+                                break
+                        
+                        if translation_part is not None:
+                            translation = parts[translation_part].strip()
+                            # Clean up
+                            translation = re.sub(r'^\d+\.?\s*', '', translation)
+                            translation = translation.strip('"\'()[]')
+                            
+                            if translation and translation != original_term:
+                                translations[original_term] = translation
+                                break
+        
+        # Strategy 3: Simple fallback - look for any English words in parentheses
+        for original_term in original_terms:
+            if original_term in translations:
+                continue
+                
+            for line in lines:
+                if original_term in line:
+                    # Look for text in parentheses
+                    paren_match = re.search(r'\(([^)]+)\)', line)
+                    if paren_match:
+                        potential_translation = paren_match.group(1).strip()
+                        # Check if it looks like English (basic check)
+                        if re.match(r'^[a-zA-Z\s\-]+$', potential_translation):
+                            translations[original_term] = potential_translation
+                            break
+        
+        return translations
 # =============================================================================
 # API AND TRANSLATION UTILITIES
 # =============================================================================
