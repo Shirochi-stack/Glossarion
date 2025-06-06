@@ -1271,7 +1271,7 @@ class TranslatorGUI:
     def open_other_settings(self):
         top = tk.Toplevel(self.master)
         top.title("Other Settings")
-        top.geometry("480x790")  # Fixed width, reasonable height
+        top.geometry("420x790")  # Fixed width, reasonable height
         
         # Create a canvas and scrollbar for scrolling
         canvas = tk.Canvas(top)
