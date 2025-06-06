@@ -303,6 +303,8 @@ a = Analysis(
         'numpy',
         'pandas',
         'scipy',
+		'multiprocessing.spawn',
+		'multiprocessing.forkserver',
         'pytest',
         'nose',
         'jupyter',
@@ -317,6 +319,7 @@ a = Analysis(
     win_private_assemblies=False,
     cipher=block_cipher,
     noarchive=False,
+	optimize=0,
 )
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
