@@ -5,9 +5,10 @@ import time
 import threading
 
 class SplashScreen:
-    def __init__(self):
+    def __init__(self, embedded_mode=False):
         self.running = True  # Initialize running flag FIRST
         self.progress_pos = 0  # Initialize progress position
+        self.embedded_mode = embedded_mode  # Track if running embedded in main process
         
         self.root = tk.Tk()
         self.root.title("Loading Glossarion...")
@@ -25,7 +26,8 @@ class SplashScreen:
         self.setup_ui()
         
         # Start monitoring for status updates
-        self.monitor_status()
+        if not embedded_mode:
+            self.monitor_status()
         
     def setup_ui(self):
         # Main frame
@@ -73,8 +75,14 @@ class SplashScreen:
     def load_icon(self, parent):
         """Load the application icon"""
         try:
-            # Get icon path
-            base_dir = os.path.dirname(os.path.abspath(__file__))
+            # Get icon path - handle both development and packaged modes
+            if getattr(sys, 'frozen', False):
+                # Running as .exe
+                base_dir = sys._MEIPASS
+            else:
+                # Running as .py files
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+            
             ico_path = os.path.join(base_dir, 'Halgakos.ico')
             
             if os.path.isfile(ico_path):
@@ -155,11 +163,20 @@ class SplashScreen:
         # Start monitoring
         self.root.after(100, check_status)
     
+    def update_status(self, message):
+        """Update status label (for embedded mode)"""
+        if hasattr(self, 'status_label'):
+            try:
+                self.status_label.config(text=message)
+            except:
+                pass
+    
     def close(self):
         """Close the splash screen"""
         self.running = False
         try:
             if hasattr(self, 'root') and self.root.winfo_exists():
+                self.root.quit()
                 self.root.destroy()
         except (tk.TclError, AttributeError):
             pass
@@ -171,19 +188,27 @@ class SplashScreen:
         except Exception as e:
             print(f"Splash screen error: {e}")
         finally:
-            # Clean up status files
-            try:
-                if os.path.exists('splash_status.txt'):
-                    os.remove('splash_status.txt')
-                if os.path.exists('splash_close.signal'):
-                    os.remove('splash_close.signal')
-            except:
-                pass
+            # Clean up status files (only in subprocess mode)
+            if not self.embedded_mode:
+                try:
+                    for file in ['splash_status.txt', 'splash_close.signal']:
+                        if os.path.exists(file):
+                            os.remove(file)
+                except:
+                    pass
 
+# Prevent execution when imported
 if __name__ == "__main__":
-    try:
-        splash = SplashScreen()
-        splash.run()
-    except Exception as e:
-        print(f"Failed to start splash screen: {e}")
-        sys.exit(1)
+    # Only run if this file is executed directly, not when imported
+    # And only if not running as part of a packaged executable
+    if not getattr(sys, 'frozen', False):
+        try:
+            splash = SplashScreen(embedded_mode=False)
+            splash.run()
+        except Exception as e:
+            print(f"Failed to start splash screen: {e}")
+            sys.exit(1)
+    else:
+        # If running as .exe, this should not be executed directly
+        print("Splash screen should not be run directly from packaged executable")
+        sys.exit(0)
