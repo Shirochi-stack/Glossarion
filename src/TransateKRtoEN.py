@@ -890,32 +890,58 @@ def _categorize_resource(file_path, file_name):
     return None
 
 def _cleanup_old_resources(output_dir):
-    """Clean up old resource directories and EPUB structure files"""
+    """Clean up old resource directories and EPUB structure files - with error handling"""
     print("🧹 Cleaning up any existing resource directories...")
+    
+    cleanup_success = True
     
     # Remove resource directories
     for resource_type in ['css', 'fonts', 'images']:
         resource_dir = os.path.join(output_dir, resource_type)
         if os.path.exists(resource_dir):
-            shutil.rmtree(resource_dir)
-            print(f"   🗑️ Removed old {resource_type} directory")
+            try:
+                shutil.rmtree(resource_dir)
+                print(f"   🗑️ Removed old {resource_type} directory")
+            except PermissionError as e:
+                print(f"   ⚠️ Cannot remove {resource_type} directory (permission denied) - will merge with existing files")
+                cleanup_success = False
+            except Exception as e:
+                print(f"   ⚠️ Error removing {resource_type} directory: {e} - will merge with existing files")
+                cleanup_success = False
     
     # Remove EPUB structure files
     epub_structure_files = ['container.xml', 'content.opf', 'toc.ncx']
     for epub_file in epub_structure_files:
         epub_path = os.path.join(output_dir, epub_file)
         if os.path.exists(epub_path):
-            os.remove(epub_path)
-            print(f"   🗑️ Removed old {epub_file}")
+            try:
+                os.remove(epub_path)
+                print(f"   🗑️ Removed old {epub_file}")
+            except PermissionError:
+                print(f"   ⚠️ Cannot remove {epub_file} (permission denied) - will use existing file")
+            except Exception as e:
+                print(f"   ⚠️ Error removing {epub_file}: {e}")
     
-    # Remove any other .opf or .ncx files
+    # Clean up any other .opf or .ncx files
     try:
         for file in os.listdir(output_dir):
             if file.lower().endswith(('.opf', '.ncx')):
-                os.remove(os.path.join(output_dir, file))
-                print(f"   🗑️ Removed old EPUB file: {file}")
+                file_path = os.path.join(output_dir, file)
+                try:
+                    os.remove(file_path)
+                    print(f"   🗑️ Removed old EPUB file: {file}")
+                except PermissionError:
+                    print(f"   ⚠️ Cannot remove {file} (permission denied)")
+                except Exception as e:
+                    print(f"   ⚠️ Error removing {file}: {e}")
     except Exception as e:
-        print(f"⚠️ Error cleaning up EPUB files: {e}")
+        print(f"⚠️ Error scanning for EPUB files: {e}")
+    
+    if not cleanup_success:
+        print("⚠️ Some cleanup operations failed due to file permissions")
+        print("   The program will continue and merge with existing files")
+    
+    return cleanup_success
 
 def _count_existing_resources(output_dir, extracted_resources):
     """Count existing resources when skipping extraction"""
