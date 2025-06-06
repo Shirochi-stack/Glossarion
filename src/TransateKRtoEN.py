@@ -79,7 +79,6 @@ except AttributeError:
 # Global stop flag for GUI integration
 _stop_requested = False
 
-
 def set_stop_flag(value):
     """Set the global stop flag"""
     global _stop_requested
@@ -110,6 +109,10 @@ def get_instructions(lang):
     """Get minimal technical instructions only"""
     # Only return the technical requirement that applies to all languages
     return "Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title> ,<h1>, <h2>, <p>, <br>, <div>, etc."
+
+# =============================================================================
+# PROGRESS TRACKING AND MANAGEMENT
+# =============================================================================
 
 def init_progress_tracking(payloads_dir):
     """Initialize or load progress tracking with improved structure"""
@@ -193,14 +196,10 @@ def init_progress_tracking(payloads_dir):
     return prog, PROGRESS_FILE
 
 def check_chapter_status(prog, chapter_idx, chapter_num, content_hash, output_dir):
-    """
-    Check if a chapter needs translation
-    Returns: (needs_translation, skip_reason, existing_file)
-    """
+    """Check if a chapter needs translation"""
     chapter_key = str(chapter_idx)
     
     # FIRST: Always check if the actual output file exists
-    # This is the most important check - if file is deleted, we must retranslate
     if chapter_key in prog["chapters"]:
         chapter_info = prog["chapters"][chapter_key]
         output_file = chapter_info.get("output_file")
@@ -213,7 +212,6 @@ def check_chapter_status(prog, chapter_idx, chapter_num, content_hash, output_di
                 print(f"🔄 Chapter {chapter_num} will be retranslated")
                 
                 # Clean up progress tracking for this chapter
-                # Remove from content hashes to prevent duplicate detection issues
                 if content_hash in prog["content_hashes"]:
                     stored_info = prog["content_hashes"][content_hash]
                     if stored_info.get("chapter_idx") == chapter_idx:
@@ -221,7 +219,7 @@ def check_chapter_status(prog, chapter_idx, chapter_num, content_hash, output_di
                 
                 # Mark chapter as needing retranslation
                 chapter_info["status"] = "file_deleted"
-                chapter_info["output_file"] = None  # Clear the reference
+                chapter_info["output_file"] = None
                 
                 # Also clear any chunk data
                 if str(chapter_idx) in prog.get("chapter_chunks", {}):
@@ -231,28 +229,21 @@ def check_chapter_status(prog, chapter_idx, chapter_num, content_hash, output_di
             else:
                 # File exists, check if it's a valid translation
                 try:
-                    # Verify file is not empty or corrupted
                     with open(output_path, 'r', encoding='utf-8') as f:
                         content = f.read()
-                        if len(content.strip()) < 100:  # Suspiciously short
+                        if len(content.strip()) < 100:
                             print(f"⚠️ Output file for chapter {chapter_num} seems corrupted/empty")
                             return True, None, None
                 except Exception as e:
                     print(f"⚠️ Error reading output file for chapter {chapter_num}: {e}")
                     return True, None, None
                 
-                # File exists and is valid
                 return False, f"Chapter {chapter_num} already translated (file exists: {output_file})", output_file
         
-        elif chapter_info.get("status") == "in_progress":
-            # Chapter is currently being processed
-            return True, None, None
-        elif chapter_info.get("status") == "file_deleted":
-            # Chapter was marked for retranslation due to deleted file
+        elif chapter_info.get("status") in ["in_progress", "file_deleted"]:
             return True, None, None
     
     # Check for duplicate content ONLY if we haven't already determined we need to translate
-    # This prevents skipping chapters when their duplicate's file also doesn't exist
     if content_hash in prog["content_hashes"]:
         duplicate_info = prog["content_hashes"][content_hash]
         duplicate_idx = duplicate_info.get("chapter_idx")
@@ -264,55 +255,41 @@ def check_chapter_status(prog, chapter_idx, chapter_num, content_hash, output_di
             if dup_output_file:
                 dup_path = os.path.join(output_dir, dup_output_file)
                 if os.path.exists(dup_path):
-                    # Verify the duplicate file is also valid
                     try:
                         with open(dup_path, 'r', encoding='utf-8') as f:
                             dup_content = f.read()
                             if len(dup_content.strip()) < 100:
-                                # Duplicate file is corrupted, don't rely on it
                                 return True, None, None
                     except:
-                        # Can't read duplicate file, need to translate this one
                         return True, None, None
                     
                     return False, f"Chapter {chapter_num} has same content as chapter {duplicate_info.get('chapter_num')} (already translated)", None
                 else:
-                    # Duplicate's file doesn't exist either, need to translate
                     return True, None, None
     
-    # Chapter needs translation
     return True, None, None
 
-
 def cleanup_missing_files(prog, output_dir):
-    """
-    Scan progress tracking and clean up any references to missing files
-    This ensures deleted files will trigger retranslation
-    """
+    """Scan progress tracking and clean up any references to missing files"""
     cleaned_count = 0
     
-    # Check each chapter entry
     for chapter_key, chapter_info in list(prog["chapters"].items()):
         output_file = chapter_info.get("output_file")
         
         if output_file:
             output_path = os.path.join(output_dir, output_file)
             if not os.path.exists(output_path):
-                # File is missing!
                 print(f"🧹 Found missing file for chapter {chapter_info.get('chapter_num', chapter_key)}: {output_file}")
                 
-                # Mark chapter for retranslation
                 chapter_info["status"] = "file_deleted"
                 chapter_info["output_file"] = None
                 
-                # Remove from content hashes
                 content_hash = chapter_info.get("content_hash")
                 if content_hash and content_hash in prog["content_hashes"]:
                     stored_info = prog["content_hashes"][content_hash]
                     if stored_info.get("chapter_idx") == int(chapter_key):
                         del prog["content_hashes"][content_hash]
                 
-                # Remove chunk data
                 if chapter_key in prog.get("chapter_chunks", {}):
                     del prog["chapter_chunks"][chapter_key]
                 
@@ -327,16 +304,14 @@ def update_progress(prog, chapter_idx, chapter_num, content_hash, output_filenam
     """Update progress tracking after successful translation"""
     chapter_key = str(chapter_idx)
     
-    # Update main chapter tracking
     prog["chapters"][chapter_key] = {
         "chapter_num": chapter_num,
         "content_hash": content_hash,
-        "output_file": output_filename,  # Can be None for in_progress
+        "output_file": output_filename,
         "status": status,
         "timestamp": time.time()
     }
     
-    # Only update content hash mapping if we have a completed file
     if output_filename and status == "completed":
         prog["content_hashes"][content_hash] = {
             "chapter_idx": chapter_idx,
@@ -350,13 +325,10 @@ def cleanup_progress_tracking(prog, output_dir):
     """Remove entries for files that no longer exist"""
     cleaned_count = 0
     
-    # Check each chapter entry
     for chapter_key, chapter_info in list(prog["chapters"].items()):
-        # Only check if output_file exists and is not None
         if chapter_info.get("output_file"):
             output_path = os.path.join(output_dir, chapter_info["output_file"])
             if not os.path.exists(output_path):
-                # File is missing, mark as incomplete
                 chapter_info["status"] = "file_missing"
                 cleaned_count += 1
                 print(f"🧹 Marked chapter {chapter_info.get('chapter_num', chapter_key)} as missing (file not found: {chapter_info['output_file']})")
@@ -380,7 +352,6 @@ def get_translation_stats(prog, output_dir):
         output_file = chapter_info.get("output_file")
         
         if status == "completed" and output_file:
-            # Verify file exists
             output_path = os.path.join(output_dir, output_file)
             if os.path.exists(output_path):
                 stats["completed"] += 1
@@ -393,18 +364,18 @@ def get_translation_stats(prog, output_dir):
     
     return stats
 
+# =============================================================================
+# CONTENT PROCESSING AND ENHANCEMENT
+# =============================================================================
+
 def emergency_restore_paragraphs(text, original_html=None, verbose=True):
-    """
-    Emergency restoration when AI returns wall of text without proper paragraph tags.
-    This function attempts to restore paragraph structure using various heuristics.
-    """
-    # Helper function for logging
+    """Emergency restoration when AI returns wall of text without proper paragraph tags"""
     def log(message):
         if verbose:
             print(message)
     
     # Check if we already have proper paragraph structure
-    if text.count('</p>') >= 3:  # Assume 3+ paragraphs means structure is OK
+    if text.count('</p>') >= 3:
         return text
     
     # If we have the original HTML, try to match its structure
@@ -412,7 +383,7 @@ def emergency_restore_paragraphs(text, original_html=None, verbose=True):
         original_para_count = original_html.count('<p>')
         current_para_count = text.count('<p>')
         
-        if current_para_count < original_para_count / 2:  # Less than half the expected paragraphs
+        if current_para_count < original_para_count / 2:
             log(f"⚠️ Paragraph mismatch! Original: {original_para_count}, Current: {current_para_count}")
             log("🔧 Attempting emergency paragraph restoration...")
     
@@ -420,19 +391,13 @@ def emergency_restore_paragraphs(text, original_html=None, verbose=True):
     if '</p>' not in text and len(text) > 300:
         log("❌ No paragraph tags found - applying emergency restoration")
         
-        # First, try to preserve any existing HTML tags
-        has_html = '<' in text and '>' in text
-        
-        # Clean up any broken tags
-        text = text.replace('</p><p>', '</p>\n<p>')  # Ensure line breaks between paragraphs
-        
-        # Strategy 1: Look for double line breaks (often indicates paragraph break)
+        # Strategy 1: Look for double line breaks
         if '\n\n' in text:
             parts = text.split('\n\n')
             paragraphs = ['<p>' + part.strip() + '</p>' for part in parts if part.strip()]
             return '\n'.join(paragraphs)
         
-        # Strategy 2: Look for dialogue patterns (quotes often start new paragraphs)
+        # Strategy 2: Look for dialogue patterns
         dialogue_pattern = r'(?<=[.!?])\s+(?=[""\u201c\u201d])'
         if re.search(dialogue_pattern, text):
             parts = re.split(dialogue_pattern, text)
@@ -440,7 +405,6 @@ def emergency_restore_paragraphs(text, original_html=None, verbose=True):
             for part in parts:
                 part = part.strip()
                 if part:
-                    # Check if it already has tags
                     if not part.startswith('<p>'):
                         part = '<p>' + part
                     if not part.endswith('</p>'):
@@ -449,13 +413,10 @@ def emergency_restore_paragraphs(text, original_html=None, verbose=True):
             return '\n'.join(paragraphs)
         
         # Strategy 3: Split by sentence patterns
-        # Look for: period/exclamation/question mark + space + capital letter
         sentence_boundary = r'(?<=[.!?])\s+(?=[A-Z\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af])'
         sentences = re.split(sentence_boundary, text)
         
         if len(sentences) > 1:
-            # Group sentences into paragraphs
-            # Aim for 3-5 sentences per paragraph, or natural breaks
             paragraphs = []
             current_para = []
             
@@ -466,11 +427,6 @@ def emergency_restore_paragraphs(text, original_html=None, verbose=True):
                     
                 current_para.append(sentence)
                 
-                # Create new paragraph if:
-                # - We have 3-4 sentences
-                # - Current sentence ends with closing quote
-                # - Next sentence would start with quote
-                # - Current sentence seems like scene break
                 should_break = (
                     len(current_para) >= 3 or
                     sentence.rstrip().endswith(('"', '"', '"')) or
@@ -488,7 +444,6 @@ def emergency_restore_paragraphs(text, original_html=None, verbose=True):
                     paragraphs.append(para_text)
                     current_para = []
             
-            # Don't forget the last paragraph
             if current_para:
                 para_text = ' '.join(current_para)
                 if not para_text.startswith('<p>'):
@@ -502,11 +457,10 @@ def emergency_restore_paragraphs(text, original_html=None, verbose=True):
             return result
         
         # Strategy 4: Last resort - fixed size chunks
-        # Split into chunks of ~150-200 words
         words = text.split()
         if len(words) > 100:
             paragraphs = []
-            words_per_para = max(100, len(words) // 10)  # Aim for ~10 paragraphs
+            words_per_para = max(100, len(words) // 10)
             
             for i in range(0, len(words), words_per_para):
                 chunk = ' '.join(words[i:i + words_per_para])
@@ -515,23 +469,19 @@ def emergency_restore_paragraphs(text, original_html=None, verbose=True):
             
             return '\n'.join(paragraphs)
     
-    # If text has some structure but seems incomplete
+    # Handle incomplete structure
     elif '<p>' in text and text.count('<p>') < 3 and len(text) > 1000:
         log("⚠️ Very few paragraphs for long text - checking if more breaks needed")
         
-        # Extract existing paragraphs
         soup = BeautifulSoup(text, 'html.parser')
         existing_paras = soup.find_all('p')
         
-        # Check if any paragraph is too long
         new_paragraphs = []
         for para in existing_paras:
             para_text = para.get_text()
-            if len(para_text) > 500:  # Paragraph seems too long
-                # Split this paragraph
+            if len(para_text) > 500:
                 sentences = re.split(r'(?<=[.!?])\s+', para_text)
                 if len(sentences) > 5:
-                    # Re-group into smaller paragraphs
                     chunks = []
                     current = []
                     for sent in sentences:
@@ -549,31 +499,85 @@ def emergency_restore_paragraphs(text, original_html=None, verbose=True):
         
         return '\n'.join(new_paragraphs)
     
-    # Return original text if no restoration needed
     return text
+
+def clean_ai_artifacts(text, remove_artifacts=True):
+    """Remove AI response artifacts from text - but ONLY when enabled"""
+    if not remove_artifacts:
+        return text
+    
+    lines = text.split('\n', 2)
+    
+    if len(lines) < 2:
+        return text
+    
+    first_line = lines[0].strip()
+    
+    if not first_line:
+        if len(lines) > 1:
+            first_line = lines[1].strip()
+            if not first_line:
+                return text
+            lines = lines[1:]
+        else:
+            return text
+    
+    # Common AI artifact patterns - be very specific
+    ai_patterns = [
+        r'^(?:Sure|Okay|Understood|Of course|Got it|Alright|Certainly|Here\'s|Here is)',
+        r'^(?:I\'ll|I will|Let me) (?:translate|help|assist)',
+        r'^(?:System|Assistant|AI|User|Human|Model)\s*:',
+        r'^\[PART\s+\d+/\d+\]',
+        r'^(?:Translation note|Note|Here\'s the translation|I\'ve translated)',
+        r'^```(?:html)?',
+        r'^<!DOCTYPE',
+    ]
+    
+    for pattern in ai_patterns:
+        if re.search(pattern, first_line, re.IGNORECASE):
+            remaining_text = '\n'.join(lines[1:]) if len(lines) > 1 else ''
+            
+            if remaining_text.strip():
+                if (re.search(r'<h[1-6]', remaining_text, re.IGNORECASE) or 
+                    re.search(r'Chapter\s+\d+', remaining_text, re.IGNORECASE) or
+                    re.search(r'第\s*\d+\s*[章節話话回]', remaining_text) or
+                    re.search(r'제\s*\d+\s*[장화]', remaining_text) or
+                    len(remaining_text.strip()) > 100):
+                    
+                    print(f"✂️ Removed AI artifact: {first_line[:50]}...")
+                    return remaining_text.lstrip()
+    
+    # Additional check: single word artifacts
+    if first_line.lower() in ['html', 'text', 'content', 'translation', 'output']:
+        remaining_text = '\n'.join(lines[1:]) if len(lines) > 1 else ''
+        if remaining_text.strip():
+            print(f"✂️ Removed single word artifact: {first_line}")
+            return remaining_text.lstrip()
+    
+    return text
+
+# =============================================================================
+# EPUB METADATA AND STRUCTURE EXTRACTION
+# =============================================================================
 
 def extract_epub_metadata(zf):
     """Extract comprehensive metadata from EPUB file"""
     meta = {}
     try:
-        # Find OPF file
         for name in zf.namelist():
             if name.lower().endswith('.opf'):
                 opf_content = zf.read(name)
                 soup = BeautifulSoup(opf_content, 'xml')
                 
-                # Extract Dublin Core metadata
                 for tag in ['title', 'creator', 'language', 'publisher', 'date', 'subject']:
                     element = soup.find(tag)
                     if element:
                         meta[tag] = element.get_text(strip=True)
                 
-                # Extract additional metadata
                 description = soup.find('description')
                 if description:
                     meta['description'] = description.get_text(strip=True)
                 
-                # Extract series information if available
                 meta_tags = soup.find_all('meta')
                 for meta_tag in meta_tags:
                     name = meta_tag.get('name', '').lower()
@@ -589,10 +593,8 @@ def extract_epub_metadata(zf):
     
     return meta
 
-
 def detect_content_language(text_sample):
     """Detect the primary language of content"""
-    # Count characters by script
     scripts = {
         'korean': 0,
         'japanese_hiragana': 0,
@@ -614,7 +616,6 @@ def detect_content_language(text_sample):
         elif 0x0020 <= code <= 0x007F:  # Basic Latin
             scripts['latin'] += 1
     
-    # Determine primary language
     total_cjk = scripts['korean'] + scripts['japanese_hiragana'] + scripts['japanese_katakana'] + scripts['chinese']
     
     if scripts['korean'] > total_cjk * 0.3:
@@ -628,131 +629,22 @@ def detect_content_language(text_sample):
     else:
         return 'unknown'
 
-
-def extract_all_resources(zf, output_dir):
-    """Extract all resources (CSS, fonts, images) from EPUB"""
-    extracted_resources = {
-        'css': [],
-        'fonts': [],
-        'images': [],
-        'other': []
-    }
-    
-    # Create resource directories
-    for resource_type in ['css', 'fonts', 'images']:
-        resource_dir = os.path.join(output_dir, resource_type)
-        os.makedirs(resource_dir, exist_ok=True)
-    
-    print(f"📦 Extracting all resources from EPUB...")
-    
-    for file_path in zf.namelist():
-        # Skip directories
-        if file_path.endswith('/'):
-            continue
-            
-        file_name = os.path.basename(file_path)
-        if not file_name:
-            continue
-            
-        try:
-            file_data = zf.read(file_path)
-            resource_type = None
-            target_dir = None
-            
-            # Determine resource type
-            if file_path.lower().endswith('.css'):
-                resource_type = 'css'
-                target_dir = os.path.join(output_dir, 'css')
-            elif file_path.lower().endswith(('.ttf', '.otf', '.woff', '.woff2', '.eot')):
-                resource_type = 'fonts'
-                target_dir = os.path.join(output_dir, 'fonts')
-            elif file_path.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.svg', '.bmp', '.webp')):
-                resource_type = 'images'
-                target_dir = os.path.join(output_dir, 'images')
-            elif file_path.lower().endswith(('.js', '.xml', '.txt')):
-                resource_type = 'other'
-                target_dir = output_dir
-            
-            if resource_type and target_dir:
-                # Sanitize filename
-                safe_filename = sanitize_resource_filename(file_name)
-                target_path = os.path.join(target_dir, safe_filename)
-                
-                # Avoid overwriting files with same name
-                counter = 1
-                original_path = target_path
-                while os.path.exists(target_path):
-                    name, ext = os.path.splitext(safe_filename)
-                    target_path = os.path.join(target_dir, f"{name}_{counter}{ext}")
-                    counter += 1
-                
-                # Write file
-                with open(target_path, 'wb') as f:
-                    f.write(file_data)
-                
-                extracted_resources[resource_type].append(safe_filename)
-                print(f"   📄 Extracted {resource_type}: {safe_filename}")
-                
-        except Exception as e:
-            print(f"[WARNING] Failed to extract {file_path}: {e}")
-    
-    # Summary
-    total_extracted = sum(len(files) for files in extracted_resources.values())
-    print(f"✅ Extracted {total_extracted} resource files:")
-    for resource_type, files in extracted_resources.items():
-        if files:
-            print(f"   • {resource_type.title()}: {len(files)} files")
-    
-    return extracted_resources
-
-
-def sanitize_resource_filename(filename):
-    """Sanitize resource filenames for filesystem compatibility"""
-    # Normalize unicode
-    filename = unicodedata.normalize('NFC', filename)
-    
-    # Replace problematic characters
-    replacements = {
-        '/': '_', '\\': '_', ':': '_', '*': '_',
-        '?': '_', '"': '_', '<': '_', '>': '_',
-        '|': '_', '\0': '', '\n': '_', '\r': '_'
-    }
-    
-    for old, new in replacements.items():
-        filename = filename.replace(old, new)
-    
-    # Remove control characters
-    filename = ''.join(char for char in filename if ord(char) >= 32)
-    
-    # Limit length
-    name, ext = os.path.splitext(filename)
-    if len(name) > 50:
-        name = name[:50]
-    
-    if not name:
-        name = 'resource'
-    
-    return name + ext
-
-
 def extract_comprehensive_content_hash(html_content):
     """Create a more comprehensive hash that captures content structure and meaning"""
     try:
         soup = BeautifulSoup(html_content, 'html.parser')
         
-        # Extract different types of content separately
         content_parts = []
         
-        # 1. Text content (normalized)
+        # Text content (normalized)
         text_content = soup.get_text(strip=True).lower()
-        # Remove chapter numbers and common markers
         text_content = re.sub(r'chapter\s+\d+[:\-\s]*', '', text_content, flags=re.IGNORECASE)
         text_content = re.sub(r'第\s*\d+\s*[章節话回][:\-\s]*', '', text_content)
         text_content = re.sub(r'제\s*\d+\s*[장화][:\-\s]*', '', text_content)
         text_content = re.sub(r'\s+', ' ', text_content).strip()
-        content_parts.append(text_content[:2000])  # First 2000 chars
+        content_parts.append(text_content[:2000])
         
-        # 2. Structural elements
+        # Structural elements
         structure_info = []
         for tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
             headers = soup.find_all(tag)
@@ -761,16 +653,15 @@ def extract_comprehensive_content_hash(html_content):
                 if header_text and len(header_text) < 200:
                     structure_info.append(f"{tag}:{header_text}")
         
-        # 3. Paragraph count and average length
+        # Paragraph count and average length
         paragraphs = soup.find_all('p')
         if paragraphs:
             total_p_length = sum(len(p.get_text()) for p in paragraphs)
             avg_p_length = total_p_length // len(paragraphs)
             structure_info.append(f"paragraphs:{len(paragraphs)}:{avg_p_length}")
         
-        # 4. Image information
-        images = soup.find_all('img')
-        for img in images:
+        # Image and link information
+        for img in soup.find_all('img'):
             src = img.get('src', '')
             alt = img.get('alt', '')
             if src:
@@ -778,9 +669,7 @@ def extract_comprehensive_content_hash(html_content):
             if alt:
                 structure_info.append(f"alt:{alt.lower()}")
         
-        # 5. Link information  
-        links = soup.find_all('a')
-        for link in links:
+        for link in soup.find_all('a'):
             href = link.get('href', '')
             link_text = link.get_text(strip=True).lower()
             if href and not href.startswith('#'):
@@ -790,30 +679,306 @@ def extract_comprehensive_content_hash(html_content):
         
         # Combine all parts
         content_parts.extend(structure_info)
-        
-        # Create multiple hash signatures
         combined_content = '|||'.join(content_parts)
         
-        # Main content hash
+        # Create multiple hash signatures
         main_hash = hashlib.md5(combined_content.encode('utf-8')).hexdigest()
-        
-        # Structural hash (for catching reordered content)
         structure_hash = hashlib.md5(''.join(structure_info).encode('utf-8')).hexdigest()
-        
-        # Text-only hash (for catching text with different formatting)
         text_hash = hashlib.md5(text_content.encode('utf-8')).hexdigest()
         
-        # Combined signature
         return f"{main_hash}_{structure_hash[:8]}_{text_hash[:8]}"
         
     except Exception as e:
         print(f"[WARNING] Failed to create comprehensive hash: {e}")
-        # Fallback to simple text hash
         simple_text = BeautifulSoup(html_content, 'html.parser').get_text()
         return hashlib.md5(simple_text.encode('utf-8')).hexdigest()
 
+def get_content_hash(html_content):
+    """Create a comprehensive hash of content to detect duplicates"""
+    return extract_comprehensive_content_hash(html_content)
 
-def extract_advanced_chapter_info(zf):
+def sanitize_resource_filename(filename):
+    """Sanitize resource filenames for filesystem compatibility"""
+    filename = unicodedata.normalize('NFC', filename)
+    
+    replacements = {
+        '/': '_', '\\': '_', ':': '_', '*': '_',
+        '?': '_', '"': '_', '<': '_', '>': '_',
+        '|': '_', '\0': '', '\n': '_', '\r': '_'
+    }
+    
+    for old, new in replacements.items():
+        filename = filename.replace(old, new)
+    
+    filename = ''.join(char for char in filename if ord(char) >= 32)
+    
+    name, ext = os.path.splitext(filename)
+    if len(name) > 50:
+        name = name[:50]
+    
+    if not name:
+        name = 'resource'
+    
+    return name + ext
+
+# =============================================================================
+# CONSOLIDATED CHAPTER AND RESOURCE EXTRACTION
+# =============================================================================
+
+def extract_chapters(zf, output_dir):
+    """
+    Extract chapters and all resources from EPUB with comprehensive handling
+    
+    This function provides:
+    - Chapter extraction with advanced detection (multiple languages)
+    - Resource extraction (CSS, fonts, images, EPUB structure files)
+    - Duplicate prevention on re-runs
+    - Comprehensive metadata extraction
+    - Validation and reporting
+    - Smart cleanup of previous extractions
+    
+    Args:
+        zf: ZipFile object of the EPUB
+        output_dir: Directory to extract content to
+        
+    Returns:
+        List of chapter dictionaries with enhanced metadata
+    """
+    
+    print("🚀 Starting comprehensive EPUB extraction...")
+    print("✅ Using enhanced extraction with full resource handling")
+    
+    # Step 1: Extract all resources (with duplicate prevention)
+    extracted_resources = _extract_all_resources(zf, output_dir)
+    
+    # Step 2: Extract comprehensive metadata (only if not exists)
+    metadata_path = os.path.join(output_dir, 'metadata.json')
+    if os.path.exists(metadata_path):
+        print("📋 Loading existing metadata...")
+        with open(metadata_path, 'r', encoding='utf-8') as f:
+            metadata = json.load(f)
+    else:
+        print("📋 Extracting fresh metadata...")
+        metadata = extract_epub_metadata(zf)
+        print(f"📋 Extracted metadata: {list(metadata.keys())}")
+    
+    # Step 3: Extract chapters with advanced detection
+    chapters, detected_language = _extract_advanced_chapter_info(zf)
+    
+    if not chapters:
+        print("❌ No chapters could be extracted!")
+        return []
+    
+    # Step 4: Enhance metadata with extracted information
+    metadata.update({
+        'chapter_count': len(chapters),
+        'detected_language': detected_language,
+        'extracted_resources': extracted_resources,
+        'extraction_summary': {
+            'total_chapters': len(chapters),
+            'chapter_range': f"{chapters[0]['num']}-{chapters[-1]['num']}",
+            'resources_extracted': sum(len(files) for files in extracted_resources.values())
+        }
+    })
+    
+    # Add chapter titles to metadata
+    metadata['chapter_titles'] = {
+        str(c['num']): c['title'] for c in chapters
+    }
+    
+    # Step 5: Save enhanced metadata
+    with open(metadata_path, 'w', encoding='utf-8') as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
+    
+    print(f"💾 Saved comprehensive metadata to: {metadata_path}")
+    
+    # Step 6: Create/update extraction report
+    _create_extraction_report(output_dir, metadata, chapters, extracted_resources)
+    
+    # Step 7: Final validation and summary
+    _log_extraction_summary(chapters, extracted_resources, detected_language)
+    
+    print("🔍 VERIFICATION: Comprehensive chapter extraction completed successfully")
+    
+    return chapters
+
+def _extract_all_resources(zf, output_dir):
+    """Extract all resources (CSS, fonts, images, EPUB structure files) with duplicate prevention"""
+    extracted_resources = {
+        'css': [],
+        'fonts': [],
+        'images': [],
+        'epub_structure': [],
+        'other': []
+    }
+    
+    # Check if resources were already extracted
+    extraction_marker = os.path.join(output_dir, '.resources_extracted')
+    if os.path.exists(extraction_marker):
+        print("📦 Resources already extracted, skipping resource extraction...")
+        return _count_existing_resources(output_dir, extracted_resources)
+    
+    # Clean up any partial extractions from previous runs
+    _cleanup_old_resources(output_dir)
+    
+    # Create fresh resource directories
+    for resource_type in ['css', 'fonts', 'images']:
+        os.makedirs(os.path.join(output_dir, resource_type), exist_ok=True)
+    
+    print(f"📦 Extracting all resources from EPUB...")
+    
+    # Extract each file
+    for file_path in zf.namelist():
+        if file_path.endswith('/') or not os.path.basename(file_path):
+            continue
+            
+        try:
+            file_data = zf.read(file_path)
+            resource_info = _categorize_resource(file_path, os.path.basename(file_path))
+            
+            if resource_info:
+                resource_type, target_dir, safe_filename = resource_info
+                target_path = os.path.join(output_dir, target_dir, safe_filename) if target_dir else os.path.join(output_dir, safe_filename)
+                
+                # Write file
+                with open(target_path, 'wb') as f:
+                    f.write(file_data)
+                
+                extracted_resources[resource_type].append(safe_filename)
+                
+                # Log appropriately
+                if resource_type == 'epub_structure':
+                    print(f"   📋 Extracted EPUB structure: {safe_filename}")
+                else:
+                    print(f"   📄 Extracted {resource_type}: {safe_filename}")
+                
+        except Exception as e:
+            print(f"[WARNING] Failed to extract {file_path}: {e}")
+    
+    # Create extraction marker
+    with open(extraction_marker, 'w') as f:
+        f.write(f"Resources extracted at {time.time()}")
+    
+    # Summary and validation
+    _validate_critical_files(output_dir, extracted_resources)
+    
+    return extracted_resources
+
+def _categorize_resource(file_path, file_name):
+    """Categorize a file and return (resource_type, target_dir, safe_filename)"""
+    file_path_lower = file_path.lower()
+    file_name_lower = file_name.lower()
+    
+    if file_path_lower.endswith('.css'):
+        return 'css', 'css', sanitize_resource_filename(file_name)
+    elif file_path_lower.endswith(('.ttf', '.otf', '.woff', '.woff2', '.eot')):
+        return 'fonts', 'fonts', sanitize_resource_filename(file_name)
+    elif file_path_lower.endswith(('.jpg', '.jpeg', '.png', '.gif', '.svg', '.bmp', '.webp')):
+        return 'images', 'images', sanitize_resource_filename(file_name)
+    elif (file_path_lower.endswith(('.opf', '.ncx')) or 
+          file_name_lower == 'container.xml' or
+          'container.xml' in file_path_lower):
+        # EPUB structure files go to root
+        if 'container.xml' in file_path_lower:
+            safe_filename = 'container.xml'
+        else:
+            safe_filename = file_name
+        return 'epub_structure', None, safe_filename
+    elif file_path_lower.endswith(('.js', '.xml', '.txt')):
+        return 'other', None, sanitize_resource_filename(file_name)
+    
+    return None
+
+def _cleanup_old_resources(output_dir):
+    """Clean up old resource directories and EPUB structure files"""
+    print("🧹 Cleaning up any existing resource directories...")
+    
+    # Remove resource directories
+    for resource_type in ['css', 'fonts', 'images']:
+        resource_dir = os.path.join(output_dir, resource_type)
+        if os.path.exists(resource_dir):
+            shutil.rmtree(resource_dir)
+            print(f"   🗑️ Removed old {resource_type} directory")
+    
+    # Remove EPUB structure files
+    epub_structure_files = ['container.xml', 'content.opf', 'toc.ncx']
+    for epub_file in epub_structure_files:
+        epub_path = os.path.join(output_dir, epub_file)
+        if os.path.exists(epub_path):
+            os.remove(epub_path)
+            print(f"   🗑️ Removed old {epub_file}")
+    
+    # Remove any other .opf or .ncx files
+    try:
+        for file in os.listdir(output_dir):
+            if file.lower().endswith(('.opf', '.ncx')):
+                os.remove(os.path.join(output_dir, file))
+                print(f"   🗑️ Removed old EPUB file: {file}")
+    except Exception as e:
+        print(f"⚠️ Error cleaning up EPUB files: {e}")
+
+def _count_existing_resources(output_dir, extracted_resources):
+    """Count existing resources when skipping extraction"""
+    for resource_type in ['css', 'fonts', 'images', 'epub_structure']:
+        if resource_type == 'epub_structure':
+            # EPUB structure files are in root directory
+            epub_files = []
+            for file in ['container.xml', 'content.opf', 'toc.ncx']:
+                if os.path.exists(os.path.join(output_dir, file)):
+                    epub_files.append(file)
+            # Also check for any .opf files with different names
+            try:
+                for file in os.listdir(output_dir):
+                    if file.lower().endswith(('.opf', '.ncx')) and file not in epub_files:
+                        epub_files.append(file)
+            except:
+                pass
+            extracted_resources[resource_type] = epub_files
+        else:
+            resource_dir = os.path.join(output_dir, resource_type)
+            if os.path.exists(resource_dir):
+                try:
+                    files = [f for f in os.listdir(resource_dir) if os.path.isfile(os.path.join(resource_dir, f))]
+                    extracted_resources[resource_type] = files
+                except:
+                    extracted_resources[resource_type] = []
+    
+    total_existing = sum(len(files) for files in extracted_resources.values())
+    print(f"✅ Found {total_existing} existing resource files")
+    return extracted_resources
+
+def _validate_critical_files(output_dir, extracted_resources):
+    """Validate that critical EPUB files were extracted"""
+    total_extracted = sum(len(files) for files in extracted_resources.values())
+    print(f"✅ Extracted {total_extracted} resource files:")
+    
+    for resource_type, files in extracted_resources.items():
+        if files:
+            if resource_type == 'epub_structure':
+                print(f"   • EPUB Structure: {len(files)} files")
+                for file in files:
+                    print(f"     - {file}")
+            else:
+                print(f"   • {resource_type.title()}: {len(files)} files")
+    
+    # Validate critical files
+    critical_files = ['container.xml']
+    missing_critical = [f for f in critical_files if not os.path.exists(os.path.join(output_dir, f))]
+    
+    if missing_critical:
+        print(f"⚠️ WARNING: Missing critical EPUB files: {missing_critical}")
+        print("   This may prevent proper EPUB reconstruction!")
+    else:
+        print("✅ All critical EPUB structure files extracted successfully")
+    
+    # Check for OPF file
+    opf_files = [f for f in extracted_resources['epub_structure'] if f.lower().endswith('.opf')]
+    if not opf_files:
+        print("⚠️ WARNING: No OPF file found! This will prevent EPUB reconstruction.")
+    else:
+        print(f"✅ Found OPF file(s): {opf_files}")
+
+def _extract_advanced_chapter_info(zf):
     """Extract comprehensive chapter information with improved detection"""
     chapters = []
     
@@ -860,7 +1025,7 @@ def extract_advanced_chapter_info(zf):
         (r'^\s*(\d+)\s*[-–—.\:]', re.MULTILINE, 'generic_numbered'),
         (r'_(\d+)\.x?html?$', re.IGNORECASE, 'filename_number'),
         (r'/(\d+)\.x?html?$', re.IGNORECASE, 'path_number'),
-        (r'(\d+)', 0, 'any_number'),  # Last resort
+        (r'(\d+)', 0, 'any_number'),
     ]
     
     # Chinese number conversion table
@@ -879,7 +1044,6 @@ def extract_advanced_chapter_info(zf):
         if cn_num in chinese_nums:
             return chinese_nums[cn_num]
         
-        # Handle compound numbers
         if '十' in cn_num:
             parts = cn_num.split('十')
             if len(parts) == 2:
@@ -926,7 +1090,7 @@ def extract_advanced_chapter_info(zf):
                 content_html = str(soup)
                 content_text = soup.get_text(strip=True)
             
-            # Skip very short files (likely not actual chapters)
+            # Skip very short files
             if len(content_text.strip()) < 200:
                 print(f"[DEBUG] Skipping short file: {file_path} ({len(content_text)} chars)")
                 continue
@@ -934,7 +1098,7 @@ def extract_advanced_chapter_info(zf):
             # Create comprehensive content hash
             content_hash = extract_comprehensive_content_hash(content_html)
             
-            # Group files by size (helps detect duplicates)
+            # Group files by size
             file_size = len(content_text)
             if file_size not in file_size_groups:
                 file_size_groups[file_size] = []
@@ -1102,7 +1266,6 @@ def extract_advanced_chapter_info(zf):
             
             # Extract or generate title
             if not chapter_title:
-                # Try to find a meaningful title
                 if soup.title and soup.title.string:
                     chapter_title = soup.title.string.strip()
                 else:
@@ -1131,7 +1294,7 @@ def extract_advanced_chapter_info(zf):
                 "content_hash": content_hash,
                 "detection_method": detection_method,
                 "file_size": file_size,
-                "language_sample": content_text[:500]  # For language detection
+                "language_sample": content_text[:500]
             }
             
             chapters.append(chapter_info)
@@ -1179,58 +1342,15 @@ def extract_advanced_chapter_info(zf):
         for method, count in method_stats.most_common():
             print(f"      • {method}: {count} chapters")
         
-        # Show duplicate file size groups (potential duplicates)
+        # Show duplicate file size groups
         large_groups = [size for size, files in file_size_groups.items() if len(files) > 1]
         if large_groups:
             print(f"   ⚠️ Found {len(large_groups)} file size groups with potential duplicates")
     
     return chapters, detected_language
 
-
-def enhanced_extract_chapters(zf, output_dir):
-    """Enhanced chapter extraction with comprehensive resource handling"""
-    
-    print("🚀 Starting enhanced chapter extraction...")
-    
-    # Step 1: Extract all resources
-    extracted_resources = extract_all_resources(zf, output_dir)
-    
-    # Step 2: Extract comprehensive metadata
-    metadata = extract_epub_metadata(zf)
-    print(f"📋 Extracted metadata: {list(metadata.keys())}")
-    
-    # Step 3: Extract chapters with advanced detection
-    chapters, detected_language = extract_advanced_chapter_info(zf)
-    
-    if not chapters:
-        print("❌ No chapters could be extracted!")
-        return []
-    
-    # Step 4: Enhance metadata with extracted information
-    metadata.update({
-        'chapter_count': len(chapters),
-        'detected_language': detected_language,
-        'extracted_resources': extracted_resources,
-        'extraction_summary': {
-            'total_chapters': len(chapters),
-            'chapter_range': f"{chapters[0]['num']}-{chapters[-1]['num']}",
-            'resources_extracted': sum(len(files) for files in extracted_resources.values())
-        }
-    })
-    
-    # Add chapter titles to metadata
-    metadata['chapter_titles'] = {
-        str(c['num']): c['title'] for c in chapters
-    }
-    
-    # Step 5: Save enhanced metadata
-    metadata_path = os.path.join(output_dir, 'metadata.json')
-    with open(metadata_path, 'w', encoding='utf-8') as f:
-        json.dump(metadata, f, ensure_ascii=False, indent=2)
-    
-    print(f"💾 Saved enhanced metadata to: {metadata_path}")
-    
-    # Step 6: Create extraction report
+def _create_extraction_report(output_dir, metadata, chapters, extracted_resources):
+    """Create comprehensive extraction report"""
     report_path = os.path.join(output_dir, 'extraction_report.txt')
     with open(report_path, 'w', encoding='utf-8') as f:
         f.write("EPUB Extraction Report\n")
@@ -1248,97 +1368,267 @@ def enhanced_extract_chapters(zf, output_dir):
         f.write(f"\nRESOURCES EXTRACTED:\n")
         for resource_type, files in extracted_resources.items():
             if files:
-                f.write(f"  {resource_type.title()}: {len(files)} files\n")
-                for file in files[:5]:  # Show first 5
-                    f.write(f"    - {file}\n")
-                if len(files) > 5:
-                    f.write(f"    ... and {len(files) - 5} more\n")
+                if resource_type == 'epub_structure':
+                    f.write(f"  EPUB Structure: {len(files)} files\n")
+                    for file in files:
+                        f.write(f"    - {file}\n")
+                else:
+                    f.write(f"  {resource_type.title()}: {len(files)} files\n")
+                    for file in files[:5]:  # Show first 5
+                        f.write(f"    - {file}\n")
+                    if len(files) > 5:
+                        f.write(f"    ... and {len(files) - 5} more\n")
     
     print(f"📄 Saved extraction report to: {report_path}")
-    
-    print(f"\n✅ Enhanced extraction complete!")
+
+def _log_extraction_summary(chapters, extracted_resources, detected_language):
+    """Log final extraction summary"""
+    print(f"\n✅ Comprehensive extraction complete!")
     print(f"   📚 Chapters: {len(chapters)}")
     print(f"   🎨 Resources: {sum(len(files) for files in extracted_resources.values())}")
     print(f"   🌍 Language: {detected_language}")
     
-    return chapters
+    # Show EPUB structure file status
+    epub_files = extracted_resources.get('epub_structure', [])
+    if epub_files:
+        print(f"   📋 EPUB Structure: {len(epub_files)} files ({', '.join(epub_files)})")
+    else:
+        print(f"   ⚠️ No EPUB structure files extracted!")
 
+# =============================================================================
+# VALIDATION FUNCTIONS
+# =============================================================================
 
-# Make this the new default extract_chapters function
-extract_chapters = enhanced_extract_chapters
+def validate_chapter_continuity(chapters):
+    """Validate chapter continuity and warn about issues"""
+    if not chapters:
+        return
+    
+    issues = []
+    
+    # Check for duplicate chapter numbers
+    chapter_nums = [c['num'] for c in chapters]
+    duplicates = [num for num in chapter_nums if chapter_nums.count(num) > 1]
+    if duplicates:
+        issues.append(f"Duplicate chapter numbers found: {set(duplicates)}")
+    
+    # Check for missing chapters
+    min_num = min(chapter_nums)
+    max_num = max(chapter_nums)
+    expected = set(range(min_num, max_num + 1))
+    actual = set(chapter_nums)
+    missing = expected - actual
+    if missing:
+        issues.append(f"Missing chapter numbers: {sorted(missing)}")
+    
+    # Check for suspiciously similar titles
+    for i in range(len(chapters) - 1):
+        for j in range(i + 1, len(chapters)):
+            title1 = chapters[i]['title'].lower()
+            title2 = chapters[j]['title'].lower()
+            if title1 == title2 and chapters[i]['num'] != chapters[j]['num']:
+                issues.append(f"Chapters {chapters[i]['num']} and {chapters[j]['num']} have identical titles")
+    
+    if issues:
+        print("\n⚠️  Chapter Validation Issues:")
+        for issue in issues:
+            print(f"  - {issue}")
+        print()
 
-def get_content_hash(html_content):
-    """Create a comprehensive hash of content to detect duplicates"""
-    return extract_comprehensive_content_hash(html_content)
+def validate_epub_structure(output_dir):
+    """Validate that all necessary EPUB structure files are present"""
+    print("🔍 Validating EPUB structure...")
+    
+    required_files = {
+        'container.xml': 'META-INF container file (critical)',
+        '*.opf': 'OPF package file (critical)',
+        '*.ncx': 'Navigation file (recommended)'
+    }
+    
+    found_files = {}
+    missing_files = []
+    
+    # Check for container.xml
+    container_path = os.path.join(output_dir, 'container.xml')
+    if os.path.exists(container_path):
+        found_files['container.xml'] = 'Found'
+        print("   ✅ container.xml - Found")
+    else:
+        missing_files.append('container.xml')
+        print("   ❌ container.xml - Missing (CRITICAL)")
+    
+    # Check for OPF files
+    opf_files = []
+    ncx_files = []
+    
+    for file in os.listdir(output_dir):
+        if file.lower().endswith('.opf'):
+            opf_files.append(file)
+        elif file.lower().endswith('.ncx'):
+            ncx_files.append(file)
+    
+    if opf_files:
+        found_files['opf'] = opf_files
+        print(f"   ✅ OPF file(s) - Found: {', '.join(opf_files)}")
+    else:
+        missing_files.append('*.opf')
+        print("   ❌ OPF file - Missing (CRITICAL)")
+    
+    if ncx_files:
+        found_files['ncx'] = ncx_files
+        print(f"   ✅ NCX file(s) - Found: {', '.join(ncx_files)}")
+    else:
+        missing_files.append('*.ncx')
+        print("   ⚠️ NCX file - Missing (navigation may not work)")
+    
+    # Check for translated HTML files
+    html_files = [f for f in os.listdir(output_dir) if f.lower().endswith('.html') and f.startswith('response_')]
+    if html_files:
+        print(f"   ✅ Translated chapters - Found: {len(html_files)} files")
+    else:
+        print("   ⚠️ No translated chapter files found")
+    
+    # Overall status
+    critical_missing = [f for f in missing_files if f in ['container.xml', '*.opf']]
+    
+    if not critical_missing:
+        print("✅ EPUB structure validation PASSED")
+        print("   All critical files present for EPUB reconstruction")
+        return True
+    else:
+        print("❌ EPUB structure validation FAILED")
+        print(f"   Missing critical files: {', '.join(critical_missing)}")
+        print("   EPUB reconstruction may fail without these files")
+        return False
 
-def clean_ai_artifacts(text, remove_artifacts=True):
-    """Remove AI response artifacts from text - but ONLY when enabled"""
-    if not remove_artifacts:
-        return text
+def check_epub_readiness(output_dir):
+    """Check if the output directory is ready for EPUB compilation"""
+    print("📋 Checking EPUB compilation readiness...")
     
-    # Only remove the first sentence/line if it looks like an AI artifact
-    lines = text.split('\n', 2)  # Split into max 3 parts (first line, second line, rest)
+    issues = []
     
-    if len(lines) < 2:
-        return text  # Nothing to remove if there's only one line
+    # Check structure files
+    if not validate_epub_structure(output_dir):
+        issues.append("Missing critical EPUB structure files")
     
-    first_line = lines[0].strip()
+    # Check for translated content
+    html_files = [f for f in os.listdir(output_dir) if f.lower().endswith('.html') and f.startswith('response_')]
+    if not html_files:
+        issues.append("No translated chapter files found")
+    else:
+        print(f"   ✅ Found {len(html_files)} translated chapters")
     
-    # Skip if first line is empty
-    if not first_line:
-        # Check second line if first is empty
-        if len(lines) > 1:
-            first_line = lines[1].strip()
-            if not first_line:
-                return text
-            lines = lines[1:]  # Adjust for empty first line
-        else:
-            return text
+    # Check for metadata
+    metadata_path = os.path.join(output_dir, 'metadata.json')
+    if os.path.exists(metadata_path):
+        print("   ✅ Metadata file present")
+        try:
+            with open(metadata_path, 'r', encoding='utf-8') as f:
+                metadata = json.load(f)
+            if 'title' not in metadata:
+                issues.append("Metadata missing title")
+        except Exception as e:
+            issues.append(f"Metadata file corrupted: {e}")
+    else:
+        issues.append("Missing metadata.json file")
     
-    # Common AI artifact patterns - be very specific
-    ai_patterns = [
-        # Direct AI responses
-        r'^(?:Sure|Okay|Understood|Of course|Got it|Alright|Certainly|Here\'s|Here is)',
-        r'^(?:I\'ll|I will|Let me) (?:translate|help|assist)',
-        # Role markers
-        r'^(?:System|Assistant|AI|User|Human|Model)\s*:',
-        # Part markers
-        r'^\[PART\s+\d+/\d+\]',
-        # Common AI explanations
-        r'^(?:Translation note|Note|Here\'s the translation|I\'ve translated)',
-        # HTML/Code markers at the very start
-        r'^```(?:html)?',
-        r'^<!DOCTYPE',  # Sometimes AI starts with this unnecessarily
+    # Check for resources
+    resource_dirs = ['css', 'fonts', 'images']
+    found_resources = 0
+    for res_dir in resource_dirs:
+        res_path = os.path.join(output_dir, res_dir)
+        if os.path.exists(res_path):
+            files = [f for f in os.listdir(res_path) if os.path.isfile(os.path.join(res_path, f))]
+            if files:
+                found_resources += len(files)
+                print(f"   ✅ Found {len(files)} {res_dir} files")
+    
+    if found_resources > 0:
+        print(f"   ✅ Total resources: {found_resources} files")
+    else:
+        print("   ⚠️ No resource files found (this may be normal)")
+    
+    # Final assessment
+    if not issues:
+        print("🎉 EPUB compilation readiness: READY")
+        print("   All necessary files present for EPUB creation")
+        return True
+    else:
+        print("⚠️ EPUB compilation readiness: ISSUES FOUND")
+        for issue in issues:
+            print(f"   • {issue}")
+        return False
+
+def cleanup_previous_extraction(output_dir):
+    """Clean up any files from previous extraction runs"""
+    cleanup_items = [
+        # Resource directories
+        'css', 'fonts', 'images',
+        # Extraction marker
+        '.resources_extracted'
     ]
     
-    # Check if the first line matches ANY of these patterns
-    for pattern in ai_patterns:
-        if re.search(pattern, first_line, re.IGNORECASE):
-            # Only remove the first line/sentence
-            remaining_text = '\n'.join(lines[1:]) if len(lines) > 1 else ''
-            
-            # Make sure we're not removing actual content
-            # Check if what remains starts with a chapter header or has substantial content
-            if remaining_text.strip():
-                # Verify remaining text has actual chapter content
-                if (re.search(r'<h[1-6]', remaining_text, re.IGNORECASE) or 
-                    re.search(r'Chapter\s+\d+', remaining_text, re.IGNORECASE) or
-                    re.search(r'第\s*\d+\s*[章节話话回]', remaining_text) or
-                    re.search(r'제\s*\d+\s*[장화]', remaining_text) or
-                    len(remaining_text.strip()) > 100):  # Has substantial content
-                    
-                    print(f"✂️ Removed AI artifact: {first_line[:50]}...")
-                    return remaining_text.lstrip()
+    # Also clean up EPUB structure files
+    epub_structure_files = [
+        'container.xml', 'content.opf', 'toc.ncx'
+    ]
     
-    # Additional check: if first line is just "html" or similar single words
-    if first_line.lower() in ['html', 'text', 'content', 'translation', 'output']:
-        remaining_text = '\n'.join(lines[1:]) if len(lines) > 1 else ''
-        if remaining_text.strip():
-            print(f"✂️ Removed single word artifact: {first_line}")
-            return remaining_text.lstrip()
+    cleaned_count = 0
     
-    # No artifacts detected, return original
-    return text
+    # Clean up directories
+    for item in cleanup_items:
+        if item.startswith('.'):  # Skip marker files for now
+            continue
+        item_path = os.path.join(output_dir, item)
+        try:
+            if os.path.isdir(item_path):
+                shutil.rmtree(item_path)
+                print(f"🧹 Removed directory: {item}")
+                cleaned_count += 1
+        except Exception as e:
+            print(f"⚠️ Could not remove directory {item}: {e}")
+    
+    # Clean up EPUB structure files
+    for epub_file in epub_structure_files:
+        file_path = os.path.join(output_dir, epub_file)
+        try:
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+                print(f"🧹 Removed EPUB file: {epub_file}")
+                cleaned_count += 1
+        except Exception as e:
+            print(f"⚠️ Could not remove {epub_file}: {e}")
+    
+    # Clean up any other .opf or .ncx files with different names
+    try:
+        for file in os.listdir(output_dir):
+            if file.lower().endswith(('.opf', '.ncx')):
+                file_path = os.path.join(output_dir, file)
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+                    print(f"🧹 Removed EPUB file: {file}")
+                    cleaned_count += 1
+    except Exception as e:
+        print(f"⚠️ Error scanning for EPUB files: {e}")
+    
+    # Clean up extraction marker
+    marker_path = os.path.join(output_dir, '.resources_extracted')
+    try:
+        if os.path.isfile(marker_path):
+            os.remove(marker_path)
+            print(f"🧹 Removed extraction marker")
+            cleaned_count += 1
+    except Exception as e:
+        print(f"⚠️ Could not remove extraction marker: {e}")
+    
+    if cleaned_count > 0:
+        print(f"🧹 Cleaned up {cleaned_count} items from previous runs")
+    
+    return cleaned_count
+
+# =============================================================================
+# GLOSSARY MANAGEMENT
+# =============================================================================
 
 def save_glossary(output_dir, chapters, instructions, language="korean"):
     """Generate and save glossary from chapters with proper CJK support"""
@@ -1462,6 +1752,10 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
     with open(os.path.join(output_dir, "glossary.json"), 'w', encoding='utf-8') as f:
         json.dump(gloss, f, ensure_ascii=False, indent=2)
 
+# =============================================================================
+# API AND TRANSLATION UTILITIES
+# =============================================================================
+
 def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn):
     """Send API request with interrupt capability"""
     result_queue = queue.Queue()
@@ -1562,43 +1856,9 @@ def build_system_prompt(user_prompt, glossary_path, instructions):
 
     return system
 
-def validate_chapter_continuity(chapters):
-    """Validate chapter continuity and warn about issues"""
-    if not chapters:
-        return
-    
-    issues = []
-    
-    # Check for duplicate chapter numbers
-    chapter_nums = [c['num'] for c in chapters]
-    duplicates = [num for num in chapter_nums if chapter_nums.count(num) > 1]
-    if duplicates:
-        issues.append(f"Duplicate chapter numbers found: {set(duplicates)}")
-    
-    # Check for missing chapters
-    min_num = min(chapter_nums)
-    max_num = max(chapter_nums)
-    expected = set(range(min_num, max_num + 1))
-    actual = set(chapter_nums)
-    missing = expected - actual
-    if missing:
-        issues.append(f"Missing chapter numbers: {sorted(missing)}")
-    
-    # Check for suspiciously similar titles
-    for i in range(len(chapters) - 1):
-        for j in range(i + 1, len(chapters)):
-            title1 = chapters[i]['title'].lower()
-            title2 = chapters[j]['title'].lower()
-            # Simple similarity check
-            if title1 == title2 and chapters[i]['num'] != chapters[j]['num']:
-                issues.append(f"Chapters {chapters[i]['num']} and {chapters[j]['num']} have identical titles")
-    
-    if issues:
-        print("\n⚠️  Chapter Validation Issues:")
-        for issue in issues:
-            print(f"  - {issue}")
-        print()
-
+# =============================================================================
+# MAIN TRANSLATION FUNCTION
+# =============================================================================
 
 def main(log_callback=None, stop_callback=None):
     """Main translation function with enhanced duplicate detection"""
@@ -1623,7 +1883,7 @@ def main(log_callback=None, stop_callback=None):
     TEMP = float(os.getenv("TRANSLATION_TEMPERATURE", "0.3"))
     HIST_LIMIT = int(os.getenv("TRANSLATION_HISTORY_LIMIT", "20"))
     MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
-    EMERGENCY_RESTORE = os.getenv("EMERGENCY_PARAGRAPH_RESTORE", "1") == "1"  # Default to enabled
+    EMERGENCY_RESTORE = os.getenv("EMERGENCY_PARAGRAPH_RESTORE", "1") == "1"
 
     # Log the setting
     if EMERGENCY_RESTORE:
@@ -1679,6 +1939,9 @@ def main(log_callback=None, stop_callback=None):
     os.makedirs(out, exist_ok=True)
     print(f"[DEBUG] Created output folder → {out}")
 
+    # FIXED: Clean up previous extraction files to prevent duplicates
+    cleanup_previous_extraction(out)
+
     # Set output directory in environment
     os.environ["EPUB_OUTPUT_DIR"] = out
     payloads_dir = out
@@ -1695,7 +1958,6 @@ def main(log_callback=None, stop_callback=None):
         
     # Initialize improved progress tracking
     prog, PROGRESS_FILE = init_progress_tracking(payloads_dir)
-
 
     def save_progress():
         try:
@@ -1717,7 +1979,7 @@ def main(log_callback=None, stop_callback=None):
                 except:
                     pass
 
-    # NEW: Always scan for missing files at startup
+    # Always scan for missing files at startup
     print("🔍 Checking for deleted output files...")
     prog = cleanup_missing_files(prog, out)
 
@@ -1748,7 +2010,7 @@ def main(log_callback=None, stop_callback=None):
         
         if reset_count > 0:
             print(f"🔄 Reset {reset_count} failed/deleted chapters for re-translation")
-            save_progress()  # Now this will work because save_progress is defined above
+            save_progress()
 
     # Clean up any orphaned entries at startup
     prog = cleanup_progress_tracking(prog, out)
@@ -1758,14 +2020,19 @@ def main(log_callback=None, stop_callback=None):
     if check_stop():
         return
 
-    # Extract EPUB contents WITH ENHANCED EXTRACTION
+    # Extract EPUB contents WITH CONSOLIDATED EXTRACTION
+    print("🚀 Using comprehensive chapter extraction with resource handling...")
     with zipfile.ZipFile(epub_path, 'r') as zf:
         metadata = extract_epub_metadata(zf)
-        chapters = extract_chapters(zf, out)  # This now uses the enhanced extraction!
+        chapters = extract_chapters(zf, out)  # ONE FUNCTION, ALL FUNCTIONALITY!
         
-        # The enhanced extraction already handles duplicates more comprehensively
         # Validate chapters
         validate_chapter_continuity(chapters)
+
+    # FIXED: Add validation after extraction
+    print("\n" + "="*50)
+    validate_epub_structure(out)
+    print("="*50 + "\n")
 
     # Check for stop after file processing
     if check_stop():
@@ -2025,9 +2292,9 @@ def main(log_callback=None, stop_callback=None):
                     # ENHANCED RETRY LOGIC WITH HISTORY PURGING
                     retry_count = 0
                     max_retries = 3
-                    duplicate_retry_count = 0  # Track duplicate-specific retries
-                    max_duplicate_retries = 6  # Total allowed duplicate retries (3 + 3 after history purge)
-                    history_purged = False  # Track if we've purged history
+                    duplicate_retry_count = 0
+                    max_duplicate_retries = 6
+                    history_purged = False
                     
                     # Store original values for retry
                     original_max_tokens = MAX_OUTPUT_TOKENS
