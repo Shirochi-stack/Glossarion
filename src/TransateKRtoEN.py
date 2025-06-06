@@ -1657,8 +1657,7 @@ def cleanup_previous_extraction(output_dir):
 # =============================================================================
 
 def save_glossary(output_dir, chapters, instructions, language="korean"):
-    """Generate and save glossary from chapters with translation support"""
-    import time  # For sleep between API calls
+    """Generate and save glossary from chapters with proper CJK support"""
     samples = []
     for c in chapters:
         samples.append(c["body"])
@@ -1691,14 +1690,173 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
         
         # Default fallback - try to detect from first characters if available
         return lang_lower
+
+    # Get the base language type
+    base_language = detect_base_language(language)
+    print(f"[DEBUG] Auto-glossary: Profile '{language}' → Base language '{base_language}'")
     
-    def translate_terms_batch(terms_list, detected_language, target_lang="english"):
-        """Translate a batch of terms using the unified API client"""
-        if not terms_list:
-            return {}
+    for txt in samples:
+        clean_text = clean_html(txt)
         
-        # Check if auto-translation is disabled (moved to calling function)
-        # This function assumes translation is wanted when called
+        if base_language == "korean":
+            # MUCH more restrictive Korean names - only with honorifics or clear context
+            
+            # 1. Names with honorifics (most reliable) - REQUIRE the honorific
+            korean_names_with_honorifics = re.findall(r'([가-힣]{2,4})(님|씨|선배|형|누나|언니|오빠)', clean_text)
+            for name, honorific in korean_names_with_honorifics:
+                # Simple filter - exclude very common words
+                if name not in ['그것', '이것', '저것', '여기', '거기', '저기', '지금', '오늘', '내일', '어제', '가끔', '가지', '가능', '그래', '이제', '하지만', '그리고']:
+                    names.add(name)
+                    suffixes.add(name + honorific)
+            
+            # 2. Names in formal context - REQUIRE the title
+            formal_names = re.findall(r'([가-힣]{2,4})(선생님|교수님|사장님|박사님|부장님|과장님)', clean_text)
+            for name, title in formal_names:
+                if name not in ['그것', '이것', '저것', '가끔', '가지']:
+                    names.add(name)
+                    terms.add(name + title)
+            
+            # 3. Names with particles (grammatical context)
+            names_with_particles = re.findall(r'([가-힣]{2,4})(?:이|가|은|는|을|를|께서|에게|한테)(?:\s|$)', clean_text)
+            for name in names_with_particles:
+                # Only if it appears multiple times and not a common word
+                if clean_text.count(name) >= 2 and name not in ['그것', '이것', '저것', '여기', '거기', '저기', '지금', '오늘', '내일', '어제', '때문', '그런', '이런', '저런', '그래', '이제', '하지만', '그러나', '그리고', '가끔', '가지고', '가까운', '가까이', '가끔씩', '가지', '가능', '가득', '가운데', '모든', '많은', '같은', '다른', '새로운', '좋은', '나쁜', '큰', '작은']:
+                    names.add(name)
+            
+            # 4. Only specific relationship terms (not random words)
+            relationship_terms = re.findall(r'(아버지|어머니|엄마|아빠|할아버지|할머니|삼촌|이모|고모|친구|동료|선배|후배)', clean_text)
+            terms.update(relationship_terms)
+            
+            # 5. Romanized names with Korean honorifics only
+            romanized_with_honorifics = re.findall(r'\b([A-Z][a-z]{2,15})[-\s]?(nim|ssi|hyung|noona|unnie|oppa|sunbae|hoobae)\b', clean_text, re.I)
+            for name, honorific in romanized_with_honorifics:
+                names.add(name)
+                suffixes.add(name + "-" + honorific)
+        
+        elif base_language == "japanese":
+            # MUCH more restrictive Japanese name extraction - only with honorifics
+            
+            # 1. Only extract names that actually have honorifics attached
+            japanese_names_with_honorifics = re.findall(r'([ァ-ヶー]{2,6}|[あ-ゞ]{2,6}|[\u4e00-\u9fff]{2,4})(さん|様|ちゃん|君|先生|殿)', clean_text)
+            for name, honorific in japanese_names_with_honorifics:
+                if len(name) >= 2:  # Names should be at least 2 characters
+                    names.add(name)
+                    suffixes.add(name + honorific)
+            
+            # 2. Only extract words that appear in name context (before honorifics)
+            formal_japanese_names = re.findall(r'([ァ-ヶー]{2,6}|[\u4e00-\u9fff]{2,4})(?:先生|教授|博士|部長|課長|主任)', clean_text)
+            for name in formal_japanese_names:
+                if len(name) >= 2:
+                    names.add(name)
+            
+            # 3. Family relationship terms only
+            jp_family = re.findall(r'(お父さん|お母さん|お兄さん|お姉さん|父|母|兄|姉|弟|妹)', clean_text)
+            terms.update(jp_family)
+            
+            # 4. Romanized names with Japanese honorifics only
+            romanized_with_honorifics = re.findall(r'\b([A-Z][a-z]{2,15})[-\s]?(san|sama|chan|kun|sensei)\b', clean_text, re.I)
+            for name, honorific in romanized_with_honorifics:
+                names.add(name)
+                suffixes.add(name + "-" + honorific)
+        
+        elif base_language == "chinese":
+            # MUCH more restrictive Chinese name extraction
+            
+            # Common Chinese surnames (top 100)
+            surnames = '王李张刘陈杨赵黄周吴徐孙胡朱高林何郭马罗梁宋郑谢韩唐冯于董萧程曹袁邓许傅沈曾彭吕苏卢蒋蔡贾丁魏薛叶阎余潘杜戴夏钟汪田任姜范方石姚谭廖邹熊金陆郝孔白崔康毛邱秦江史顾侯邵孟龙万段章钱汤尹黎易常武乔贺赖龚文'
+            
+            # 1. Names with titles (most reliable)
+            names_with_titles = re.findall(f'([{surnames}][\u4e00-\u9fff]{{1,3}})(公子|小姐|夫人|先生|大人|少爷|姑娘|老爷|师父|师傅)', clean_text)
+            for name, title in names_with_titles:
+                if 2 <= len(name) <= 4:
+                    names.add(name)
+                    terms.add(name + title)
+            
+            # 2. Names in formal address
+            formal_chinese_names = re.findall(f'([{surnames}][\u4e00-\u9fff]{{1,3}})(?:博士|教授|医生|律师|经理|主任)', clean_text)
+            for name in formal_chinese_names:
+                if 2 <= len(name) <= 4:
+                    names.add(name)
+            
+            # 3. Only specific cultivation/martial arts terms
+            cultivation_terms = re.findall(r'(师尊|师父|师傅|道长|真人|上人|尊者|圣人|仙人|掌门|宗主|长老|太上|至尊)', clean_text)
+            terms.update(cultivation_terms)
+            
+            # 4. Family terms only
+            family_terms = re.findall(r'(父亲|母亲|爷爷|奶奶|外公|外婆|叔叔|阿姨|舅舅|姑姑|哥哥|姐姐|弟弟|妹妹)', clean_text)
+            terms.update(family_terms)
+            
+            # 5. Pinyin names (Western format)
+            pinyin_names = re.findall(r'\b[A-Z][a-z]+\s+[A-Z][a-z]+\b', clean_text)
+            for name in pinyin_names:
+                if len(name.split()) == 2:  # First Last format
+                    names.add(name)
+        
+        else:
+            # Unknown/custom language - try to extract generic patterns
+            print(f"[DEBUG] Unknown language '{base_language}' - using generic extraction")
+            
+            # Extract any CJK characters as potential names/terms
+            cjk_terms = re.findall(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]{2,6}', clean_text)
+            names.update(cjk_terms[:50])  # Limit to avoid too many
+        
+        # Always extract romanized names for all languages
+        for nm in re.findall(r"\b[A-Z][a-z]{2,20}\b", clean_text):
+            names.add(nm)
+    
+    # Filter and clean up results
+    names = [n for n in names if len(n) > 1 and not n.isdigit()]
+    suffixes = [s for s in suffixes if len(s) > 1]
+    terms = [t for t in terms if len(t) > 1]
+    
+    # Filter and clean up results
+    original_names_count = len(names)
+    original_suffixes_count = len(suffixes)
+    original_terms_count = len(terms)
+    
+    names = [n for n in names if len(n) > 1 and not n.isdigit()]
+    suffixes = [s for s in suffixes if len(s) > 1]
+    terms = [t for t in terms if len(t) > 1]
+    
+    print(f"📑 Initial extraction: {original_names_count} names, {original_suffixes_count} suffixes, {original_terms_count} terms")
+    
+    # Additional filtering for each language to remove common words
+    if base_language == "korean":
+        korean_common_words = {'그것', '이것', '저것', '여기', '거기', '저기', '지금', '오늘', '내일', '어제', '때문', '그런', '이런', '저런', '그래', '이제', '하지만', '그러나', '그리고', '가끔', '가지고', '가까운', '가까이', '가끔씩', '가지', '가능', '가득', '가운데', '모든', '많은', '같은', '다른', '새로운', '좋은', '나쁜', '큰', '작은', '어떤', '무엇', '누구', '언제', '어디', '왜', '어떻게'}
+        names = [n for n in names if n not in korean_common_words]
+        suffixes = [s for s in suffixes if not any(common in s for common in korean_common_words)]
+    
+    elif base_language == "japanese":
+        japanese_common_words = {'それ', 'これ', 'あれ', 'ここ', 'そこ', 'あそこ', '今日', '明日', '昨日', 'でも', 'しかし', 'だから', 'そして', 'また', 'もう', 'まだ', 'とても', '少し', '沢山', '全部', '何か', '誰か', 'どこか', 'いつか', 'どうして', 'なぜ', 'どう', 'こう', 'そう', 'ああ', 'はい', 'いいえ', 'ありがとう', 'すみません', 'おはよう', 'こんにちは', 'こんばんは'}
+        names = [n for n in names if n not in japanese_common_words]
+        suffixes = [s for s in suffixes if not any(common in s for common in japanese_common_words)]
+    
+    elif base_language == "chinese":
+        chinese_common_words = {'什么', '怎么', '为什么', '哪里', '这里', '那里', '现在', '今天', '明天', '昨天', '因为', '所以', '但是', '然后', '如果', '虽然', '不过', '或者', '而且', '并且', '可以', '应该', '需要', '想要', '喜欢', '知道', '认为', '觉得', '发现', '看到', '听到', '说话', '做事', '东西', '事情', '时候', '地方', '人们', '我们', '你们', '他们'}
+        names = [n for n in names if n not in chinese_common_words]
+        suffixes = [s for s in suffixes if not any(common in s for common in chinese_common_words)]
+    
+    # Frequency filtering - names should appear multiple times to be considered valid
+    if len(names) > 15:  # Only apply if we have many candidates
+        all_text = ' '.join(clean_html(txt) for txt in samples)
+        filtered_names = []
+        for name in names:
+            frequency = all_text.count(name)
+            if frequency >= 2:  # Name appears at least twice
+                filtered_names.append(name)
+        names = filtered_names
+        print(f"📑 Applied frequency filtering: kept {len(names)} names that appear 2+ times")
+    
+    # Sort for consistency
+    names = sorted(list(set(names)))[:100]
+    suffixes = sorted(list(set(suffixes)))[:50]
+    terms = sorted(list(set(terms)))[:50]
+
+    # Simple translation function (only if enabled)
+    def simple_translate_terms(term_list, source_lang):
+        """Simple translation using API - no complex batching"""
+        if not term_list or os.getenv("DISABLE_GLOSSARY_TRANSLATION", "0") == "1":
+            return {term: term for term in term_list}
         
         try:
             # Get API settings
@@ -1709,534 +1867,116 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
                        os.getenv("GEMINI_API_KEY"))
             
             if not API_KEY:
-                print("⚠️ No API key found, skipping glossary translation")
-                return {term: term for term in terms_list}
+                return {term: term for term in term_list}
             
-            # Initialize client
+            # Simple translation for small lists only
+            if len(term_list) > 20:
+                return {term: term for term in term_list}
+            
             from unified_api_client import UnifiedClient
             client = UnifiedClient(model=MODEL, api_key=API_KEY)
             
-            # Prepare terms for translation (limit batch size)
-            batch_size = 20  # Translate 20 terms at a time to avoid token limits
+            terms_text = "\n".join(f"- {term}" for term in term_list)
+            
+            system_prompt = f"Translate these {source_lang} names/terms to English. Format: Original → Translation"
+            user_prompt = f"Translate these {source_lang} terms:\n{terms_text}"
+            
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+            
+            response, _ = client.send(messages, temperature=0.1, max_tokens=1024)
+            
+            # Simple parsing
             translations = {}
-            
-            for i in range(0, len(terms_list), batch_size):
-                batch = terms_list[i:i + batch_size]
-                
-                # Create translation prompt
-                terms_text = "\n".join(f"- {term}" for term in batch)
-                
-                # Language-specific examples and instructions
-                if detected_language == "korean":
-                    examples = """- 이민호 → Lee Min-ho
-- 선배 → senior/upperclassman
-- 사랑해 → I love you
-- 김치 → kimchi
-- 안녕하세요 → hello"""
-                    specific_instructions = "- For Korean names: use standard romanization (e.g., 김민수 → Kim Min-su)\n- For honorifics: provide English equivalent or meaning\n- For cultural terms: provide romanization if widely known, otherwise translate"
-                
-                elif detected_language == "japanese":
-                    examples = """- 田中太郎 → Tanaka Taro
-- さん → -san (honorific)
-- 先輩 → senpai/senior
-- ありがとう → thank you
-- 寿司 → sushi"""
-                    specific_instructions = "- For Japanese names: use standard romanization\n- For honorifics: keep common ones like -san, -kun, -chan with explanation\n- For cultural terms: use romanization if widely known (sushi, anime, etc.)"
-                
-                elif detected_language == "chinese":
-                    examples = """- 李明 → Li Ming
-- 师父 → shifu/master
-- 谢谢 → thank you
-- 功夫 → kung fu
-- 太极 → tai chi"""
-                    specific_instructions = "- For Chinese names: use pinyin romanization\n- For titles: provide meaning and/or pinyin if culturally significant\n- For cultural terms: use established English terms where available"
-                
-                else:
-                    examples = """- [Original] → [Translation]
-- [Name] → [Romanized Name]
-- [Title] → [English equivalent]"""
-                    specific_instructions = "- Provide appropriate romanization for names\n- Translate titles and terms to English equivalents"
-                
-                system_prompt = f"""You are a professional {detected_language} to English translator specializing in names and terms.
-
-INSTRUCTIONS:
-- Translate each term/name accurately
-- For names: provide romanization if applicable
-- For titles/honorifics: provide meaning/equivalent
-- For terms: provide direct translation or explanation
-- Keep translations concise (2-4 words max)
-- Maintain cultural context when needed
-
-{specific_instructions}
-
-Format your response as:
-Original Term → English Translation
-
-Examples:
-{examples}"""
-
-                user_prompt = f"""Translate these {detected_language} terms to English:
-
-{terms_text}
-
-Remember: Provide clear, concise translations. For names, use standard romanization. For honorifics and terms, provide the closest English equivalent or meaning."""
-
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ]
-                
-                print(f"📑 Translating batch {i//batch_size + 1} ({len(batch)} terms)...")
-                
-                # Get translation with lower temperature for consistency
-                response, _ = client.send(
-                    messages, 
-                    temperature=0.1,
-                    max_tokens=2048,
-                    context='glossary_translation'
-                )
-                
-                # Parse response to extract translations
-                batch_translations = parse_translation_response(response, batch)
-                translations.update(batch_translations)
-                
-                # Small delay between batches
-                time.sleep(1)
-            
-            return translations
-            
-        except Exception as e:
-            print(f"⚠️ Glossary translation failed: {e}")
-            print("📑 Continuing with original terms only")
-            return {term: term for term in terms_list}
-    
-    def parse_translation_response(response, original_terms):
-        """Parse the AI response to extract term translations"""
-        translations = {}
-        
-        # Try to parse the response format: "Original → Translation"
-        lines = response.split('\n')
-        
-        for line in lines:
-            line = line.strip()
-            if '→' in line:
-                try:
-                    # Split on arrow
+            for line in response.split('\n'):
+                if '→' in line:
                     parts = line.split('→', 1)
                     if len(parts) == 2:
                         original = parts[0].strip().lstrip('- ').strip()
                         translation = parts[1].strip()
-                        
-                        # Find matching original term
-                        for term in original_terms:
+                        for term in term_list:
                             if term in original or original in term:
                                 translations[term] = translation
                                 break
-                except Exception:
-                    continue
-            elif '=' in line:
-                # Alternative format: "Original = Translation"
-                try:
-                    parts = line.split('=', 1)
-                    if len(parts) == 2:
-                        original = parts[0].strip().lstrip('- ').strip()
-                        translation = parts[1].strip()
-                        
-                        for term in original_terms:
-                            if term in original or original in term:
-                                translations[term] = translation
-                                break
-                except Exception:
-                    continue
-        
-        # Fill in any missing translations with original terms
-        for term in original_terms:
-            if term not in translations:
-                translations[term] = term
-        
-        return translations
-    
-    # Get the base language type from profile name (fallback)
-    profile_language = detect_base_language(language)
-    
-    # Auto-detect actual language from content
-    combined_sample = ' '.join(clean_html(txt) for txt in samples[:3])  # Use first 3 chapters for detection
-    actual_language = detect_content_language(combined_sample)
-    
-    # Use actual detected language, fallback to profile if unknown
-    if actual_language in ['korean', 'japanese', 'chinese']:
-        base_language = actual_language
-        print(f"[DEBUG] Auto-detected content language: '{actual_language}' (profile: '{language}')")
+            
+            # Fill missing
+            for term in term_list:
+                if term not in translations:
+                    translations[term] = term
+            
+            return translations
+            
+        except Exception as e:
+            print(f"⚠️ Translation failed: {e}")
+            return {term: term for term in term_list}
+
+    # Apply simple translation
+    all_terms = list(names) + list(suffixes) + list(terms)
+    if all_terms and len(all_terms) <= 20:  # Only translate small lists
+        print(f"📑 Attempting to translate {len(all_terms)} terms...")
+        translations = simple_translate_terms(all_terms, base_language)
+        translation_enabled = len([t for t in translations.values() if '(' in t or t != list(translations.keys())[list(translations.values()).index(t)]]) > 0
     else:
-        base_language = profile_language
-        print(f"[DEBUG] Using profile-based language: '{profile_language}' (content detection: '{actual_language}')")
-    
-    # Extract terms with improved precision
-    for txt in samples:
-        clean_text = clean_html(txt)
-        
-        if base_language == "korean":
-            # IMPROVED Korean name extraction - much more precise
-            
-            # 1. Names with honorifics (most reliable)
-            korean_names_with_honorifics = re.findall(r'([가-힣]{2,4})(님|씨|선배|형|누나|언니|오빠|선생|대표|사장|회장|부장|과장|팀장)', clean_text)
-            for name, honorific in korean_names_with_honorifics:
-                # Filter out common words that might appear with honorifics
-                if not any(common in name for common in ['그것', '이것', '저것', '여기', '거기', '저기', '지금', '오늘', '내일', '어제']):
-                    names.add(name)
-                    suffixes.add(name + honorific)
-            
-            # 2. Names in dialogue context (quoted speech with names)
-            dialogue_names = re.findall(r'[""\']\s*([가-힣]{2,4})[,\s]*[""\'']', clean_text)
-            names.update(dialogue_names)
-            
-            # 3. Names at start of sentences or after punctuation
-            sentence_start_names = re.findall(r'(?:^|[.!?]\s+)([가-힣]{2,4})(?:이|가|은|는|을|를|께서|에게|한테)\s', clean_text)
-            names.update(sentence_start_names)
-            
-            # 4. Names in formal address patterns
-            formal_names = re.findall(r'([가-힣]{2,4})\s*(?:선생님|교수님|사장님|회장님|부장님|과장님|팀장님|박사님|의사님)', clean_text)
-            names.update(formal_names)
-            
-            # 5. Korean honorifics and suffixes (more specific)
-            korean_suffixes = re.findall(r'[가-힣]{2,4}(님|씨|선배|형|누나|언니|오빠|양|군|쨩)', clean_text)
-            suffixes.update([s for s in korean_suffixes if s])
-            
-            # 6. Romanized Korean names/honorifics
-            romanized_korean = re.findall(r'\b\w+[-~]?(nim|ssi|ah|ya|ie|hyung|noona|unnie|oppa|sunbae|hoobae|gun|yang)\b', clean_text, re.I)
-            suffixes.update(romanized_korean)
-            
-            # Extract romanized Korean names (capitalized words that appear with Korean context)
-            potential_romanized = re.findall(r'\b[A-Z][a-z]{2,15}\b', clean_text)
-            for name in potential_romanized:
-                # Check if it appears near Korean honorifics or in Korean context
-                korean_context_pattern = f'{name}.*?(?:님|씨|선배|형|누나|언니|오빠)'
-                if re.search(korean_context_pattern, clean_text, re.IGNORECASE):
-                    names.add(name)
-            
-            # 7. Common relationship terms
-            relationship_terms = re.findall(r'(아버지|어머니|엄마|아빠|할아버지|할머니|삼촌|이모|고모|외삼촌|사촌|친구|동료|선후배)', clean_text)
-            terms.update(relationship_terms)
-        
-        elif base_language == "japanese":
-            # IMPROVED Japanese name extraction
-            
-            # 1. Names with honorifics (most reliable)
-            japanese_names_with_honorifics = re.findall(r'([\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]{2,4})(さん|様|ちゃん|君|先生|殿|先輩|後輩)', clean_text)
-            for name, honorific in japanese_names_with_honorifics:
-                names.add(name)
-                suffixes.add(name + honorific)
-            
-            # 2. Katakana names (often foreign names in Japanese)
-            katakana_names = re.findall(r'[\u30a0-\u30ff]{2,8}(?=さん|様|ちゃん|君|\s|、|。)', clean_text)
-            names.update(katakana_names)
-            
-            # 3. Japanese family terms
-            jp_family = re.findall(r'(お父さん|お母さん|父|母|兄|姉|弟|妹|息子|娘|夫|妻|祖父|祖母)', clean_text)
-            terms.update(jp_family)
-            
-            # 4. Japanese honorifics
-            jp_honorifics = re.findall(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]+(さん|様|ちゃん|君|先輩|後輩|先生|殿)', clean_text)
-            suffixes.update([h for h in jp_honorifics if h])
-            
-            # 5. Romanized Japanese honorifics
-            romanized_honorifics = re.findall(r'\b\w+[-~]?(san|sama|chan|kun|senpai|kouhai|sensei|dono)\b', clean_text, re.I)
-            suffixes.update(romanized_honorifics)
-            
-            # 6. Romanized Japanese names (in context)
-            potential_romanized = re.findall(r'\b[A-Z][a-z]{2,15}\b', clean_text)
-            for name in potential_romanized:
-                # Check if it appears near Japanese honorifics or in Japanese context
-                japanese_context_pattern = f'{name}.*?(?:さん|様|ちゃん|君|先生)'
-                if re.search(japanese_context_pattern, clean_text, re.IGNORECASE):
-                    names.add(name)
-        
-        elif base_language == "chinese":
-            # IMPROVED Chinese name extraction
-            
-            # Common Chinese surnames (top 100) - more comprehensive
-            surnames = '王李张刘陈杨赵黄周吴徐孙胡朱高林何郭马罗梁宋郑谢韩唐冯于董萧程曹袁邓许傅沈曾彭吕苏卢蒋蔡贾丁魏薛叶阎余潘杜戴夏钟汪田任姜范方石姚谭廖邹熊金陆郝孔白崔康毛邱秦江史顾侯邵孟龙万段章钱汤尹黎易常武乔贺赖龚文庞樊兰殷施陶洪翟安颜倪严牛温芦季俞章鲁葛伍韦申尤毕聂丛焦向柳邢路岳齐沿梅莫庄辛管祝左涂谷祁时窦敖裴陆雷贺倪汤滕殷罗毕郝邬安常乐于时傅皮卞齐康伍余元卜顾孟平黄谭秋乔尹彭郎鲁韦昌马苗凤花方俞任袁柳酆鲍史唐费廉岑薛雷贺倪汤滕殷罗毕郝邬安常乐'
-            
-            # 1. Names starting with common surnames (2-4 characters total)
-            chinese_names = re.findall(f'([{surnames}][\u4e00-\u9fff]{{1,3}})(?=\s|，|。|！|？|：|；|的|是|在|有|了|和|与|及)', clean_text)
-            # Filter by length and exclude obvious non-names
-            for name in chinese_names:
-                if 2 <= len(name) <= 4 and not any(common in name for common in ['的话', '不是', '可以', '这样', '那样', '什么', '怎么']):
-                    names.add(name)
-            
-            # 2. Names with titles/honorifics
-            titled_names = re.findall(r'([{surnames}][\u4e00-\u9fff]{{1,3}})(公子|小姐|夫人|先生|大人|少爷|姑娘|老爷|师父|师傅|道长|真人|尊者|长老|宗主|掌门)'.format(surnames=surnames), clean_text)
-            for name, title in titled_names:
-                names.add(name)
-                terms.add(name + title)
-            
-            # 3. Chinese titles and cultivation terms
-            chinese_titles = re.findall(r'(师父|师傅|师尊|道长|真人|上人|尊者|圣人|仙人|掌门|宗主|长老|太上|至尊)', clean_text)
-            terms.update(chinese_titles)
-            
-            # 4. Family terms
-            family_terms = re.findall(r'(父亲|母亲|爷爷|奶奶|外公|外婆|叔叔|阿姨|舅舅|姑姑|哥哥|姐姐|弟弟|妹妹|儿子|女儿)', clean_text)
-            terms.update(family_terms)
-            
-            # 5. Honorific particles
-            honorific_particles = re.findall(r'(老|小|大|阿)([{surnames}][\u4e00-\u9fff]{{1,2}})'.format(surnames=surnames), clean_text)
-            for particle, name in honorific_particles:
-                names.add(name)
-                suffixes.add(particle + name)
-            
-            # 6. Pinyin/Romanized Chinese names
-            pinyin_names = re.findall(r'\b[A-Z][a-z]+\s+[A-Z][a-z]+\b', clean_text)
-            names.update(pinyin_names)
-            
-            # Also single romanized names in Chinese context
-            potential_romanized = re.findall(r'\b[A-Z][a-z]{2,15}\b', clean_text)
-            for name in potential_romanized:
-                # Check if it appears near Chinese titles or in Chinese context
-                chinese_context_pattern = f'{name}.*?(?:先生|小姐|夫人|师父|师傅)'
-                if re.search(chinese_context_pattern, clean_text, re.IGNORECASE):
-                    names.add(name)
-        
-        else:
-            # Generic extraction for unknown languages - more conservative
-            # Only extract capitalized words that look like names
-            potential_names = re.findall(r'\b[A-Z][a-z]{2,15}\b', clean_text)
-            
-            # Filter to only include words that appear multiple times (likely names)
-            name_counts = {}
-            for name in potential_names:
-                name_counts[name] = name_counts.get(name, 0) + 1
-            
-            # Only include names that appear 2+ times
-            frequent_names = [name for name, count in name_counts.items() if count >= 2]
-            names.update(frequent_names)
-            
-            # Extract any CJK characters as potential names/terms (limited)
-            cjk_terms = re.findall(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]{2,6}', clean_text)
-            # Only take the most frequent CJK terms
-            cjk_counts = {}
-            for term in cjk_terms:
-                cjk_counts[term] = cjk_counts.get(term, 0) + 1
-            frequent_cjk = [term for term, count in cjk_counts.items() if count >= 2]
-            names.update(frequent_cjk[:20])  # Limit to top 20
-        
-        # Extract any remaining high-frequency romanized names for all languages
-        remaining_romanized = re.findall(r'\b[A-Z][a-z]{3,15}\b', clean_text)
-        romanized_counts = {}
-        for name in remaining_romanized:
-            # Skip common English words
-            if name.lower() not in {'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'had', 'her', 'was', 'one', 'our', 'out', 'day', 'get', 'has', 'him', 'his', 'how', 'its', 'may', 'new', 'now', 'old', 'see', 'two', 'who', 'boy', 'did', 'man', 'own', 'say', 'she', 'too', 'use', 'way', 'what', 'when', 'where', 'will', 'with', 'would', 'your'}:
-                romanized_counts[name] = romanized_counts.get(name, 0) + 1
-        
-        # Only include romanized names that appear multiple times
-        frequent_romanized = [name for name, count in romanized_counts.items() if count >= 2]
-        names.update(frequent_romanized)
-    
-    # Filter and clean up results with frequency analysis
-    def filter_names_by_frequency(name_list, min_frequency=2):
-        """Filter names that appear multiple times (more likely to be actual names)"""
-        name_counts = {}
-        all_text = ' '.join(clean_html(txt) for txt in samples)
-        
-        for name in name_list:
-            name_counts[name] = all_text.count(name)
-        
-        # Keep names that appear at least min_frequency times
-        frequent_names = [name for name, count in name_counts.items() if count >= min_frequency]
-        return frequent_names
-    
-    # Clean and filter names
-    names = [n for n in names if len(n) > 1 and not n.isdigit()]
-    suffixes = [s for s in suffixes if len(s) > 1]
-    terms = [t for t in terms if len(t) > 1]
-    
-    # Remove common Korean words that might be mistakenly captured
-    if base_language == "korean":
-        korean_common_words = {
-            '그것', '이것', '저것', '여기', '거기', '저기', '지금', '오늘', '내일', '어제',
-            '때문', '그런', '이런', '저런', '그래', '이제', '하지만', '그러나', '그리고',
-            '가끔', '가지고', '가까운', '가까이', '가끔씩', '가지', '가능', '가득', '가운데',
-            '그곳', '이곳', '저곳', '여전히', '아직', '벌써', '이미', '다시', '또한', '그래서'
-        }
-        names = [n for n in names if n not in korean_common_words]
-        suffixes = [s for s in suffixes if not any(common in s for common in korean_common_words)]
-    
-    # Remove common Chinese words
-    elif base_language == "chinese":
-        chinese_common_words = {
-            '什么', '怎么', '为什么', '哪里', '这里', '那里', '现在', '今天', '明天', '昨天',
-            '因为', '所以', '但是', '然后', '如果', '虽然', '不过', '或者', '而且', '并且',
-            '可以', '应该', '需要', '想要', '喜欢', '知道', '认为', '觉得', '发现', '看到'
-        }
-        names = [n for n in names if n not in chinese_common_words]
-    
-    # Remove common Japanese words  
-    elif base_language == "japanese":
-        japanese_common_words = {
-            'それ', 'これ', 'あれ', 'ここ', 'そこ', 'あそこ', '今日', '明日', '昨日',
-            'でも', 'しかし', 'だから', 'そして', 'また', 'もう', 'まだ', 'とても',
-            '少し', '沢山', '全部', '何か', '誰か', 'どこか', 'いつか', 'どうして'
-        }
-        names = [n for n in names if n not in japanese_common_words]
-    
-    # Apply frequency filtering for names (names should appear multiple times)
-    original_name_count = len(names)
-    if len(names) > 20:  # Only apply frequency filter if we have many candidates
-        names = filter_names_by_frequency(names, min_frequency=2)
-        print(f"📑 Applied frequency filter: {original_name_count} → {len(names)} names")
-    
-    # Sort for consistency and limit size (keep original limits)
-    names = sorted(list(set(names)))[:100]  # Original limit
-    suffixes = sorted(list(set(suffixes)))[:50]  # Original limit  
-    terms = sorted(list(set(terms)))[:50]  # Original limit
-    
-    print(f"📑 Final counts after filtering and limiting:")
-    print(f"   • Names: {len(names)}")
-    print(f"   • Honorifics/Suffixes: {len(suffixes)}")
-    print(f"   • Terms: {len(terms)}")
-    
-    print(f"📑 Extracted using improved patterns:")
-    print(f"   • {len(names)} potential names")
-    print(f"   • {len(suffixes)} honorifics/suffixes") 
-    print(f"   • {len(terms)} terms")
-    
-    # Debug: Show examples of what was extracted
-    if names:
-        print(f"   • Example names: {list(names)[:5]}")
-    if suffixes:
-        print(f"   • Example suffixes: {list(suffixes)[:3]}")
-    if terms:
-        print(f"   • Example terms: {list(terms)[:3]}")
-    
-    # Check if translation is enabled
-    translation_enabled = os.getenv("DISABLE_GLOSSARY_TRANSLATION", "0") != "1"
-    
-    if translation_enabled:
-        print("📑 Starting translation process...")
-        
-        # Translate all extracted terms
-        all_terms = []
-        all_terms.extend(names)
-        all_terms.extend(suffixes) 
-        all_terms.extend(terms)
-        
-        # Remove duplicates while preserving order
-        seen = set()
-        unique_terms = []
-        for term in all_terms:
-            if term not in seen:
-                seen.add(term)
-                unique_terms.append(term)
-        
-        # Get translations
-        if unique_terms:
-            print(f"📑 Translating {len(unique_terms)} unique terms from {base_language} to English...")
-            translations = translate_terms_batch(unique_terms, base_language)
-            print(f"📑 Translation completed: {len(translations)} terms processed")
-        else:
-            translations = {}
-    else:
-        print("📑 Glossary translation disabled - using original terms only")
         translations = {}
-    
-    # Helper function to format terms with translations (only if translation enabled)
-    def format_with_translation(term_list, category_name):
-        """Format terms as 'Original (Translation)' or just 'Original' if no translation"""
-        if not translation_enabled or not translations:
-            return term_list  # Return original list unchanged
-            
+        translation_enabled = False
+
+    # Helper function to add translations
+    def add_translation(term_list):
+        if not translations:
+            return term_list
         formatted = []
         for term in term_list:
             if term in translations and translations[term] != term:
-                # Only add translation if it's different from original
                 formatted.append(f"{term} ({translations[term]})")
             else:
                 formatted.append(term)
         return formatted
-    
-    # Build glossary with translations
+
+    # Build glossary based on detected base language
     gloss = {}
     
     if base_language == "korean":
-        if names:
-            gloss["Korean_Names"] = format_with_translation(names, "Korean Names")
-        if suffixes:
-            gloss["Korean_Honorifics"] = format_with_translation(suffixes, "Korean Honorifics")
+        gloss["Korean_Names"] = add_translation(names)
+        gloss["Korean_Honorifics"] = add_translation(suffixes)
         if terms:
-            gloss["Korean_Terms"] = format_with_translation(terms, "Korean Terms")
+            gloss["Korean_Terms"] = add_translation(terms)
     elif base_language == "japanese":
-        if names:
-            gloss["Japanese_Names"] = format_with_translation(names, "Japanese Names")
-        if suffixes:
-            gloss["Japanese_Honorifics"] = format_with_translation(suffixes, "Japanese Honorifics")
+        gloss["Japanese_Names"] = add_translation(names)
+        gloss["Japanese_Honorifics"] = add_translation(suffixes)
         if terms:
-            gloss["Japanese_Family_Terms"] = format_with_translation(terms, "Japanese Family Terms")
+            gloss["Japanese_Family_Terms"] = add_translation(terms)
     elif base_language == "chinese":
-        if names:
-            gloss["Chinese_Names"] = format_with_translation(names, "Chinese Names")
+        gloss["Chinese_Names"] = add_translation(names)
         if terms:
-            gloss["Chinese_Titles"] = format_with_translation(terms, "Chinese Titles")
+            gloss["Chinese_Titles"] = add_translation(terms)
         if suffixes:
-            gloss["Chinese_Terms"] = format_with_translation(suffixes, "Chinese Terms")
+            gloss["Chinese_Terms"] = add_translation(suffixes)
     else:
         # Generic/unknown language
-        if names:
-            gloss["Names"] = format_with_translation(names, "Names")
+        gloss["Names"] = add_translation(names)
         if suffixes:
-            gloss["Honorifics"] = format_with_translation(suffixes, "Honorifics")
+            gloss["Honorifics"] = add_translation(suffixes)
         if terms:
-            gloss["Terms"] = format_with_translation(terms, "Terms")
-    
-    # Add metadata about the glossary
-    if translation_enabled and translations:
-        gloss["_note"] = f"Auto-generated glossary for profile '{language}' (auto-detected: {base_language}) with English translations"
-        gloss["_translation_info"] = {
-            "total_terms_extracted": len(unique_terms) if 'unique_terms' in locals() else 0,
-            "terms_translated": len([t for t in translations.values() if t != ""]),
-            "translation_enabled": True,
-            "detected_language": base_language,
-            "profile_name": language
-        }
+            gloss["Terms"] = add_translation(terms)
+
+    # Add a note about the glossary with original profile name
+    if translation_enabled:
+        gloss["_note"] = f"Auto-generated glossary for '{language}' (detected as {base_language}) with English translations"
     else:
-        gloss["_note"] = f"Auto-generated glossary for profile '{language}' (auto-detected: {base_language})"
-        if not translation_enabled:
-            gloss["_translation_info"] = {
-                "translation_enabled": False, 
-                "reason": "disabled",
-                "detected_language": base_language,
-                "profile_name": language
-            }
-        else:
-            gloss["_translation_info"] = {
-                "translation_enabled": True, 
-                "reason": "no_terms_or_failed",
-                "detected_language": base_language,
-                "profile_name": language
-            }
-    
-    # Save glossary
+        gloss["_note"] = f"Auto-generated glossary for '{language}' (detected as {base_language})"
+
     glossary_path = os.path.join(output_dir, "glossary.json")
     with open(glossary_path, 'w', encoding='utf-8') as f:
         json.dump(gloss, f, ensure_ascii=False, indent=2)
-    
-    # Enhanced logging
-    total_entries = sum(len(v) for k, v in gloss.items() if not k.startswith('_'))
-    
-    if translation_enabled and translations:
-        print(f"📑 Generated improved auto-glossary with translations:")
-        print(f"   • Profile: '{language}' → Auto-detected: '{base_language}'")
-        print(f"   • Final entries: {total_entries}")
-        print(f"   • With translations: {len([t for t in translations.values() if t != ''])}")
-        print(f"   • Saved to: {glossary_path}")
+
+    if translation_enabled:
+        print(f"📑 Generated improved automatic glossary with translations for profile '{language}' → {len(names)} names, {len(suffixes)} honorifics, {len(terms)} terms")
     else:
-        print(f"📑 Generated improved auto-glossary (original format):")
-        print(f"   • Profile: '{language}' → Auto-detected: '{base_language}'")
-        print(f"   • Final entries: {total_entries}")
-        print(f"   • Saved to: {glossary_path}")
-        if not translation_enabled:
-            print(f"   • Translation was disabled")
+        print(f"📑 Generated improved automatic glossary for profile '{language}' → {len(names)} names, {len(suffixes)} honorifics, {len(terms)} terms")
     
     return glossary_path
-
 # =============================================================================
 # API AND TRANSLATION UTILITIES
 # =============================================================================
