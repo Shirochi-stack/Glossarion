@@ -1,20 +1,30 @@
+# Standard Library - Core
 import io
-import os
-import sys
 import json
-import threading
-import math
-import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 import logging
+import math
+import os
 import shutil
+import sys
+import threading
 import time
 
-# Essential imports only - heavy modules loaded lazily
+# Standard Library - GUI Framework
+import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
+
+# Third-Party - UI Theme Framework (back to normal imports)
 import ttkbootstrap as tb
 from ttkbootstrap.constants import *
 
-# Defer heavy imports until needed
+# Splash Screen Manager
+from splash_utils import SplashManager
+
+# =============================================================================
+# DEFERRED HEAVY MODULES - Only translation modules need lazy loading
+# =============================================================================
+
+# Translation modules (loaded by _lazy_load_modules in TranslatorGUI)
 translation_main = None
 translation_stop_flag = None
 translation_stop_check = None
@@ -24,145 +34,42 @@ glossary_stop_check = None
 fallback_compile_epub = None
 scan_html_folder = None
 
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+
 CONFIG_FILE = "config.json"
 BASE_WIDTH, BASE_HEIGHT = 1550, 1000
 
-def show_splash():
-    """Show splash screen during startup with icon - FIXED VERSION"""
-    splash = tk.Tk()
-    splash.title("Loading Glossarion...")
-    splash.geometry("450x350")  # Made slightly taller for larger icon
-    splash.configure(bg='#2b2b2b')
-    splash.resizable(False, False)
+# =============================================================================
+# ICON LOADING UTILITY (for main window after startup)
+# =============================================================================
+
+def load_application_icon(window, base_dir):
+    """Load application icon with fallback handling"""
+    ico_path = os.path.join(base_dir, 'Halgakos.ico')
     
-    # Remove window decorations for cleaner look
-    splash.overrideredirect(True)
+    # Set window icon (Windows)
+    if os.path.isfile(ico_path):
+        try:
+            window.iconbitmap(ico_path)
+        except Exception as e:
+            logging.warning(f"Could not set window icon: {e}")
     
-    # Center the splash screen
-    splash.update_idletasks()
-    x = (splash.winfo_screenwidth() // 2) - (450 // 2)
-    y = (splash.winfo_screenheight() // 2) - (350 // 2)  # Updated for new height
-    splash.geometry(f"450x350+{x}+{y}")
-    
-    # Create main frame
-    main_frame = tk.Frame(splash, bg='#2b2b2b', relief='raised', bd=2)
-    main_frame.pack(fill='both', expand=True, padx=2, pady=2)
-    
-    # Load and display icon with better error handling
-    icon_label = None
+    # Set taskbar icon (cross-platform)
     try:
-        # Get base directory (same logic as main app)
-        import sys
-        import os
-        base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-        ico_path = os.path.join(base_dir, 'Halgakos.ico')
-        
-        print(f"[DEBUG] Looking for icon at: {ico_path}")
-        print(f"[DEBUG] File exists: {os.path.isfile(ico_path)}")
-        
+        from PIL import Image, ImageTk
         if os.path.isfile(ico_path):
-            try:
-                from PIL import Image, ImageTk
-                print("[DEBUG] PIL imported successfully")
-                
-                # Load the icon image
-                icon_image = Image.open(ico_path)
-                print(f"[DEBUG] Icon loaded: {icon_image.size}, mode: {icon_image.mode}")
-                
-                # Convert to RGBA if needed
-                if icon_image.mode != 'RGBA':
-                    icon_image = icon_image.convert('RGBA')
-                
-                # Resize to appropriate size for splash (128x128 pixels)
-                icon_image = icon_image.resize((128, 128), Image.Resampling.LANCZOS)
-                
-                # FIXED: Create PhotoImage with explicit master reference
-                icon_photo = ImageTk.PhotoImage(icon_image, master=splash)
-                
-                # Create label with icon - CENTER IT
-                icon_label = tk.Label(main_frame, image=icon_photo, bg='#2b2b2b')
-                icon_label.image = icon_photo  # Keep a reference to prevent garbage collection
-                icon_label.pack(pady=(20, 10))
-                
-                print("[DEBUG] Icon displayed successfully")
-                
-            except ImportError as e:
-                print(f"[DEBUG] PIL not available: {e}")
-            except Exception as e:
-                print(f"[DEBUG] Could not load icon with PIL: {e}")
-                # Try alternative: create a simple colored rectangle as placeholder
-                try:
-                    placeholder_frame = tk.Frame(main_frame, bg='#4a9eff', width=128, height=128)
-                    placeholder_frame.pack(pady=(20, 10))
-                    placeholder_frame.pack_propagate(False)  # Don't shrink
-                    tk.Label(placeholder_frame, text="📚", font=('Arial', 64), bg='#4a9eff', fg='white').pack(expand=True)
-                    print("[DEBUG] Using placeholder icon")
-                except:
-                    pass
-                
-        else:
-            print(f"[DEBUG] Icon file not found: {ico_path}")
-            # Create a simple placeholder
-            try:
-                placeholder_frame = tk.Frame(main_frame, bg='#4a9eff', width=128, height=128)
-                placeholder_frame.pack(pady=(20, 10))
-                placeholder_frame.pack_propagate(False)
-                tk.Label(placeholder_frame, text="📚", font=('Arial', 64), bg='#4a9eff', fg='white').pack(expand=True)
-                print("[DEBUG] Using emoji placeholder")
-            except:
-                pass
-            
-    except Exception as e:
-        print(f"[DEBUG] Icon loading error: {e}")
+            icon_image = Image.open(ico_path)
+            if icon_image.mode != 'RGBA':
+                icon_image = icon_image.convert('RGBA')
+            icon_photo = ImageTk.PhotoImage(icon_image)
+            window.iconphoto(False, icon_photo)
+            return icon_photo  # Keep reference to prevent garbage collection
+    except (ImportError, Exception) as e:
+        logging.warning(f"Could not load icon image: {e}")
     
-    # Add title (smaller padding since we have icon now)
-    title_label = tk.Label(main_frame, text="Glossarion v1.6.6", 
-                          bg='#2b2b2b', fg='#4a9eff', 
-                          font=('Arial', 20, 'bold'))
-    title_label.pack(pady=(10 if icon_label else 30, 5))
-    
-    # Add subtitle
-    subtitle_label = tk.Label(main_frame, text="Advanced EPUB Translation Suite", 
-                             bg='#2b2b2b', fg='#cccccc', 
-                             font=('Arial', 12))
-    subtitle_label.pack(pady=(0, 15))
-    
-    # Add loading text
-    loading_label = tk.Label(main_frame, text="Loading modules...", 
-                            bg='#2b2b2b', fg='#ffffff', 
-                            font=('Arial', 11))
-    loading_label.pack(pady=(0, 15))
-    
-    # FIXED: Use basic Canvas instead of ttk.Progressbar to avoid theme conflicts
-    progress_frame = tk.Frame(main_frame, bg='#2b2b2b')
-    progress_frame.pack(pady=(0, 25))
-    
-    canvas = tk.Canvas(progress_frame, width=300, height=20, bg='#404040', highlightthickness=0)
-    canvas.pack()
-    
-    # Simple animated progress bar
-    progress_width = 0
-    def animate_progress():
-        nonlocal progress_width
-        if splash.winfo_exists():  # Check if splash still exists
-            try:
-                canvas.delete("progress")
-                progress_width = (progress_width + 10) % 300
-                canvas.create_rectangle(0, 0, progress_width, 20, fill='#4a9eff', tags="progress")
-                splash.after(100, animate_progress)
-            except:
-                pass  # Splash was destroyed
-    
-    animate_progress()
-    
-    # Add version info
-    version_label = tk.Label(main_frame, text="Starting up...", 
-                            bg='#2b2b2b', fg='#888888', 
-                            font=('Arial', 9))
-    version_label.pack(side='bottom', pady=(0, 10))
-    
-    splash.update()
-    return splash, loading_label, version_label
+    return None
 
 class TranslatorGUI:
     def __init__(self, master):
@@ -1817,21 +1724,29 @@ class TranslatorGUI:
 if __name__ == "__main__":
     print("🚀 Starting Glossarion v1.6.6...")
     
-    # Create dark themed window FIRST
+    # Start splash screen immediately
+    splash_manager = SplashManager()
+    splash_manager.start_splash()
+    
+    # Update splash while loading
+    splash_manager.update_status("Loading theme framework...")
+    
+    # Your existing imports and setup (put ALL your heavy imports back!)
+    import ttkbootstrap as tb
+    from ttkbootstrap.constants import *
+    
+    splash_manager.update_status("Creating main window...")
     root = tb.Window(themename="darkly")
-    root.withdraw()  # Hide it initially
+    root.withdraw()
     
-    # NOW show splash screen
-    splash, loading_label, version_label = show_splash()
-    
-    # Create GUI
+    splash_manager.update_status("Setting up interface...")
     app = TranslatorGUI(root)
     
-    # Show the main window and close splash
-    root.deiconify()  # Show the main window
-    splash.destroy()
+    splash_manager.update_status("Ready!")
+    
+    # Close splash and show main window
+    splash_manager.close_splash()
+    root.deiconify()
     
     print("✅ Ready to use!")
-    
-    # Start the app
     root.mainloop()
