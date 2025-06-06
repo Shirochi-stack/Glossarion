@@ -191,7 +191,21 @@ class TranslatorGUI:
         self.duplicate_lookback_var = tk.StringVar(
             value=str(self.config.get('duplicate_lookback_chapters', '5'))  # Check last 5 chapters
         )     
-        
+        self.glossary_min_frequency_var = tk.StringVar(
+            value=str(self.config.get('glossary_min_frequency', 3))
+        )
+        self.glossary_max_names_var = tk.StringVar(
+            value=str(self.config.get('glossary_max_names', 30))
+        )
+        self.glossary_max_suffixes_var = tk.StringVar(
+            value=str(self.config.get('glossary_max_suffixes', 20))
+        )
+        self.glossary_max_terms_var = tk.StringVar(
+            value=str(self.config.get('glossary_max_terms', 20))
+        )
+        self.glossary_batch_size_var = tk.StringVar(
+            value=str(self.config.get('glossary_batch_size', 50))
+        )
         # Default prompts
         self.default_prompts = {
             "korean": "You are a professional Korean to English novel translator, you must strictly output only English/HTML text while following these rules:\n- Use a context rich and natural translation style.\n- Retain honorifics, and suffixes like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
@@ -736,6 +750,20 @@ class TranslatorGUI:
                     self.append_log("✅ Glossary will be appended to prompts")
                 else:
                     self.append_log("⚠️ Glossary appending is disabled")
+                    
+                # ─── NEW: Log glossary extraction settings ───
+                self.append_log(f"📑 Glossary Extraction Settings:")
+                self.append_log(f"   • Min frequency: {self.glossary_min_frequency_var.get()} occurrences")
+                self.append_log(f"   • Max names: {self.glossary_max_names_var.get()}")
+                self.append_log(f"   • Max suffixes: {self.glossary_max_suffixes_var.get()}")
+                self.append_log(f"   • Max terms: {self.glossary_max_terms_var.get()}")
+                self.append_log(f"   • Translation batch size: {self.glossary_batch_size_var.get()}")
+                
+                # Log glossary translation status
+                if self.disable_glossary_translation_var.get():
+                    self.append_log("⚠️ Glossary translation disabled - terms will remain in original language")
+                else:
+                    self.append_log(f"✅ Glossary translation enabled with {self.glossary_batch_size_var.get()} terms per batch")                    
                 
                 # Set environment variables - FIXED: Use multiple API key variables
                 os.environ.update({
@@ -766,7 +794,12 @@ class TranslatorGUI:
                     'RETRY_TRUNCATED': "1" if self.retry_truncated_var.get() else "0",
                     'MAX_RETRY_TOKENS': self.max_retry_tokens_var.get(),
                     'RETRY_DUPLICATE_BODIES': "1" if self.retry_duplicate_var.get() else "0",
-                    'DUPLICATE_LOOKBACK_CHAPTERS': self.duplicate_lookback_var.get()
+                    'DUPLICATE_LOOKBACK_CHAPTERS': self.duplicate_lookback_var.get(),
+                    'GLOSSARY_MIN_FREQUENCY': self.glossary_min_frequency_var.get(),
+                    'GLOSSARY_MAX_NAMES': self.glossary_max_names_var.get(),
+                    'GLOSSARY_MAX_SUFFIXES': self.glossary_max_suffixes_var.get(),
+                    'GLOSSARY_MAX_TERMS': self.glossary_max_terms_var.get(),
+                    'GLOSSARY_BATCH_SIZE': self.glossary_batch_size_var.get()
                 })
                 
                 # Set chapter range if specified
@@ -1301,7 +1334,7 @@ class TranslatorGUI:
         """Open the Other Settings dialog with all advanced options in a grid layout"""
         top = tk.Toplevel(self.master)
         top.title("Other Settings")
-        top.geometry("665x750")  # Wider and shorter
+        top.geometry("730x880")  # Made taller to accommodate new controls
         top.transient(self.master)
         top.grab_set()
         
@@ -1410,7 +1443,7 @@ class TranslatorGUI:
                  font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
         
         # =================================================================
-        # SECTION 4: GLOSSARY SETTINGS (Middle Right)
+        # SECTION 4: GLOSSARY SETTINGS (Middle Right) - EXPANDED
         # =================================================================
         section4_frame = tk.LabelFrame(scrollable_frame, text="Glossary Settings", padx=10, pady=10)
         section4_frame.grid(row=1, column=1, sticky="nsew", padx=(5, 10), pady=5)
@@ -1436,104 +1469,152 @@ class TranslatorGUI:
         
         tk.Label(section4_frame, 
                  text="Automatically includes glossary terms\nin translation prompts",
-                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
+                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 8))
         
         # =================================================================
-        # SECTION 5: PROCESSING OPTIONS (Bottom Left)
+        # SECTION 5: AUTOMATIC GLOSSARY EXTRACTION CONTROLS (NEW - Bottom Left)
         # =================================================================
-        section5_frame = tk.LabelFrame(scrollable_frame, text="Processing Options", padx=10, pady=10)
+        section5_frame = tk.LabelFrame(scrollable_frame, text="Automatic Glossary Extraction Controls", padx=10, pady=10)
         section5_frame.grid(row=2, column=0, sticky="nsew", padx=(10, 5), pady=5)
         
+        # Configure grid for consistent alignment
+        section5_frame.grid_columnconfigure(0, weight=0)  # Label column
+        section5_frame.grid_columnconfigure(1, weight=1)  # Entry column
+        
+        # Min Frequency
+        tk.Label(section5_frame, text="Min frequency:").grid(row=0, column=0, sticky=tk.W, pady=2)
+        tb.Entry(section5_frame, width=8, textvariable=self.glossary_min_frequency_var).grid(row=0, column=1, sticky=tk.W, padx=(5,0), pady=2)
+        
+        tk.Label(section5_frame, 
+                 text="Minimum times a name must appear to be included",
+                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
+        
+        # Max Names
+        tk.Label(section5_frame, text="Max names:").grid(row=2, column=0, sticky=tk.W, pady=2)
+        tb.Entry(section5_frame, width=8, textvariable=self.glossary_max_names_var).grid(row=2, column=1, sticky=tk.W, padx=(5,0), pady=2)
+        
+        # Max Suffixes
+        tk.Label(section5_frame, text="Max suffixes:").grid(row=3, column=0, sticky=tk.W, pady=2)
+        tb.Entry(section5_frame, width=8, textvariable=self.glossary_max_suffixes_var).grid(row=3, column=1, sticky=tk.W, padx=(5,0), pady=2)
+        
+        # Max Terms
+        tk.Label(section5_frame, text="Max terms:").grid(row=4, column=0, sticky=tk.W, pady=2)
+        tb.Entry(section5_frame, width=8, textvariable=self.glossary_max_terms_var).grid(row=4, column=1, sticky=tk.W, padx=(5,0), pady=2)
+        
+        # Batch Size
+        tk.Label(section5_frame, text="Batch size:").grid(row=5, column=0, sticky=tk.W, pady=2)
+        tb.Entry(section5_frame, width=8, textvariable=self.glossary_batch_size_var).grid(row=5, column=1, sticky=tk.W, padx=(5,0), pady=2)
+        
+        tk.Label(section5_frame, 
+                 text="Terms per API call (larger = faster but more expensive)",
+                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=(5, 5))
+        # =================================================================
+        # SECTION 6: PROCESSING OPTIONS (Bottom Right)
+        # =================================================================
+        section6_frame = tk.LabelFrame(scrollable_frame, text="Processing Options", padx=10, pady=10)
+        section6_frame.grid(row=2, column=1, sticky="nsew", padx=(5, 10), pady=5)
+        
         # Emergency Paragraph Restoration
-        tb.Checkbutton(section5_frame, text="Emergency Paragraph Restoration", 
+        tb.Checkbutton(section6_frame, text="Emergency Paragraph Restoration", 
                        variable=self.emergency_restore_var,
                        bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
         
-        tk.Label(section5_frame, 
+        tk.Label(section6_frame, 
                  text="Fixes AI responses that lose paragraph\nstructure (wall of text)",
                  font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
         
         # Reset Failed Chapters
-        tb.Checkbutton(section5_frame, text="Reset Failed Chapters on Start", 
+        tb.Checkbutton(section6_frame, text="Reset Failed Chapters on Start", 
                        variable=self.reset_failed_chapters_var,
                        bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
         
-        tk.Label(section5_frame, 
+        tk.Label(section6_frame, 
                  text="Automatically retry failed/deleted chapters\non each translation run",
-                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
+                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
         
-        # =================================================================
-        # SECTION 6: EPUB UTILITIES (Bottom Right)
-        # =================================================================
-        section6_frame = tk.LabelFrame(scrollable_frame, text="EPUB Utilities", padx=10, pady=10)
-        section6_frame.grid(row=2, column=1, sticky="nsew", padx=(5, 10), pady=5)
+        # EPUB Utilities
+        tk.Label(section6_frame, text="EPUB Utilities:", font=('TkDefaultFont', 11, 'bold')).pack(anchor=tk.W, pady=(5, 5))
         
         # Validation Button
         tb.Button(section6_frame, text="🔍 Validate EPUB Structure", 
                   command=self.validate_epub_structure_gui, 
                   bootstyle="success-outline",
-                  width=25).pack(anchor=tk.W, pady=5)
+                  width=25).pack(anchor=tk.W, pady=2)
         
         tk.Label(section6_frame, 
                  text="Check if all required EPUB files are\npresent for compilation",
-                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 10))
-        
-        # Add some padding space
-        tk.Frame(section6_frame, height=40).pack()
+                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 5))
         
         # =================================================================
         # SAVE & CLOSE FUNCTIONALITY (Bottom spanning both columns)
         # =================================================================
         def save_and_close():
             """Save all settings and close the dialog"""
-            # Context Management
-            self.config['use_rolling_summary'] = self.rolling_summary_var.get()
-            self.config['summary_role'] = self.summary_role_var.get()
-            
-            # Response Handling
-            self.config['retry_truncated'] = self.retry_truncated_var.get()
-            self.config['max_retry_tokens'] = int(self.max_retry_tokens_var.get())
-            self.config['retry_duplicate_bodies'] = self.retry_duplicate_var.get()
-            self.config['duplicate_lookback_chapters'] = int(self.duplicate_lookback_var.get())
-            
-            # Prompt Management
-            self.config['reinforcement_frequency'] = int(self.reinforcement_freq_var.get())
-            self.config['disable_system_prompt'] = self.disable_system_prompt_var.get()
-            
-            # Glossary Settings
-            self.config['disable_auto_glossary'] = self.disable_auto_glossary_var.get()
-            self.config['disable_glossary_translation'] = self.disable_glossary_translation_var.get()
-            self.config['append_glossary'] = self.append_glossary_var.get()
-            
-            # Processing Options
-            self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()
-            self.config['reset_failed_chapters'] = self.reset_failed_chapters_var.get()
-            
-            # Set environment variables for immediate effect
-            os.environ["USE_ROLLING_SUMMARY"] = "1" if self.rolling_summary_var.get() else "0"
-            os.environ["SUMMARY_ROLE"] = self.summary_role_var.get()
-            os.environ["RETRY_TRUNCATED"] = "1" if self.retry_truncated_var.get() else "0"
-            os.environ["MAX_RETRY_TOKENS"] = self.max_retry_tokens_var.get()
-            os.environ["RETRY_DUPLICATE_BODIES"] = "1" if self.retry_duplicate_var.get() else "0"
-            os.environ["DUPLICATE_LOOKBACK_CHAPTERS"] = self.duplicate_lookback_var.get()
-            os.environ["REINFORCEMENT_FREQUENCY"] = self.reinforcement_freq_var.get()
-            os.environ["DISABLE_SYSTEM_PROMPT"] = "1" if self.disable_system_prompt_var.get() else "0"
-            os.environ["DISABLE_AUTO_GLOSSARY"] = "1" if self.disable_auto_glossary_var.get() else "0"
-            os.environ["DISABLE_GLOSSARY_TRANSLATION"] = "1" if self.disable_glossary_translation_var.get() else "0"
-            os.environ["APPEND_GLOSSARY"] = "1" if self.append_glossary_var.get() else "0"
-            os.environ["EMERGENCY_PARAGRAPH_RESTORE"] = "1" if self.emergency_restore_var.get() else "0"
-            os.environ["RESET_FAILED_CHAPTERS"] = "1" if self.reset_failed_chapters_var.get() else "0"
-            
-            # Save to config file
             try:
+                # Context Management
+                self.config['use_rolling_summary'] = self.rolling_summary_var.get()
+                self.config['summary_role'] = self.summary_role_var.get()
+                
+                # Response Handling
+                self.config['retry_truncated'] = self.retry_truncated_var.get()
+                self.config['max_retry_tokens'] = int(self.max_retry_tokens_var.get())
+                self.config['retry_duplicate_bodies'] = self.retry_duplicate_var.get()
+                self.config['duplicate_lookback_chapters'] = int(self.duplicate_lookback_var.get())
+                
+                # Prompt Management
+                self.config['reinforcement_frequency'] = int(self.reinforcement_freq_var.get())
+                self.config['disable_system_prompt'] = self.disable_system_prompt_var.get()
+                
+                # Glossary Settings
+                self.config['disable_auto_glossary'] = self.disable_auto_glossary_var.get()
+                self.config['disable_glossary_translation'] = self.disable_glossary_translation_var.get()
+                self.config['append_glossary'] = self.append_glossary_var.get()
+                
+                # NEW: Glossary Extraction Controls
+                self.config['glossary_min_frequency'] = int(self.glossary_min_frequency_var.get())
+                self.config['glossary_max_names'] = int(self.glossary_max_names_var.get())
+                self.config['glossary_max_suffixes'] = int(self.glossary_max_suffixes_var.get())
+                self.config['glossary_max_terms'] = int(self.glossary_max_terms_var.get())
+                self.config['glossary_batch_size'] = int(self.glossary_batch_size_var.get())
+                
+                # Processing Options
+                self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()
+                self.config['reset_failed_chapters'] = self.reset_failed_chapters_var.get()
+                
+                # Set environment variables for immediate effect
+                os.environ["USE_ROLLING_SUMMARY"] = "1" if self.rolling_summary_var.get() else "0"
+                os.environ["SUMMARY_ROLE"] = self.summary_role_var.get()
+                os.environ["RETRY_TRUNCATED"] = "1" if self.retry_truncated_var.get() else "0"
+                os.environ["MAX_RETRY_TOKENS"] = self.max_retry_tokens_var.get()
+                os.environ["RETRY_DUPLICATE_BODIES"] = "1" if self.retry_duplicate_var.get() else "0"
+                os.environ["DUPLICATE_LOOKBACK_CHAPTERS"] = self.duplicate_lookback_var.get()
+                os.environ["REINFORCEMENT_FREQUENCY"] = self.reinforcement_freq_var.get()
+                os.environ["DISABLE_SYSTEM_PROMPT"] = "1" if self.disable_system_prompt_var.get() else "0"
+                os.environ["DISABLE_AUTO_GLOSSARY"] = "1" if self.disable_auto_glossary_var.get() else "0"
+                os.environ["DISABLE_GLOSSARY_TRANSLATION"] = "1" if self.disable_glossary_translation_var.get() else "0"
+                os.environ["APPEND_GLOSSARY"] = "1" if self.append_glossary_var.get() else "0"
+                os.environ["EMERGENCY_PARAGRAPH_RESTORE"] = "1" if self.emergency_restore_var.get() else "0"
+                os.environ["RESET_FAILED_CHAPTERS"] = "1" if self.reset_failed_chapters_var.get() else "0"
+                
+                # NEW: Glossary extraction environment variables
+                os.environ["GLOSSARY_MIN_FREQUENCY"] = self.glossary_min_frequency_var.get()
+                os.environ["GLOSSARY_MAX_NAMES"] = self.glossary_max_names_var.get()
+                os.environ["GLOSSARY_MAX_SUFFIXES"] = self.glossary_max_suffixes_var.get()
+                os.environ["GLOSSARY_MAX_TERMS"] = self.glossary_max_terms_var.get()
+                os.environ["GLOSSARY_BATCH_SIZE"] = self.glossary_batch_size_var.get()
+                
+                # Save to config file
                 with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                     json.dump(self.config, f, ensure_ascii=False, indent=2)
-                print("✅ Other Settings saved successfully")
+                
+                self.append_log("✅ Other Settings saved successfully")
+                top.destroy()
+                
+            except ValueError as e:
+                messagebox.showerror("Invalid Input", f"Please enter valid numbers for all numeric fields.\nError: {e}")
             except Exception as e:
                 print(f"❌ Failed to save Other Settings: {e}")
                 messagebox.showerror("Error", f"Failed to save settings: {e}")
-            
-            top.destroy()
         
         # Save button frame spanning both columns
         button_frame = tk.Frame(scrollable_frame)
@@ -1576,6 +1657,7 @@ class TranslatorGUI:
             top.destroy()
 
         top.protocol("WM_DELETE_WINDOW", on_close)
+
 
 
     # Keep the validation function as-is:
@@ -1868,7 +1950,6 @@ class TranslatorGUI:
             self.config['use_rolling_summary'] = self.rolling_summary_var.get()
             self.config['summary_role'] = self.summary_role_var.get()
             self.config['max_output_tokens'] = self.max_output_tokens
-            # ─── NEW: Save new toggle states ───
             self.config['disable_system_prompt'] = self.disable_system_prompt_var.get()
             self.config['disable_auto_glossary'] = self.disable_auto_glossary_var.get()
             self.config['append_glossary'] = self.append_glossary_var.get()
@@ -1879,7 +1960,11 @@ class TranslatorGUI:
             self.config['duplicate_lookback_chapters'] = int(self.duplicate_lookback_var.get())
             self.config['token_limit_disabled'] = self.token_limit_disabled
             self.config['disable_glossary_translation'] = self.disable_glossary_translation_var.get()
-
+            self.config['glossary_min_frequency'] = int(self.glossary_min_frequency_var.get())
+            self.config['glossary_max_names'] = int(self.glossary_max_names_var.get())
+            self.config['glossary_max_suffixes'] = int(self.glossary_max_suffixes_var.get())
+            self.config['glossary_max_terms'] = int(self.glossary_max_terms_var.get())
+            self.config['glossary_batch_size'] = int(self.glossary_batch_size_var.get())
 
             
             _tl = self.token_limit_entry.get().strip()
