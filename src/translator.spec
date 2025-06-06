@@ -5,6 +5,8 @@ block_cipher = None
 # Add all your python files here
 added_files = [
     ('translator_gui.py', '.'),
+    ('splash_screen.py', '.'),              # NEW - Separate splash screen script
+    ('splash_utils.py', '.'),               # NEW - Splash management utilities
     ('TransateKRtoEN.py', '.'),
     ('extract_glossary_from_epub.py', '.'),
     ('epub_converter.py', '.'),
@@ -33,6 +35,8 @@ a = Analysis(
         'history_manager',
         'check_epub_directory',
         'direct_imports',
+        'splash_screen',              # NEW - Splash screen module
+        'splash_utils',               # NEW - Splash utilities module
         
         # ==================== EPUB PROCESSING ====================
         'ebooklib',
@@ -103,7 +107,7 @@ a = Analysis(
         'PIL.PpmImagePlugin',
         'PIL.TiffImagePlugin',
         'PIL.WebPImagePlugin',
-        'PIL.IcoImagePlugin',
+        'PIL.IcoImagePlugin',        # CRITICAL - for splash screen icon loading
         'PIL.MicImagePlugin',
         'PIL.PcxImagePlugin',
         'PIL.TarImagePlugin',
@@ -195,16 +199,19 @@ a = Analysis(
         'tqdm.notebook',
         'tqdm.asyncio',
         
-        # ==================== THREADING/CONCURRENCY ====================
-        'threading',
+        # ==================== PROCESS MANAGEMENT ====================
+        'subprocess',             # CRITICAL - used by splash_utils.py to launch splash
+        'multiprocessing',
+        'multiprocessing.pool',
+        'threading',              # CRITICAL - used by splash screen
         '_thread',
         'queue',
         'concurrent',             # CRITICAL - used by various libraries
         'concurrent.futures',     # CRITICAL - used by various libraries
-        'multiprocessing',
-        'multiprocessing.pool',
         'sched',
         'contextlib',
+        'atexit',                 # CRITICAL - used by splash_utils.py for cleanup
+        'signal',                 # CRITICAL - for process management
         
         # ==================== FILE SYSTEM/COMPRESSION ====================
         'os',
@@ -260,7 +267,6 @@ a = Analysis(
         'time',
         'datetime',
         'argparse',
-        'subprocess',
         'platform',
         'warnings',
         'types',
@@ -329,7 +335,7 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,  # Set to True if you want console output for debugging
+    console=False,  # Keep as False for clean splash screen experience
     disable_windowed_traceback=False,
     target_arch=None,
     codesign_identity=None,
