@@ -52,6 +52,11 @@ BASE_WIDTH, BASE_HEIGHT = 1550, 1000
 class TranslatorGUI:
     def __init__(self, master):
         self.master = master
+        self.epub_thread = None
+        self.stop_requested = False
+        self.translation_thread = None
+        self.glossary_thread = None
+        self.qa_thread = None
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
@@ -514,7 +519,7 @@ class TranslatorGUI:
             ("EPUB Converter",      self.epub_converter,               "info"),
             ("Extract Glossary",    self.run_glossary_extraction_thread, "warning"),
             ("Trim Glossary",       self.trim_glossary,               "secondary"),
-            ("Retranslate",   self.force_retranslation,         "warning"),  # NEW
+            ("Retranslate",         self.force_retranslation,         "warning"),
             ("Save Config",         self.save_config,                 "secondary"),
             ("Load Glossary",       self.load_glossary,               "secondary"),
             ("Import Profiles",     self.import_profiles,             "secondary"),
@@ -526,6 +531,8 @@ class TranslatorGUI:
             btn.grid(row=0, column=idx, sticky=tk.EW, padx=2)
             if lbl == "Extract Glossary":
                 self.glossary_button = btn
+            elif lbl == "EPUB Converter":  # ADD THIS
+                self.epub_button = btn
 
         self.frame.grid_rowconfigure(12, weight=0)
 
@@ -851,6 +858,13 @@ class TranslatorGUI:
             self.qa_thread and 
             self.qa_thread.is_alive()
         )
+        epub_running = (
+            hasattr(self, 'epub_thread') and 
+            self.epub_thread and 
+            self.epub_thread.is_alive()
+        )
+
+        any_process_running = translation_running or glossary_running or qa_running or epub_running
 
         # Update translation button
         if translation_running:
@@ -865,10 +879,10 @@ class TranslatorGUI:
                 text="Run Translation",
                 command=self.run_translation_thread,
                 bootstyle="success",
-                state=tk.NORMAL if translation_main and not (glossary_running or qa_running) else tk.DISABLED
+                state=tk.NORMAL if translation_main and not any_process_running else tk.DISABLED
             )
             
-        # Update glossary button if it exists
+        # Update glossary button
         if hasattr(self, 'glossary_button'):
             if glossary_running:
                 self.glossary_button.config(
@@ -882,12 +896,31 @@ class TranslatorGUI:
                     text="Extract Glossary",
                     command=self.run_glossary_extraction_thread,
                     bootstyle="warning",
-                    state=tk.NORMAL if glossary_main and not (translation_running or qa_running) else tk.DISABLED
+                    state=tk.NORMAL if glossary_main and not any_process_running else tk.DISABLED
+                )
+        
+        # Update EPUB button
+        if hasattr(self, 'epub_button'):
+            if epub_running:
+                self.epub_button.config(
+                    text="Stop EPUB",
+                    command=self.stop_epub_converter,
+                    bootstyle="danger",
+                    state=tk.NORMAL
+                )
+            else:
+                self.epub_button.config(
+                    text="EPUB Converter",
+                    command=self.epub_converter,
+                    bootstyle="info",
+                    state=tk.NORMAL if fallback_compile_epub and not any_process_running else tk.DISABLED
                 )
                 
-        # Disable other buttons when any process is running
+        # Update QA button
         if hasattr(self, 'qa_button'):
-            self.qa_button.config(state=tk.NORMAL if not (translation_running or glossary_running) else tk.DISABLED)
+            self.qa_button.config(
+                state=tk.NORMAL if scan_html_folder and not any_process_running else tk.DISABLED
+            )
 
     def stop_translation(self):
         """Stop translation only"""
@@ -926,42 +959,97 @@ class TranslatorGUI:
         self.update_run_button()
 
     def epub_converter(self):
-        """Run EPUB converter directly without subprocess"""
+        """Start EPUB converter in a separate thread"""
         if fallback_compile_epub is None:
             self.append_log("❌ EPUB converter module is not available")
             messagebox.showerror("Module Error", "EPUB converter module is not available.")
+            return
+
+        # Check if other processes are running
+        if hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive():
+            self.append_log("⚠️ Cannot run EPUB converter while translation is in progress.")
+            messagebox.showwarning("Process Running", "Please wait for translation to complete before converting EPUB.")
+            return
+            
+        if hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive():
+            self.append_log("⚠️ Cannot run EPUB converter while glossary extraction is in progress.")
+            messagebox.showwarning("Process Running", "Please wait for glossary extraction to complete before converting EPUB.")
+            return
+
+        if hasattr(self, 'epub_thread') and self.epub_thread and self.epub_thread.is_alive():
+            # Stop existing EPUB conversion
+            self.stop_epub_converter()
             return
 
         folder = filedialog.askdirectory(title="Select translation output folder")
         if not folder:
             return
 
+        self.epub_folder = folder  # Store for the thread
+        self.stop_requested = False
+        self.epub_thread = threading.Thread(target=self.run_epub_converter_direct, daemon=True)
+        self.epub_thread.start()
+        # Update buttons immediately after starting thread
+        self.master.after(100, self.update_run_button)
+
+    def run_epub_converter_direct(self):
+        """Run EPUB converter directly without blocking GUI"""
         try:
-            self.append_log("📦 Running EPUB Converter...")
+            folder = self.epub_folder
+            self.append_log("📦 Starting EPUB Converter...")
             
-            # Call the EPUB converter function directly with callback
-            fallback_compile_epub(folder, log_callback=self.append_log)
+            # Call the EPUB converter function directly with callbacks
+            fallback_compile_epub(
+                folder, 
+                log_callback=self.append_log
+            )
             
-            # Update to use the new filename format
-            base_name = os.path.basename(folder)
-            out_file = os.path.join(folder, f"{base_name}.epub")
-            
-            # Check if the file was actually created
-            if os.path.exists(out_file):
-                messagebox.showinfo("EPUB Compilation Success", f"Created: {out_file}")
-            else:
-                self.append_log("⚠️ EPUB file was not created. Check the logs for details.")
+            if not self.stop_requested:
+                # Update to use the new filename format
+                base_name = os.path.basename(folder)
+                out_file = os.path.join(folder, f"{base_name}.epub")
+                
+                # Check if the file was actually created
+                if os.path.exists(out_file):
+                    self.append_log("✅ EPUB Converter completed successfully!")
+                    # Show success message on main thread
+                    self.master.after(0, lambda: messagebox.showinfo("EPUB Compilation Success", f"Created: {out_file}"))
+                else:
+                    self.append_log("⚠️ EPUB file was not created. Check the logs for details.")
             
         except Exception as e:
             error_str = str(e)
             self.append_log(f"❌ EPUB Converter error: {error_str}")
             
-            # Don't show popup for "Document is empty" errors
+            # Show error message on main thread (only for non-empty errors)
             if "Document is empty" not in error_str:
-                messagebox.showerror("EPUB Converter Failed", f"Error: {error_str}")
+                self.master.after(0, lambda: messagebox.showerror("EPUB Converter Failed", f"Error: {error_str}"))
             else:
-                # Just log it, no popup
                 self.append_log("📋 Check the log above for details about what went wrong.")
+                
+        finally:
+            # CRITICAL: Clear thread reference and update buttons
+            self.epub_thread = None
+            self.stop_requested = False
+            
+            # Schedule button update on main thread
+            self.master.after(0, self.update_run_button)
+            
+            # Also explicitly update the EPUB button (extra safety)
+            if hasattr(self, 'epub_button'):
+                self.master.after(0, lambda: self.epub_button.config(
+                    text="EPUB Converter",
+                    command=self.epub_converter,
+                    bootstyle="info",
+                    state=tk.NORMAL if fallback_compile_epub else tk.DISABLED
+                ))
+
+    def stop_epub_converter(self):
+        """Stop EPUB converter"""
+        self.stop_requested = True
+        self.append_log("❌ EPUB converter stop requested.")
+        self.append_log("⏳ Please wait... stopping after current operation completes.")
+        self.update_run_button()
 
     def run_qa_scan(self):
         """Run QA scan directly without subprocess"""
