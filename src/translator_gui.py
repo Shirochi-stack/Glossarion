@@ -20,6 +20,13 @@ from ttkbootstrap.constants import *
 # Splash Screen Manager
 from splash_utils import SplashManager
 
+if getattr(sys, 'frozen', False):
+    try:
+        import multiprocessing
+        multiprocessing.freeze_support()
+    except:
+        pass
+        
 # =============================================================================
 # DEFERRED HEAVY MODULES - Only translation modules need lazy loading
 # =============================================================================
@@ -1722,18 +1729,11 @@ class TranslatorGUI:
 
 
 if __name__ == "__main__":
-    # Prevent multiple instances when running as .exe
-    import sys
-    
-    # Check if we're being called with arguments that would indicate subprocess mode
-    if len(sys.argv) > 1 and any(arg.endswith('.py') for arg in sys.argv[1:]):
-        # This looks like subprocess call - exit to prevent recursion
-        print("Preventing subprocess recursion")
-        sys.exit(0)
+    import time  # Add this import
     
     print("🚀 Starting Glossarion v1.6.6...")
     
-    # Initialize splash screen with proper mode detection
+    # Initialize splash screen (main thread only)
     splash_manager = None
     try:
         from splash_utils import SplashManager
@@ -1741,45 +1741,37 @@ if __name__ == "__main__":
         splash_started = splash_manager.start_splash()
         
         if splash_started:
-            # Update splash while loading
             splash_manager.update_status("Loading theme framework...")
+            time.sleep(0.5)  # Give user time to see the status
         
     except Exception as e:
-        print(f"⚠️ Splash screen failed to start: {e}")
+        print(f"⚠️ Splash screen failed: {e}")
         splash_manager = None
     
     try:
         # Import heavy modules
         if splash_manager:
             splash_manager.update_status("Loading UI framework...")
+            time.sleep(0.3)
         
         import ttkbootstrap as tb
         from ttkbootstrap.constants import *
         
         if splash_manager:
             splash_manager.update_status("Creating main window...")
+            time.sleep(0.3)
         
-        # Create main window
-        root = tb.Window(themename="darkly")
-        root.withdraw()  # Hide initially
-        
+        # Close splash before creating main window
         if splash_manager:
-            splash_manager.update_status("Setting up interface...")
+            splash_manager.update_status("Ready!")
+            time.sleep(0.5)
+            splash_manager.close_splash()
+        
+        # Now create main window (on same thread)
+        root = tb.Window(themename="darkly")
         
         # Initialize the app
         app = TranslatorGUI(root)
-        
-        if splash_manager:
-            splash_manager.update_status("Ready!")
-            # Give a moment for the status to show
-            import time
-            time.sleep(0.5)
-        
-        # Close splash and show main window
-        if splash_manager:
-            splash_manager.close_splash()
-        
-        root.deiconify()  # Show main window
         
         print("✅ Ready to use!")
         
@@ -1790,6 +1782,8 @@ if __name__ == "__main__":
         print(f"❌ Failed to start application: {e}")
         if splash_manager:
             splash_manager.close_splash()
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
     
     finally:
