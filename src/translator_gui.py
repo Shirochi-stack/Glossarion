@@ -4,59 +4,169 @@ import sys
 import json
 import threading
 import math
-import ttkbootstrap as tb
 import tkinter as tk
-import tkinter as ttk
-from tkinter import filedialog, messagebox, scrolledtext
-from ttkbootstrap.constants import *
+from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 import logging
 import shutil
-from tkinter import scrolledtext
-from PIL import Image, ImageTk
-from tkinter import simpledialog
-from tkinter import ttk
+import time
 
-# CRITICAL: Import all modules at the top level for PyInstaller
-# This ensures they're bundled into the executable
-try:
-    from TransateKRtoEN import main as translation_main, set_stop_flag as translation_stop_flag, is_stop_requested as translation_stop_check
-except ImportError:
-    translation_main = None
-    translation_stop_flag = None
-    translation_stop_check = None
-    print("Warning: Could not import TransateKRtoEN module")
+# Essential imports only - heavy modules loaded lazily
+import ttkbootstrap as tb
+from ttkbootstrap.constants import *
 
-try:
-    from extract_glossary_from_epub import main as glossary_main, set_stop_flag as glossary_stop_flag, is_stop_requested as glossary_stop_check
-except ImportError:
-    glossary_main = None
-    glossary_stop_flag = None
-    glossary_stop_check = None
-    print("Warning: Could not import extract_glossary_from_epub module")
-
-try:
-    from epub_converter import fallback_compile_epub
-except ImportError:
-    fallback_compile_epub = None
-    print("Warning: Could not import epub_converter module")
-
-try:
-    from scan_html_folder import scan_html_folder
-except ImportError:
-    scan_html_folder = None
-    print("Warning: Could not import scan_html_folder module")
+# Defer heavy imports until needed
+translation_main = None
+translation_stop_flag = None
+translation_stop_check = None
+glossary_main = None
+glossary_stop_flag = None
+glossary_stop_check = None
+fallback_compile_epub = None
+scan_html_folder = None
 
 CONFIG_FILE = "config.json"
 BASE_WIDTH, BASE_HEIGHT = 1550, 1000
 
+def show_splash():
+    """Show splash screen during startup with icon - FIXED VERSION"""
+    splash = tk.Tk()
+    splash.title("Loading Glossarion...")
+    splash.geometry("450x350")  # Made slightly taller for larger icon
+    splash.configure(bg='#2b2b2b')
+    splash.resizable(False, False)
+    
+    # Remove window decorations for cleaner look
+    splash.overrideredirect(True)
+    
+    # Center the splash screen
+    splash.update_idletasks()
+    x = (splash.winfo_screenwidth() // 2) - (450 // 2)
+    y = (splash.winfo_screenheight() // 2) - (350 // 2)  # Updated for new height
+    splash.geometry(f"450x350+{x}+{y}")
+    
+    # Create main frame
+    main_frame = tk.Frame(splash, bg='#2b2b2b', relief='raised', bd=2)
+    main_frame.pack(fill='both', expand=True, padx=2, pady=2)
+    
+    # Load and display icon with better error handling
+    icon_label = None
+    try:
+        # Get base directory (same logic as main app)
+        import sys
+        import os
+        base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+        ico_path = os.path.join(base_dir, 'Halgakos.ico')
+        
+        print(f"[DEBUG] Looking for icon at: {ico_path}")
+        print(f"[DEBUG] File exists: {os.path.isfile(ico_path)}")
+        
+        if os.path.isfile(ico_path):
+            try:
+                from PIL import Image, ImageTk
+                print("[DEBUG] PIL imported successfully")
+                
+                # Load the icon image
+                icon_image = Image.open(ico_path)
+                print(f"[DEBUG] Icon loaded: {icon_image.size}, mode: {icon_image.mode}")
+                
+                # Convert to RGBA if needed
+                if icon_image.mode != 'RGBA':
+                    icon_image = icon_image.convert('RGBA')
+                
+                # Resize to appropriate size for splash (128x128 pixels)
+                icon_image = icon_image.resize((128, 128), Image.Resampling.LANCZOS)
+                
+                # FIXED: Create PhotoImage with explicit master reference
+                icon_photo = ImageTk.PhotoImage(icon_image, master=splash)
+                
+                # Create label with icon - CENTER IT
+                icon_label = tk.Label(main_frame, image=icon_photo, bg='#2b2b2b')
+                icon_label.image = icon_photo  # Keep a reference to prevent garbage collection
+                icon_label.pack(pady=(20, 10))
+                
+                print("[DEBUG] Icon displayed successfully")
+                
+            except ImportError as e:
+                print(f"[DEBUG] PIL not available: {e}")
+            except Exception as e:
+                print(f"[DEBUG] Could not load icon with PIL: {e}")
+                # Try alternative: create a simple colored rectangle as placeholder
+                try:
+                    placeholder_frame = tk.Frame(main_frame, bg='#4a9eff', width=128, height=128)
+                    placeholder_frame.pack(pady=(20, 10))
+                    placeholder_frame.pack_propagate(False)  # Don't shrink
+                    tk.Label(placeholder_frame, text="📚", font=('Arial', 64), bg='#4a9eff', fg='white').pack(expand=True)
+                    print("[DEBUG] Using placeholder icon")
+                except:
+                    pass
+                
+        else:
+            print(f"[DEBUG] Icon file not found: {ico_path}")
+            # Create a simple placeholder
+            try:
+                placeholder_frame = tk.Frame(main_frame, bg='#4a9eff', width=128, height=128)
+                placeholder_frame.pack(pady=(20, 10))
+                placeholder_frame.pack_propagate(False)
+                tk.Label(placeholder_frame, text="📚", font=('Arial', 64), bg='#4a9eff', fg='white').pack(expand=True)
+                print("[DEBUG] Using emoji placeholder")
+            except:
+                pass
+            
+    except Exception as e:
+        print(f"[DEBUG] Icon loading error: {e}")
+    
+    # Add title (smaller padding since we have icon now)
+    title_label = tk.Label(main_frame, text="Glossarion v1.6.6", 
+                          bg='#2b2b2b', fg='#4a9eff', 
+                          font=('Arial', 20, 'bold'))
+    title_label.pack(pady=(10 if icon_label else 30, 5))
+    
+    # Add subtitle
+    subtitle_label = tk.Label(main_frame, text="Advanced EPUB Translation Suite", 
+                             bg='#2b2b2b', fg='#cccccc', 
+                             font=('Arial', 12))
+    subtitle_label.pack(pady=(0, 15))
+    
+    # Add loading text
+    loading_label = tk.Label(main_frame, text="Loading modules...", 
+                            bg='#2b2b2b', fg='#ffffff', 
+                            font=('Arial', 11))
+    loading_label.pack(pady=(0, 15))
+    
+    # FIXED: Use basic Canvas instead of ttk.Progressbar to avoid theme conflicts
+    progress_frame = tk.Frame(main_frame, bg='#2b2b2b')
+    progress_frame.pack(pady=(0, 25))
+    
+    canvas = tk.Canvas(progress_frame, width=300, height=20, bg='#404040', highlightthickness=0)
+    canvas.pack()
+    
+    # Simple animated progress bar
+    progress_width = 0
+    def animate_progress():
+        nonlocal progress_width
+        if splash.winfo_exists():  # Check if splash still exists
+            try:
+                canvas.delete("progress")
+                progress_width = (progress_width + 10) % 300
+                canvas.create_rectangle(0, 0, progress_width, 20, fill='#4a9eff', tags="progress")
+                splash.after(100, animate_progress)
+            except:
+                pass  # Splash was destroyed
+    
+    animate_progress()
+    
+    # Add version info
+    version_label = tk.Label(main_frame, text="Starting up...", 
+                            bg='#2b2b2b', fg='#888888', 
+                            font=('Arial', 9))
+    version_label.pack(side='bottom', pady=(0, 10))
+    
+    splash.update()
+    return splash, loading_label, version_label
+
 class TranslatorGUI:
     def __init__(self, master):
         self.master = master
-        self.epub_thread = None
-        self.stop_requested = False
-        self.translation_thread = None
-        self.glossary_thread = None
-        self.qa_thread = None
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
@@ -67,11 +177,16 @@ class TranslatorGUI:
         master.bind('<Escape>', lambda e: master.attributes('-fullscreen', False))
         self.payloads_dir = os.path.join(os.getcwd(), "Payloads")        
         
+        # Module loading state
+        self._modules_loaded = False
+        self._modules_loading = False
+        
         # Add stop flags for threading
         self.stop_requested = False
         self.translation_thread = None
         self.glossary_thread = None
         self.qa_thread = None
+        self.epub_thread = None
         
         # Warn on close
         self.master.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -87,14 +202,16 @@ class TranslatorGUI:
             except Exception:
                 pass
 
-        # Load embedded icon image for display
+        # Load embedded icon image for display (lazy load PIL)
+        self.logo_img = None
         try:
+            # Delay PIL import
+            from PIL import Image, ImageTk
             self.logo_img = ImageTk.PhotoImage(Image.open(ico_path)) if os.path.isfile(ico_path) else None
+            if self.logo_img:
+                master.iconphoto(False, self.logo_img)
         except Exception as e:
             logging.error(f"Failed to load logo: {e}")
-            self.logo_img = None
-        if self.logo_img:
-            master.iconphoto(False, self.logo_img)
             
         # Load config FIRST before setting up variables
         try:
@@ -171,13 +288,84 @@ class TranslatorGUI:
 
         # Initialize GUI components
         self._setup_gui()
+
+    def _lazy_load_modules(self, splash_callback=None):
+        """Load heavy modules only when needed"""
+        if self._modules_loaded or self._modules_loading:
+            return self._modules_loaded
+            
+        self._modules_loading = True
         
-        # Check module availability and update UI accordingly
-        self._check_modules()
+        if splash_callback:
+            splash_callback("Loading translation modules...")
+        
+        global translation_main, translation_stop_flag, translation_stop_check
+        global glossary_main, glossary_stop_flag, glossary_stop_check  
+        global fallback_compile_epub, scan_html_folder
+        
+        success_count = 0
+        total_modules = 4
+        
+        try:
+            if splash_callback:
+                splash_callback("Loading translation engine...")
+            from TransateKRtoEN import main as translation_main, set_stop_flag as translation_stop_flag, is_stop_requested as translation_stop_check
+            success_count += 1
+        except ImportError as e:
+            translation_main = None
+            translation_stop_flag = None
+            translation_stop_check = None
+            print(f"Warning: Could not import TransateKRtoEN module: {e}")
+
+        try:
+            if splash_callback:
+                splash_callback("Loading glossary extractor...")
+            from extract_glossary_from_epub import main as glossary_main, set_stop_flag as glossary_stop_flag, is_stop_requested as glossary_stop_check
+            success_count += 1
+        except ImportError as e:
+            glossary_main = None
+            glossary_stop_flag = None
+            glossary_stop_check = None
+            print(f"Warning: Could not import extract_glossary_from_epub module: {e}")
+
+        try:
+            if splash_callback:
+                splash_callback("Loading EPUB converter...")
+            from epub_converter import fallback_compile_epub
+            success_count += 1
+        except ImportError as e:
+            fallback_compile_epub = None
+            print(f"Warning: Could not import epub_converter module: {e}")
+
+        try:
+            if splash_callback:
+                splash_callback("Loading QA scanner...")
+            from scan_html_folder import scan_html_folder
+            success_count += 1
+        except ImportError as e:
+            scan_html_folder = None
+            print(f"Warning: Could not import scan_html_folder module: {e}")
+            
+        self._modules_loaded = True
+        self._modules_loading = False
+        
+        if splash_callback:
+            splash_callback(f"Loaded {success_count}/{total_modules} modules successfully")
+        
+        # Update UI state after loading
+        self.master.after(0, self._check_modules)
+        
+        if hasattr(self, 'log_text'):
+            self.append_log(f"✅ Loaded {success_count}/{total_modules} modules successfully")
+        
+        return True
 
     def _check_modules(self):
         """Check which modules are available and disable buttons if needed"""
-        if translation_main is None:
+        if not self._modules_loaded:
+            return
+            
+        if translation_main is None and hasattr(self, 'run_button'):
             self.run_button.config(state='disabled')
             self.append_log("⚠️ Translation module not available")
         
@@ -185,13 +373,8 @@ class TranslatorGUI:
             self.glossary_button.config(state='disabled')
             self.append_log("⚠️ Glossary extraction module not available")
         
-        if fallback_compile_epub is None:
-            # Find and disable EPUB converter button
-            for child in self.frame.winfo_children():
-                if isinstance(child, tb.Frame):
-                    for btn in child.winfo_children():
-                        if isinstance(btn, tb.Button) and btn.cget('text') == 'EPUB Converter':
-                            btn.config(state='disabled')
+        if fallback_compile_epub is None and hasattr(self, 'epub_button'):
+            self.epub_button.config(state='disabled')
             self.append_log("⚠️ EPUB converter module not available")
         
         if scan_html_folder is None and hasattr(self, 'qa_button'):
@@ -389,6 +572,11 @@ class TranslatorGUI:
         self.on_profile_select()
 
         print("[DEBUG] GUI setup completed with config values loaded")  # Debug logging
+        
+        # Add initial log message
+        self.append_log("🚀 Glossarion v1.6.6 - Ready to use!")
+        self.append_log("💡 Click any function button to load modules automatically")
+
     def force_retranslation(self):
         """Force retranslation of specific chapters"""
         epub_path = self.entry_epub.get()
@@ -505,7 +693,7 @@ class TranslatorGUI:
                   command=retranslate_selected, bg="#ff6b6b", fg="white").pack(side=tk.LEFT, padx=5)
         tk.Button(button_frame, text="Cancel", 
                   command=dialog.destroy).pack(side=tk.LEFT, padx=5)
-                  
+
     def _make_bottom_toolbar(self):
         """Create the bottom toolbar with all action buttons"""
         btn_frame = tb.Frame(self.frame)
@@ -531,7 +719,7 @@ class TranslatorGUI:
             btn.grid(row=0, column=idx, sticky=tk.EW, padx=2)
             if lbl == "Extract Glossary":
                 self.glossary_button = btn
-            elif lbl == "EPUB Converter":  # ADD THIS
+            elif lbl == "EPUB Converter":
                 self.epub_button = btn
 
         self.frame.grid_rowconfigure(12, weight=0)
@@ -540,6 +728,11 @@ class TranslatorGUI:
     
     def run_translation_thread(self):
         """Start translation in a separate thread"""
+        # Load modules first
+        if not self._lazy_load_modules():
+            self.append_log("❌ Failed to load translation modules")
+            return
+            
         if translation_main is None:
             self.append_log("❌ Translation module is not available")
             messagebox.showerror("Module Error", "Translation module is not available. Please ensure all files are present.")
@@ -629,7 +822,9 @@ class TranslatorGUI:
                     'REINFORCEMENT_FREQUENCY': self.reinforcement_freq_var.get(),
                     'RESET_FAILED_CHAPTERS': "1" if self.reset_failed_chapters_var.get() else "0",
                     'RETRY_TRUNCATED': "1" if self.retry_truncated_var.get() else "0",
-                    'MAX_RETRY_TOKENS': self.max_retry_tokens_var.get()
+                    'MAX_RETRY_TOKENS': self.max_retry_tokens_var.get(),
+                    'RETRY_DUPLICATE_BODIES': "1" if self.retry_duplicate_var.get() else "0",
+                    'DUPLICATE_LOOKBACK_CHAPTERS': self.duplicate_lookback_var.get()
                 })
                 
                 # Set chapter range if specified
@@ -713,6 +908,11 @@ class TranslatorGUI:
 
     def run_glossary_extraction_thread(self):
         """Start glossary extraction in a separate thread"""
+        # Load modules first
+        if not self._lazy_load_modules():
+            self.append_log("❌ Failed to load glossary modules")
+            return
+            
         if glossary_main is None:
             self.append_log("❌ Glossary extraction module is not available")
             messagebox.showerror("Module Error", "Glossary extraction module is not available.")
@@ -823,7 +1023,147 @@ class TranslatorGUI:
             # Clear the thread reference to fix double-click issue
             self.glossary_thread = None
             self.master.after(0, self.update_run_button)
-                    
+
+    def epub_converter(self):
+        """Start EPUB converter in a separate thread"""
+        # Load modules first
+        if not self._lazy_load_modules():
+            self.append_log("❌ Failed to load EPUB converter modules")
+            return
+            
+        if fallback_compile_epub is None:
+            self.append_log("❌ EPUB converter module is not available")
+            messagebox.showerror("Module Error", "EPUB converter module is not available.")
+            return
+
+        # Check if other processes are running
+        if hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive():
+            self.append_log("⚠️ Cannot run EPUB converter while translation is in progress.")
+            messagebox.showwarning("Process Running", "Please wait for translation to complete before converting EPUB.")
+            return
+            
+        if hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive():
+            self.append_log("⚠️ Cannot run EPUB converter while glossary extraction is in progress.")
+            messagebox.showwarning("Process Running", "Please wait for glossary extraction to complete before converting EPUB.")
+            return
+
+        if hasattr(self, 'epub_thread') and self.epub_thread and self.epub_thread.is_alive():
+            # Stop existing EPUB conversion
+            self.stop_epub_converter()
+            return
+
+        folder = filedialog.askdirectory(title="Select translation output folder")
+        if not folder:
+            return
+
+        self.epub_folder = folder  # Store for the thread
+        self.stop_requested = False
+        self.epub_thread = threading.Thread(target=self.run_epub_converter_direct, daemon=True)
+        self.epub_thread.start()
+        # Update buttons immediately after starting thread
+        self.master.after(100, self.update_run_button)
+
+    def run_epub_converter_direct(self):
+        """Run EPUB converter directly without blocking GUI"""
+        try:
+            folder = self.epub_folder
+            self.append_log("📦 Starting EPUB Converter...")
+            
+            # Call the EPUB converter function directly with callbacks
+            fallback_compile_epub(
+                folder, 
+                log_callback=self.append_log
+            )
+            
+            if not self.stop_requested:
+                # Update to use the new filename format
+                base_name = os.path.basename(folder)
+                out_file = os.path.join(folder, f"{base_name}.epub")
+                
+                # Check if the file was actually created
+                if os.path.exists(out_file):
+                    self.append_log("✅ EPUB Converter completed successfully!")
+                    # Show success message on main thread
+                    self.master.after(0, lambda: messagebox.showinfo("EPUB Compilation Success", f"Created: {out_file}"))
+                else:
+                    self.append_log("⚠️ EPUB file was not created. Check the logs for details.")
+            
+        except Exception as e:
+            error_str = str(e)
+            self.append_log(f"❌ EPUB Converter error: {error_str}")
+            
+            # Show error message on main thread (only for non-empty errors)
+            if "Document is empty" not in error_str:
+                self.master.after(0, lambda: messagebox.showerror("EPUB Converter Failed", f"Error: {error_str}"))
+            else:
+                self.append_log("📋 Check the log above for details about what went wrong.")
+                
+        finally:
+            # CRITICAL: Clear thread reference and update buttons
+            self.epub_thread = None
+            self.stop_requested = False
+            
+            # Schedule button update on main thread
+            self.master.after(0, self.update_run_button)
+            
+            # Also explicitly update the EPUB button (extra safety)
+            if hasattr(self, 'epub_button'):
+                self.master.after(0, lambda: self.epub_button.config(
+                    text="EPUB Converter",
+                    command=self.epub_converter,
+                    bootstyle="info",
+                    state=tk.NORMAL if fallback_compile_epub else tk.DISABLED
+                ))
+
+    def run_qa_scan(self):
+        """Run QA scan directly without subprocess"""
+        # Load modules first
+        if not self._lazy_load_modules():
+            self.append_log("❌ Failed to load QA scanner modules")
+            return
+            
+        if scan_html_folder is None:
+            self.append_log("❌ QA scanner module is not available")
+            messagebox.showerror("Module Error", "QA scanner module is not available.")
+            return
+
+        if hasattr(self, 'qa_thread') and self.qa_thread and self.qa_thread.is_alive():
+            self.stop_requested = True
+            self.append_log("⛔ QA scan stop requested.")
+            return
+            
+        folder_path = filedialog.askdirectory(title="Select Folder with HTML Files")
+        if not folder_path:
+            self.append_log("⚠️ QA scan canceled.")
+            return
+
+        self.append_log(f"🔍 Starting QA scan for folder: {folder_path}")
+        self.stop_requested = False
+
+        def run_scan():
+            # Update buttons when scan starts
+            self.master.after(0, self.update_run_button)
+            self.qa_button.config(text="Stop Scan", command=self.stop_qa_scan, bootstyle="danger")
+            
+            try:
+                scan_html_folder(folder_path, log=self.append_log, stop_flag=lambda: self.stop_requested)
+                self.append_log("✅ QA scan completed successfully.")
+            except Exception as e:
+                self.append_log(f"❌ QA scan error: {e}")
+            finally:
+                # Clear thread reference and update buttons when done
+                self.qa_thread = None
+                self.master.after(0, self.update_run_button)
+                self.master.after(0, lambda: self.qa_button.config(
+                    text="QA Scan", 
+                    command=self.run_qa_scan, 
+                    bootstyle="warning",
+                    state=tk.NORMAL if scan_html_folder else tk.DISABLED
+                ))
+
+        self.qa_thread = threading.Thread(target=run_scan, daemon=True)
+        self.qa_thread.start()
+
     def toggle_token_limit(self):
         """Toggle whether the token-limit entry is active or not."""
         if not self.token_limit_disabled:
@@ -958,142 +1298,12 @@ class TranslatorGUI:
         self.append_log("⏳ Please wait... stopping after current API call completes.")
         self.update_run_button()
 
-    def epub_converter(self):
-        """Start EPUB converter in a separate thread"""
-        if fallback_compile_epub is None:
-            self.append_log("❌ EPUB converter module is not available")
-            messagebox.showerror("Module Error", "EPUB converter module is not available.")
-            return
-
-        # Check if other processes are running
-        if hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive():
-            self.append_log("⚠️ Cannot run EPUB converter while translation is in progress.")
-            messagebox.showwarning("Process Running", "Please wait for translation to complete before converting EPUB.")
-            return
-            
-        if hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive():
-            self.append_log("⚠️ Cannot run EPUB converter while glossary extraction is in progress.")
-            messagebox.showwarning("Process Running", "Please wait for glossary extraction to complete before converting EPUB.")
-            return
-
-        if hasattr(self, 'epub_thread') and self.epub_thread and self.epub_thread.is_alive():
-            # Stop existing EPUB conversion
-            self.stop_epub_converter()
-            return
-
-        folder = filedialog.askdirectory(title="Select translation output folder")
-        if not folder:
-            return
-
-        self.epub_folder = folder  # Store for the thread
-        self.stop_requested = False
-        self.epub_thread = threading.Thread(target=self.run_epub_converter_direct, daemon=True)
-        self.epub_thread.start()
-        # Update buttons immediately after starting thread
-        self.master.after(100, self.update_run_button)
-
-    def run_epub_converter_direct(self):
-        """Run EPUB converter directly without blocking GUI"""
-        try:
-            folder = self.epub_folder
-            self.append_log("📦 Starting EPUB Converter...")
-            
-            # Call the EPUB converter function directly with callbacks
-            fallback_compile_epub(
-                folder, 
-                log_callback=self.append_log
-            )
-            
-            if not self.stop_requested:
-                # Update to use the new filename format
-                base_name = os.path.basename(folder)
-                out_file = os.path.join(folder, f"{base_name}.epub")
-                
-                # Check if the file was actually created
-                if os.path.exists(out_file):
-                    self.append_log("✅ EPUB Converter completed successfully!")
-                    # Show success message on main thread
-                    self.master.after(0, lambda: messagebox.showinfo("EPUB Compilation Success", f"Created: {out_file}"))
-                else:
-                    self.append_log("⚠️ EPUB file was not created. Check the logs for details.")
-            
-        except Exception as e:
-            error_str = str(e)
-            self.append_log(f"❌ EPUB Converter error: {error_str}")
-            
-            # Show error message on main thread (only for non-empty errors)
-            if "Document is empty" not in error_str:
-                self.master.after(0, lambda: messagebox.showerror("EPUB Converter Failed", f"Error: {error_str}"))
-            else:
-                self.append_log("📋 Check the log above for details about what went wrong.")
-                
-        finally:
-            # CRITICAL: Clear thread reference and update buttons
-            self.epub_thread = None
-            self.stop_requested = False
-            
-            # Schedule button update on main thread
-            self.master.after(0, self.update_run_button)
-            
-            # Also explicitly update the EPUB button (extra safety)
-            if hasattr(self, 'epub_button'):
-                self.master.after(0, lambda: self.epub_button.config(
-                    text="EPUB Converter",
-                    command=self.epub_converter,
-                    bootstyle="info",
-                    state=tk.NORMAL if fallback_compile_epub else tk.DISABLED
-                ))
-
     def stop_epub_converter(self):
         """Stop EPUB converter"""
         self.stop_requested = True
         self.append_log("❌ EPUB converter stop requested.")
         self.append_log("⏳ Please wait... stopping after current operation completes.")
         self.update_run_button()
-
-    def run_qa_scan(self):
-        """Run QA scan directly without subprocess"""
-        if scan_html_folder is None:
-            self.append_log("❌ QA scanner module is not available")
-            messagebox.showerror("Module Error", "QA scanner module is not available.")
-            return
-
-        if hasattr(self, 'qa_thread') and self.qa_thread and self.qa_thread.is_alive():
-            self.stop_requested = True
-            self.append_log("⛔ QA scan stop requested.")
-            return
-            
-        folder_path = filedialog.askdirectory(title="Select Folder with HTML Files")
-        if not folder_path:
-            self.append_log("⚠️ QA scan canceled.")
-            return
-
-        self.append_log(f"🔍 Starting QA scan for folder: {folder_path}")
-        self.stop_requested = False
-
-        def run_scan():
-            # Update buttons when scan starts
-            self.master.after(0, self.update_run_button)
-            self.qa_button.config(text="Stop Scan", command=self.stop_qa_scan, bootstyle="danger")
-            
-            try:
-                scan_html_folder(folder_path, log=self.append_log, stop_flag=lambda: self.stop_requested)
-                self.append_log("✅ QA scan completed successfully.")
-            except Exception as e:
-                self.append_log(f"❌ QA scan error: {e}")
-            finally:
-                # Clear thread reference and update buttons when done
-                self.qa_thread = None
-                self.master.after(0, self.update_run_button)
-                self.master.after(0, lambda: self.qa_button.config(
-                    text="QA Scan", 
-                    command=self.run_qa_scan, 
-                    bootstyle="warning",
-                    state=tk.NORMAL if scan_html_folder else tk.DISABLED
-                ))
-
-        self.qa_thread = threading.Thread(target=run_scan, daemon=True)
-        self.qa_thread.start()
 
     def stop_qa_scan(self):
         """Stop QA scan"""
@@ -1147,7 +1357,7 @@ class TranslatorGUI:
     def open_other_settings(self):
         top = tk.Toplevel(self.master)
         top.title("Other Settings")
-        top.geometry("730x1050")  # Fixed width, reasonable height
+        top.geometry("480x790")  # Fixed width, reasonable height
         
         # Create a canvas and scrollbar for scrolling
         canvas = tk.Canvas(top)
@@ -1327,13 +1537,6 @@ class TranslatorGUI:
         # Bind mouse wheel to canvas
         canvas.bind_all("<MouseWheel>", _on_mousewheel)
         
-        # Unbind when window is closed
-        def on_close():
-            canvas.unbind_all("<MouseWheel>")
-            top.destroy()
-        
-        top.protocol("WM_DELETE_WINDOW", on_close)
-
 
     def on_profile_select(self, event=None):
         """Load the selected profile's prompt into the text area."""
@@ -1612,6 +1815,23 @@ class TranslatorGUI:
 
 
 if __name__ == "__main__":
+    print("🚀 Starting Glossarion v1.6.6...")
+    
+    # Create dark themed window FIRST
     root = tb.Window(themename="darkly")
+    root.withdraw()  # Hide it initially
+    
+    # NOW show splash screen
+    splash, loading_label, version_label = show_splash()
+    
+    # Create GUI
     app = TranslatorGUI(root)
+    
+    # Show the main window and close splash
+    root.deiconify()  # Show the main window
+    splash.destroy()
+    
+    print("✅ Ready to use!")
+    
+    # Start the app
     root.mainloop()
