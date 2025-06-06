@@ -1657,7 +1657,8 @@ def cleanup_previous_extraction(output_dir):
 # =============================================================================
 
 def save_glossary(output_dir, chapters, instructions, language="korean"):
-    """Generate and save glossary from chapters with proper CJK support"""
+    """Generate and save glossary from chapters with translation support"""
+    import time  # For sleep between API calls
     samples = []
     for c in chapters:
         samples.append(c["body"])
@@ -1691,10 +1692,186 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
         # Default fallback - try to detect from first characters if available
         return lang_lower
     
-    # Get the base language type
-    base_language = detect_base_language(language)
-    print(f"[DEBUG] Auto-glossary: Profile '{language}' → Base language '{base_language}'")
+    def translate_terms_batch(terms_list, detected_language, target_lang="english"):
+        """Translate a batch of terms using the unified API client"""
+        if not terms_list:
+            return {}
+        
+        # Check if auto-translation is disabled (moved to calling function)
+        # This function assumes translation is wanted when called
+        
+        try:
+            # Get API settings
+            MODEL = os.getenv("MODEL", "gemini-1.5-flash")
+            API_KEY = (os.getenv("API_KEY") or 
+                       os.getenv("OPENAI_API_KEY") or 
+                       os.getenv("OPENAI_OR_Gemini_API_KEY") or
+                       os.getenv("GEMINI_API_KEY"))
+            
+            if not API_KEY:
+                print("⚠️ No API key found, skipping glossary translation")
+                return {term: term for term in terms_list}
+            
+            # Initialize client
+            from unified_api_client import UnifiedClient
+            client = UnifiedClient(model=MODEL, api_key=API_KEY)
+            
+            # Prepare terms for translation (limit batch size)
+            batch_size = 20  # Translate 20 terms at a time to avoid token limits
+            translations = {}
+            
+            for i in range(0, len(terms_list), batch_size):
+                batch = terms_list[i:i + batch_size]
+                
+                # Create translation prompt
+                terms_text = "\n".join(f"- {term}" for term in batch)
+                
+                # Language-specific examples and instructions
+                if detected_language == "korean":
+                    examples = """- 이민호 → Lee Min-ho
+- 선배 → senior/upperclassman
+- 사랑해 → I love you
+- 김치 → kimchi
+- 안녕하세요 → hello"""
+                    specific_instructions = "- For Korean names: use standard romanization (e.g., 김민수 → Kim Min-su)\n- For honorifics: provide English equivalent or meaning\n- For cultural terms: provide romanization if widely known, otherwise translate"
+                
+                elif detected_language == "japanese":
+                    examples = """- 田中太郎 → Tanaka Taro
+- さん → -san (honorific)
+- 先輩 → senpai/senior
+- ありがとう → thank you
+- 寿司 → sushi"""
+                    specific_instructions = "- For Japanese names: use standard romanization\n- For honorifics: keep common ones like -san, -kun, -chan with explanation\n- For cultural terms: use romanization if widely known (sushi, anime, etc.)"
+                
+                elif detected_language == "chinese":
+                    examples = """- 李明 → Li Ming
+- 师父 → shifu/master
+- 谢谢 → thank you
+- 功夫 → kung fu
+- 太极 → tai chi"""
+                    specific_instructions = "- For Chinese names: use pinyin romanization\n- For titles: provide meaning and/or pinyin if culturally significant\n- For cultural terms: use established English terms where available"
+                
+                else:
+                    examples = """- [Original] → [Translation]
+- [Name] → [Romanized Name]
+- [Title] → [English equivalent]"""
+                    specific_instructions = "- Provide appropriate romanization for names\n- Translate titles and terms to English equivalents"
+                
+                system_prompt = f"""You are a professional {detected_language} to English translator specializing in names and terms.
+
+INSTRUCTIONS:
+- Translate each term/name accurately
+- For names: provide romanization if applicable
+- For titles/honorifics: provide meaning/equivalent
+- For terms: provide direct translation or explanation
+- Keep translations concise (2-4 words max)
+- Maintain cultural context when needed
+
+{specific_instructions}
+
+Format your response as:
+Original Term → English Translation
+
+Examples:
+{examples}"""
+
+                user_prompt = f"""Translate these {detected_language} terms to English:
+
+{terms_text}
+
+Remember: Provide clear, concise translations. For names, use standard romanization. For honorifics and terms, provide the closest English equivalent or meaning."""
+
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ]
+                
+                print(f"📑 Translating batch {i//batch_size + 1} ({len(batch)} terms)...")
+                
+                # Get translation with lower temperature for consistency
+                response, _ = client.send(
+                    messages, 
+                    temperature=0.1,
+                    max_tokens=2048,
+                    context='glossary_translation'
+                )
+                
+                # Parse response to extract translations
+                batch_translations = parse_translation_response(response, batch)
+                translations.update(batch_translations)
+                
+                # Small delay between batches
+                time.sleep(1)
+            
+            return translations
+            
+        except Exception as e:
+            print(f"⚠️ Glossary translation failed: {e}")
+            print("📑 Continuing with original terms only")
+            return {term: term for term in terms_list}
     
+    def parse_translation_response(response, original_terms):
+        """Parse the AI response to extract term translations"""
+        translations = {}
+        
+        # Try to parse the response format: "Original → Translation"
+        lines = response.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if '→' in line:
+                try:
+                    # Split on arrow
+                    parts = line.split('→', 1)
+                    if len(parts) == 2:
+                        original = parts[0].strip().lstrip('- ').strip()
+                        translation = parts[1].strip()
+                        
+                        # Find matching original term
+                        for term in original_terms:
+                            if term in original or original in term:
+                                translations[term] = translation
+                                break
+                except Exception:
+                    continue
+            elif '=' in line:
+                # Alternative format: "Original = Translation"
+                try:
+                    parts = line.split('=', 1)
+                    if len(parts) == 2:
+                        original = parts[0].strip().lstrip('- ').strip()
+                        translation = parts[1].strip()
+                        
+                        for term in original_terms:
+                            if term in original or original in term:
+                                translations[term] = translation
+                                break
+                except Exception:
+                    continue
+        
+        # Fill in any missing translations with original terms
+        for term in original_terms:
+            if term not in translations:
+                translations[term] = term
+        
+        return translations
+    
+    # Get the base language type from profile name (fallback)
+    profile_language = detect_base_language(language)
+    
+    # Auto-detect actual language from content
+    combined_sample = ' '.join(clean_html(txt) for txt in samples[:3])  # Use first 3 chapters for detection
+    actual_language = detect_content_language(combined_sample)
+    
+    # Use actual detected language, fallback to profile if unknown
+    if actual_language in ['korean', 'japanese', 'chinese']:
+        base_language = actual_language
+        print(f"[DEBUG] Auto-detected content language: '{actual_language}' (profile: '{language}')")
+    else:
+        base_language = profile_language
+        print(f"[DEBUG] Using profile-based language: '{profile_language}' (content detection: '{actual_language}')")
+    
+    # Extract terms as before
     for txt in samples:
         clean_text = clean_html(txt)
         
@@ -1781,46 +1958,142 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
     suffixes = [s for s in suffixes if len(s) > 1]
     terms = [t for t in terms if len(t) > 1]
     
-    # Sort for consistency
-    names = sorted(list(set(names)))[:100]
-    suffixes = sorted(list(set(suffixes)))[:50]
-    terms = sorted(list(set(terms)))[:50]
+    # Sort for consistency and limit size (keep original limits)
+    names = sorted(list(set(names)))[:100]  # Original limit
+    suffixes = sorted(list(set(suffixes)))[:50]  # Original limit  
+    terms = sorted(list(set(terms)))[:50]  # Original limit
     
-    # Build glossary based on detected base language
+    print(f"📑 Extracted {len(names)} names, {len(suffixes)} honorifics, {len(terms)} terms")
+    
+    # Check if translation is enabled
+    translation_enabled = os.getenv("DISABLE_GLOSSARY_TRANSLATION", "0") != "1"
+    
+    if translation_enabled:
+        print("📑 Starting translation process...")
+        
+        # Translate all extracted terms
+        all_terms = []
+        all_terms.extend(names)
+        all_terms.extend(suffixes) 
+        all_terms.extend(terms)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_terms = []
+        for term in all_terms:
+            if term not in seen:
+                seen.add(term)
+                unique_terms.append(term)
+        
+        # Get translations
+        if unique_terms:
+            print(f"📑 Translating {len(unique_terms)} unique terms from {base_language} to English...")
+            translations = translate_terms_batch(unique_terms, base_language)
+            print(f"📑 Translation completed: {len(translations)} terms processed")
+        else:
+            translations = {}
+    else:
+        print("📑 Glossary translation disabled - using original terms only")
+        translations = {}
+    
+    # Helper function to format terms with translations (only if translation enabled)
+    def format_with_translation(term_list, category_name):
+        """Format terms as 'Original (Translation)' or just 'Original' if no translation"""
+        if not translation_enabled or not translations:
+            return term_list  # Return original list unchanged
+            
+        formatted = []
+        for term in term_list:
+            if term in translations and translations[term] != term:
+                # Only add translation if it's different from original
+                formatted.append(f"{term} ({translations[term]})")
+            else:
+                formatted.append(term)
+        return formatted
+    
+    # Build glossary with translations
     gloss = {}
     
     if base_language == "korean":
-        gloss["Korean_Names"] = names
-        gloss["Korean_Honorifics"] = suffixes
-        if terms:
-            gloss["Korean_Terms"] = terms
-    elif base_language == "japanese":
-        gloss["Japanese_Names"] = names
-        gloss["Japanese_Honorifics"] = suffixes
-        if terms:
-            gloss["Japanese_Family_Terms"] = terms
-    elif base_language == "chinese":
-        gloss["Chinese_Names"] = names
-        if terms:
-            gloss["Chinese_Titles"] = terms
+        if names:
+            gloss["Korean_Names"] = format_with_translation(names, "Korean Names")
         if suffixes:
-            gloss["Chinese_Terms"] = suffixes
+            gloss["Korean_Honorifics"] = format_with_translation(suffixes, "Korean Honorifics")
+        if terms:
+            gloss["Korean_Terms"] = format_with_translation(terms, "Korean Terms")
+    elif base_language == "japanese":
+        if names:
+            gloss["Japanese_Names"] = format_with_translation(names, "Japanese Names")
+        if suffixes:
+            gloss["Japanese_Honorifics"] = format_with_translation(suffixes, "Japanese Honorifics")
+        if terms:
+            gloss["Japanese_Family_Terms"] = format_with_translation(terms, "Japanese Family Terms")
+    elif base_language == "chinese":
+        if names:
+            gloss["Chinese_Names"] = format_with_translation(names, "Chinese Names")
+        if terms:
+            gloss["Chinese_Titles"] = format_with_translation(terms, "Chinese Titles")
+        if suffixes:
+            gloss["Chinese_Terms"] = format_with_translation(suffixes, "Chinese Terms")
     else:
         # Generic/unknown language
-        gloss["Names"] = names
+        if names:
+            gloss["Names"] = format_with_translation(names, "Names")
         if suffixes:
-            gloss["Honorifics"] = suffixes
+            gloss["Honorifics"] = format_with_translation(suffixes, "Honorifics")
         if terms:
-            gloss["Terms"] = terms
+            gloss["Terms"] = format_with_translation(terms, "Terms")
     
-    # Add a note about the glossary with original profile name
-    gloss["_note"] = f"Auto-generated glossary for '{language}' (detected as {base_language})"
+    # Add metadata about the glossary
+    if translation_enabled and translations:
+        gloss["_note"] = f"Auto-generated glossary for profile '{language}' (auto-detected: {base_language}) with English translations"
+        gloss["_translation_info"] = {
+            "total_terms_extracted": len(unique_terms) if 'unique_terms' in locals() else 0,
+            "terms_translated": len([t for t in translations.values() if t != ""]),
+            "translation_enabled": True,
+            "detected_language": base_language,
+            "profile_name": language
+        }
+    else:
+        gloss["_note"] = f"Auto-generated glossary for profile '{language}' (auto-detected: {base_language})"
+        if not translation_enabled:
+            gloss["_translation_info"] = {
+                "translation_enabled": False, 
+                "reason": "disabled",
+                "detected_language": base_language,
+                "profile_name": language
+            }
+        else:
+            gloss["_translation_info"] = {
+                "translation_enabled": True, 
+                "reason": "no_terms_or_failed",
+                "detected_language": base_language,
+                "profile_name": language
+            }
     
+    # Save glossary
     glossary_path = os.path.join(output_dir, "glossary.json")
     with open(glossary_path, 'w', encoding='utf-8') as f:
         json.dump(gloss, f, ensure_ascii=False, indent=2)
     
-    print(f"📑 Generated automatic glossary for profile '{language}' → {len(names)} names, {len(suffixes)} honorifics, {len(terms)} terms")
+    # Enhanced logging
+    total_entries = sum(len(v) for k, v in gloss.items() if not k.startswith('_'))
+    
+    if translation_enabled and translations:
+        print(f"📑 Generated automatic glossary with translations:")
+        print(f"   • Profile: '{language}' → Auto-detected: '{base_language}'")
+        print(f"   • Total entries: {total_entries}")
+        print(f"   • With translations: {len([t for t in translations.values() if t != ''])}")
+        print(f"   • Saved to: {glossary_path}")
+    else:
+        print(f"📑 Generated automatic glossary (original format):")
+        print(f"   • Profile: '{language}' → Auto-detected: '{base_language}'")
+        print(f"   • Total entries: {total_entries}")
+        print(f"   • Saved to: {glossary_path}")
+        if not translation_enabled:
+            print(f"   • Translation was disabled")
+    
+    return glossary_path
 
 # =============================================================================
 # API AND TRANSLATION UTILITIES
