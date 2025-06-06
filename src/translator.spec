@@ -2,10 +2,10 @@
 
 block_cipher = None
 
-# Core application files
-app_files = [
+# Add all your python files here
+added_files = [
     ('translator_gui.py', '.'),
-    ('splash_utils.py', '.'),
+    ('splash_utils.py', '.'),          # NEW - Added splash utilities
     ('TransateKRtoEN.py', '.'),
     ('extract_glossary_from_epub.py', '.'),
     ('epub_converter.py', '.'),
@@ -13,97 +13,187 @@ app_files = [
     ('unified_api_client.py', '.'),
     ('chapter_splitter.py', '.'),
     ('history_manager.py', '.'),
-    ('check_epub_directory.py', '.'),
-    ('direct_imports.py', '.'),
-    ('Halgakos.ico', '.'),
+    ('check_epub_directory.py', '.'),  # Added missing file
+    ('direct_imports.py', '.'),        # Added missing file
+    ('Halgakos.ico', '.'),  # Include icon
 ]
 
 a = Analysis(
     ['translator_gui.py'],
     pathex=[],
     binaries=[],
-    datas=app_files,
+    datas=added_files,
     hiddenimports=[
-        # ==================== CORE APPLICATION ====================
+        # Core modules
         'TransateKRtoEN',
-        'extract_glossary_from_epub', 
+        'extract_glossary_from_epub',
         'epub_converter',
         'scan_html_folder',
         'unified_api_client',
         'chapter_splitter',
         'history_manager',
-        'check_epub_directory',
-        'direct_imports',
-        'splash_utils',
+        'check_epub_directory',  # Added
+        'direct_imports',        # Added
+        'splash_utils',          # NEW - Added splash utilities
         
-        # ==================== GUI FRAMEWORK ====================
+        # EPUB processing
+        'ebooklib',
+        'ebooklib.epub',
+        'ebooklib.utils',  # Added for completeness
+        'bs4',
+        'BeautifulSoup',
+        'lxml',
+        'lxml.etree',
+        'lxml._elementpath',
+        'lxml.html',  # Added
+        'lxml.html.clean',  # Added
+        'html5lib',
+        'html',  # Added for html.escape
+        'html.parser',  # Added
+        
+        # GUI
         'ttkbootstrap',
-        'ttkbootstrap.constants',
+        'ttkbootstrap.constants',  # Added
         'tkinter',
         'tkinter.filedialog',
         'tkinter.messagebox',
         'tkinter.scrolledtext',
         'tkinter.simpledialog',
         'tkinter.ttk',
-        '_tkinter',
+        '_tkinter',  # Added for tkinter backend
         
-        # ==================== WEB & API ====================
-        'requests',
-        'requests.adapters',
-        'urllib3',
-        'certifi',
-        'chardet',
-        'idna',
-        
-        # ==================== AI CLIENTS ====================
-        'openai',
-        'google.generativeai',
-        'tiktoken',
-        'tiktoken_ext',
-        
-        # ==================== EPUB & HTML PROCESSING ====================
-        'ebooklib',
-        'ebooklib.epub',
-        'bs4',
-        'lxml',
-        'lxml.etree',
-        'html5lib',
-        
-        # ==================== IMAGE PROCESSING ====================
+        # PIL/Pillow - EXPANDED
         'PIL',
         'PIL.Image',
         'PIL.ImageTk',
-        'PIL.ImageOps',
+        'PIL._binary',
+        'PIL._imaging',
+        'PIL._imagingft',
+        'PIL._imagingmath',
+        'PIL._imagingtk',
+        'PIL.BmpImagePlugin',
+        'PIL.GifImagePlugin',
+        'PIL.JpegImagePlugin',
+        'PIL.PngImagePlugin',
+        'PIL.PpmImagePlugin',
+        'PIL.TiffImagePlugin',
+        'PIL.WebPImagePlugin',
         'PIL.IcoImagePlugin',
+        'PIL.MicImagePlugin',
+        'olefile',  # FIXES THE ERROR - this is what MicImagePlugin needs
         
-        # ==================== LANGUAGE & TEXT ====================
+        # AI/API clients
+        'google',  # Added base google module
+        'google.generativeai',
+        'google.ai',
+        'google.ai.generativelanguage',
+        'google.auth',  # Added for authentication
+        'google.auth.transport',  # Added
+        'google.auth.transport.requests',  # Added
+        'openai',
+        'tiktoken',
+        'tiktoken_ext',
+        'tiktoken_ext.openai_public',
+        'regex',  # Added - tiktoken dependency
+        
+        # Text processing
         'langdetect',
-        'unicodedata',
+        'langdetect.detector',  # Added
+        'langdetect.lang_detect_exception',  # Added
         'difflib',
+        'unicodedata',
         
-        # ==================== PROGRESS & UI ====================
+        # Progress/UI
         'tqdm',
+        'tqdm.auto',  # Added
+        'tqdm.std',   # Added
         
-        # ==================== CORE PYTHON ====================
+        # Network
+        'requests',
+        'requests.adapters',  # Added
+        'requests.models',    # Added
+        'requests.sessions',  # Added
+        'chardet',
+        'certifi',
+        'urllib3',
+        'urllib',     # Added
+        'urllib.parse',  # Added
+        'urllib.request',  # Added
+        'idna',
+        'ssl',  # Added
+        'socket',  # Added
+        
+        # Additional commonly missed modules
+        'pkg_resources',
+        'pkg_resources._vendor',  # Added
+        'encodings',
+        'encodings.utf_8',
+        'encodings.ascii',
+        'encodings.latin_1',
+        'encodings.cp1252',  # Added for Windows
+        'encodings.utf_16',  # Added
+        'encodings.utf_32',  # Added
+        'codecs',
+        
+        # Standard library modules that might be missed
         'json',
-        'os',
-        'sys',
-        'time',
+        'csv',
+        'hashlib',
+        'tempfile',
+        'shutil',
         'threading',
         'queue',
-        'zipfile',
-        'shutil',
-        'tempfile',
-        'hashlib',
-        'logging',
-        'collections',
         're',
+        'zipfile',
+        'mimetypes',
+        'collections',
+        'collections.abc',  # Added
         'io',
-        'pathlib',
+        'logging',
+        'logging.handlers',  # Added
+        'time',
+        'datetime',  # Added
+        'os',
+        'os.path',  # Added
+        'sys',
+        'dataclasses',
+        'typing',
+        'typing_extensions',  # Added - often needed
+        'argparse',
+        'subprocess',
+        'platform',
+        'pathlib',  # Added
+        'contextlib',  # Added - used by history_manager
+        'functools',  # Added
+        'itertools',  # Added
+        'warnings',  # Added
+        'copy',  # Added
+        'weakref',  # Added
+        'locale',  # Added
+        'struct',  # Added
+        'base64',  # Added - might be used by APIs
+        'hmac',  # Added - might be used by APIs
+        'secrets',  # Added - might be used by APIs
+        'uuid',  # Added - might be used by APIs
+        'email',  # Added - might be used by requests
+        'email.utils',  # Added
+        'http',  # Added
+        'http.client',  # Added
+        'xml',  # Added - used by BeautifulSoup
+        'xml.etree',  # Added
+        'xml.etree.ElementTree',  # Added
     ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
+    excludes=[
+        'matplotlib',  # Exclude if not used
+        'numpy',       # Exclude if not used
+        'pandas',      # Exclude if not used
+        'scipy',       # Exclude if not used
+        'pytest',      # Exclude test frameworks
+        'nose',        # Exclude test frameworks
+    ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -119,17 +209,17 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='Glossarion v1.6.6',
+    name='Glossarion v1.6.5',  # Updated version
     debug=False,
-    bootloader_ignore_signals=True,
+    bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,
+    console=False,  # Set to True if you want to see console output for debugging
     disable_windowed_traceback=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='Halgakos.ico'
+    icon='Halgakos.ico'  # Icon path
 )
