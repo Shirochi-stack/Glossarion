@@ -4,7 +4,7 @@ import logging
 import shutil
 import threading
 import queue
-import os, sys, io, zipfile, time, re, mimetypes, tiktoken
+import os, sys, io, zipfile, time, re, mimetypes, subprocess, tiktoken
 import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup
