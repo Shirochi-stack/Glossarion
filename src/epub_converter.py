@@ -53,66 +53,68 @@ def extract_translated_title_from_html(html_content, chapter_num=None, filename=
         title_tag = soup.find('title')
         if title_tag and title_tag.string:
             title_text = title_tag.string.strip()
-            if title_text and not title_text.lower() in ['untitled', 'chapter', '']:
-                candidates.append((title_text, 0.9, "title_tag"))
+            if title_text and len(title_text) > 1 and title_text.lower() not in ['untitled', 'chapter']:
+                candidates.append((title_text, 0.95, "title_tag"))
         
         # Strategy 2: Look for h1 tags (high confidence)
         h1_tags = soup.find_all('h1')
         for h1 in h1_tags:
             h1_text = h1.get_text(strip=True)
-            if h1_text and len(h1_text) < 200:  # Reasonable title length
-                # Check if it looks like a chapter title
-                if any(pattern in h1_text.lower() for pattern in ['chapter', 'part', 'episode', ':']):
-                    candidates.append((h1_text, 0.85, "h1_chapter"))
-                else:
-                    candidates.append((h1_text, 0.7, "h1_generic"))
+            if h1_text and len(h1_text) < 300:
+                candidates.append((h1_text, 0.9, "h1_tag"))
         
-        # Strategy 3: Look for h2 tags (medium confidence)
+        # Strategy 3: Look for h2 tags (medium-high confidence)
         h2_tags = soup.find_all('h2')
         for h2 in h2_tags:
             h2_text = h2.get_text(strip=True)
-            if h2_text and len(h2_text) < 150:
-                if any(pattern in h2_text.lower() for pattern in ['chapter', 'part', 'episode', ':']):
-                    candidates.append((h2_text, 0.7, "h2_chapter"))
-                else:
-                    candidates.append((h2_text, 0.5, "h2_generic"))
+            if h2_text and len(h2_text) < 250:
+                candidates.append((h2_text, 0.8, "h2_tag"))
         
-        # Strategy 4: Look for bold/strong text in first few elements (low confidence)
-        first_elements = soup.find_all(['p', 'div'])[:3]
+        # Strategy 4: Look for h3 tags (medium confidence) 
+        h3_tags = soup.find_all('h3')
+        for h3 in h3_tags:
+            h3_text = h3.get_text(strip=True)
+            if h3_text and len(h3_text) < 200:
+                candidates.append((h3_text, 0.7, "h3_tag"))
+        
+        # Strategy 5: Look for bold/strong text in first few elements
+        first_elements = soup.find_all(['p', 'div'])[:5]
         for elem in first_elements:
             bold_tags = elem.find_all(['b', 'strong'])
             for bold in bold_tags:
                 bold_text = bold.get_text(strip=True)
-                if bold_text and len(bold_text) < 100:
-                    if any(pattern in bold_text.lower() for pattern in ['chapter', 'part', 'episode']):
-                        candidates.append((bold_text, 0.4, "bold_chapter"))
-        
-        # Strategy 5: Extract from filename if available (fallback)
-        if filename:
-            filename_match = re.search(r'response_\d+_(.+?)\.html', filename)
-            if filename_match:
-                filename_title = filename_match.group(1).replace('_', ' ').title()
-                candidates.append((filename_title, 0.3, "filename"))
+                if bold_text and 3 <= len(bold_text) <= 150:
+                    candidates.append((bold_text, 0.6, "bold_text"))
         
         # Strategy 6: Look for patterns in first paragraph
         first_p = soup.find('p')
         if first_p:
             p_text = first_p.get_text(strip=True)
-            # Look for patterns like "Chapter X: Title" at the beginning
-            chapter_pattern = re.match(r'^(Chapter\s+\d+\s*[:\-\u2013\u2014]\s*)(.{5,80})(?:\.|$)', p_text, re.IGNORECASE)
+            # Look for patterns like "Chapter X: Title"
+            chapter_pattern = re.match(r'^(Chapter\s+\d+\s*[:\-\u2013\u2014]\s*)(.{3,100})(?:\.|$|Chapter)', p_text, re.IGNORECASE)
             if chapter_pattern:
                 title_part = chapter_pattern.group(2).strip()
-                if title_part:
-                    candidates.append((f"Chapter {chapter_num}: {title_part}" if chapter_num else title_part, 0.8, "paragraph_pattern"))
+                if title_part and len(title_part) >= 3:
+                    candidates.append((title_part, 0.8, "paragraph_pattern"))
+            elif len(p_text) <= 100:
+                # Might be a standalone title
+                candidates.append((p_text, 0.4, "paragraph_standalone"))
+        
+        # Strategy 7: Extract from filename if available (fallback)
+        if filename:
+            filename_match = re.search(r'response_\d+_(.+?)\.html', filename)
+            if filename_match:
+                filename_title = filename_match.group(1).replace('_', ' ').title()
+                if len(filename_title) > 2:
+                    candidates.append((filename_title, 0.3, "filename"))
         
         # Filter and rank candidates
         if candidates:
-            # Remove duplicates and sort by confidence
             unique_candidates = {}
             for title, confidence, source in candidates:
                 # Clean title
                 title = clean_extracted_title(title)
-                if title and len(title) > 2:  # Minimum meaningful length
+                if title and len(title) > 2 and is_valid_title(title):
                     if title not in unique_candidates or unique_candidates[title][1] < confidence:
                         unique_candidates[title] = (title, confidence, source)
             
@@ -120,10 +122,7 @@ def extract_translated_title_from_html(html_content, chapter_num=None, filename=
                 # Sort by confidence
                 sorted_candidates = sorted(unique_candidates.values(), key=lambda x: x[1], reverse=True)
                 best_title, best_confidence, best_source = sorted_candidates[0]
-                
-                # Validate the best title
-                if is_valid_title(best_title):
-                    return best_title, best_confidence
+                return best_title, best_confidence
         
         # Fallback: generate from chapter number
         if chapter_num:
@@ -150,41 +149,47 @@ def clean_extracted_title(title):
     # Normalize whitespace
     title = re.sub(r'\s+', ' ', title).strip()
     
-    # Remove common prefixes that might be artifacts
-    prefixes_to_remove = [
-        r'^(Chapter\s+\d+\s*[:\-\u2013\u2014]\s*)+',  # Multiple "Chapter X:" prefixes
-        r'^[:\-\u2013\u2014\s]+',  # Leading punctuation
-    ]
+    # Remove leading punctuation only
+    title = re.sub(r'^[:\-\u2013\u2014\s]+', '', title).strip()
     
-    for pattern in prefixes_to_remove:
-        title = re.sub(pattern, '', title, flags=re.IGNORECASE).strip()
+    # Remove quotes if they wrap the entire title
+    if (title.startswith('"') and title.endswith('"')) or (title.startswith("'") and title.endswith("'")):
+        title = title[1:-1].strip()
     
     # Truncate if too long
-    if len(title) > 100:
-        title = title[:97] + "..."
+    if len(title) > 150:
+        title = title[:147] + "..."
     
     return title
 
 
 def is_valid_title(title):
     """Check if extracted title is valid and meaningful"""
-    if not title or len(title) < 3:
+    if not title or len(title) < 2:
         return False
     
     # Check for common invalid patterns
     invalid_patterns = [
         r'^\d+$',  # Just numbers
-        r'^[^\w]+$',  # Just punctuation
-        r'^(untitled|chapter|part)$',  # Generic words only
-        r'^[a-z\s]*$',  # All lowercase (might be generic)
+        r'^[^\w\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]+$',  # Just punctuation (allow Unicode)
+        r'^(untitled)$',  # Just "untitled"
     ]
     
     for pattern in invalid_patterns:
         if re.match(pattern, title.lower().strip()):
             return False
     
+    # Skip common filler phrases
+    title_lower = title.lower().strip()
+    filler_phrases = [
+        'click here', 'read more', 'continue reading', 'next chapter',
+        'previous chapter', 'table of contents', 'back to top'
+    ]
+    
+    if any(phrase in title_lower for phrase in filler_phrases):
+        return False
+    
     return True
-
 
 def extract_chapter_info_from_filename(filename):
     """Extract chapter number and basic info from filename"""
@@ -1096,7 +1101,7 @@ def fallback_compile_epub(base_dir, log_callback=None):
         chapter_tuples.sort(key=lambda x: x[0])
         log(f"[DEBUG] Found {len(chapter_tuples)} unique chapters to process")
 
-        # Add chapters WITH EXTRACTED TITLES
+        # Add chapters WITH EXTRACTED TITLES - IMPROVED VERSION
         log(f"\n📚 Processing {len(chapter_tuples)} chapters with extracted titles...")
         for num, fn in chapter_tuples:
             path = os.path.join(OUTPUT_DIR, fn)
@@ -1117,14 +1122,43 @@ def fallback_compile_epub(base_dir, log_callback=None):
                 # Clean the content
                 raw = clean_chapter_content(raw)
                 
-                # IMPROVED: Get extracted title instead of metadata title
+                # IMPROVED: Get title with multiple fallback attempts
+                title = None
+                confidence = 0.0
+                title_source = "fallback"
+                
+                # First: Try pre-analyzed titles
                 if num in chapter_titles_info:
                     title, confidence, source_filename = chapter_titles_info[num]
-                    log(f"[DEBUG] Using extracted title: '{title}' (confidence: {confidence:.2f})")
-                else:
-                    # Fallback to filename or generic title
+                    title_source = "pre-analyzed"
+                    log(f"[DEBUG] Using pre-analyzed title: '{title}' (confidence: {confidence:.2f})")
+                
+                # Second: If low confidence or no title, re-extract from current content
+                if not title or confidence < 0.5:
+                    log(f"[DEBUG] Re-extracting title from content (current confidence: {confidence:.2f})")
+                    backup_title, backup_confidence = extract_translated_title_from_html(raw, num, fn)
+                    
+                    if backup_confidence > confidence:
+                        title = backup_title
+                        confidence = backup_confidence
+                        title_source = "re-extracted"
+                        log(f"[DEBUG] Using re-extracted title: '{title}' (confidence: {confidence:.2f})")
+                
+                # Third: Clean and validate the title
+                if title:
+                    original_title = title
+                    title = clean_extracted_title(title)
+                    if not is_valid_title(title):
+                        log(f"[DEBUG] Title '{original_title}' failed validation")
+                        title = None
+                
+                # Final fallback
+                if not title:
                     title = f"Chapter {num}"
-                    log(f"[DEBUG] No extracted title found, using fallback: '{title}'")
+                    title_source = "final_fallback"
+                    log(f"[DEBUG] Using final fallback title: '{title}'")
+                
+                log(f"[INFO] ✅ Final title for chapter {num}: '{title}' (source: {title_source})")
                 
                 # Prepare CSS links
                 chapter_css_links = []
@@ -1151,7 +1185,7 @@ def fallback_compile_epub(base_dir, log_callback=None):
 </body>
 </html>'''
                 
-                # Process images in content
+                # Process images in content (existing code continues...)
                 try:
                     soup = BeautifulSoup(xhtml_content, 'lxml-xml')
                 except:
@@ -1195,7 +1229,7 @@ def fallback_compile_epub(base_dir, log_callback=None):
                 safe_fn = f"chapter_{num:03d}.xhtml"
                 
                 chap = epub.EpubHtml(
-                    title=title,  # This now uses the extracted translated title!
+                    title=title,  # This now uses the improved extracted translated title!
                     file_name=safe_fn,
                     lang=meta.get("language", "en")
                 )
@@ -1232,7 +1266,7 @@ def fallback_compile_epub(base_dir, log_callback=None):
                 toc.append(chap)  # The TOC will now show the extracted translated title!
                 chapters_added += 1
                 
-                log(f"✅ Added chapter {num}: {title} (File: {safe_fn})")
+                log(f"✅ Added chapter {num}: '{title}' (File: {safe_fn}, Source: {title_source})")
                 
                 # Verify CSS links
                 if css_items:
