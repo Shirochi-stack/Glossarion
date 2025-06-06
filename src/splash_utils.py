@@ -1,169 +1,160 @@
-import subprocess
-import os
-import sys
-import atexit
-import threading
 import time
+import atexit
 
 class SplashManager:
-    """Manages the splash screen for both development and packaged executable"""
+    """Simple splash screen manager that works with main thread"""
     
     def __init__(self):
-        self.splash_process = None
-        self.splash_thread = None
-        self._splash_active = False
+        self.splash_window = None
+        self._status_text = "Initializing..."
         
     def start_splash(self):
-        """Start the splash screen - works for both .py and .exe versions"""
+        """Create splash window on main thread"""
         try:
-            # Check if we're running as a packaged executable
-            if getattr(sys, 'frozen', False):
-                # Running as .exe - use embedded splash screen
-                print("🎨 Starting embedded splash screen...")
-                self._start_embedded_splash()
-            else:
-                # Running as .py files - use subprocess
-                print("🎨 Starting splash screen subprocess...")
-                self._start_subprocess_splash()
-                
+            import tkinter as tk
+            
+            print("🎨 Starting splash screen...")
+            
+            # Create splash window on main thread
+            self.splash_window = tk.Tk()
+            self.splash_window.title("Loading Glossarion...")
+            self.splash_window.geometry("450x350")
+            self.splash_window.configure(bg='#2b2b2b')
+            self.splash_window.resizable(False, False)
+            self.splash_window.overrideredirect(True)
+            
+            # Center the window
+            self.splash_window.update_idletasks()
+            x = (self.splash_window.winfo_screenwidth() // 2) - 225
+            y = (self.splash_window.winfo_screenheight() // 2) - 175
+            self.splash_window.geometry(f"450x350+{x}+{y}")
+            
+            # Add content
+            main_frame = tk.Frame(self.splash_window, bg='#2b2b2b', relief='raised', bd=2)
+            main_frame.pack(fill='both', expand=True, padx=2, pady=2)
+            
+            # Load the actual Halgakos.ico icon
+            self._load_icon(main_frame)
+            
+            # Title
+            title_label = tk.Label(main_frame, text="Glossarion v1.6.6", 
+                                  bg='#2b2b2b', fg='#4a9eff', font=('Arial', 20, 'bold'))
+            title_label.pack(pady=(10, 5))
+            
+            # Subtitle
+            subtitle_label = tk.Label(main_frame, text="Advanced EPUB Translation Suite", 
+                                     bg='#2b2b2b', fg='#cccccc', font=('Arial', 12))
+            subtitle_label.pack(pady=(0, 15))
+            
+            # Status
+            self.status_label = tk.Label(main_frame, text=self._status_text, 
+                                        bg='#2b2b2b', fg='#ffffff', font=('Arial', 11))
+            self.status_label.pack(pady=(10, 10))
+            
+            # Progress bar
+            progress_frame = tk.Frame(main_frame, bg='#2b2b2b')
+            progress_frame.pack(pady=(5, 20))
+            self.progress_canvas = tk.Canvas(progress_frame, width=300, height=20, 
+                                           bg='#404040', highlightthickness=0)
+            self.progress_canvas.pack()
+            
+            # Version info
+            version_label = tk.Label(main_frame, text="Starting up...", 
+                                   bg='#2b2b2b', fg='#888888', font=('Arial', 9))
+            version_label.pack(side='bottom', pady=(0, 15))
+            
+            # Start progress animation
+            self.progress_pos = 0
+            self._animate_progress()
+            
+            # Update the display
+            self.splash_window.update()
+            
             # Register cleanup
             atexit.register(self.close_splash)
             return True
-                
+            
         except Exception as e:
             print(f"⚠️ Could not start splash: {e}")
             return False
     
-    def _start_embedded_splash(self):
-        """Start splash screen in the same process (for .exe)"""
-        def run_splash():
-            try:
-                # Import here to avoid circular imports
-                from splash_screen import SplashScreen
-                self._splash_active = True
-                
-                splash = SplashScreen()
-                
-                # Run splash in separate thread
-                def splash_loop():
-                    try:
-                        # Start the splash screen
-                        splash.root.after(0, splash.root.mainloop)
-                    except Exception as e:
-                        print(f"Splash screen error: {e}")
-                    finally:
-                        self._splash_active = False
-                
-                # Start splash loop in thread
-                splash_thread = threading.Thread(target=splash_loop, daemon=True)
-                splash_thread.start()
-                
-                # Keep reference to splash for cleanup
-                self.embedded_splash = splash
-                
-            except Exception as e:
-                print(f"⚠️ Embedded splash failed: {e}")
-                self._splash_active = False
-        
-        # Start splash in background thread
-        self.splash_thread = threading.Thread(target=run_splash, daemon=True)
-        self.splash_thread.start()
-    
-    def _start_subprocess_splash(self):
-        """Start splash screen as subprocess (for .py development)"""
+    def _load_icon(self, parent):
+        """Load the Halgakos.ico icon"""
         try:
-            # Get the directory where this script is located
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            splash_script = os.path.join(script_dir, 'splash_screen.py')
+            # Get icon path - handle both development and packaged modes
+            import os
+            import sys
+            import tkinter as tk
             
-            # Start splash process with proper python executable
-            if os.path.exists(splash_script):
-                # Use python.exe explicitly for development
-                python_exe = sys.executable
-                if 'python' not in os.path.basename(python_exe).lower():
-                    # If sys.executable doesn't look like python, try to find it
-                    import shutil
-                    python_exe = shutil.which('python') or shutil.which('python3') or sys.executable
-                
-                self.splash_process = subprocess.Popen([
-                    python_exe, splash_script
-                ], cwd=script_dir, 
-                   creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0)
-                
-                print("🎨 Splash screen subprocess started")
+            if getattr(sys, 'frozen', False):
+                # Running as .exe
+                base_dir = sys._MEIPASS
             else:
-                print("⚠️ Splash script not found, continuing without splash")
-                
-        except Exception as e:
-            print(f"⚠️ Subprocess splash failed: {e}")
-    
-    def update_status(self, message):
-        """Update the splash screen status"""
-        try:
-            # For subprocess version
-            with open('splash_status.txt', 'w', encoding='utf-8') as f:
-                f.write(message)
+                # Running as .py files
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+            
+            ico_path = os.path.join(base_dir, 'Halgakos.ico')
+            
+            if os.path.isfile(ico_path):
+                try:
+                    # Try PIL first for better quality
+                    from PIL import Image, ImageTk
+                    pil_image = Image.open(ico_path)
+                    pil_image = pil_image.resize((128, 128), Image.Resampling.LANCZOS)
+                    icon_photo = ImageTk.PhotoImage(pil_image, master=self.splash_window)
+                    icon_label = tk.Label(parent, image=icon_photo, bg='#2b2b2b')
+                    icon_label.image = icon_photo  # Keep reference
+                    icon_label.pack(pady=(20, 10))
+                    return
+                except ImportError:
+                    # Fallback to basic tkinter
+                    try:
+                        icon_image = tk.PhotoImage(file=ico_path)
+                        icon_label = tk.Label(parent, image=icon_image, bg='#2b2b2b')
+                        icon_label.image = icon_image
+                        icon_label.pack(pady=(20, 10))
+                        return
+                    except tk.TclError:
+                        pass
         except Exception:
             pass
         
-        # For embedded version
-        if hasattr(self, 'embedded_splash'):
+        # Fallback emoji if icon loading fails
+        import tkinter as tk
+        icon_frame = tk.Frame(parent, bg='#4a9eff', width=128, height=128)
+        icon_frame.pack(pady=(20, 10))
+        icon_frame.pack_propagate(False)
+        
+        icon_label = tk.Label(icon_frame, text="📚", font=('Arial', 64), 
+                             bg='#4a9eff', fg='white')
+        icon_label.pack(expand=True)
+
+    def _animate_progress(self):
+        """Animate progress bar"""
+        if self.splash_window and self.splash_window.winfo_exists():
             try:
-                def update_ui():
-                    if hasattr(self.embedded_splash, 'status_label'):
-                        self.embedded_splash.status_label.config(text=message)
-                
-                if hasattr(self.embedded_splash, 'root'):
-                    self.embedded_splash.root.after(0, update_ui)
-            except Exception:
+                self.progress_canvas.delete("progress")
+                self.progress_pos = (self.progress_pos + 12) % 320
+                self.progress_canvas.create_rectangle(0, 0, self.progress_pos, 20, fill='#4a9eff', tags="progress")
+                self.splash_window.after(120, self._animate_progress)
+            except:
                 pass
+    
+    def update_status(self, message):
+        """Update splash status"""
+        self._status_text = message
+        try:
+            if self.splash_window and hasattr(self, 'status_label'):
+                self.status_label.config(text=message)
+                self.splash_window.update()
+        except:
+            pass
     
     def close_splash(self):
         """Close the splash screen"""
         try:
-            # Signal splash to close (for subprocess version)
-            with open('splash_close.signal', 'w') as f:
-                f.write('close')
-            
-            # Close subprocess if running
-            if self.splash_process:
-                try:
-                    self.splash_process.terminate()
-                    self.splash_process.wait(timeout=2)
-                except:
-                    try:
-                        self.splash_process.kill()
-                    except:
-                        pass
-                self.splash_process = None
-            
-            # Close embedded splash if running
-            if hasattr(self, 'embedded_splash'):
-                try:
-                    if hasattr(self.embedded_splash, 'close'):
-                        self.embedded_splash.close()
-                    elif hasattr(self.embedded_splash, 'root'):
-                        self.embedded_splash.root.quit()
-                        self.embedded_splash.root.destroy()
-                except Exception as e:
-                    print(f"Error closing embedded splash: {e}")
-            
-            self._splash_active = False
-            
-        except Exception as e:
-            print(f"Error during splash cleanup: {e}")
-        finally:
-            # Clean up files
-            try:
-                for file in ['splash_status.txt', 'splash_close.signal']:
-                    if os.path.exists(file):
-                        os.remove(file)
-            except:
-                pass
-    
-    def is_active(self):
-        """Check if splash screen is still active"""
-        if getattr(sys, 'frozen', False):
-            return self._splash_active
-        else:
-            return self.splash_process is not None and self.splash_process.poll() is None
+            if self.splash_window and self.splash_window.winfo_exists():
+                self.splash_window.destroy()
+                self.splash_window = None
+        except:
+            pass
