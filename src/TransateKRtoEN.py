@@ -1847,51 +1847,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
     names = sorted(list(set(names)))[:100]
     suffixes = sorted(list(set(suffixes)))[:50]
     terms = sorted(list(set(terms)))[:50]
-    
-    # ============================================================================
-    # APPLY TRANSLATION - THIS SECTION IS MISSING IN YOUR CODE!
-    # ============================================================================
-
-    # Apply simple translation - NO MORE 20-term limit!
-    all_terms = list(names) + list(suffixes) + list(terms)
-    if all_terms:
-        print(f"📑 Attempting to translate {len(all_terms)} terms...")
-        translations = simple_translate_terms(all_terms, base_language)
         
-        # Check if translation was successful by counting actual translations
-        successful_translations = 0
-        for original, translated in translations.items():
-            if translated != original and translated.strip():
-                successful_translations += 1
-        
-        translation_enabled = successful_translations > 0
-        
-        if translation_enabled:
-            print(f"📑 Successfully got {successful_translations} translations out of {len(all_terms)} terms")
-        else:
-            print(f"📑 No translations were generated (all terms remained unchanged)")
-    else:
-        translations = {}
-        translation_enabled = False
-
-    # Helper function to add translations - simplified
-    def add_translation(term_list):
-        if not translations:
-            return term_list
-        
-        formatted = []
-        for term in term_list:
-            if term in translations:
-                translated = translations[term]
-                if translated != term and translated.strip():
-                    # Show both original and translation
-                    formatted.append(f"{term} ({translated})")
-                else:
-                    # No translation available, just show original
-                    formatted.append(term)
-            else:
-                formatted.append(term)
-        return formatted    
 
     # ============================================================================
     # IMPROVED TRANSLATION FUNCTIONS
@@ -2080,6 +2036,50 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
                             break
         
         return translations
+    # ============================================================================
+    # APPLY TRANSLATION
+    # ============================================================================
+
+    # Apply simple translation - NO MORE 20-term limit!
+    all_terms = list(names) + list(suffixes) + list(terms)
+    if all_terms:
+        print(f"📑 Attempting to translate {len(all_terms)} terms...")
+        translations = simple_translate_terms(all_terms, base_language)
+        
+        # Check if translation was successful by counting actual translations
+        successful_translations = 0
+        for original, translated in translations.items():
+            if translated != original and translated.strip():
+                successful_translations += 1
+        
+        translation_enabled = successful_translations > 0
+        
+        if translation_enabled:
+            print(f"📑 Successfully got {successful_translations} translations out of {len(all_terms)} terms")
+        else:
+            print(f"📑 No translations were generated (all terms remained unchanged)")
+    else:
+        translations = {}
+        translation_enabled = False
+
+    # Helper function to add translations - simplified
+    def add_translation(term_list):
+        if not translations:
+            return term_list
+        
+        formatted = []
+        for term in term_list:
+            if term in translations:
+                translated = translations[term]
+                if translated != term and translated.strip():
+                    # Show both original and translation
+                    formatted.append(f"{term} ({translated})")
+                else:
+                    # No translation available, just show original
+                    formatted.append(term)
+            else:
+                formatted.append(term)
+        return formatted        
 # =============================================================================
 # API AND TRANSLATION UTILITIES
 # =============================================================================
