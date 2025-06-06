@@ -84,7 +84,7 @@ class TranslatorGUI:
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
-        master.title("Glossarion v1.6.7")
+        master.title("Glossarion v1.6.8")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1550, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
@@ -138,6 +138,9 @@ class TranslatorGUI:
         
         # Set max_output_tokens from config
         self.max_output_tokens = self.config.get('max_output_tokens', self.max_output_tokens)
+        
+        # Load token limit disabled state from config
+        self.token_limit_disabled = self.config.get('token_limit_disabled', False)
         
         # ─── restore rolling-summary state from config.json ───
         self.rolling_summary_var = tk.BooleanVar(
@@ -203,11 +206,18 @@ class TranslatorGUI:
         # Initialize GUI components
         self._setup_gui()
 
+
     def _lazy_load_modules(self, splash_callback=None):
-        """Load heavy modules only when needed"""
-        if self._modules_loaded or self._modules_loading:
-            return self._modules_loaded
+        """Load heavy modules only when needed - optimized version"""
+        if self._modules_loaded:
+            return True
             
+        if self._modules_loading:
+            # Wait for loading to complete
+            while self._modules_loading and not self._modules_loaded:
+                time.sleep(0.1)
+            return self._modules_loaded
+                
         self._modules_loading = True
         
         if splash_callback:
@@ -220,56 +230,62 @@ class TranslatorGUI:
         success_count = 0
         total_modules = 4
         
-        try:
-            if splash_callback:
-                splash_callback("Loading translation engine...")
-            from TransateKRtoEN import main as translation_main, set_stop_flag as translation_stop_flag, is_stop_requested as translation_stop_check
-            success_count += 1
-        except ImportError as e:
-            translation_main = None
-            translation_stop_flag = None
-            translation_stop_check = None
-            print(f"Warning: Could not import TransateKRtoEN module: {e}")
-
-        try:
-            if splash_callback:
-                splash_callback("Loading glossary extractor...")
-            from extract_glossary_from_epub import main as glossary_main, set_stop_flag as glossary_stop_flag, is_stop_requested as glossary_stop_check
-            success_count += 1
-        except ImportError as e:
-            glossary_main = None
-            glossary_stop_flag = None
-            glossary_stop_check = None
-            print(f"Warning: Could not import extract_glossary_from_epub module: {e}")
-
-        try:
-            if splash_callback:
-                splash_callback("Loading EPUB converter...")
-            from epub_converter import fallback_compile_epub
-            success_count += 1
-        except ImportError as e:
-            fallback_compile_epub = None
-            print(f"Warning: Could not import epub_converter module: {e}")
-
-        try:
-            if splash_callback:
-                splash_callback("Loading QA scanner...")
-            from scan_html_folder import scan_html_folder
-            success_count += 1
-        except ImportError as e:
-            scan_html_folder = None
-            print(f"Warning: Could not import scan_html_folder module: {e}")
-            
+        # Load modules with better error handling and progress feedback
+        modules_to_load = [
+            ('TransateKRtoEN', 'translation engine'),
+            ('extract_glossary_from_epub', 'glossary extractor'),
+            ('epub_converter', 'EPUB converter'),
+            ('scan_html_folder', 'QA scanner')
+        ]
+        
+        for module_name, display_name in modules_to_load:
+            try:
+                if splash_callback:
+                    splash_callback(f"Loading {display_name}...")
+                
+                if module_name == 'TransateKRtoEN':
+                    from TransateKRtoEN import main as translation_main, set_stop_flag as translation_stop_flag, is_stop_requested as translation_stop_check
+                    success_count += 1
+                    
+                elif module_name == 'extract_glossary_from_epub':
+                    from extract_glossary_from_epub import main as glossary_main, set_stop_flag as glossary_stop_flag, is_stop_requested as glossary_stop_check
+                    success_count += 1
+                    
+                elif module_name == 'epub_converter':
+                    from epub_converter import fallback_compile_epub
+                    success_count += 1
+                    
+                elif module_name == 'scan_html_folder':
+                    from scan_html_folder import scan_html_folder
+                    success_count += 1
+                    
+            except ImportError as e:
+                print(f"Warning: Could not import {module_name} module: {e}")
+                # Set appropriate globals to None
+                if module_name == 'TransateKRtoEN':
+                    translation_main = translation_stop_flag = translation_stop_check = None
+                elif module_name == 'extract_glossary_from_epub':
+                    glossary_main = glossary_stop_flag = glossary_stop_check = None
+                elif module_name == 'epub_converter':
+                    fallback_compile_epub = None
+                elif module_name == 'scan_html_folder':
+                    scan_html_folder = None
+                    
+            except Exception as e:
+                print(f"Error loading {module_name}: {e}")
+        
         self._modules_loaded = True
         self._modules_loading = False
         
         if splash_callback:
             splash_callback(f"Loaded {success_count}/{total_modules} modules successfully")
         
-        # Update UI state after loading
-        self.master.after(0, self._check_modules)
+        # Update UI state after loading (schedule on main thread)
+        if hasattr(self, 'master'):
+            self.master.after(0, self._check_modules)
         
-        if hasattr(self, 'log_text'):
+        # Log success
+        if hasattr(self, 'append_log'):
             self.append_log(f"✅ Loaded {success_count}/{total_modules} modules successfully")
         
         return True
@@ -480,7 +496,13 @@ class TranslatorGUI:
         # Bottom toolbar
         self._make_bottom_toolbar()
 
-        self.token_limit_disabled = False
+        # Apply the loaded token limit state
+        if self.token_limit_disabled:
+            self.token_limit_entry.config(state=tk.DISABLED)
+            self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
+        else:
+            self.token_limit_entry.config(state=tk.NORMAL)
+            self.toggle_token_btn.config(text="Disable Input Token Limit", bootstyle="danger-outline")
 
         # Initial prompt
         self.on_profile_select()
@@ -488,7 +510,7 @@ class TranslatorGUI:
         print("[DEBUG] GUI setup completed with config values loaded")  # Debug logging
         
         # Add initial log message
-        self.append_log("🚀 Glossarion v1.6.6 - Ready to use!")
+        self.append_log("🚀 Glossarion v1.6.8 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
 
     def force_retranslation(self):
@@ -642,16 +664,6 @@ class TranslatorGUI:
     
     def run_translation_thread(self):
         """Start translation in a separate thread"""
-        # Load modules first
-        if not self._lazy_load_modules():
-            self.append_log("❌ Failed to load translation modules")
-            return
-            
-        if translation_main is None:
-            self.append_log("❌ Translation module is not available")
-            messagebox.showerror("Module Error", "Translation module is not available. Please ensure all files are present.")
-            return
-            
         # Check if glossary extraction is running
         if hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive():
             self.append_log("⚠️ Cannot run translation while glossary extraction is in progress.")
@@ -666,14 +678,28 @@ class TranslatorGUI:
         self.stop_requested = False
         if translation_stop_flag:
             translation_stop_flag(False)
+        
+        # FIXED: Start thread immediately without loading modules on main thread
         self.translation_thread = threading.Thread(target=self.run_translation_direct, daemon=True)
         self.translation_thread.start()
+        
         # Update button immediately after starting thread
         self.master.after(100, self.update_run_button)
 
     def run_translation_direct(self):
         """Run translation directly without subprocess"""
         try:
+            # FIXED: Load modules in background thread to prevent GUI freezing
+            self.append_log("🔄 Loading translation modules...")
+            if not self._lazy_load_modules():
+                self.append_log("❌ Failed to load translation modules")
+                return
+                
+            if translation_main is None:
+                self.append_log("❌ Translation module is not available")
+                messagebox.showerror("Module Error", "Translation module is not available. Please ensure all files are present.")
+                return
+                
             # Validate inputs
             epub_path = self.entry_epub.get()
             if not epub_path or not os.path.isfile(epub_path):
@@ -1268,10 +1294,11 @@ class TranslatorGUI:
             self.output_btn.config(text=f"Output Token Limit: {val}")
             self.append_log(f"✅ Output token limit set to {val}")
 
+
     def open_other_settings(self):
         top = tk.Toplevel(self.master)
         top.title("Other Settings")
-        top.geometry("420x790")  # Fixed width, reasonable height
+        top.geometry("420x900")  # Increased height for new section
         
         # Create a canvas and scrollbar for scrolling
         canvas = tk.Canvas(top)
@@ -1306,7 +1333,7 @@ class TranslatorGUI:
         ttk.Combobox(summary_frame, textvariable=self.summary_role_var,
                      values=["user", "system"], state="readonly", width=10).pack(side=tk.LEFT, padx=5)
         
-        # Section 2: Response Handling, after the truncated response checkbox:
+        # Section 2: Response Handling
         section2_frame = tk.LabelFrame(scrollable_frame, text="Response Handling", padx=10, pady=10)
         section2_frame.pack(fill="x", padx=10, pady=5)
         
@@ -1385,6 +1412,20 @@ class TranslatorGUI:
                  text="Automatically retry failed chapters on each run",
                  font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, padx=20)
         
+        # NEW Section 6: EPUB Utilities
+        section6_frame = tk.LabelFrame(scrollable_frame, text="EPUB Utilities", padx=10, pady=10)
+        section6_frame.pack(fill="x", padx=10, pady=5)
+        
+        # Validation button
+        tb.Button(section6_frame, text="🔍 Validate EPUB Structure", 
+                  command=self.validate_epub_structure_gui, 
+                  bootstyle="success-outline",
+                  width=25).pack(anchor=tk.W, pady=5)
+        
+        tk.Label(section6_frame, 
+                 text="Check if all required EPUB files are present for compilation",
+                 font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(0, 5))
+        
         # Save and close function
         def save_and_close():
             self.config['use_rolling_summary'] = self.rolling_summary_var.get()
@@ -1450,6 +1491,58 @@ class TranslatorGUI:
         
         # Bind mouse wheel to canvas
         canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+
+    # Keep the validation function as-is:
+    def validate_epub_structure_gui(self):
+        """GUI wrapper for EPUB structure validation"""
+        epub_path = self.entry_epub.get()
+        if not epub_path:
+            messagebox.showerror("Error", "Please select an EPUB file first.")
+            return
+        
+        # Get output directory
+        epub_base = os.path.splitext(os.path.basename(epub_path))[0]
+        output_dir = epub_base
+        
+        if not os.path.exists(output_dir):
+            messagebox.showinfo("Info", f"No output directory found: {output_dir}")
+            return
+        
+        self.append_log("🔍 Validating EPUB structure...")
+        
+        # Import the validation functions
+        try:
+            from TransateKRtoEN import validate_epub_structure, check_epub_readiness
+            
+            # Run validation
+            structure_ok = validate_epub_structure(output_dir)
+            readiness_ok = check_epub_readiness(output_dir)
+            
+            # Show results
+            if structure_ok and readiness_ok:
+                self.append_log("✅ EPUB validation PASSED - Ready for compilation!")
+                messagebox.showinfo("Validation Passed", 
+                                   "✅ All EPUB structure files are present!\n\n"
+                                   "Your translation is ready for EPUB compilation.")
+            elif structure_ok:
+                self.append_log("⚠️ EPUB structure OK, but some issues found")
+                messagebox.showwarning("Validation Warning", 
+                                      "⚠️ EPUB structure is mostly OK, but some issues were found.\n\n"
+                                      "Check the log for details.")
+            else:
+                self.append_log("❌ EPUB validation FAILED - Missing critical files")
+                messagebox.showerror("Validation Failed", 
+                                    "❌ Missing critical EPUB files!\n\n"
+                                    "container.xml and/or OPF files are missing.\n"
+                                    "Try re-running the translation to extract them.")
+        
+        except ImportError as e:
+            self.append_log(f"❌ Could not import validation functions: {e}")
+            messagebox.showerror("Error", "Validation functions not available.")
+        except Exception as e:
+            self.append_log(f"❌ Validation error: {e}")
+            messagebox.showerror("Error", f"Validation failed: {e}")
         
 
     def on_profile_select(self, event=None):
@@ -1699,6 +1792,8 @@ class TranslatorGUI:
             self.config['reset_failed_chapters'] = self.reset_failed_chapters_var.get()
             self.config['retry_duplicate_bodies'] = self.retry_duplicate_var.get()
             self.config['duplicate_lookback_chapters'] = int(self.duplicate_lookback_var.get())
+            self.config['token_limit_disabled'] = self.token_limit_disabled
+
 
             
             _tl = self.token_limit_entry.get().strip()
@@ -1731,7 +1826,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time  # Add this import
     
-    print("🚀 Starting Glossarion v1.6.6...")
+    print("🚀 Starting Glossarion v1.6.8...")
     
     # Initialize splash screen (main thread only)
     splash_manager = None
