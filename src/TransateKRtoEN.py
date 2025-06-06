@@ -1671,10 +1671,34 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
         soup = BeautifulSoup(html_text, 'html.parser')
         return soup.get_text()
     
+    # IMPROVED: Flexible language detection for custom profiles
+    def detect_base_language(lang_string):
+        """Detect base language from profile name (handles custom profiles)"""
+        lang_lower = str(lang_string).lower()
+        
+        # Check for Korean variants (korean, korean2, mykorean, etc.)
+        if any(keyword in lang_lower for keyword in ['korean', 'korea', '한국', 'kr']):
+            return 'korean'
+        
+        # Check for Japanese variants (japanese, japanese_formal, jp, etc.)
+        if any(keyword in lang_lower for keyword in ['japanese', 'japan', '日本', 'jp', 'jpn']):
+            return 'japanese'
+        
+        # Check for Chinese variants (chinese, chinese_traditional, cn, etc.)
+        if any(keyword in lang_lower for keyword in ['chinese', 'china', '中国', '中文', 'cn', 'zh']):
+            return 'chinese'
+        
+        # Default fallback - try to detect from first characters if available
+        return lang_lower
+    
+    # Get the base language type
+    base_language = detect_base_language(language)
+    print(f"[DEBUG] Auto-glossary: Profile '{language}' → Base language '{base_language}'")
+    
     for txt in samples:
         clean_text = clean_html(txt)
         
-        if language == "korean":
+        if base_language == "korean":
             # Korean names (2-4 character Korean names)
             korean_names = re.findall(r'[가-힣]{2,4}(?:님|씨|야|아|이|군|양)?', clean_text)
             names.update(korean_names)
@@ -1687,7 +1711,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
             for s in re.findall(r"\b\w+[-~]?(?:nim|ssi|ah|ya|ie|hyung|noona|unnie|oppa|sunbae|hoobae|gun|yang)\b", clean_text, re.I):
                 suffixes.add(s)
         
-        elif language == "japanese":
+        elif base_language == "japanese":
             # Japanese names (kanji names, usually 2-4 characters)
             japanese_names = re.findall(r'[\u4e00-\u9fff]{2,4}(?:さん|様|ちゃん|君|先生|殿)?', clean_text)
             names.update(japanese_names)
@@ -1708,7 +1732,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
             for s in re.findall(r"\b\w+[-~]?(?:san|sama|chan|kun|senpai|kouhai|sensei|dono)\b", clean_text, re.I):
                 suffixes.add(s)
         
-        elif language == "chinese":
+        elif base_language == "chinese":
             # Chinese names (2-4 character names, avoiding common words)
             chinese_names = []
             
@@ -1740,7 +1764,15 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
             pinyin_names = re.findall(r'\b[A-Z][a-z]+\s+[A-Z][a-z]+\b', clean_text)
             names.update(pinyin_names)
         
-        # Also extract any romanized names for all languages
+        else:
+            # Unknown/custom language - try to extract generic patterns
+            print(f"[DEBUG] Unknown language '{base_language}' - using generic extraction")
+            
+            # Extract any CJK characters as potential names/terms
+            cjk_terms = re.findall(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]{2,6}', clean_text)
+            names.update(cjk_terms[:50])  # Limit to avoid too many
+        
+        # Always extract romanized names for all languages
         for nm in re.findall(r"\b[A-Z][a-z]{2,20}\b", clean_text):
             names.add(nm)
     
@@ -1754,29 +1786,41 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
     suffixes = sorted(list(set(suffixes)))[:50]
     terms = sorted(list(set(terms)))[:50]
     
-    # Build glossary based on language
+    # Build glossary based on detected base language
     gloss = {}
     
-    if language == "korean":
+    if base_language == "korean":
         gloss["Korean_Names"] = names
         gloss["Korean_Honorifics"] = suffixes
-    elif language == "japanese":
+        if terms:
+            gloss["Korean_Terms"] = terms
+    elif base_language == "japanese":
         gloss["Japanese_Names"] = names
         gloss["Japanese_Honorifics"] = suffixes
         if terms:
             gloss["Japanese_Family_Terms"] = terms
-    elif language == "chinese":
+    elif base_language == "chinese":
         gloss["Chinese_Names"] = names
         if terms:
             gloss["Chinese_Titles"] = terms
         if suffixes:
             gloss["Chinese_Terms"] = suffixes
+    else:
+        # Generic/unknown language
+        gloss["Names"] = names
+        if suffixes:
+            gloss["Honorifics"] = suffixes
+        if terms:
+            gloss["Terms"] = terms
     
-    # Add a note about the glossary
-    gloss["_note"] = f"Auto-generated glossary for {language} text"
+    # Add a note about the glossary with original profile name
+    gloss["_note"] = f"Auto-generated glossary for '{language}' (detected as {base_language})"
     
-    with open(os.path.join(output_dir, "glossary.json"), 'w', encoding='utf-8') as f:
+    glossary_path = os.path.join(output_dir, "glossary.json")
+    with open(glossary_path, 'w', encoding='utf-8') as f:
         json.dump(gloss, f, ensure_ascii=False, indent=2)
+    
+    print(f"📑 Generated automatic glossary for profile '{language}' → {len(names)} names, {len(suffixes)} honorifics, {len(terms)} terms")
 
 # =============================================================================
 # API AND TRANSLATION UTILITIES
@@ -2315,7 +2359,7 @@ def main(log_callback=None, stop_callback=None):
                     
                     client.context = 'translation'
                     
-                    # ENHANCED RETRY LOGIC WITH HISTORY PURGING
+                    # ENHANCED RETRY LOGIC WITH GRADUAL TEMPERATURE INCREASE
                     retry_count = 0
                     max_retries = 3
                     duplicate_retry_count = 0
@@ -2351,7 +2395,7 @@ def main(log_callback=None, stop_callback=None):
                                 retry_max_tokens = int(os.getenv("MAX_RETRY_TOKENS", "16384"))
                                 MAX_OUTPUT_TOKENS = min(MAX_OUTPUT_TOKENS * 2, retry_max_tokens)
                         
-                        # Check for duplicate body content (enhanced logic)
+                        # Check for duplicate body content (ENHANCED with more aggressive detection)
                         if not retry_needed and os.getenv("RETRY_DUPLICATE_BODIES", "1") == "1":
                             if duplicate_retry_count < max_duplicate_retries:
                                 # Extract body from the result (remove headers)
@@ -2361,19 +2405,24 @@ def main(log_callback=None, stop_callback=None):
                                 for header in result_soup.find_all(['h1', 'h2', 'h3', 'title']):
                                     header.decompose()
                                 
-                                # Get more content for comparison (not just 1000 chars)
+                                # Get more content for comparison
                                 result_body = result_soup.get_text(strip=True)
                                 
-                                # Normalize the text for better comparison
-                                def normalize_text(text):
+                                # ENHANCED normalization for better duplicate detection
+                                def normalize_text_aggressive(text):
                                     # Remove extra whitespace
                                     text = re.sub(r'\s+', ' ', text).strip()
                                     # Remove numbers that might be chapter numbers
                                     text = re.sub(r'\b\d+\b', '', text)
-                                    # Take first 2000 chars for comparison
-                                    return text[:2000].lower()
+                                    # Remove common punctuation variations
+                                    text = re.sub(r'["""''„"‚']', '"', text)
+                                    text = re.sub(r'[–—]', '-', text)
+                                    # Remove potential AI artifacts
+                                    text = re.sub(r'\b(?:chapter|part)\s*\d+\b', '', text, flags=re.IGNORECASE)
+                                    # Take first 3000 chars for more comprehensive comparison
+                                    return text[:3000].lower()
                                 
-                                normalized_result = normalize_text(result_body)
+                                normalized_result = normalize_text_aggressive(result_body)
                                 
                                 # Check against previously translated chapters
                                 lookback_chapters = int(os.getenv("DUPLICATE_LOOKBACK_CHAPTERS", "5"))
@@ -2395,59 +2444,141 @@ def main(log_callback=None, stop_callback=None):
                                                     header.decompose()
                                                 prev_body = prev_soup.get_text(strip=True)
                                                 
-                                                normalized_prev = normalize_text(prev_body)
+                                                normalized_prev = normalize_text_aggressive(prev_body)
                                                 
-                                                # Calculate similarity instead of exact match
+                                                # Calculate similarity with more aggressive threshold
                                                 from difflib import SequenceMatcher
                                                 similarity = SequenceMatcher(None, normalized_result, normalized_prev).ratio()
                                                 
-                                                # If similarity is very high (>85%), it's likely a duplicate
-                                                if similarity > 0.85:
-                                                    retry_needed = True
-                                                    is_duplicate_retry = True
-                                                    retry_reason = f"duplicate body content (matches chapter {chapters[prev_idx]['num']} with {int(similarity*100)}% similarity)"
+                                                # LOWERED threshold to 75% for more aggressive detection
+                                                if similarity > 0.75:
+                                                    # Additional check: look for sequence patterns
+                                                    # Split into sentences and check for matching sequences
+                                                    result_sentences = re.split(r'[.!?]+', normalized_result)
+                                                    prev_sentences = re.split(r'[.!?]+', normalized_prev)
                                                     
-                                                    # ENHANCED: After 3 duplicate retries, purge history and try again
-                                                    if duplicate_retry_count >= 3 and not history_purged:
-                                                        print(f"    🧹 Purging translation history after 3 duplicate attempts...")
+                                                    # Check for common sentence sequences (indicating same content)
+                                                    common_sequences = 0
+                                                    for i in range(len(result_sentences) - 2):
+                                                        if i < len(prev_sentences) - 2:
+                                                            result_seq = ' '.join(result_sentences[i:i+3])
+                                                            prev_seq = ' '.join(prev_sentences[i:i+3])
+                                                            seq_sim = SequenceMatcher(None, result_seq, prev_seq).ratio()
+                                                            if seq_sim > 0.8:
+                                                                common_sequences += 1
+                                                    
+                                                    # If high similarity OR multiple common sequences, it's a duplicate
+                                                    if similarity > 0.75 or common_sequences >= 2:
+                                                        retry_needed = True
+                                                        is_duplicate_retry = True
+                                                        retry_reason = f"duplicate body content (matches chapter {chapters[prev_idx]['num']} with {int(similarity*100)}% similarity, {common_sequences} common sequences)"
                                                         
-                                                        # Clear the history
-                                                        history_manager.save_history([])
-                                                        history = []
-                                                        trimmed = []
-                                                        history_purged = True
+                                                        # IMPROVED: Gradual temperature increase logic
+                                                        if duplicate_retry_count >= 3 and not history_purged:
+                                                            print(f"    🧹 Purging translation history after 3 duplicate attempts...")
+                                                            
+                                                            # Clear the history
+                                                            history_manager.save_history([])
+                                                            history = []
+                                                            trimmed = []
+                                                            history_purged = True
+                                                            
+                                                            # RESET temperature to original value when purging history
+                                                            TEMP = original_temp
+                                                            print(f"    🌡️ Reset temperature to original value: {TEMP}")
+                                                            
+                                                            # Rebuild messages without history
+                                                            if base_msg:
+                                                                msgs = base_msg + [{"role": "user", "content": user_prompt}]
+                                                            else:
+                                                                msgs = [{"role": "user", "content": user_prompt}]
+                                                            
+                                                            print(f"    🔄 Retrying with fresh history (attempt {duplicate_retry_count + 1}/{max_duplicate_retries})")
                                                         
-                                                        # Rebuild messages without history
-                                                        if base_msg:
-                                                            msgs = base_msg + [{"role": "user", "content": user_prompt}]
+                                                        elif duplicate_retry_count == 0:
+                                                            # FIRST retry: keep same temperature
+                                                            print(f"    🔄 First duplicate retry - keeping same temperature: {TEMP}")
+                                                        
+                                                        elif history_purged:
+                                                            # AFTER history purge: gradual increase from original temp
+                                                            attempts_since_purge = duplicate_retry_count - 3
+                                                            temp_increase = 0.1 * attempts_since_purge
+                                                            TEMP = min(original_temp + temp_increase, 1.0)
+                                                            print(f"    🌡️ Post-purge temperature increase to {TEMP} (attempt {attempts_since_purge} since purge)")
+                                                        
                                                         else:
-                                                            msgs = [{"role": "user", "content": user_prompt}]
+                                                            # GRADUAL increase: +0.1 each attempt before purge
+                                                            temp_increase = 0.1 * duplicate_retry_count
+                                                            TEMP = min(original_temp + temp_increase, 1.0)
+                                                            print(f"    🌡️ Gradual temperature increase to {TEMP} (attempt {duplicate_retry_count + 1})")
                                                         
-                                                        print(f"    🔄 Retrying with fresh history (attempt {duplicate_retry_count + 1}/{max_duplicate_retries})")
-                                                    else:
-                                                        # Regular duplicate retry - increase temperature more aggressively
-                                                        TEMP = min(TEMP + 0.3, 1.0)
-                                                    
-                                                    # Create a more specific prompt
-                                                    user_prompt = f"""[CRITICAL: This is Chapter {c['num']} titled "{c['title']}". 
-                        The previous response was {int(similarity*100)}% similar to Chapter {chapters[prev_idx]['num']}.
+                                                        # Create a more specific and varied prompt for each retry
+                                                        if duplicate_retry_count == 0:
+                                                            # First retry: emphasize uniqueness
+                                                            user_prompt = f"""[CRITICAL INSTRUCTION: This is Chapter {c['num']} titled "{c['title']}". 
+                            The AI response was {int(similarity*100)}% similar to Chapter {chapters[prev_idx]['num']}.
 
-                        You MUST translate the UNIQUE content below for Chapter {c['num']}. This chapter contains DIFFERENT events than Chapter {chapters[prev_idx]['num']}.
+                            You MUST translate the UNIQUE content for Chapter {c['num']}. This chapter contains COMPLETELY DIFFERENT events.
 
-                        Key differences to focus on:
-                        - This is a DIFFERENT chapter with its own unique story progression
-                        - Characters may be in different situations
-                        - Events should progress from where Chapter {c['num']-1} ended
-                        - Do NOT repeat any content from Chapter {chapters[prev_idx]['num']}
+                            Focus on what makes THIS chapter unique:
+                            - Different story events and progression  
+                            - Different dialogue and character interactions
+                            - Different settings or situations
+                            - Advance the plot from where Chapter {c['num']-1} ended
 
-                        IMPORTANT: Each chapter in this novel has its own unique content. Even if chapter titles seem similar, the actual events and story progression are different.]
+                            TRANSLATE ONLY THE CONTENT BELOW - DO NOT REPEAT PREVIOUS CHAPTERS:]
 
-                        {chunk_html}"""
-                                                    
-                                                    # Update messages with new prompt
-                                                    msgs[-1] = {"role": "user", "content": user_prompt}
-                                                    
-                                                    break
+                            {chunk_html}"""
+                        
+                                                        elif duplicate_retry_count == 1:
+                                                            # Second retry: change approach
+                                                            user_prompt = f"""[TRANSLATION DIRECTIVE: Chapter {c['num']} - "{c['title']}"]
+
+                            IMPORTANT: Previous translation was too similar to Chapter {chapters[prev_idx]['num']}. 
+
+                            This chapter has its own distinct narrative. Pay close attention to:
+                            - Specific character actions and dialogue in THIS chapter
+                            - The unique sequence of events that happen here
+                            - How this chapter connects to and advances from Chapter {c['num']-1}
+
+                            Use natural, flowing English while preserving the distinct content of this specific chapter:
+
+                            {chunk_html}"""
+                        
+                                                        elif duplicate_retry_count == 2:
+                                                            # Third retry: more direct
+                                                            user_prompt = f"""Chapter {c['num']}: {c['title']}
+
+                            [Previous attempts were similar to other chapters. Focus on the SPECIFIC events in this chapter only.]
+
+                            Translate this content with attention to its unique narrative elements:
+
+                            {chunk_html}"""
+                                                        
+                                                        elif duplicate_retry_count == 3:
+                                                            # History purge attempt: fresh start with clear instructions
+                                                            user_prompt = f"""[FRESH START - HISTORY CLEARED]
+
+                            Chapter {c['num']}: "{c['title']}"
+
+                            Previous translations were too similar to other chapters. Starting fresh.
+
+                            Translate the following content naturally and accurately:
+
+                            {chunk_html}"""
+                                                        
+                                                        else:
+                                                            # Post-purge attempts: very simple and direct
+                                                            user_prompt = f"""Chapter {c['num']}: {c['title']}
+
+                            Translate this content:
+
+                            {chunk_html}"""
+                                                        
+                                                        # Update messages with new prompt
+                                                        msgs[-1] = {"role": "user", "content": user_prompt}
+                                                        
+                                                        break
                                             except Exception as e:
                                                 print(f"    [WARN] Error checking previous chapter: {e}")
                         
@@ -2467,15 +2598,19 @@ def main(log_callback=None, stop_callback=None):
                                 print(f"    ❌ Still getting {retry_reason} after {max_retries} retries, proceeding anyway")
                                 break
                         
-                        # Retry needed
-                        print(f"    ⚠️ Detected {retry_reason}!")
-                        
+                        # Log retry attempt
                         if is_duplicate_retry:
-                            if history_purged:
-                                print(f"    🔄 Retrying with purged history (duplicate attempt {duplicate_retry_count}/{max_duplicate_retries})")
+                            if duplicate_retry_count == 0:
+                                print(f"    🔄 First duplicate retry with same temperature (attempt {duplicate_retry_count + 1}/{max_duplicate_retries})")
+                            elif duplicate_retry_count == 3:
+                                print(f"    🔄 History purge retry (attempt {duplicate_retry_count + 1}/{max_duplicate_retries})")
+                            elif history_purged:
+                                attempts_since_purge = duplicate_retry_count - 3
+                                print(f"    🔄 Post-purge retry #{attempts_since_purge} (attempt {duplicate_retry_count + 1}/{max_duplicate_retries})")
+                                print(f"    🌡️ Current temperature: {TEMP}")
                             else:
-                                print(f"    🔄 Retrying with increased temperature (duplicate attempt {duplicate_retry_count}/{max_duplicate_retries})")
-                                print(f"    📊 Increased temperature to {TEMP}")
+                                print(f"    🔄 Gradual temperature increase retry (attempt {duplicate_retry_count + 1}/{max_duplicate_retries})")
+                                print(f"    🌡️ Current temperature: {TEMP}")
                         else:
                             print(f"    🔄 Retrying translation (attempt {retry_count}/{max_retries})")
                             if "truncated" in retry_reason:
@@ -2484,10 +2619,11 @@ def main(log_callback=None, stop_callback=None):
                         # Brief delay before retry
                         time.sleep(2)
                     
-                    # Restore original values after retry loop
+                    # IMPORTANT: Restore original values after retry loop
                     MAX_OUTPUT_TOKENS = original_max_tokens
                     TEMP = original_temp
                     user_prompt = original_user_prompt
+                    print(f"    🔄 Restored original temperature: {TEMP}")
                     
                     # Clean AI artifacts ONLY if the toggle is enabled
                     if REMOVE_AI_ARTIFACTS:
