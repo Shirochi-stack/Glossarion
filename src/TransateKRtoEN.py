@@ -15,6 +15,7 @@ import unicodedata
 from difflib import SequenceMatcher
 import unicodedata
 import re
+import time
 
 # Import the new modules
 from history_manager import HistoryManager
@@ -132,7 +133,6 @@ def init_progress_tracking(payloads_dir):
                     content = pf.read()
                 
                 # Fix trailing commas in arrays
-                import re
                 # Fix trailing commas before closing brackets
                 content = re.sub(r',\s*\]', ']', content)
                 # Fix trailing commas before closing braces
@@ -151,7 +151,6 @@ def init_progress_tracking(payloads_dir):
                 print("🔄 Creating backup and starting fresh...")
                 
                 # Create a backup of the corrupted file
-                import time
                 backup_name = f"translation_progress_backup_{int(time.time())}.json"
                 backup_path = os.path.join(payloads_dir, backup_name)
                 try:
@@ -1655,370 +1654,54 @@ def cleanup_previous_extraction(output_dir):
 # =============================================================================
 # GLOSSARY MANAGEMENT
 # =============================================================================
-def save_glossary(output_dir, chapters, instructions, language="korean"):
-    """
-    automatic glossary generator - works for ANY language
-    Finds character names by looking for words that appear with honorifics
-    PRESERVED ALL ORIGINAL FUNCTIONALITY
-    """
-    
-    print("📑 Automatic Glossary Generator v2.0")
-    print("📑 Language-agnostic character name detection")
-    
-    # Load settings
-    min_frequency = int(os.getenv("GLOSSARY_MIN_FREQUENCY", "2"))
-    max_names = int(os.getenv("GLOSSARY_MAX_NAMES", "50"))
-    max_suffixes = int(os.getenv("GLOSSARY_MAX_SUFFIXES", "50"))
-    batch_size = int(os.getenv("GLOSSARY_BATCH_SIZE", "50"))
-    
-    print(f"📑 Min frequency: {min_frequency}, Max names: {max_names}, Max suffixes: {max_suffixes}")
-    
-    def clean_html(html_text):
-        """Remove HTML tags to get clean text"""
-        soup = BeautifulSoup(html_text, 'html.parser')
-        return soup.get_text()
-    
-    # Extract and combine all text from chapters
-    all_text = ' '.join(clean_html(chapter["body"]) for chapter in chapters)
-    print(f"📑 Processing {len(all_text):,} characters of text")
-    
-    # automatic honorifics from all languages
-    UNIVERSAL_HONORIFICS = [
-        # Korean honorifics and titles
-        '님', '씨', '선배', '형', '누나', '언니', '오빠', '선생님', '교수님', 
-        '공주', '왕자', '폐하', '전하', '각하', '원님', '대감', '영감',
-        
-        # Japanese honorifics and titles
-        'さん', 'ちゃん', '君', 'くん', '様', 'さま', '先生', 'せんせい',
-        '殿', 'どの', '姫', 'ひめ', '王', '皇', '陛下', '閣下', '大人',
-        
-        # Chinese honorifics and titles
-        '公子', '小姐', '夫人', '先生', '大人', '师父', '师傅', '老师',
-        '陛下', '殿下', '王爷', '公主', '皇上', '将军', '大师', '长老',
-        
-        # English honorifics (for mixed content)
-        '-san', '-chan', '-kun', '-sama', '-sensei', '-senpai'
-    ]
-    
-    # Universal exclusion list
-    UNIVERSAL_EXCLUSIONS = {
-        # Korean common words and particles
-        '나', '너', '그', '이', '저', '것', '수', '때', '곳', '중', '안', '밖', '위', '아래', '앞', '뒤',
-        '나는', '나를', '나의', '나도', '나만', '나조차', '나부터', '나까지',
-        '너는', '너를', '너의', '너도', '너만', '그는', '그를', '그의', '그도',
-        '그것', '이것', '저것', '무엇', '어떤', '모든', '각각', '서로', '함께', '혼자',
-        '같은', '다른', '새로운', '오래된', '많은', '적은', '좋은', '나쁜', '큰', '작은',
-        '지금', '오늘', '내일', '어제', '이제', '그때', '언제', '항상', '가끔', '자주',
-        '여기', '거기', '저기', '어디', '어디서', '어디로', '어디까지', '어디든',
-        '하는', '되는', '있는', '없는', '하고', '되고', '있고', '없고', '해서', '돼서',
-        '때문', '위해', '대해', '통해', '의해', '로서', '로써', '부터', '까지', '마다',
-        
-        # Japanese common words and particles  
-        'それ', 'これ', 'あれ', 'どれ', 'その', 'この', 'あの', 'どの',
-        'そう', 'こう', 'ああ', 'どう', 'そこ', 'ここ', 'あそこ', 'どこ',
-        'みんな', 'だれ', 'なに', 'なん', 'いつ', 'なぜ', 'どんな', 'いろいろ',
-        'とても', 'すごく', 'ちょっと', 'すこし', 'たくさん', 'いっぱい', 'もっと',
-        'もう', 'まだ', 'きっと', 'たぶん', 'やっぱり', 'やはり', 'ほんとう',
-        'ひと', 'もの', 'こと', 'とき', 'ところ', 'ほう', 'よう', 'ふう', 'やつ', 'かた',
-        'です', 'ます', 'した', 'する', 'いる', 'ある', 'ない', 'から', 'まで', 'など',
-        
-        # Chinese common words
-        '那个', '这个', '什么', '哪里', '怎么', '为什么', '什么时候', '多少', '怎样', '如何',
-        '所有', '每个', '任何', '没有', '一些', '很多', '一点', '非常', '特别', '真的',
-        '可能', '应该', '必须', '需要', '想要', '喜欢', '觉得', '认为', '知道', '明白',
-        
-        # English common words (for mixed content)
-        'that', 'this', 'what', 'where', 'when', 'how', 'why', 'who', 'which',
-        'some', 'many', 'very', 'good', 'bad', 'big', 'small', 'new', 'old',
-        'here', 'there', 'now', 'then', 'yes', 'no', 'and', 'but', 'or',
-        
-        # Single characters and particles (usually not names)
-        'a', 'i', 'u', 'e', 'o', 'の', 'は', 'が', 'を', 'に', 'で', 'と', 'も', 'か', 'よ', 'ね',
-        '은', '는', '이', '가', '을', '를', '에', '의', '와', '과', '도', '만', '부터', '까지',
-        '了', '的', '在', '是', '有', '不', '我', '你', '他', '她', '它', '们', '也', '都'
-    }
-    
-    print(f"📑 Using {len(UNIVERSAL_HONORIFICS)} honorifics from all languages")
-    print(f"📑 Excluding {len(UNIVERSAL_EXCLUSIONS)} common words")
-    
-    JAPANESE_EXCLUSIONS = {
-        # Common Japanese particles and words
-        'これ', 'それ', 'あれ', 'この', 'その', 'あの', 'こんな', 'そんな', 'あんな',
-        'ここ', 'そこ', 'あそこ', 'こちら', 'そちら', 'あちら', 'こっち', 'そっち', 'あっち',
-        'いつ', 'いま', 'きょう', 'あした', 'きのう', 'まえ', 'あと', 'つぎ',
-        'みんな', 'だれ', 'なに', 'どこ', 'どう', 'なぜ', 'いくつ', 'いくら',
-        'ひと', 'もの', 'こと', 'とき', 'ところ', 'かた', 'ほう',
-        'わたし', 'あなた', 'かれ', 'かのじょ', 'われわれ', 'かれら',
-        'じぶん', 'みずから', 'おれ', 'ぼく', 'きみ', 'おまえ',
-        # Common kanji words
-        '今日', '明日', '昨日', '今', '後', '前', '時', '人', '事', '物',
-        '所', '方', '何', '誰', '私', '僕', '君', '彼', '彼女', '自分',
-        '皆', '全部', '少し', '沢山', '大体', '普通', '特別', '本当',
-        # Common non-name kanji combinations
-        '時間', '場所', '毎日', '最近', '大切', '必要', '可能', '簡単', 
-        '困難', '重要', '部屋', '学校', '会社', '仕事', '友達', '家族'
-    }
-    
-    # Combine exclusions - FIXED: union() works with both sets and lists
-    ALL_EXCLUSIONS = set(UNIVERSAL_EXCLUSIONS).union(set(JAPANESE_EXCLUSIONS))
+# =============================================================================
+# GLOSSARY MANAGEMENT - Complete Implementation
+# =============================================================================
 
-    # Then replace the entire find_names_with_honorifics function:
-    def find_names_with_honorifics(text, honorifics, exclusions, min_freq):
-        """Core algorithm: Find names that appear with honorifics - ENHANCED for Japanese"""
-        names_with_honorifics = []
-        standalone_names = set()
-        
-        print("📑 Scanning for name + honorific combinations...")
-        
-        # Detect if text contains Japanese
-        japanese_chars = sum(1 for char in text if 
-                           (12352 <= ord(char) <= 12447) or  # Hiragana
-                           (12448 <= ord(char) <= 12543) or  # Katakana
-                           (19968 <= ord(char) <= 40959))    # Kanji
-        
-        total_chars = len(text)
-        is_japanese = (japanese_chars / total_chars > 0.1) if total_chars > 0 else False
-        
-        if is_japanese:
-            print("📑 Detected Japanese text - using enhanced detection")
-        
-        # Process each honorific
-        for honorific in honorifics:
-            honorific_count = 0
-            found_names = set()  # Avoid duplicates per honorific
+def parse_translation_response(response, original_terms):
+    """Parse translation response - handles numbered format"""
+    translations = {}
+    lines = response.strip().split('\n')
+    
+    # Look for numbered format (1. term -> translation)
+    for line in lines:
+        line = line.strip()
+        if not line or not line[0].isdigit():
+            continue
             
-            # Japanese honorifics need special handling
-            if honorific in ['さん', 'ちゃん', '君', 'くん', '様', 'さま', '先生', 'せんせい', 
-                           '殿', 'どの', '姫', 'ひめ', '陛下', '閣下', '-san', '-chan', 
-                           '-kun', '-sama', '-sensei', '-senpai']:
+        try:
+            # Extract number and content
+            number_match = re.match(r'^(\d+)\.?\s*(.+)', line)
+            if number_match:
+                num = int(number_match.group(1)) - 1  # Convert to 0-based index
+                content = number_match.group(2).strip()
                 
-                # Search for honorific in text
-                search_pos = 0
-                while True:
-                    pos = text.find(honorific, search_pos)
-                    if pos == -1:
-                        break
+                if 0 <= num < len(original_terms):
+                    original_term = original_terms[num]
                     
-                    # Extract name before honorific
-                    name_chars = []
-                    char_pos = pos - 1
-                    
-                    # Scan backwards to find name
-                    while char_pos >= 0 and len(name_chars) < 6:  # Max 6 chars for safety
-                        char = text[char_pos]
-                        char_code = ord(char)
-                        
-                        # Check if character could be part of a name
-                        if (12352 <= char_code <= 12447 or    # Hiragana
-                            12448 <= char_code <= 12543 or    # Katakana  
-                            19968 <= char_code <= 40959 or    # Kanji
-                            (char.isalpha() and char_code < 128)):  # ASCII letters
-                            name_chars.insert(0, char)
-                            char_pos -= 1
-                        # Check for Japanese punctuation and spaces
-                        elif char in ' ' or char == '　' or char in '、。「」『』・':
-                            break
-                        else:
-                            break
-                    
-                    # Process found name
-                    if name_chars:
-                        potential_name = ''.join(name_chars)
-                        
-                        if is_valid_name(potential_name, exclusions) and potential_name not in found_names:
-                            full_combination = potential_name + honorific
-                            count = text.count(full_combination)
+                    # Try to extract translation from various formats
+                    for separator in ['->', '→', ':', '-', '—', '=']:
+                        if separator in content:
+                            parts = content.split(separator, 1)
+                            if len(parts) == 2:
+                                translation = parts[1].strip()
+                                # Clean up the translation
+                                translation = translation.strip('"\'()[]')
+                                if translation and translation != original_term:
+                                    translations[original_term] = translation
+                                    break
+                    else:
+                        # No separator found, treat whole content as translation
+                        if content != original_term:
+                            translations[original_term] = content
                             
-                            if count >= min_freq:
-                                names_with_honorifics.append(full_combination)
-                                standalone_names.add(potential_name)
-                                found_names.add(potential_name)
-                                honorific_count += 1
-                                
-                                if honorific_count <= 10:  # Show first 10
-                                    print("   ✅ {} + {} ({}x)".format(potential_name, honorific, count))
-                    
-                    search_pos = pos + len(honorific)
-            
-            else:
-                # Non-Japanese honorifics - use word splitting
-                words = text.split()
-                for word in words:
-                    if word.endswith(honorific) and len(word) > len(honorific):
-                        potential_name = word[:-len(honorific)]
-                        
-                        if is_valid_name(potential_name, exclusions):
-                            full_combination = potential_name + honorific
-                            count = text.count(full_combination)
-                            
-                            if count >= min_freq:
-                                names_with_honorifics.append(full_combination)
-                                standalone_names.add(potential_name)
-                                honorific_count += 1
-                                print("   ✅ {} + {} ({}x)".format(potential_name, honorific, count))
-            
-            if honorific_count > 0:
-                print("   📊 Found {} unique names with '{}'".format(honorific_count, honorific))
-        
-        # Additional pattern detection for Japanese names
-        if is_japanese and len(standalone_names) < 10:  # If we found few names
-            print("📑 Running additional Japanese name pattern detection...")
-            
-            # Common name kanji patterns
-            name_patterns = [
-                # Family name endings
-                ('田', 1, 3), ('山', 1, 3), ('川', 1, 3), ('村', 1, 3), 
-                ('木', 1, 3), ('野', 1, 3), ('原', 1, 3), ('藤', 1, 3),
-                ('井', 1, 3), ('本', 1, 3), ('谷', 1, 3), ('口', 1, 3),
-                # Given name patterns  
-                ('子', 1, 2), ('美', 1, 2), ('郎', 1, 2), ('太', 1, 2)
-            ]
-            
-            additional_names = set()
-            for pattern_char, min_prefix, max_prefix in name_patterns:
-                search_pos = 0
-                while True:
-                    pos = text.find(pattern_char, search_pos)
-                    if pos == -1:
-                        break
-                    
-                    # Try different name lengths
-                    for prefix_len in range(min_prefix, max_prefix + 1):
-                        if pos >= prefix_len:
-                            candidate = text[pos - prefix_len:pos + 1]
-                            
-                            # Validate it's all kanji
-                            if all(19968 <= ord(c) <= 40959 for c in candidate):
-                                if is_valid_name(candidate, exclusions):
-                                    count = text.count(candidate)
-                                    if count >= min_freq:
-                                        additional_names.add(candidate)
-                    
-                    search_pos = pos + 1
-            
-            # Add additional names found
-            for name in additional_names:
-                if name not in standalone_names:
-                    standalone_names.add(name)
-                    print("   ✅ {} (pattern match, {}x)".format(name, text.count(name)))
-        
-        return list(set(names_with_honorifics)), standalone_names
-
-    # And update is_valid_name function:
-    def is_valid_name(name, exclusions):
-        """Check if a potential name meets our criteria - ENHANCED for Japanese"""
-        if not name or not name.strip():
-            return False
-        
-        name = name.strip()
-        
-        # Check against all exclusions
-        if name in exclusions:
-            return False
-        
-        # Length validation based on script
-        name_length = len(name)
-        contains_kanji = any(19968 <= ord(char) <= 40959 for char in name)
-        contains_kana = any((12352 <= ord(char) <= 12447) or 
-                           (12448 <= ord(char) <= 12543) for char in name)
-        
-        if contains_kanji or contains_kana:
-            # Japanese names: 1-4 characters typical
-            if not (1 <= name_length <= 5):
-                return False
-            
-            # Single character validation for Japanese
-            if name_length == 1:
-                # Common single kanji that aren't names
-                single_exclusions = {'人', '日', '月', '年', '時', '分', '今', '中', 
-                                   '上', '下', '左', '右', '前', '後', '内', '外'}
-                if name in single_exclusions:
-                    return False
-        else:
-            # Non-Japanese names: 2-12 characters
-            if not (2 <= name_length <= 12):
-                return False
-        
-        # Reject pure numbers
-        if name.isdigit():
-            return False
-        
-        # Reject if too many non-letter characters
-        letter_count = sum(1 for c in name if c.isalpha() or 19968 <= ord(c) <= 40959)
-        if letter_count < name_length * 0.8:
-            return False
-        
-        return True
+        except (ValueError, IndexError):
+            continue
     
-    # Make sure to use ALL_EXCLUSIONS when calling the function:
-    names_with_honorifics, standalone_names = find_names_with_honorifics(
-        all_text, UNIVERSAL_HONORIFICS, ALL_EXCLUSIONS, min_frequency
-    )
-    
-    # Apply limits and convert to final format
-    final_standalone_names = list(standalone_names)[:max_names]
-    final_names_with_honorifics = list(set(names_with_honorifics))[:max_suffixes]
-
-    # Then define all_terms
-    all_terms = final_standalone_names + final_names_with_honorifics
-    
-    # Language detection for translation
-    def detect_primary_language(text):
-        """Simple language detection for translation purposes"""
-        korean_chars = sum(1 for char in text if 44032 <= ord(char) <= 55215)
-        japanese_chars = sum(1 for char in text if 12352 <= ord(char) <= 12543)
-        chinese_chars = sum(1 for char in text if 19968 <= ord(char) <= 40959)
-        
-        if korean_chars > japanese_chars and korean_chars > chinese_chars:
-            return "korean"
-        elif japanese_chars > chinese_chars:
-            return "japanese"
-        elif chinese_chars > 0:
-            return "chinese"
-        else:
-            return "unknown"
-    
-    detected_language = detect_primary_language(all_text)
-    print(f"\n📑 Auto-detected language for translation: {detected_language}")
-    all_terms = final_standalone_names + final_names_with_honorifics
-    
-    print(f"📑 Translating {len(all_terms)} character names...")
-    
-    # Translate all terms
-    translations = translate_terms_batch(all_terms, detected_language, batch_size)
-    
-    # Build final glossary
-    glossary_entries = {}
-    for term in all_terms:
-        if term in translations and translations[term] != term:
-            glossary_entries[term] = translations[term]
-        else:
-            glossary_entries[term] = term  # Keep original if translation failed
-    
-    # Save glossary
-    glossary_path = os.path.join(output_dir, "glossary.json")
-    with open(glossary_path, 'w', encoding='utf-8') as f:
-        json.dump(glossary_entries, f, ensure_ascii=False, indent=2)
-    
-    print(f"\n📑 ✅ AUTOMATIC GLOSSARY SAVED!")
-    print(f"📑 File: {glossary_path}")
-    print(f"📑 Entries: {len(glossary_entries)}")
-    
-    # Final display
-    if glossary_entries:
-        print(f"\n📑 Final glossary preview:")
-        sample_count = min(15, len(glossary_entries))
-        for orig, trans in list(glossary_entries.items())[:sample_count]:
-            print(f"   • {orig} → {trans}")
-        
-        if len(glossary_entries) > sample_count:
-            print(f"   ... and {len(glossary_entries) - sample_count} more entries")
-    
-    print(f"\n📑 🌍 AUTOMATIC detection complete!")
-    print(f"📑 Works for Korean, Japanese, Chinese, and mixed content!")
+    return translations
 
 def translate_terms_batch(term_list, source_lang, batch_size=50):
-    """IMPROVED: Use GUI-controlled batch size for translation"""
+    """Use GUI-controlled batch size for translation"""
     if not term_list or os.getenv("DISABLE_GLOSSARY_TRANSLATION", "0") == "1":
         print(f"📑 Glossary translation disabled or no terms to translate")
         return {term: term for term in term_list}
@@ -2037,6 +1720,8 @@ def translate_terms_batch(term_list, source_lang, batch_size=50):
         
         print(f"📑 Translating {len(term_list)} {source_lang} terms to English using batch size {batch_size}...")
         
+        # Import UnifiedClient
+        from unified_api_client import UnifiedClient
         client = UnifiedClient(model=MODEL, api_key=API_KEY)
         
         all_translations = {}
@@ -2109,48 +1794,385 @@ def translate_terms_batch(term_list, source_lang, batch_size=50):
         print(f"⚠️ Glossary translation failed: {e}")
         return {term: term for term in term_list}
 
-def parse_translation_response(response, original_terms):
-    """Parse translation response - handles numbered format"""
-    translations = {}
-    lines = response.strip().split('\n')
+def save_glossary(output_dir, chapters, instructions, language="korean"):
+    """
+    Targeted glossary generator - Focuses on titles and CJK names with honorifics
+    """
     
-    # Look for numbered format (1. term -> translation)
-    for line in lines:
-        line = line.strip()
-        if not line or not line[0].isdigit():
-            continue
-            
+    print("📑 Targeted Glossary Generator v3.0")
+    print("📑 Extracting titles and names with honorifics only")
+    
+    # Check for existing manual glossary first
+    manual_glossary_path = os.getenv("MANUAL_GLOSSARY")
+    if manual_glossary_path and os.path.exists(manual_glossary_path):
+        print(f"📑 Manual glossary detected: {os.path.basename(manual_glossary_path)}")
+        
+        # Copy manual glossary to output directory
+        target_path = os.path.join(output_dir, "glossary.json")
         try:
-            # Extract number and content
-            number_match = re.match(r'^(\d+)\.?\s*(.+)', line)
-            if number_match:
-                num = int(number_match.group(1)) - 1  # Convert to 0-based index
-                content = number_match.group(2).strip()
-                
-                if 0 <= num < len(original_terms):
-                    original_term = original_terms[num]
-                    
-                    # Try to extract translation from various formats
-                    for separator in ['->', '→', ':', '-', '—', '=']:
-                        if separator in content:
-                            parts = content.split(separator, 1)
-                            if len(parts) == 2:
-                                translation = parts[1].strip()
-                                # Clean up the translation
-                                translation = translation.strip('"\'()[]')
-                                if translation and translation != original_term:
-                                    translations[original_term] = translation
-                                    break
-                    else:
-                        # No separator found, treat whole content as translation
-                        if content != original_term:
-                            translations[original_term] = content
-                            
-        except (ValueError, IndexError):
-            continue
+            shutil.copy2(manual_glossary_path, target_path)
+            print(f"📑 ✅ Manual glossary copied to: {target_path}")
+            print(f"📑 Skipping automatic glossary generation")
+            
+            # Also create a simple format version for compatibility
+            with open(manual_glossary_path, 'r', encoding='utf-8') as f:
+                manual_data = json.load(f)
+            
+            # Convert manual format to simple format
+            simple_entries = {}
+            if isinstance(manual_data, list):
+                for char in manual_data:
+                    original = char.get('original_name', '')
+                    translated = char.get('name', original)
+                    if original and translated:
+                        simple_entries[original] = translated
+            
+            simple_path = os.path.join(output_dir, "glossary_simple.json")
+            with open(simple_path, 'w', encoding='utf-8') as f:
+                json.dump(simple_entries, f, ensure_ascii=False, indent=2)
+            
+            return simple_entries
+            
+        except Exception as e:
+            print(f"⚠️ Could not copy manual glossary: {e}")
+            print(f"📑 Proceeding with automatic generation...")
     
-    return translations
-
+    # Check if there's an existing glossary from the manual extractor
+    glossary_folder_path = os.path.join(output_dir, "Glossary")
+    existing_glossary = None
+    
+    if os.path.exists(glossary_folder_path):
+        # Look for JSON files in the Glossary folder
+        for file in os.listdir(glossary_folder_path):
+            if file.endswith("_glossary.json"):
+                existing_path = os.path.join(glossary_folder_path, file)
+                try:
+                    with open(existing_path, 'r', encoding='utf-8') as f:
+                        existing_glossary = json.load(f)
+                    print(f"📑 Found existing glossary from manual extraction: {file}")
+                    break
+                except Exception as e:
+                    print(f"⚠️ Could not load existing glossary: {e}")
+    
+    # Load settings
+    min_frequency = int(os.getenv("GLOSSARY_MIN_FREQUENCY", "2"))
+    max_names = int(os.getenv("GLOSSARY_MAX_NAMES", "50"))
+    max_titles = int(os.getenv("GLOSSARY_MAX_TITLES", "30"))
+    batch_size = int(os.getenv("GLOSSARY_BATCH_SIZE", "50"))
+    
+    print(f"📑 Settings: Min frequency: {min_frequency}, Max names: {max_names}, Max titles: {max_titles}")
+    
+    def clean_html(html_text):
+        """Remove HTML tags to get clean text"""
+        soup = BeautifulSoup(html_text, 'html.parser')
+        return soup.get_text()
+    
+    # Extract and combine all text from chapters
+    all_text = ' '.join(clean_html(chapter["body"]) for chapter in chapters)
+    print(f"📑 Processing {len(all_text):,} characters of text")
+    
+    # Focused honorifics for CJK languages only
+    CJK_HONORIFICS = {
+        'korean': ['님', '씨', '선배', '형', '누나', '언니', '오빠', '선생님', '교수님', '사장님', '회장님'],
+        'japanese': ['さん', 'ちゃん', '君', 'くん', '様', 'さま', '先生', 'せんせい', '殿', 'どの', '先輩', 'せんぱい'],
+        'chinese': ['先生', '小姐', '夫人', '公子', '大人', '老师', '师父', '师傅', '同志', '同学'],
+        'english': ['-san', '-chan', '-kun', '-sama', '-sensei', '-senpai', '-dono']  # For romanized content
+    }
+    
+    # Title patterns for various languages
+    TITLE_PATTERNS = {
+        'korean': [
+            r'\b(왕|여왕|왕자|공주|황제|황후|대왕|대공|공작|백작|자작|남작|기사|장군|대장|원수|제독|함장|대신|재상|총리|대통령|시장|지사|검사|판사|변호사|의사|박사|교수|신부|목사|스님|도사)\b',
+            r'\b(폐하|전하|각하|예하|님|대감|영감|나리|도련님|아가씨|부인|선생)\b'
+        ],
+        'japanese': [
+            r'\b(王|女王|王子|姫|皇帝|皇后|天皇|皇太子|大王|大公|公爵|伯爵|子爵|男爵|騎士|将軍|大将|元帥|提督|艦長|大臣|宰相|総理|大統領|市長|知事|検事|裁判官|弁護士|医者|博士|教授|神父|牧師|僧侶|道士)\b',
+            r'\b(陛下|殿下|閣下|猊下|様|大人|殿|卿|君|氏)\b'
+        ],
+        'chinese': [
+            r'\b(王|女王|王子|公主|皇帝|皇后|大王|大公|公爵|伯爵|子爵|男爵|骑士|将军|大将|元帅|提督|舰长|大臣|宰相|总理|大总统|市长|知事|检察官|法官|律师|医生|博士|教授|神父|牧师|和尚|道士)\b',
+            r'\b(陛下|殿下|阁下|大人|老爷|夫人|小姐|公子|少爷|姑娘|先生)\b'
+        ],
+        'english': [
+            r'\b(King|Queen|Prince|Princess|Emperor|Empress|Duke|Duchess|Marquis|Marquess|Earl|Count|Countess|Viscount|Viscountess|Baron|Baroness|Knight|Lord|Lady|Sir|Dame|General|Admiral|Captain|Major|Colonel|Commander|Lieutenant|Sergeant|Minister|Chancellor|President|Mayor|Governor|Judge|Doctor|Professor|Father|Reverend|Master|Mistress)\b',
+            r'\b(His|Her|Your|Their)\s+(Majesty|Highness|Grace|Excellency|Honor|Worship|Lordship|Ladyship)\b'
+        ]
+    }
+    
+    # Enhanced exclusions - more strict
+    COMMON_WORDS = {
+        # Korean particles and common words that might appear with honorifics
+        '이', '그', '저', '우리', '너희', '자기', '당신', '여기', '거기', '저기',
+        '오늘', '내일', '어제', '지금', '아까', '나중', '먼저', '다음', '마지막',
+        '모든', '어떤', '무슨', '이런', '그런', '저런', '같은', '다른', '새로운',
+        
+        # Japanese particles and common words
+        'この', 'その', 'あの', 'どの', 'これ', 'それ', 'あれ', 'どれ',
+        'わたし', 'あなた', 'かれ', 'かのじょ', 'わたしたち', 'あなたたち',
+        'きょう', 'あした', 'きのう', 'いま', 'あとで', 'まえ', 'つぎ',
+        
+        # Chinese common words
+        '这', '那', '哪', '这个', '那个', '哪个', '这里', '那里', '哪里',
+        '我', '你', '他', '她', '它', '我们', '你们', '他们', '她们',
+        '今天', '明天', '昨天', '现在', '刚才', '以后', '以前', '后来',
+        
+        # Single characters that are definitely not names
+        '一', '二', '三', '四', '五', '六', '七', '八', '九', '十',
+        'a', 'i', 'u', 'e', 'o', 'の', 'は', 'が', 'を', 'に', 'で', 'と', 'も',
+        '은', '는', '이', '가', '을', '를', '에', '의', '와', '과', '도', '만'
+    }
+    
+    def is_valid_name(name, language_hint='unknown'):
+        """Strict validation for proper names only"""
+        if not name or len(name.strip()) < 1:
+            return False
+            
+        name = name.strip()
+        
+        # Exclude common words
+        if name.lower() in COMMON_WORDS or name in COMMON_WORDS:
+            return False
+        
+        # Language-specific validation
+        if language_hint == 'korean':
+            # Korean names are usually 2-4 characters (family name + given name)
+            if not (2 <= len(name) <= 4):
+                return False
+            # Should be all Hangul
+            if not all(0xAC00 <= ord(char) <= 0xD7AF for char in name):
+                return False
+                
+        elif language_hint == 'japanese':
+            # Japanese names can be 2-6 characters
+            if not (2 <= len(name) <= 6):
+                return False
+            # Should contain kanji or kana
+            has_kanji = any(0x4E00 <= ord(char) <= 0x9FFF for char in name)
+            has_kana = any((0x3040 <= ord(char) <= 0x309F) or (0x30A0 <= ord(char) <= 0x30FF) for char in name)
+            if not (has_kanji or has_kana):
+                return False
+                
+        elif language_hint == 'chinese':
+            # Chinese names are usually 2-4 characters
+            if not (2 <= len(name) <= 4):
+                return False
+            # Should be all Chinese characters
+            if not all(0x4E00 <= ord(char) <= 0x9FFF for char in name):
+                return False
+                
+        elif language_hint == 'english':
+            # English names should start with capital letter
+            if not name[0].isupper():
+                return False
+            # Should be mostly letters
+            if sum(1 for c in name if c.isalpha()) < len(name) * 0.8:
+                return False
+            # Reasonable length
+            if not (2 <= len(name) <= 20):
+                return False
+        
+        return True
+    
+    def detect_language_hint(text_sample):
+        """Quick language detection for validation purposes"""
+        # Count script usage
+        korean_chars = sum(1 for char in text_sample[:1000] if 0xAC00 <= ord(char) <= 0xD7AF)
+        japanese_kana = sum(1 for char in text_sample[:1000] if (0x3040 <= ord(char) <= 0x309F) or (0x30A0 <= ord(char) <= 0x30FF))
+        chinese_chars = sum(1 for char in text_sample[:1000] if 0x4E00 <= ord(char) <= 0x9FFF)
+        latin_chars = sum(1 for char in text_sample[:1000] if 0x0041 <= ord(char) <= 0x007A)
+        
+        if korean_chars > 50:
+            return 'korean'
+        elif japanese_kana > 20:
+            return 'japanese'
+        elif chinese_chars > 50 and japanese_kana < 10:
+            return 'chinese'
+        elif latin_chars > 100:
+            return 'english'
+        else:
+            return 'unknown'
+    
+    # Detect primary language
+    language_hint = detect_language_hint(all_text)
+    print(f"📑 Detected primary language: {language_hint}")
+    
+    # Select appropriate honorifics
+    honorifics_to_use = []
+    if language_hint in CJK_HONORIFICS:
+        honorifics_to_use.extend(CJK_HONORIFICS[language_hint])
+    # Always include English romanized honorifics
+    honorifics_to_use.extend(CJK_HONORIFICS['english'])
+    
+    print(f"📑 Using {len(honorifics_to_use)} honorifics for {language_hint}")
+    
+    # Find names with honorifics
+    names_with_honorifics = {}
+    standalone_names = {}
+    
+    print("📑 Scanning for names with honorifics...")
+    
+    # Process each honorific
+    for honorific in honorifics_to_use:
+        # Use regex to find name + honorific patterns
+        if honorific.startswith('-'):
+            # English style suffix
+            pattern = r'(\b[A-Z][a-zA-Z]+)' + re.escape(honorific) + r'\b'
+        else:
+            # CJK style suffix - need to handle no word boundaries
+            if language_hint == 'japanese':
+                # Japanese names can be 1-6 chars before honorific
+                pattern = r'([\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]{1,6})' + re.escape(honorific)
+            elif language_hint == 'korean':
+                # Korean names are typically 2-4 chars
+                pattern = r'([\uac00-\ud7af]{2,4})' + re.escape(honorific)
+            elif language_hint == 'chinese':
+                # Chinese names are typically 2-4 chars
+                pattern = r'([\u4e00-\u9fff]{2,4})' + re.escape(honorific)
+            else:
+                # Generic pattern
+                pattern = r'(\S+)' + re.escape(honorific) + r'(?:\s|$|[。、.,!?])'
+        
+        matches = re.finditer(pattern, all_text)
+        
+        for match in matches:
+            potential_name = match.group(1)
+            
+            if is_valid_name(potential_name, language_hint):
+                full_form = potential_name + honorific
+                
+                # Count occurrences
+                count = len(re.findall(re.escape(full_form), all_text))
+                
+                if count >= min_frequency:
+                    if full_form not in names_with_honorifics:
+                        names_with_honorifics[full_form] = count
+                    if potential_name not in standalone_names:
+                        standalone_names[potential_name] = count
+    
+    print(f"📑 Found {len(standalone_names)} unique names with honorifics")
+    
+    # Find titles
+    print("📑 Scanning for titles...")
+    found_titles = {}
+    
+    # Use appropriate title patterns
+    title_patterns_to_use = []
+    if language_hint in TITLE_PATTERNS:
+        title_patterns_to_use.extend(TITLE_PATTERNS[language_hint])
+    # Always check for English titles too
+    title_patterns_to_use.extend(TITLE_PATTERNS['english'])
+    
+    for pattern in title_patterns_to_use:
+        matches = re.finditer(pattern, all_text, re.IGNORECASE if 'english' in pattern else 0)
+        
+        for match in matches:
+            title = match.group(0)
+            count = len(re.findall(re.escape(title), all_text, re.IGNORECASE if 'english' in pattern else 0))
+            
+            if count >= min_frequency:
+                # Normalize case for English titles
+                if re.match(r'[A-Za-z]', title):
+                    title = title.title()
+                
+                if title not in found_titles:
+                    found_titles[title] = count
+    
+    print(f"📑 Found {len(found_titles)} unique titles")
+    
+    # Sort by frequency and apply limits
+    sorted_names = sorted(names_with_honorifics.items(), key=lambda x: x[1], reverse=True)[:max_names]
+    sorted_titles = sorted(found_titles.items(), key=lambda x: x[1], reverse=True)[:max_titles]
+    
+    # Combine for translation
+    all_terms = []
+    
+    # Add names with count info
+    for name, count in sorted_names:
+        all_terms.append(name)
+        
+    # Add titles with count info  
+    for title, count in sorted_titles:
+        all_terms.append(title)
+    
+    print(f"📑 Total terms to translate: {len(all_terms)}")
+    
+    # Show sample of what was found
+    if sorted_names:
+        print("\n📑 Sample names found:")
+        for name, count in sorted_names[:5]:
+            print(f"   • {name} ({count}x)")
+    
+    if sorted_titles:
+        print("\n📑 Sample titles found:")
+        for title, count in sorted_titles[:5]:
+            print(f"   • {title} ({count}x)")
+    
+    # Translate if enabled
+    if os.getenv("DISABLE_GLOSSARY_TRANSLATION", "0") == "1":
+        print("📑 Translation disabled - keeping original terms")
+        translations = {term: term for term in all_terms}
+    else:
+        print(f"📑 Translating {len(all_terms)} terms...")
+        translations = translate_terms_batch(all_terms, language_hint, batch_size)
+    
+    # Build final glossary with categories
+    glossary_entries = {}
+    
+    # Add names
+    for name, _ in sorted_names:
+        if name in translations:
+            glossary_entries[name] = translations[name]
+    
+    # Add titles
+    for title, _ in sorted_titles:
+        if title in translations:
+            glossary_entries[title] = translations[title]
+    
+    # Merge with existing glossary if found
+    if existing_glossary and isinstance(existing_glossary, list):
+        print("📑 Merging with existing manual glossary...")
+        merged_count = 0
+        
+        for char in existing_glossary:
+            original = char.get('original_name', '')
+            translated = char.get('name', original)
+            
+            # Add to our glossary if not already present
+            if original and translated and original not in glossary_entries:
+                glossary_entries[original] = translated
+                merged_count += 1
+        
+        print(f"📑 Added {merged_count} entries from existing glossary")
+    
+    # Save glossary with metadata
+    glossary_data = {
+        "metadata": {
+            "language": language_hint,
+            "names_count": len(sorted_names),
+            "titles_count": len(sorted_titles),
+            "min_frequency": min_frequency,
+            "generation_date": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "merged_with_manual": existing_glossary is not None
+        },
+        "entries": glossary_entries
+    }
+    
+    glossary_path = os.path.join(output_dir, "glossary.json")
+    with open(glossary_path, 'w', encoding='utf-8') as f:
+        json.dump(glossary_data, f, ensure_ascii=False, indent=2)
+    
+    print(f"\n📑 ✅ TARGETED GLOSSARY SAVED!")
+    print(f"📑 File: {glossary_path}")
+    print(f"📑 Names: {len(sorted_names)}, Titles: {len(sorted_titles)}")
+    if existing_glossary:
+        print(f"📑 Total entries (including manual): {len(glossary_entries)}")
+    
+    # For compatibility, also save simple format
+    simple_glossary_path = os.path.join(output_dir, "glossary_simple.json")
+    with open(simple_glossary_path, 'w', encoding='utf-8') as f:
+        json.dump(glossary_entries, f, ensure_ascii=False, indent=2)
+    
+    return glossary_entries
       
 # =============================================================================
 # API AND TRANSLATION UTILITIES
@@ -2206,9 +2228,47 @@ def parse_token_limit(env_value):
     return 1000000, "1000000 (default)"
 
 def build_system_prompt(user_prompt, glossary_path, instructions):
-    """Build the system prompt with glossary"""
+    """Build the system prompt with glossary - handles multiple formats"""
     # Check if we should append glossary (default is True if not set)
     append_glossary = os.getenv("APPEND_GLOSSARY", "1") == "1"
+    
+    # Helper function to format glossary for prompt
+    def format_glossary_for_prompt(glossary_data):
+        """Convert various glossary formats into a unified prompt format"""
+        formatted_entries = {}
+        
+        # Handle manual glossary format (array of character objects)
+        if isinstance(glossary_data, list):
+            for char in glossary_data:
+                # Extract original and translated names
+                original = char.get('original_name', '')
+                translated = char.get('name', original)
+                if original and translated:
+                    formatted_entries[original] = translated
+                
+                # Also add title with original name if present
+                title = char.get('title')
+                if title and original:
+                    formatted_entries[f"{original} ({title})"] = f"{translated} ({title})"
+                
+                # Add any how_they_refer_to_others entries
+                refer_map = char.get('how_they_refer_to_others', {})
+                if isinstance(refer_map, dict):
+                    for other_name, reference in refer_map.items():
+                        if other_name and reference:
+                            # This helps with consistency in dialogue
+                            formatted_entries[f"{original} → {other_name}"] = f"{translated} → {reference}"
+        
+        # Handle automatic glossary format (dict with entries)
+        elif isinstance(glossary_data, dict):
+            if "entries" in glossary_data:
+                # New automatic format with metadata
+                formatted_entries = glossary_data["entries"]
+            else:
+                # Simple dict format
+                formatted_entries = glossary_data
+        
+        return formatted_entries
     
     # Check if system prompt is disabled
     if os.getenv("DISABLE_SYSTEM_PROMPT", "0") == "1":
@@ -2217,15 +2277,22 @@ def build_system_prompt(user_prompt, glossary_path, instructions):
         
         # Append glossary if the toggle is on
         if append_glossary and os.path.exists(glossary_path):
-            with open(glossary_path, "r", encoding="utf-8") as gf:
-                entries = json.load(gf)
-            glossary_block = json.dumps(entries, ensure_ascii=False, indent=2)
-            if system:
-                system += "\n\n"
-            system += (
-                "Use the following glossary entries exactly as given:\n"
-                f"{glossary_block}"
-            )
+            try:
+                with open(glossary_path, "r", encoding="utf-8") as gf:
+                    glossary_data = json.load(gf)
+                
+                formatted_entries = format_glossary_for_prompt(glossary_data)
+                
+                if formatted_entries:
+                    glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
+                    if system:
+                        system += "\n\n"
+                    system += (
+                        "Character/Term Glossary (use these translations consistently):\n"
+                        f"{glossary_block}"
+                    )
+            except Exception as e:
+                print(f"Warning: Could not load glossary: {e}")
         
         return system
     
@@ -2234,23 +2301,40 @@ def build_system_prompt(user_prompt, glossary_path, instructions):
         system = user_prompt
         # Append glossary if the toggle is on
         if append_glossary and os.path.exists(glossary_path):
-            with open(glossary_path, "r", encoding="utf-8") as gf:
-                entries = json.load(gf)
-            glossary_block = json.dumps(entries, ensure_ascii=False, indent=2)
-            system += (
-                "\n\nUse the following glossary entries exactly as given:\n"
-                f"{glossary_block}"
-            )
+            try:
+                with open(glossary_path, "r", encoding="utf-8") as gf:
+                    glossary_data = json.load(gf)
+                
+                formatted_entries = format_glossary_for_prompt(glossary_data)
+                
+                if formatted_entries:
+                    glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
+                    system += (
+                        "\n\nCharacter/Term Glossary (use these translations consistently):\n"
+                        f"{glossary_block}"
+                    )
+            except Exception as e:
+                print(f"Warning: Could not load glossary: {e}")
             
     elif os.path.exists(glossary_path) and append_glossary:
-        with open(glossary_path, "r", encoding="utf-8") as gf:
-            entries = json.load(gf)
-        glossary_block = json.dumps(entries, ensure_ascii=False, indent=2)
-        system = (
-            instructions + "\n\n"
-            "Use the following glossary entries exactly as given:\n"
-            f"{glossary_block}"
-        )
+        try:
+            with open(glossary_path, "r", encoding="utf-8") as gf:
+                glossary_data = json.load(gf)
+            
+            formatted_entries = format_glossary_for_prompt(glossary_data)
+            
+            if formatted_entries:
+                glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
+                system = (
+                    instructions + "\n\n"
+                    "Character/Term Glossary (use these translations consistently):\n"
+                    f"{glossary_block}"
+                )
+            else:
+                system = instructions
+        except Exception as e:
+            print(f"Warning: Could not load glossary: {e}")
+            system = instructions
     else:
         system = instructions
 
