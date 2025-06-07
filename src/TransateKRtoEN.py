@@ -1656,11 +1656,9 @@ def cleanup_previous_extraction(output_dir):
 # GLOSSARY MANAGEMENT
 # =============================================================================
 
-# Replace the save_glossary function in TransateKRtoEN.py with this fixed version:
-
 def save_glossary(output_dir, chapters, instructions, language="korean"):
-    """Generate and save glossary - ONLY names that appear WITH honorifics"""
-    print("📑 Starting ULTRA-RESTRICTIVE glossary generation...")
+    """Generate and save glossary - ULTRA-SIMPLE version with NO regex"""
+    print("📑 Starting ULTRA-SIMPLE glossary generation...")
     
     # Get settings from environment variables
     min_frequency = int(os.getenv("GLOSSARY_MIN_FREQUENCY", "3"))
@@ -1691,119 +1689,80 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
     # Combine all text
     all_text = ' '.join(clean_html(c["body"]) for c in chapters)
     
-    # RULE: ONLY extract items that are FOUND with honorifics attached
-    # If a word never appears with an honorific, it's NOT a character name
-    
     names_with_honorifics = []
     standalone_character_names = []
+    confirmed_character_names = set()
     
     if base_language == "korean":
-        print("📑 KOREAN: Only extracting names that appear WITH honorifics...")
+        print("📑 KOREAN: Simple surname + honorific detection...")
         
-        # Korean honorifics - FIXED: Only capture the name part, not the honorific
-        korean_honorific_patterns = [
-            (r'([가-힣]{2,4})님', '님'),
-            (r'([가-힣]{2,4})씨', '씨'),
-            (r'([가-힣]{2,4})선배', '선배'),
-            (r'([가-힣]{2,4})형', '형'),
-            (r'([가-힣]{2,4})누나', '누나'),
-            (r'([가-힣]{2,4})언니', '언니'),
-            (r'([가-힣]{2,4})오빠', '오빠'),
-            (r'([가-힣]{2,4})공주', '공주'),
-            (r'([가-힣]{2,4})왕자', '왕자'),
-            (r'([가-힣]{2,4})선생님', '선생님'),
-            (r'([가-힣]{2,4})교수님', '교수님'),
-        ]
+        # Korean - simple string matching only
+        common_surnames = ['김', '이', '박', '최', '정', '강', '조', '윤', '장', '임']
+        honorifics = ['님', '씨', '선배', '형', '누나', '언니', '오빠']
         
-        confirmed_character_names = set()
+        print("   🔍 Checking known surnames with honorifics...")
         
-        # STEP 1: Find ALL name+honorific combinations
-        for pattern, honorific in korean_honorific_patterns:
-            matches = re.findall(pattern, all_text)
-            for name in matches:
-                # name is now a string (just the captured name part)
-                # Must be 2-4 characters and appear multiple times
-                if (len(name) >= 2 and 
-                    all_text.count(name + honorific) >= min_frequency):
-                    
-                    # EXTRA CHECK: Make sure it's not a random word
-                    if name not in ['그것', '이것', '저것', '그런', '이런', '저런', '그래', '이제', '하지만', '그리고', '그러나', '때문', '그냥', '막', '좀', '또', '다시', '모든', '많은', '같은', '다른', '좋은', '나쁜', '이제', '지금', '오늘', '내일', '어제', '여기', '거기', '저기', '어디', '언제', '무엇', '누구', '어떻게', '왜', '뭐', '뭔가', '누군가', '어떤', '이런', '저런', '그런', '어느', '모든', '다른', '같은', '새로운', '오래된', '처음', '마지막', '다음', '이전', '지난', '앞으로', '나중', '지금까지', '앞으로도']:
-                        
-                        confirmed_character_names.add(name)
-                        names_with_honorifics.append(name + honorific)
-                        print(f"   ✅ Found: {name} (with {honorific}) - appears {all_text.count(name + honorific)} times")
+        for surname in common_surnames:
+            for honorific in honorifics:
+                # Check surname + honorific
+                full_term = surname + honorific
+                count = all_text.count(full_term)
+                if count >= min_frequency:
+                    confirmed_character_names.add(surname)
+                    names_with_honorifics.append(full_term)
+                    print(f"   ✅ Found: {surname} + {honorific} ({count} times)")
         
-        # STEP 2: ONLY add standalone names if they were confirmed with honorifics
+        # Add standalone names
         for name in confirmed_character_names:
             if all_text.count(name) >= min_frequency:
                 standalone_character_names.append(name)
         
     elif base_language == "japanese":
-        print("📑 JAPANESE: Only extracting names that appear WITH honorifics...")
+        print("📑 JAPANESE: Ultra-simple name detection...")
         
-        # Japanese honorifics - FIXED: Only capture the name part
-        japanese_honorific_patterns = [
-            (r'([ァ-ヶー]{2,6}|[あ-ゞ]{2,6}|[\u4e00-\u9fff]{2,4})さん', 'さん'),
-            (r'([ァ-ヶー]{2,6}|[あ-ゞ]{2,6}|[\u4e00-\u9fff]{2,4})ちゃん', 'ちゃん'),
-            (r'([ァ-ヶー]{2,6}|[あ-ゞ]{2,6}|[\u4e00-\u9fff]{2,4})君', '君'),
-            (r'([ァ-ヶー]{2,6}|[あ-ゞ]{2,6}|[\u4e00-\u9fff]{2,4})様', '様'),
-            (r'([ァ-ヶー]{2,6}|[あ-ゞ]{2,6}|[\u4e00-\u9fff]{2,4})先生', '先生'),
+        # Just check known surnames - most reliable and fast
+        common_surnames = [
+            '田中', '山田', '佐藤', '鈴木', '高橋', '伊藤', '渡辺', '中村', '小林', '加藤'
         ]
         
-        # MASSIVE Japanese exclusion list - anything that could be a common word
-        japanese_excluded = {
-            'あの', 'いま', 'あした', 'きょう', 'きのう', 'あさ', 'ひる', 'よる', 'ばん', 'とき', 'あいだ', 'まえ', 'あと', 'つぎ', 'さき', 'はじめ', 'おわり', 'ところ', 'ばしょ', 'みち', 'いえ', 'うち', 'そと', 'なか', 'うえ', 'した', 'よこ', 'となり', 'ちかく', 'とおく', 'ひと', 'ひとり', 'みんな', 'だれ', 'なに', 'なん', 'どこ', 'いつ', 'なぜ', 'どう', 'どの', 'どんな', 'いくつ', 'いくら', 'どれ', 'どちら', 'こと', 'もの', 'ひと', 'かた', 'やつ', 'あれ', 'これ', 'それ', 'どれ', 'ここ', 'そこ', 'あそこ', 'どこ', 'こちら', 'そちら', 'あちら', 'どちら', 'いろいろ', 'みんな', 'すべて', 'なにも', 'だれも', 'どこも', 'いつも', 'どうも', 'とても', 'すごく', 'ちょっと', 'すこし', 'たくさん', 'いっぱい', 'ぜんぶ', 'はんぶん', 'ひとつ', 'ふたつ', 'みっつ', 'よっつ', 'いつつ', 'むっつ', 'ななつ', 'やっつ', 'ここのつ', 'とお', 'おおく', 'すくなく', 'たくさん', 'いちばん', 'さいご', 'はじめて', 'もう', 'まだ', 'もっと', 'いちど', 'にど', 'なんど', 'ときどき', 'いつも', 'たいてい', 'よく', 'あまり', 'ぜんぜん', 'けっして', 'かならず', 'きっと', 'たぶん', 'もしかして', 'やっぱり', 'やはり', 'さすが', 'なるほど', 'そうそう', 'はい', 'いいえ', 'うん', 'ううん', 'いや', 'ちがう', 'そう', 'ほんとう', 'うそ', 'だめ', 'いい', 'わるい', 'すき', 'きらい', 'じょうず', 'へた', 'たいせつ', 'ひつよう', 'だいじ', 'かんたん', 'むずかしい', 'やさしい', 'きびしい', 'あたらしい', 'ふるい', 'わかい', 'としより', 'おおきい', 'ちいさい', 'たかい', 'ひくい', 'なが', 'みじか', 'ひろ', 'せま', 'おも', 'かる', 'つよ', 'よわ', 'はや', 'おそ', 'あつ', 'さむ', 'あたたか', 'すず', 'あか', 'あお', 'き', 'しろ', 'くろ', 'きいろ', 'みどり', 'むらさき', 'ちゃいろ', 'はい', 'あかる', 'くら', 'きれい', 'きたな', 'しず', 'うるさ', 'にぎやか', 'さみし', 'たの', 'つまら', 'おもしろ', 'かな', 'うれし', 'たのし', 'しあわせ', 'かなし', 'さびし', 'つら', 'くる', 'いや', 'こわ', 'あぶな', 'あんぜん', 'げんき', 'びょうき', 'いた', 'くる', 'つか', 'ねむ', 'のど', 'おな', 'あた', 'いそが', 'ひま', 'べんり', 'ふべん', 'かんた', 'ふくざ', 'しんぱ', 'あんし', 'まじめ', 'ふまじめ', 'しんせつ', 'いじわる', 'やさし', 'きび', 'すな', 'あたた', 'つめた', 'あま', 'から', 'しょっぱ', 'すっぱ', 'にが', 'おい', 'まず', 'おと', 'こえ', 'おんがく', 'うた', 'はな', 'きく', 'みる', 'よむ', 'かく', 'いう', 'はな', 'きく', 'かんが', 'しる', 'わかる', 'わすれる', 'おぼえる', 'ならう', 'おしえる', 'べんきょう', 'しごと', 'やすむ', 'ねる', 'おきる', 'たつ', 'すわる', 'あるく', 'はしる', 'とぶ', 'およぐ', 'のぼる', 'おりる', 'はいる', 'でる', 'くる', 'いく', 'かえる', 'きて', 'いって', 'かえって', 'もどる', 'とまる', 'うごく', 'あける', 'しめる', 'つける', 'けす', 'はじめる', 'おわる', 'つづける', 'やめる', 'つくる', 'こわす', 'なおす', 'なくす', 'みつける', 'さがす', 'もつ', 'おく', 'とる', 'あげる', 'もらう', 'かりる', 'かす', 'かう', 'うる', 'はらう', 'つかう', 'ためる', 'きる', 'ぬぐ', 'はく', 'みにつける', 'あらう', 'ふく', 'そうじ', 'せんたく', 'りょうり', 'たべる', 'のむ', 'つくる', 'きる', 'あじ', 'におい', 'いろ', 'かたち', 'おおき', 'おも', 'かた', 'やわら', 'なめら', 'ざらざら', 'つる', 'がさがさ'
-        }
+        honorifics = ['さん', 'ちゃん', '君', '様', '先生']
         
-        confirmed_character_names = set()
+        print("   🔍 Checking known surnames with honorifics...")
         
-        # Find ALL name+honorific combinations
-        for pattern, honorific in japanese_honorific_patterns:
-            matches = re.findall(pattern, all_text)
-            for name in matches:
-                # name is now a string (just the captured name part)
-                if (len(name) >= 2 and 
-                    all_text.count(name + honorific) >= min_frequency and
-                    name not in japanese_excluded):
-                    
-                    confirmed_character_names.add(name)
-                    names_with_honorifics.append(name + honorific)
-                    print(f"   ✅ Found: {name} (with {honorific}) - appears {all_text.count(name + honorific)} times")
+        for surname in common_surnames:
+            for honorific in honorifics:
+                full_term = surname + honorific
+                count = all_text.count(full_term)
+                if count >= min_frequency:
+                    confirmed_character_names.add(surname)
+                    names_with_honorifics.append(full_term)
+                    print(f"   ✅ Found: {surname} + {honorific} ({count} times)")
         
-        # ONLY add standalone names if they were confirmed with honorifics
+        # Add standalone names
         for name in confirmed_character_names:
             if all_text.count(name) >= min_frequency:
                 standalone_character_names.append(name)
         
     elif base_language == "chinese":
-        print("📑 CHINESE: Only extracting names that appear WITH titles...")
+        print("📑 CHINESE: Simple surname + title detection...")
         
-        # Chinese - ONLY extract names with clear titles - FIXED patterns
-        surnames = '王李张刘陈杨赵黄周吴'
-        chinese_title_patterns = [
-            (rf'([{surnames}][\u4e00-\u9fff]{{1,3}})公子', '公子'),
-            (rf'([{surnames}][\u4e00-\u9fff]{{1,3}})小姐', '小姐'),
-            (rf'([{surnames}][\u4e00-\u9fff]{{1,3}})夫人', '夫人'),
-            (rf'([{surnames}][\u4e00-\u9fff]{{1,3}})先生', '先生'),
-            (rf'([{surnames}][\u4e00-\u9fff]{{1,3}})大人', '大人'),
-            (rf'([{surnames}][\u4e00-\u9fff]{{1,3}})师父', '师父'),
-            (rf'([{surnames}][\u4e00-\u9fff]{{1,3}})师傅', '师傅'),
-        ]
+        # Chinese - simple string matching only
+        common_surnames = ['王', '李', '张', '刘', '陈', '杨', '赵', '黄', '周', '吴']
+        titles = ['公子', '小姐', '夫人', '先生', '大人']
         
-        confirmed_character_names = set()
+        print("   🔍 Checking known surnames with titles...")
         
-        for pattern, title in chinese_title_patterns:
-            matches = re.findall(pattern, all_text)
-            for name in matches:
-                # name is now a string (just the captured name part)
-                if (2 <= len(name) <= 4 and 
-                    all_text.count(name + title) >= min_frequency):
-                    
-                    confirmed_character_names.add(name)
-                    names_with_honorifics.append(name + title)
-                    print(f"   ✅ Found: {name} (with {title}) - appears {all_text.count(name + title)} times")
+        for surname in common_surnames:
+            for title in titles:
+                # Check surname + title
+                full_term = surname + title
+                count = all_text.count(full_term)
+                if count >= min_frequency:
+                    confirmed_character_names.add(surname)
+                    names_with_honorifics.append(full_term)
+                    print(f"   ✅ Found: {surname} + {title} ({count} times)")
         
-        # ONLY add standalone names if confirmed with titles
+        # Add standalone names
         for name in confirmed_character_names:
             if all_text.count(name) >= min_frequency:
                 standalone_character_names.append(name)
@@ -1816,7 +1775,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
     
     # Show what we found
     if standalone_character_names:
-        print("📑 Standalone character names (confirmed via honorifics):")
+        print("📑 Standalone character names:")
         for name in standalone_character_names:
             print(f"   • {name}")
     
@@ -1829,8 +1788,8 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
     all_terms = standalone_character_names + names_with_honorifics
     
     if not all_terms:
-        print("📑 ❌ NO CHARACTER NAMES FOUND WITH HONORIFICS")
-        print("📑 This text may not have clear character name patterns or honorific usage")
+        print("📑 ❌ NO CHARACTER NAMES FOUND")
+        print("📑 This text may not have clear character name patterns")
         print("📑 Consider using a manual glossary or disabling auto-glossary")
         
         # Create empty glossary
@@ -1839,7 +1798,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
             json.dump({}, f, ensure_ascii=False, indent=2)
         return
     
-    # Translate only the confirmed character names
+    # Translate the confirmed character names
     print(f"📑 Translating {len(all_terms)} confirmed character names...")
     translations = translate_terms_batch(all_terms, base_language, batch_size)
     
@@ -1857,16 +1816,15 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
     with open(glossary_path, 'w', encoding='utf-8') as f:
         json.dump(glossary_entries, f, ensure_ascii=False, indent=2)
     
-    print(f"📑 ✅ Saved ULTRA-RESTRICTIVE glossary: {len(glossary_entries)} character names only")
+    print(f"📑 ✅ Saved ULTRA-SIMPLE glossary: {len(glossary_entries)} character names only")
     
     # Show final result
     if glossary_entries:
-        print("📑 Final glossary contains ONLY:")
+        print("📑 Final glossary contains:")
         for orig, trans in list(glossary_entries.items())[:10]:
             print(f"   • {orig} → {trans}")
     
-    print("📑 🎯 RULE: Only names that appear WITH honorifics were included")
-
+    print("📑 🎯 RULE: Only known surnames with honorifics were included")
 
 def translate_terms_batch(term_list, source_lang, batch_size=50):
     """IMPROVED: Use GUI-controlled batch size for translation"""
