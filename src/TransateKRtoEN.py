@@ -20,6 +20,9 @@ import time
 # Import the new modules
 from history_manager import HistoryManager
 from chapter_splitter import ChapterSplitter
+from image_translator import ImageTranslator
+from typing import Dict, List, Tuple 
+
 
 def make_safe_filename(title, chapter_num):
     """Create a safe filename that works across different filesystems"""
@@ -110,6 +113,137 @@ def get_instructions(lang):
     """Get minimal technical instructions only"""
     # Only return the technical requirement that applies to all languages
     return "Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title> ,<h1>, <h2>, <p>, <br>, <div>, etc."
+    
+def process_chapter_images(chapter_html: str, chapter_num: int, image_translator: ImageTranslator, 
+                         check_stop_fn=None) -> Tuple[str, Dict[str, str]]:
+    """
+    Process and translate images in a chapter
+    
+    Args:
+        chapter_html: HTML content of the chapter
+        chapter_num: Chapter number for context
+        image_translator: ImageTranslator instance
+        check_stop_fn: Function to check if translation should stop
+        
+    Returns:
+        (updated_html, image_translations_map)
+    """
+    # Extract images from chapter
+    images = image_translator.extract_images_from_chapter(chapter_html)
+    
+    if not images:
+        return chapter_html, {}
+        
+    print(f"🖼️ Found {len(images)} images in chapter {chapter_num}")
+    
+    image_translations = {}
+    translated_count = 0
+    text_found_count = 0
+    skipped_count = 0
+    
+    # Check for limits
+    max_images_per_chapter = int(os.getenv('MAX_IMAGES_PER_CHAPTER', '10'))
+    if len(images) > max_images_per_chapter:
+        print(f"   ⚠️ Chapter has {len(images)} images - processing first {max_images_per_chapter} only")
+        images = images[:max_images_per_chapter]
+    
+    for idx, img_info in enumerate(images, 1):
+        if check_stop_fn and check_stop_fn():
+            print("❌ Image translation stopped by user")
+            break
+            
+        img_src = img_info['src']
+        
+        # Build full image path
+        if img_src.startswith('../'):
+            img_path = os.path.join(image_translator.output_dir, img_src[3:])
+        elif img_src.startswith('./'):
+            img_path = os.path.join(image_translator.output_dir, img_src[2:])
+        elif img_src.startswith('/'):
+            # Absolute path within EPUB
+            img_path = os.path.join(image_translator.output_dir, img_src[1:])
+        else:
+            # Assume it's in the images directory
+            img_path = os.path.join(image_translator.images_dir, os.path.basename(img_src))
+            
+        # Normalize path
+        img_path = os.path.normpath(img_path)
+        
+        # Check if file exists
+        if not os.path.exists(img_path):
+            print(f"   ⚠️ Image not found: {img_path}")
+            # Try alternative locations
+            alt_paths = [
+                os.path.join(image_translator.output_dir, 'images', os.path.basename(img_src)),
+                os.path.join(image_translator.output_dir, os.path.basename(img_src)),
+                os.path.join(os.path.dirname(image_translator.output_dir), img_src)
+            ]
+            
+            for alt_path in alt_paths:
+                if os.path.exists(alt_path):
+                    img_path = alt_path
+                    print(f"   ✅ Found image at: {alt_path}")
+                    break
+            else:
+                print(f"   ❌ Could not find image in any location")
+                continue
+            
+        # Check if we should translate this image
+        if not image_translator.should_translate_image(img_path):
+            skipped_count += 1
+            continue
+            
+        print(f"   🔍 Processing image {idx}/{len(images)}: {os.path.basename(img_path)}")
+        
+        # Build context for translation
+        context = f"Chapter {chapter_num}"
+        if img_info.get('alt'):
+            context += f", Alt text: {img_info['alt']}"
+            
+        # Add delay between API calls
+        if translated_count > 0:
+            import time
+            delay = float(os.getenv('IMAGE_API_DELAY', '1.0'))
+            time.sleep(delay)
+            
+        # Translate the image
+        translation_html = image_translator.translate_image(img_path, context)
+        
+        if translation_html:
+            # Image had text and was translated
+            image_translations[img_src] = translation_html
+            text_found_count += 1
+            translated_count += 1
+            
+            # Save individual translation for debugging
+            if os.getenv('SAVE_IMAGE_TRANSLATIONS', '1') == '1':
+                trans_file = os.path.join(
+                    image_translator.translated_images_dir, 
+                    f"ch{chapter_num}_img{translated_count}.html"
+                )
+                with open(trans_file, 'w', encoding='utf-8') as f:
+                    f.write(f"<!-- Chapter {chapter_num}, Image {translated_count} -->\n")
+                    f.write(f"<!-- Source: {img_src} -->\n")
+                    f.write(translation_html)
+    
+    # Summary
+    if skipped_count > 0:
+        print(f"   📊 Skipped {skipped_count} images (illustrations/decorative)")
+    
+    if text_found_count > 0:
+        print(f"   🖼️ Found text in {text_found_count} images")
+        
+        # Save translation log
+        image_translator.save_translation_log(chapter_num, image_translations)
+        
+        # Update HTML with translations
+        updated_html = image_translator.update_chapter_with_translated_images(chapter_html, image_translations)
+        return updated_html, image_translations
+    else:
+        if len(images) > skipped_count:
+            print(f"   ℹ️ No text found in {len(images) - skipped_count} processed images")
+        
+    return chapter_html, {}
 
 # =============================================================================
 # PROGRESS TRACKING AND MANAGEMENT
@@ -1004,7 +1138,7 @@ def _validate_critical_files(output_dir, extracted_resources):
         print(f"✅ Found OPF file(s): {opf_files}")
 
 def _extract_advanced_chapter_info(zf):
-    """Extract comprehensive chapter information with improved detection"""
+    """Extract comprehensive chapter information with improved detection for image-only chapters"""
     chapters = []
     
     # Get all potential document files
@@ -2591,6 +2725,21 @@ def main(log_callback=None, stop_callback=None):
     # Build system prompt (this will now use the completed glossary)
     system = build_system_prompt(SYSTEM_PROMPT, glossary_path, instructions)
     base_msg = [{"role": "system", "content": system}]
+    
+    # Initialize image translator if using vision-capable model
+    image_translator = None
+    ENABLE_IMAGE_TRANSLATION = os.getenv("ENABLE_IMAGE_TRANSLATION", "1") == "1"
+    
+    if ENABLE_IMAGE_TRANSLATION and MODEL.lower() in ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-exp', 'gpt-4-turbo', 'gpt-4o']:
+        print("🖼️ Vision-capable model detected - enabling image translation")
+        print("🖼️ Image translation will use your custom system prompt and glossary")
+        # Pass the complete system prompt (including GUI prompt + glossary + instructions)
+        image_translator = ImageTranslator(client, out, TRANSLATION_LANG, system)
+    else:
+        if not ENABLE_IMAGE_TRANSLATION:
+            print("ℹ️ Image translation disabled by user")
+        else:
+            print("ℹ️ Model does not support vision - image translation disabled")
     
     total_chapters = len(chapters)
     
