@@ -224,6 +224,9 @@ class TranslatorGUI:
         self.max_images_per_chapter_var = tk.StringVar(
             value=str(self.config.get('max_images_per_chapter', '10'))
         )
+        self.comprehensive_extraction_var = tk.BooleanVar(
+            value=self.config.get('comprehensive_extraction', False)  # Default to False (smart mode)
+        )        
         # Default prompts
         self.default_prompts = {
             "korean": "You are a professional Korean to English novel translator, you must strictly output only English/HTML text while following these rules:\n- Use a context rich and natural translation style.\n- Retain honorifics, and suffixes like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
@@ -1391,7 +1394,7 @@ class TranslatorGUI:
         """Open the Other Settings dialog with all advanced options in a grid layout"""
         top = tk.Toplevel(self.master)
         top.title("Other Settings")
-        top.geometry("860x1040")
+        top.geometry("860x1050")
         top.transient(self.master)
         top.grab_set()
         
@@ -1622,6 +1625,24 @@ class TranslatorGUI:
         tk.Label(section6_frame, 
                  text="Check if all required EPUB files are\npresent for compilation",
                  font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 5))
+
+        # Comprehensive Chapter Extraction
+        tb.Checkbutton(section6_frame, text="Comprehensive Chapter Extraction", 
+                       variable=self.comprehensive_extraction_var,
+                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+
+        tk.Label(section6_frame, 
+                 text="Extract ALL files (disable smart filtering)",
+                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+
+        # In the save_and_close function within open_other_settings, add:
+        self.config['comprehensive_extraction'] = self.comprehensive_extraction_var.get()
+
+        # In save_config method, add:
+        self.config['comprehensive_extraction'] = self.comprehensive_extraction_var.get()
+
+        # In the environment variables section of run_translation_direct, add:
+        os.environ["COMPREHENSIVE_EXTRACTION"] = "1" if self.comprehensive_extraction_var.get() else "0"                 
     
         # =================================================================
         # SECTION 7: IMAGE TRANSLATION (Optimized Layout)
