@@ -13,6 +13,7 @@ added_files = [
     ('unified_api_client.py', '.'),
     ('chapter_splitter.py', '.'),
     ('history_manager.py', '.'),
+    ('image_translator.py', '.'),      # NEW - Added image translator
     ('check_epub_directory.py', '.'),  # Added missing file
     ('direct_imports.py', '.'),        # Added missing file
     ('Halgakos.ico', '.'),  # Include icon
@@ -32,6 +33,7 @@ a = Analysis(
         'unified_api_client',
         'chapter_splitter',
         'history_manager',
+        'image_translator',      # NEW - Added image translator
         'check_epub_directory',  # Added
         'direct_imports',        # Added
         'splash_utils',          # NEW - Added splash utilities
@@ -62,10 +64,14 @@ a = Analysis(
         'tkinter.ttk',
         '_tkinter',  # Added for tkinter backend
         
-        # PIL/Pillow - EXPANDED
+        # PIL/Pillow - EXPANDED FOR IMAGE PROCESSING
         'PIL',
         'PIL.Image',
         'PIL.ImageTk',
+        'PIL.ImageDraw',         # NEW - Used by image_translator
+        'PIL.ImageFont',         # NEW - Used by image_translator
+        'PIL.ImageEnhance',      # NEW - Used by image_translator
+        'PIL.ImageFilter',       # NEW - Used by image_translator
         'PIL._binary',
         'PIL._imaging',
         'PIL._imagingft',
@@ -177,7 +183,7 @@ a = Analysis(
         'weakref',  # Added
         'locale',  # Added
         'struct',  # Added
-        'base64',  # Added - might be used by APIs
+        'base64',  # Added - might be used by APIs and image processing
         'hmac',  # Added - might be used by APIs
         'secrets',  # Added - might be used by APIs
         'uuid',  # Added - might be used by APIs
@@ -215,7 +221,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='Glossarion v1.7.1',  # Updated version
+    name='Glossarion v1.8.0',  # Updated version
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
