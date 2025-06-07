@@ -8,6 +8,8 @@ class SplashManager:
         self.splash_window = None
         self._status_text = "Initializing..."
         self.progress_value = 0  # Track actual progress 0-100
+        self.canvas_width = 320  # Progress bar dimensions (increased from 300)
+        self.canvas_height = 36  # Increased from 30
         
     def start_splash(self):
         """Create splash window on main thread"""
@@ -54,25 +56,43 @@ class SplashManager:
             
             # Progress bar container
             progress_frame = tk.Frame(main_frame, bg='#2b2b2b')
-            progress_frame.pack(pady=(5, 20))
+            progress_frame.pack(pady=(5, 15))  # Adjusted padding for larger bar
             
             # Progress bar background
-            self.progress_bg = tk.Canvas(progress_frame, width=304, height=24, 
+            self.progress_bg = tk.Canvas(progress_frame, width=self.canvas_width, height=self.canvas_height, 
                                         bg='#2b2b2b', highlightthickness=0)
             self.progress_bg.pack()
             
             # Create border
-            self.progress_bg.create_rectangle(1, 1, 303, 23, outline='#555555', width=2)
+            self.progress_bg.create_rectangle(1, 1, self.canvas_width-1, self.canvas_height-1, 
+                                            outline='#666666', width=2)
             
             # Create background
-            self.progress_bg.create_rectangle(3, 3, 301, 21, fill='#1a1a1a', outline='')
+            self.progress_bg.create_rectangle(3, 3, self.canvas_width-3, self.canvas_height-3, 
+                                            fill='#1a1a1a', outline='')
             
             # Progress bar fill (will be updated)
             self.progress_fill = None
             
-            # Progress percentage text
-            self.progress_text = self.progress_bg.create_text(152, 12, text="0%", 
-                                                             fill='#ffffff', font=('Arial', 9))
+            # Progress percentage text - moved up and with better font
+            text_x = self.canvas_width // 2  # 160 for 320px width
+            text_y = 13.5  # Positioned slightly above center for visual balance
+            
+            # Use a cleaner, more modern font
+            progress_font = ('Montserrat', 12, 'bold')  # Increased size to 12
+            
+            # Create outline for better readability
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    if dx != 0 or dy != 0:
+                        self.progress_bg.create_text(text_x + dx, text_y + dy, text="0%", 
+                                                   fill='#000000', font=progress_font,
+                                                   tags="outline", anchor='center')
+            
+            # Main text on top (white)
+            self.progress_text = self.progress_bg.create_text(text_x, text_y, text="0%", 
+                                                             fill='#ffffff', font=progress_font,
+                                                             anchor='center')
             
             # Version info
             version_label = tk.Label(main_frame, text="Starting up...", 
@@ -167,25 +187,38 @@ class SplashManager:
                 # Update progress bar fill
                 if self.progress_fill:
                     self.progress_bg.delete(self.progress_fill)
+                # Also delete old highlight
+                self.progress_bg.delete("highlight")
                 
-                # Calculate fill width (3 to 301 = 298 pixels total)
-                fill_width = int((self.progress_value / 100) * 298)
+                # Calculate fill width (3 to canvas_width-3)
+                fill_width = int((self.progress_value / 100) * (self.canvas_width - 6))  # -6 for borders
                 if fill_width > 0:
                     # Create gradient effect
                     self.progress_fill = self.progress_bg.create_rectangle(
-                        3, 3, 3 + fill_width, 21, 
+                        3, 3, 3 + fill_width, self.canvas_height - 3, 
                         fill='#4a9eff', outline=''
                     )
                     
-                    # Add a highlight effect
+                    # Add a highlight effect (adjusted for new height)
                     if fill_width > 10:
                         self.progress_bg.create_rectangle(
-                            3, 3, min(13, 3 + fill_width), 8,
+                            3, 3, min(13, 3 + fill_width), 12,
                             fill='#6bb6ff', outline='', tags="highlight"
                         )
                 
-                # Update percentage text
-                self.progress_bg.itemconfig(self.progress_text, text=f"{self.progress_value}%")
+                # Update percentage text without changing position
+                percent_text = f"{self.progress_value}%"
+                
+                # Update main text
+                self.progress_bg.itemconfig(self.progress_text, text=percent_text)
+                
+                # Update all outline layers
+                for item in self.progress_bg.find_withtag("outline"):
+                    self.progress_bg.itemconfig(item, text=percent_text)
+                
+                # Ensure text stays on top of progress fill
+                self.progress_bg.tag_raise("outline")
+                self.progress_bg.tag_raise(self.progress_text)
                 
                 # Continue animation
                 self.splash_window.after(100, self._animate_progress)
