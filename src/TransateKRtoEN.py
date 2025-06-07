@@ -1655,10 +1655,92 @@ def cleanup_previous_extraction(output_dir):
 # =============================================================================
 # GLOSSARY MANAGEMENT
 # =============================================================================
-# In save_glossary function, add these Japanese-specific exclusions to UNIVERSAL_EXCLUSIONS:
-
-    # Add this right after the UNIVERSAL_EXCLUSIONS definition:
-    # Japanese-specific common words to exclude
+def save_glossary(output_dir, chapters, instructions, language="korean"):
+    """
+    automatic glossary generator - works for ANY language
+    Finds character names by looking for words that appear with honorifics
+    PRESERVED ALL ORIGINAL FUNCTIONALITY
+    """
+    
+    print("📑 Automatic Glossary Generator v2.0")
+    print("📑 Language-agnostic character name detection")
+    
+    # Load settings
+    min_frequency = int(os.getenv("GLOSSARY_MIN_FREQUENCY", "2"))
+    max_names = int(os.getenv("GLOSSARY_MAX_NAMES", "50"))
+    max_suffixes = int(os.getenv("GLOSSARY_MAX_SUFFIXES", "50"))
+    batch_size = int(os.getenv("GLOSSARY_BATCH_SIZE", "50"))
+    
+    print(f"📑 Min frequency: {min_frequency}, Max names: {max_names}, Max suffixes: {max_suffixes}")
+    
+    def clean_html(html_text):
+        """Remove HTML tags to get clean text"""
+        soup = BeautifulSoup(html_text, 'html.parser')
+        return soup.get_text()
+    
+    # Extract and combine all text from chapters
+    all_text = ' '.join(clean_html(chapter["body"]) for chapter in chapters)
+    print(f"📑 Processing {len(all_text):,} characters of text")
+    
+    # automatic honorifics from all languages
+    UNIVERSAL_HONORIFICS = [
+        # Korean honorifics and titles
+        '님', '씨', '선배', '형', '누나', '언니', '오빠', '선생님', '교수님', 
+        '공주', '왕자', '폐하', '전하', '각하', '원님', '대감', '영감',
+        
+        # Japanese honorifics and titles
+        'さん', 'ちゃん', '君', 'くん', '様', 'さま', '先生', 'せんせい',
+        '殿', 'どの', '姫', 'ひめ', '王', '皇', '陛下', '閣下', '大人',
+        
+        # Chinese honorifics and titles
+        '公子', '小姐', '夫人', '先生', '大人', '师父', '师傅', '老师',
+        '陛下', '殿下', '王爷', '公主', '皇上', '将军', '大师', '长老',
+        
+        # English honorifics (for mixed content)
+        '-san', '-chan', '-kun', '-sama', '-sensei', '-senpai'
+    ]
+    
+    # Universal exclusion list
+    UNIVERSAL_EXCLUSIONS = {
+        # Korean common words and particles
+        '나', '너', '그', '이', '저', '것', '수', '때', '곳', '중', '안', '밖', '위', '아래', '앞', '뒤',
+        '나는', '나를', '나의', '나도', '나만', '나조차', '나부터', '나까지',
+        '너는', '너를', '너의', '너도', '너만', '그는', '그를', '그의', '그도',
+        '그것', '이것', '저것', '무엇', '어떤', '모든', '각각', '서로', '함께', '혼자',
+        '같은', '다른', '새로운', '오래된', '많은', '적은', '좋은', '나쁜', '큰', '작은',
+        '지금', '오늘', '내일', '어제', '이제', '그때', '언제', '항상', '가끔', '자주',
+        '여기', '거기', '저기', '어디', '어디서', '어디로', '어디까지', '어디든',
+        '하는', '되는', '있는', '없는', '하고', '되고', '있고', '없고', '해서', '돼서',
+        '때문', '위해', '대해', '통해', '의해', '로서', '로써', '부터', '까지', '마다',
+        
+        # Japanese common words and particles  
+        'それ', 'これ', 'あれ', 'どれ', 'その', 'この', 'あの', 'どの',
+        'そう', 'こう', 'ああ', 'どう', 'そこ', 'ここ', 'あそこ', 'どこ',
+        'みんな', 'だれ', 'なに', 'なん', 'いつ', 'なぜ', 'どんな', 'いろいろ',
+        'とても', 'すごく', 'ちょっと', 'すこし', 'たくさん', 'いっぱい', 'もっと',
+        'もう', 'まだ', 'きっと', 'たぶん', 'やっぱり', 'やはり', 'ほんとう',
+        'ひと', 'もの', 'こと', 'とき', 'ところ', 'ほう', 'よう', 'ふう', 'やつ', 'かた',
+        'です', 'ます', 'した', 'する', 'いる', 'ある', 'ない', 'から', 'まで', 'など',
+        
+        # Chinese common words
+        '那个', '这个', '什么', '哪里', '怎么', '为什么', '什么时候', '多少', '怎样', '如何',
+        '所有', '每个', '任何', '没有', '一些', '很多', '一点', '非常', '特别', '真的',
+        '可能', '应该', '必须', '需要', '想要', '喜欢', '觉得', '认为', '知道', '明白',
+        
+        # English common words (for mixed content)
+        'that', 'this', 'what', 'where', 'when', 'how', 'why', 'who', 'which',
+        'some', 'many', 'very', 'good', 'bad', 'big', 'small', 'new', 'old',
+        'here', 'there', 'now', 'then', 'yes', 'no', 'and', 'but', 'or',
+        
+        # Single characters and particles (usually not names)
+        'a', 'i', 'u', 'e', 'o', 'の', 'は', 'が', 'を', 'に', 'で', 'と', 'も', 'か', 'よ', 'ね',
+        '은', '는', '이', '가', '을', '를', '에', '의', '와', '과', '도', '만', '부터', '까지',
+        '了', '的', '在', '是', '有', '不', '我', '你', '他', '她', '它', '们', '也', '都'
+    }
+    
+    print(f"📑 Using {len(UNIVERSAL_HONORIFICS)} honorifics from all languages")
+    print(f"📑 Excluding {len(UNIVERSAL_EXCLUSIONS)} common words")
+    
     JAPANESE_EXCLUSIONS = {
         # Common Japanese particles and words
         'これ', 'それ', 'あれ', 'この', 'その', 'あの', 'こんな', 'そんな', 'あんな',
@@ -1872,44 +1954,6 @@ def cleanup_previous_extraction(output_dir):
     names_with_honorifics, standalone_names = find_names_with_honorifics(
         all_text, UNIVERSAL_HONORIFICS, ALL_EXCLUSIONS, min_frequency
     )
-    
-    # Apply limits and convert to final format
-    final_standalone_names = list(standalone_names)[:max_names]
-    final_names_with_honorifics = list(set(names_with_honorifics))[:max_suffixes]
-    
-    print(f"\n📑 DETECTION RESULTS:")
-    print(f"   • Standalone names: {len(final_standalone_names)}")
-    print(f"   • Names with honorifics: {len(final_names_with_honorifics)}")
-    print(f"   • Total entries: {len(final_standalone_names) + len(final_names_with_honorifics)}")
-    
-    # Display found names
-    if final_standalone_names:
-        print("\n📑 Detected character names:")
-        for name in final_standalone_names[:20]:
-            print(f"   • {name}")
-        if len(final_standalone_names) > 20:
-            print(f"   ... and {len(final_standalone_names) - 20} more")
-    
-    if final_names_with_honorifics:
-        print("\n📑 Names with honorifics:")
-        for combo in final_names_with_honorifics[:20]:
-            print(f"   • {combo}")
-        if len(final_names_with_honorifics) > 20:
-            print(f"   ... and {len(final_names_with_honorifics) - 20} more")
-    
-    # Handle empty results
-    all_terms = final_standalone_names + final_names_with_honorifics
-    
-    if not all_terms:
-        print("\n📑 ❌ NO CHARACTER NAMES DETECTED")
-        print("📑 This text may not use honorific naming conventions")
-        print("📑 Consider using a manual glossary or disabling auto-glossary")
-        
-        # Create empty glossary
-        glossary_path = os.path.join(output_dir, "glossary.json")
-        with open(glossary_path, 'w', encoding='utf-8') as f:
-            json.dump({}, f, ensure_ascii=False, indent=2)
-        return
     
     # Language detection for translation
     def detect_primary_language(text):
