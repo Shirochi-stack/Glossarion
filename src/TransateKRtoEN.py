@@ -1655,21 +1655,19 @@ def cleanup_previous_extraction(output_dir):
 # =============================================================================
 # GLOSSARY MANAGEMENT
 # =============================================================================
-
 def save_glossary(output_dir, chapters, instructions, language="korean"):
-    """Generate and save glossary - FIXED VERSION"""
-    print("📑 Starting FIXED glossary generation...")
+    """Generate and save glossary - ONLY names with honorifics"""
+    print("📑 Starting name extraction (honorific-based)...")
     
     # Get settings from environment variables
-    min_frequency = int(os.getenv("GLOSSARY_MIN_FREQUENCY", "3"))
+    min_frequency = int(os.getenv("GLOSSARY_MIN_FREQUENCY", "2"))
     max_names = int(os.getenv("GLOSSARY_MAX_NAMES", "30"))
     max_suffixes = int(os.getenv("GLOSSARY_MAX_SUFFIXES", "20"))
-    max_terms = int(os.getenv("GLOSSARY_MAX_TERMS", "20"))
     batch_size = int(os.getenv("GLOSSARY_BATCH_SIZE", "50"))
     
-    print(f"📑 Settings: min_freq={min_frequency}, max_names={max_names}, max_terms={max_terms}")
+    print(f"📑 Settings: min_freq={min_frequency}, max_names={max_names}")
     
-    # Remove HTML tags for better text processing
+    # Remove HTML tags
     def clean_html(html_text):
         soup = BeautifulSoup(html_text, 'html.parser')
         return soup.get_text()
@@ -1691,161 +1689,120 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
     all_text = ' '.join(clean_html(c["body"]) for c in chapters)
     print(f"📑 Total text length: {len(all_text):,} characters")
     
-    # Language-specific settings
+    # Define honorifics by language
     if base_language == "korean":
-        # Korean character range
-        def is_korean_char(char):
-            code = ord(char)
-            return 0xAC00 <= code <= 0xD7AF  # Hangul syllables
-        
-        # Common Korean particles to exclude (not names)
-        particles = {'은', '는', '이', '가', '을', '를', '의', '에', '에서', '로', '으로', '과', '와', '도', '만', '부터', '까지', '에게', '한테', '께'}
-        
+        honorifics = ['님', '씨', '아', '야', '이', '선배', '후배', '형', '누나', '언니', '오빠', '동생', '군', '양', '선생님', '교수님', '사장님', '회장님']
+        # Common Korean words to exclude
+        exclude_words = {
+            '나', '너', '그', '이', '저', '우리', '그것', '이것', '저것', '여기', '거기', '저기',
+            '때문', '위해', '대해', '통해', '의해', '부터', '까지', '처럼', '같이', '보다',
+            '그리고', '그러나', '하지만', '그래서', '그런데', '그러면', '그러므로'
+        }
     elif base_language == "japanese":
-        # Japanese character ranges
-        def is_japanese_char(char):
-            code = ord(char)
-            return (0x3040 <= code <= 0x309F or  # Hiragana
-                    0x30A0 <= code <= 0x30FF or  # Katakana
-                    0x4E00 <= code <= 0x9FFF)    # Kanji
-        
-        particles = {'は', 'が', 'を', 'に', 'へ', 'で', 'から', 'まで', 'の', 'と', 'も', 'や', 'など', 'より'}
-        
+        honorifics = ['さん', 'ちゃん', '君', 'くん', '様', 'さま', '殿', 'どの', '先生', '先輩', '後輩', 'たん', '氏']
+        exclude_words = {'それ', 'これ', 'あれ', 'どれ', 'その', 'この', 'あの', 'どの'}
     elif base_language == "chinese":
-        # Chinese character range
-        def is_chinese_char(char):
-            code = ord(char)
-            return 0x4E00 <= code <= 0x9FFF
-        
-        particles = {'的', '了', '在', '是', '和', '与', '或', '但', '而', '如', '为', '于', '从', '到', '被', '把', '让', '给'}
+        honorifics = ['公子', '小姐', '夫人', '先生', '大人', '少爷', '老爷', '姑娘', '爷', '哥', '姐', '弟', '妹', '兄', '师父', '师傅', '老师', '总', '老']
+        exclude_words = {'那个', '这个', '什么', '怎么', '为什么', '因为', '所以', '但是', '可是', '然后'}
     else:
-        # Default to Japanese
-        def is_japanese_char(char):
-            code = ord(char)
-            return (0x3040 <= code <= 0x309F or 0x30A0 <= code <= 0x30FF or 0x4E00 <= code <= 0x9FFF)
-        particles = set()
+        honorifics = ['さん', 'ちゃん', '君', '様']
+        exclude_words = set()
     
-    # Simple word extraction
-    words = all_text.split()
+    print(f"📑 Using {len(honorifics)} honorifics: {', '.join(honorifics[:5])}...")
     
-    # Count frequencies
-    word_freq = {}
-    for word in words:
-        # Clean word
-        word = word.strip('.,!?;:()[]{}""''""\'\"')
-        
-        if not word or len(word) < 2 or len(word) > 10:
-            continue
-            
-        # Skip if it's a particle
-        if word in particles:
-            continue
-            
-        # Count frequency
-        if word in word_freq:
-            word_freq[word] += 1
-        else:
-            word_freq[word] = 1
+    # Find names with honorifics
+    found_names = {}  # name -> count
+    found_combos = {}  # name+honorific -> count
     
-    # Filter by frequency
-    frequent_words = {word: count for word, count in word_freq.items() if count >= min_frequency}
+    # Split text into words/tokens
+    import re
+    # Split on spaces and punctuation
+    tokens = re.findall(r'[\w가-힣ぁ-んァ-ヶー一-龯]+', all_text)
+    
+    for i, token in enumerate(tokens):
+        # Check each honorific
+        for honorific in honorifics:
+            if token.endswith(honorific):
+                # Extract the base name
+                base_name = token[:-len(honorific)]
+                
+                # Validate the base name
+                if not base_name or len(base_name) > 6:
+                    continue
+                
+                # For Korean: typically 2-3 characters
+                if base_language == "korean" and not (2 <= len(base_name) <= 3):
+                    continue
+                    
+                # For Japanese: typically 1-4 characters  
+                if base_language == "japanese" and not (1 <= len(base_name) <= 4):
+                    continue
+                    
+                # For Chinese: typically 1-3 characters
+                if base_language == "chinese" and not (1 <= len(base_name) <= 3):
+                    continue
+                
+                # Skip if it's an excluded word
+                if base_name in exclude_words:
+                    continue
+                
+                # Count the name
+                if base_name in found_names:
+                    found_names[base_name] += 1
+                else:
+                    found_names[base_name] = 1
+                
+                # Count the combo
+                if token in found_combos:
+                    found_combos[token] += 1
+                else:
+                    found_combos[token] = 1
+    
+    # Filter by minimum frequency
+    frequent_names = {name: count for name, count in found_names.items() if count >= min_frequency}
+    frequent_combos = {combo: count for combo, count in found_combos.items() if count >= min_frequency}
     
     # Sort by frequency
-    sorted_words = sorted(frequent_words.items(), key=lambda x: x[1], reverse=True)
+    sorted_names = sorted(frequent_names.items(), key=lambda x: x[1], reverse=True)[:max_names]
+    sorted_combos = sorted(frequent_combos.items(), key=lambda x: x[1], reverse=True)[:max_suffixes]
     
-    # Separate into categories
-    potential_names = []
-    potential_terms = []
+    print(f"📑 Found {len(sorted_names)} character names")
+    print(f"📑 Found {len(sorted_combos)} name+honorific combinations")
     
-    for word, count in sorted_words:
-        # Simple categorization based on language
-        if base_language == "korean":
-            # Check if it's likely a Korean name (2-3 syllables)
-            if 2 <= len(word) <= 3 and all(is_korean_char(c) for c in word):
-                potential_names.append((word, count))
-            elif len(word) >= 2:
-                potential_terms.append((word, count))
-                
-        elif base_language == "japanese":
-            # Katakana words are often names or foreign terms
-            if all(0x30A0 <= ord(c) <= 0x30FF for c in word):
-                potential_names.append((word, count))
-            # Kanji compounds could be names or terms
-            elif any(0x4E00 <= ord(c) <= 0x9FFF for c in word):
-                if len(word) <= 4:  # Shorter = more likely a name
-                    potential_names.append((word, count))
-                else:
-                    potential_terms.append((word, count))
-            else:
-                potential_terms.append((word, count))
-                
-        elif base_language == "chinese":
-            # Chinese names are typically 2-4 characters
-            if 2 <= len(word) <= 4 and all(is_chinese_char(c) for c in word):
-                potential_names.append((word, count))
-            elif len(word) >= 2:
-                potential_terms.append((word, count))
-        else:
-            # Default behavior
-            potential_terms.append((word, count))
+    # Extract just the names/combos
+    final_names = [name for name, count in sorted_names]
+    final_combos = [combo for combo, count in sorted_combos]
     
-    # Limit to max counts
-    final_names = [word for word, count in potential_names[:max_names]]
-    final_terms = [word for word, count in potential_terms[:max_terms]]
+    # Show what we found
+    if final_names:
+        print("📑 Character names found:")
+        for name, count in sorted_names[:10]:
+            print(f"   • {name} ({count} times)")
     
-    print(f"📑 Found {len(final_names)} potential names and {len(final_terms)} potential terms")
+    if final_combos:
+        print("📑 Name+honorific combinations:")
+        for combo, count in sorted_combos[:10]:
+            print(f"   • {combo} ({count} times)")
     
-    # Also look for words with honorifics (as supplementary)
-    honorific_combos = []
-    if base_language == "korean":
-        honorifics = ['님', '씨', '선배', '군', '양']
-        for word in words:
-            for honorific in honorifics:
-                if word.endswith(honorific) and len(word) > len(honorific):
-                    base_name = word[:-len(honorific)]
-                    if 2 <= len(base_name) <= 4:
-                        honorific_combos.append(word)
-                        if base_name not in final_names:
-                            final_names.append(base_name)
-                        
-    elif base_language == "japanese":
-        honorifics = ['さん', 'ちゃん', '君', 'くん', '様', 'さま', '先生', '殿']
-        for word in words:
-            for honorific in honorifics:
-                if word.endswith(honorific) and len(word) > len(honorific):
-                    base_name = word[:-len(honorific)]
-                    if 1 <= len(base_name) <= 5:
-                        honorific_combos.append(word)
-                        if base_name not in final_names:
-                            final_names.append(base_name)
+    # Combine for translation
+    all_terms = final_names + final_combos
     
-    # Limit honorific combos
-    honorific_combos = list(set(honorific_combos))[:max_suffixes]
-    
-    # Combine all terms for translation
-    all_glossary_terms = final_names + final_terms + honorific_combos
-    
-    if not all_glossary_terms:
-        print("📑 No terms found for glossary")
+    if not all_terms:
+        print("📑 No character names found (no words with honorifics detected)")
         glossary_path = os.path.join(output_dir, "glossary.json")
         with open(glossary_path, 'w', encoding='utf-8') as f:
             json.dump({}, f, ensure_ascii=False, indent=2)
         return
     
-    print(f"📑 Total terms to translate: {len(all_glossary_terms)}")
-    
-    # Show sample terms
-    print("📑 Sample terms found:")
-    for term in all_glossary_terms[:10]:
-        print(f"   • {term}")
+    print(f"📑 Translating {len(all_terms)} character names...")
     
     # Translate terms
-    translations = translate_terms_batch(all_glossary_terms, base_language, batch_size)
+    translations = translate_terms_batch(all_terms, base_language, batch_size)
     
     # Build glossary
     glossary_entries = {}
-    for term in all_glossary_terms:
-        if term in translations and translations[term] != term:
+    for term in all_terms:
+        if term in translations:
             glossary_entries[term] = translations[term]
     
     # Save glossary
@@ -1853,13 +1810,13 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
     with open(glossary_path, 'w', encoding='utf-8') as f:
         json.dump(glossary_entries, f, ensure_ascii=False, indent=2)
     
-    print(f"📑 Saved glossary with {len(glossary_entries)} entries")
+    print(f"📑 Saved glossary with {len(glossary_entries)} character names")
 
 
 def translate_terms_batch(term_list, source_lang, batch_size=50):
-    """Simplified translation function"""
+    """Translate character names in batches"""
     if not term_list or os.getenv("DISABLE_GLOSSARY_TRANSLATION", "0") == "1":
-        print(f"📑 Glossary translation disabled or no terms to translate")
+        print(f"📑 Translation disabled or no terms")
         return {term: term for term in term_list}
     
     try:
@@ -1871,10 +1828,10 @@ def translate_terms_batch(term_list, source_lang, batch_size=50):
                    os.getenv("GEMINI_API_KEY"))
         
         if not API_KEY:
-            print(f"📑 No API key found, skipping translation")
+            print(f"📑 No API key found")
             return {term: term for term in term_list}
         
-        print(f"📑 Translating {len(term_list)} {source_lang} terms...")
+        print(f"📑 Translating {len(term_list)} names...")
         
         from unified_api_client import UnifiedClient
         client = UnifiedClient(model=MODEL, api_key=API_KEY)
@@ -1887,59 +1844,62 @@ def translate_terms_batch(term_list, source_lang, batch_size=50):
             batch_num = (i // batch_size) + 1
             total_batches = (len(term_list) + batch_size - 1) // batch_size
             
-            print(f"📑 Processing batch {batch_num}/{total_batches} ({len(batch)} terms)...")
+            print(f"📑 Batch {batch_num}/{total_batches}")
             
-            # Simple JSON format for reliable parsing
-            terms_json = json.dumps(batch, ensure_ascii=False, indent=2)
+            # Create simple list
+            terms_list = "\n".join(f"{idx+1}. {term}" for idx, term in enumerate(batch))
             
-            # Clear, simple prompt
-            system_prompt = f"Translate {source_lang} terms to English. Return ONLY a JSON object mapping original terms to translations."
-            
-            user_prompt = f"""Translate these {source_lang} terms to English.
-Input JSON:
-{terms_json}
+            # Direct prompt
+            prompt = f"""Translate these {source_lang} character names to English.
+For each name, provide the romanized version or English equivalent.
 
-Return a JSON object with the same terms as keys and their English translations as values.
-For names, provide romanization. For titles/honorifics, provide English equivalents."""
+{terms_list}
+
+Reply with the same numbered format, just the translations."""
             
             messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
+                {"role": "user", "content": prompt}
             ]
             
             try:
-                response, _ = client.send(messages, temperature=0.1, max_tokens=4096)
+                response, _ = client.send(messages, temperature=0.1, max_tokens=2048)
                 
-                # Parse JSON response
-                batch_translations = parse_json_response(response, batch)
-                all_translations.update(batch_translations)
+                # Parse response
+                lines = response.strip().split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    # Extract number and translation
+                    parts = line.split('.', 1)
+                    if len(parts) == 2 and parts[0].strip().isdigit():
+                        idx = int(parts[0].strip()) - 1
+                        if 0 <= idx < len(batch):
+                            translation = parts[1].strip()
+                            # Clean up common prefixes
+                            for prefix in [':', '-', '>', '=']:
+                                if translation.startswith(prefix):
+                                    translation = translation[1:].strip()
+                            
+                            all_translations[batch[idx]] = translation
                 
-                print(f"📑 Batch {batch_num} completed: {len(batch_translations)} translations")
-                
-                # Short delay between batches
-                if i + batch_size < len(term_list):
-                    time.sleep(0.5)
+                time.sleep(0.5)
                     
             except Exception as e:
-                print(f"⚠️ Translation failed for batch {batch_num}: {e}")
-                # Add untranslated terms
+                print(f"⚠️ Batch {batch_num} failed: {e}")
                 for term in batch:
                     all_translations[term] = term
         
-        # Ensure all terms are included
+        # Ensure all terms have translations
         for term in term_list:
             if term not in all_translations:
                 all_translations[term] = term
         
-        # Count successful translations
-        translated_count = sum(1 for term, translation in all_translations.items() 
-                             if translation != term and translation.strip())
-        
-        print(f"📑 Successfully translated {translated_count}/{len(term_list)} terms")
         return all_translations
         
     except Exception as e:
-        print(f"⚠️ Glossary translation failed: {e}")
+        print(f"⚠️ Translation failed: {e}")
         return {term: term for term in term_list}
 
 
