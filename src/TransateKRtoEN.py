@@ -1973,6 +1973,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
     
     detected_language = detect_primary_language(all_text)
     print(f"\n📑 Auto-detected language for translation: {detected_language}")
+    all_terms = final_standalone_names + final_names_with_honorifics
     
     print(f"📑 Translating {len(all_terms)} character names...")
     
