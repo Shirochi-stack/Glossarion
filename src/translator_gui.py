@@ -84,7 +84,7 @@ class TranslatorGUI:
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
-        master.title("Glossarion v1.7.0")
+        master.title("Glossarion v1.7.1")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1550, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
@@ -192,20 +192,18 @@ class TranslatorGUI:
             value=str(self.config.get('duplicate_lookback_chapters', '5'))  # Check last 5 chapters
         )     
         self.glossary_min_frequency_var = tk.StringVar(
-            value=str(self.config.get('glossary_min_frequency', 3))
+            value=str(self.config.get('glossary_min_frequency', 2))  # Changed default to 2
         )
         self.glossary_max_names_var = tk.StringVar(
-            value=str(self.config.get('glossary_max_names', 30))
+            value=str(self.config.get('glossary_max_names', 50))
         )
-        self.glossary_max_suffixes_var = tk.StringVar(
-            value=str(self.config.get('glossary_max_suffixes', 20))
-        )
-        self.glossary_max_terms_var = tk.StringVar(
-            value=str(self.config.get('glossary_max_terms', 20))
+        self.glossary_max_titles_var = tk.StringVar(
+            value=str(self.config.get('glossary_max_titles', 30))  # NEW
         )
         self.glossary_batch_size_var = tk.StringVar(
             value=str(self.config.get('glossary_batch_size', 50))
         )
+
         # Default prompts
         self.default_prompts = {
             "korean": "You are a professional Korean to English novel translator, you must strictly output only English/HTML text while following these rules:\n- Use a context rich and natural translation style.\n- Retain honorifics, and suffixes like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
@@ -526,7 +524,7 @@ class TranslatorGUI:
         print("[DEBUG] GUI setup completed with config values loaded")  # Debug logging
         
         # Add initial log message
-        self.append_log("🚀 Glossarion v1.7.0 - Ready to use!")
+        self.append_log("🚀 Glossarion v1.7.1 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
 
     def force_retranslation(self):
@@ -752,11 +750,10 @@ class TranslatorGUI:
                     self.append_log("⚠️ Glossary appending is disabled")
                     
                 # ─── NEW: Log glossary extraction settings ───
-                self.append_log(f"📑 Glossary Extraction Settings:")
+                self.append_log(f"📑 Targeted Glossary Settings:")
                 self.append_log(f"   • Min frequency: {self.glossary_min_frequency_var.get()} occurrences")
-                self.append_log(f"   • Max names: {self.glossary_max_names_var.get()}")
-                self.append_log(f"   • Max suffixes: {self.glossary_max_suffixes_var.get()}")
-                self.append_log(f"   • Max terms: {self.glossary_max_terms_var.get()}")
+                self.append_log(f"   • Max character names: {self.glossary_max_names_var.get()}")
+                self.append_log(f"   • Max titles/ranks: {self.glossary_max_titles_var.get()}")
                 self.append_log(f"   • Translation batch size: {self.glossary_batch_size_var.get()}")
                 
                 # Log glossary translation status
@@ -797,8 +794,7 @@ class TranslatorGUI:
                     'DUPLICATE_LOOKBACK_CHAPTERS': self.duplicate_lookback_var.get(),
                     'GLOSSARY_MIN_FREQUENCY': self.glossary_min_frequency_var.get(),
                     'GLOSSARY_MAX_NAMES': self.glossary_max_names_var.get(),
-                    'GLOSSARY_MAX_SUFFIXES': self.glossary_max_suffixes_var.get(),
-                    'GLOSSARY_MAX_TERMS': self.glossary_max_terms_var.get(),
+                    'GLOSSARY_MAX_TITLES': self.glossary_max_titles_var.get(),
                     'GLOSSARY_BATCH_SIZE': self.glossary_batch_size_var.get()
                 })
                 
@@ -1334,7 +1330,7 @@ class TranslatorGUI:
         """Open the Other Settings dialog with all advanced options in a grid layout"""
         top = tk.Toplevel(self.master)
         top.title("Other Settings")
-        top.geometry("730x880")  # Made taller to accommodate new controls
+        top.geometry("735x920")  # Made taller to accommodate new controls
         top.transient(self.master)
         top.grab_set()
         
@@ -1474,40 +1470,50 @@ class TranslatorGUI:
         # =================================================================
         # SECTION 5: AUTOMATIC GLOSSARY EXTRACTION CONTROLS (NEW - Bottom Left)
         # =================================================================
-        section5_frame = tk.LabelFrame(scrollable_frame, text="Automatic Glossary Extraction Controls", padx=10, pady=10)
+        section5_frame = tk.LabelFrame(scrollable_frame, text="Targeted Automatic Glossary Extraction", padx=10, pady=10)
         section5_frame.grid(row=2, column=0, sticky="nsew", padx=(10, 5), pady=5)
-        
+
         # Configure grid for consistent alignment
         section5_frame.grid_columnconfigure(0, weight=0)  # Label column
         section5_frame.grid_columnconfigure(1, weight=1)  # Entry column
-        
+
+        # Add description
+        tk.Label(section5_frame, 
+                 text="Extracts only character names with honorifics and titles",
+                 font=('TkDefaultFont', 10, 'italic'), fg='gray', justify=tk.LEFT).grid(
+                 row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+
         # Min Frequency
-        tk.Label(section5_frame, text="Min frequency:").grid(row=0, column=0, sticky=tk.W, pady=2)
-        tb.Entry(section5_frame, width=8, textvariable=self.glossary_min_frequency_var).grid(row=0, column=1, sticky=tk.W, padx=(5,0), pady=2)
-        
+        tk.Label(section5_frame, text="Min frequency:").grid(row=1, column=0, sticky=tk.W, pady=2)
+        tb.Entry(section5_frame, width=8, textvariable=self.glossary_min_frequency_var).grid(row=1, column=1, sticky=tk.W, padx=(5,0), pady=2)
+
         tk.Label(section5_frame, 
-                 text="Minimum times a name must appear to be included",
-                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
-        
+                 text="Minimum appearances required (lower = more terms)",
+                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
+
         # Max Names
-        tk.Label(section5_frame, text="Max names:").grid(row=2, column=0, sticky=tk.W, pady=2)
-        tb.Entry(section5_frame, width=8, textvariable=self.glossary_max_names_var).grid(row=2, column=1, sticky=tk.W, padx=(5,0), pady=2)
-        
-        # Max Suffixes
-        tk.Label(section5_frame, text="Max suffixes:").grid(row=3, column=0, sticky=tk.W, pady=2)
-        tb.Entry(section5_frame, width=8, textvariable=self.glossary_max_suffixes_var).grid(row=3, column=1, sticky=tk.W, padx=(5,0), pady=2)
-        
-        # Max Terms
-        tk.Label(section5_frame, text="Max terms:").grid(row=4, column=0, sticky=tk.W, pady=2)
-        tb.Entry(section5_frame, width=8, textvariable=self.glossary_max_terms_var).grid(row=4, column=1, sticky=tk.W, padx=(5,0), pady=2)
-        
-        # Batch Size
-        tk.Label(section5_frame, text="Batch size:").grid(row=5, column=0, sticky=tk.W, pady=2)
-        tb.Entry(section5_frame, width=8, textvariable=self.glossary_batch_size_var).grid(row=5, column=1, sticky=tk.W, padx=(5,0), pady=2)
-        
+        tk.Label(section5_frame, text="Max names:").grid(row=3, column=0, sticky=tk.W, pady=2)
+        tb.Entry(section5_frame, width=8, textvariable=self.glossary_max_names_var).grid(row=3, column=1, sticky=tk.W, padx=(5,0), pady=2)
+
         tk.Label(section5_frame, 
-                 text="Terms per API call (larger = faster but more expensive)",
-                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=(5, 5))
+                 text="Maximum character names to extract",
+                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
+
+        # Max Titles
+        tk.Label(section5_frame, text="Max titles:").grid(row=5, column=0, sticky=tk.W, pady=2)
+        tb.Entry(section5_frame, width=8, textvariable=self.glossary_max_titles_var).grid(row=5, column=1, sticky=tk.W, padx=(5,0), pady=2)
+
+        tk.Label(section5_frame, 
+                 text="Maximum titles/ranks to extract",
+                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
+
+        # Batch Size
+        tk.Label(section5_frame, text="Translation batch:").grid(row=7, column=0, sticky=tk.W, pady=2)
+        tb.Entry(section5_frame, width=8, textvariable=self.glossary_batch_size_var).grid(row=7, column=1, sticky=tk.W, padx=(5,0), pady=2)
+
+        tk.Label(section5_frame, 
+                 text="Terms per API call for translation",
+                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=(0, 5))
         # =================================================================
         # SECTION 6: PROCESSING OPTIONS (Bottom Right)
         # =================================================================
@@ -1573,8 +1579,7 @@ class TranslatorGUI:
                 # NEW: Glossary Extraction Controls
                 self.config['glossary_min_frequency'] = int(self.glossary_min_frequency_var.get())
                 self.config['glossary_max_names'] = int(self.glossary_max_names_var.get())
-                self.config['glossary_max_suffixes'] = int(self.glossary_max_suffixes_var.get())
-                self.config['glossary_max_terms'] = int(self.glossary_max_terms_var.get())
+                self.config['glossary_max_titles'] = int(self.glossary_max_titles_var.get()) 
                 self.config['glossary_batch_size'] = int(self.glossary_batch_size_var.get())
                 
                 # Processing Options
@@ -1599,8 +1604,7 @@ class TranslatorGUI:
                 # NEW: Glossary extraction environment variables
                 os.environ["GLOSSARY_MIN_FREQUENCY"] = self.glossary_min_frequency_var.get()
                 os.environ["GLOSSARY_MAX_NAMES"] = self.glossary_max_names_var.get()
-                os.environ["GLOSSARY_MAX_SUFFIXES"] = self.glossary_max_suffixes_var.get()
-                os.environ["GLOSSARY_MAX_TERMS"] = self.glossary_max_terms_var.get()
+                os.environ["GLOSSARY_MAX_TITLES"] = self.glossary_max_titles_var.get()
                 os.environ["GLOSSARY_BATCH_SIZE"] = self.glossary_batch_size_var.get()
                 
                 # Save to config file
@@ -1962,8 +1966,7 @@ class TranslatorGUI:
             self.config['disable_glossary_translation'] = self.disable_glossary_translation_var.get()
             self.config['glossary_min_frequency'] = int(self.glossary_min_frequency_var.get())
             self.config['glossary_max_names'] = int(self.glossary_max_names_var.get())
-            self.config['glossary_max_suffixes'] = int(self.glossary_max_suffixes_var.get())
-            self.config['glossary_max_terms'] = int(self.glossary_max_terms_var.get())
+            self.config['glossary_max_titles'] = int(self.glossary_max_titles_var.get())
             self.config['glossary_batch_size'] = int(self.glossary_batch_size_var.get())
 
             
@@ -1997,7 +2000,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time  # Add this import
     
-    print("🚀 Starting Glossarion v1.7.0...")
+    print("🚀 Starting Glossarion v1.7.1...")
     
     # Initialize splash screen (main thread only)
     splash_manager = None
