@@ -136,10 +136,11 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
         
     print(f"🖼️ Found {len(images)} images in chapter {chapter_num}")
     
+    # Parse the HTML to modify it
+    soup = BeautifulSoup(chapter_html, 'html.parser')
+    
     image_translations = {}
     translated_count = 0
-    text_found_count = 0
-    skipped_count = 0
     
     # Check for limits
     max_images_per_chapter = int(os.getenv('MAX_IMAGES_PER_CHAPTER', '10'))
@@ -160,10 +161,9 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
         elif img_src.startswith('./'):
             img_path = os.path.join(image_translator.output_dir, img_src[2:])
         elif img_src.startswith('/'):
-            # Absolute path within EPUB
             img_path = os.path.join(image_translator.output_dir, img_src[1:])
         else:
-            # Assume it's in the images directory
+            # Check in images directory
             img_path = os.path.join(image_translator.images_dir, os.path.basename(img_src))
             
         # Normalize path
@@ -172,27 +172,8 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
         # Check if file exists
         if not os.path.exists(img_path):
             print(f"   ⚠️ Image not found: {img_path}")
-            # Try alternative locations
-            alt_paths = [
-                os.path.join(image_translator.output_dir, 'images', os.path.basename(img_src)),
-                os.path.join(image_translator.output_dir, os.path.basename(img_src)),
-                os.path.join(os.path.dirname(image_translator.output_dir), img_src)
-            ]
-            
-            for alt_path in alt_paths:
-                if os.path.exists(alt_path):
-                    img_path = alt_path
-                    print(f"   ✅ Found image at: {alt_path}")
-                    break
-            else:
-                print(f"   ❌ Could not find image in any location")
-                continue
-            
-        # Check if we should translate this image
-        if not image_translator.should_translate_image(img_path):
-            skipped_count += 1
             continue
-            
+        
         print(f"   🔍 Processing image {idx}/{len(images)}: {os.path.basename(img_path)}")
         
         # Build context for translation
@@ -202,46 +183,91 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
             
         # Add delay between API calls
         if translated_count > 0:
-            import time
             delay = float(os.getenv('IMAGE_API_DELAY', '1.0'))
             time.sleep(delay)
             
         # Translate the image
-        translation_html = image_translator.translate_image(img_path, context)
+        translation_result = image_translator.translate_image(img_path, context)
         
-        if translation_html:
-            # Image had text and was translated
-            image_translations[img_src] = translation_html
-            text_found_count += 1
-            translated_count += 1
+        if translation_result:
+            # CRITICAL FIX: Update the HTML to include translation
+            # Find the image in the soup
+            img_tag = None
+            for img in soup.find_all('img'):
+                if img.get('src') == img_src:
+                    img_tag = img
+                    break
             
-            # Save individual translation for debugging
-            if os.getenv('SAVE_IMAGE_TRANSLATIONS', '1') == '1':
-                trans_file = os.path.join(
-                    image_translator.translated_images_dir, 
-                    f"ch{chapter_num}_img{translated_count}.html"
-                )
-                with open(trans_file, 'w', encoding='utf-8') as f:
-                    f.write(f"<!-- Chapter {chapter_num}, Image {translated_count} -->\n")
-                    f.write(f"<!-- Source: {img_src} -->\n")
-                    f.write(translation_html)
+            if img_tag:
+                # Create a container div for the image and translation
+                container = soup.new_tag('div', **{'class': 'image-with-translation'})
+                
+                # Add a note about translation
+                note = soup.new_tag('p', **{'class': 'translation-note'})
+                note.string = f"[Image {idx} - Translated text below]"
+                container.append(note)
+                
+                # Keep original image
+                img_tag.replace_with(container)
+                container.append(img_tag)
+                
+                # Add translation below image
+                translation_div = soup.new_tag('div', **{'class': 'image-translation'})
+                
+                # Parse the translation result to extract just the text
+                if '<div class="image-translation">' in translation_result:
+                    # Extract the translated text from the result
+                    trans_soup = BeautifulSoup(translation_result, 'html.parser')
+                    trans_content = trans_soup.find('div', class_='image-translation')
+                    if trans_content:
+                        # Add the content to our div
+                        for element in trans_content.children:
+                            if element.name:
+                                translation_div.append(element)
+                else:
+                    # Just add the text
+                    trans_p = soup.new_tag('p')
+                    trans_p.string = translation_result
+                    translation_div.append(trans_p)
+                
+                container.append(translation_div)
+                
+                translated_count += 1
+                
+                # Save individual translation file
+                trans_filename = f"ch{chapter_num:03d}_img{idx:02d}_translation.html"
+                trans_filepath = os.path.join(image_translator.translated_images_dir, trans_filename)
+                
+                with open(trans_filepath, 'w', encoding='utf-8') as f:
+                    f.write(f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8"/>
+    <title>Chapter {chapter_num} - Image {idx} Translation</title>
+</head>
+<body>
+    <h2>Chapter {chapter_num} - Image {idx}</h2>
+    <p>Original: {os.path.basename(img_path)}</p>
+    <hr/>
+    {translation_div}
+</body>
+</html>""")
+                
+                print(f"   ✅ Saved translation to: {trans_filename}")
+            else:
+                print(f"   ⚠️ Could not find image tag in HTML for: {img_src}")
     
     # Summary
-    if skipped_count > 0:
-        print(f"   📊 Skipped {skipped_count} images (illustrations/decorative)")
-    
-    if text_found_count > 0:
-        print(f"   🖼️ Found text in {text_found_count} images")
+    if translated_count > 0:
+        print(f"   🖼️ Successfully translated {translated_count} images")
         
         # Save translation log
         image_translator.save_translation_log(chapter_num, image_translations)
         
-        # Update HTML with translations
-        updated_html = image_translator.update_chapter_with_translated_images(chapter_html, image_translations)
-        return updated_html, image_translations
+        # Return updated HTML
+        return str(soup), image_translations
     else:
-        if len(images) > skipped_count:
-            print(f"   ℹ️ No text found in {len(images) - skipped_count} processed images")
+        print(f"   ℹ️ No images were successfully translated")
         
     return chapter_html, {}
 
@@ -1290,8 +1316,154 @@ def _validate_critical_files(output_dir, extracted_resources):
         print("⚠️ WARNING: No OPF file found! This will prevent EPUB reconstruction.")
     else:
         print(f"✅ Found OPF file(s): {opf_files}")
-
+        
 def _extract_advanced_chapter_info(zf):
+    """Extract chapters - either comprehensively or with smart filtering based on toggle"""
+    
+    # Check if comprehensive extraction is enabled
+    comprehensive_mode = os.getenv("COMPREHENSIVE_EXTRACTION", "0") == "1"
+    
+    if comprehensive_mode:
+        print("📚 Using COMPREHENSIVE extraction mode (all files)")
+        return _extract_all_chapters_comprehensive(zf)
+    else:
+        print("📚 Using SMART extraction mode (filtered)")
+        return _extract_chapters_smart(zf)
+
+
+def _extract_all_chapters_comprehensive(zf):
+    """Comprehensive extraction - includes ALL HTML files"""
+    chapters = []
+    
+    # Get ALL HTML-type files
+    all_html_files = []
+    for name in zf.namelist():
+        if name.lower().endswith(('.xhtml', '.html', '.htm')):
+            all_html_files.append(name)
+    
+    print(f"📚 Found {len(all_html_files)} HTML files in EPUB")
+    
+    # Sort files to maintain order
+    all_html_files.sort()
+    
+    # Minimal skip list
+    skip_keywords = ['nav.', 'toc.', 'contents.', 'copyright.', 'cover.']
+    
+    # Process ALL files
+    chapter_num = 0
+    for idx, file_path in enumerate(all_html_files):
+        try:
+            # Check if we should skip
+            lower_name = file_path.lower()
+            basename = os.path.basename(lower_name)
+            
+            # Only skip if filename exactly matches skip patterns
+            should_skip = False
+            for skip in skip_keywords:
+                if basename == skip + 'xhtml' or basename == skip + 'html' or basename == skip + 'htm':
+                    should_skip = True
+                    break
+            
+            if should_skip:
+                print(f"[SKIP] Navigation/TOC file: {file_path}")
+                continue
+            
+            # Read the file
+            file_data = zf.read(file_path)
+            
+            # Try to decode
+            html_content = None
+            for encoding in ['utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr', 'gbk', 'big5']:
+                try:
+                    html_content = file_data.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            
+            if not html_content:
+                print(f"[WARNING] Could not decode {file_path}")
+                continue
+            
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Extract content
+            if soup.body:
+                content_html = str(soup.body)
+                content_text = soup.body.get_text(strip=True)
+            else:
+                content_html = html_content
+                content_text = soup.get_text(strip=True)
+            
+            # Increment chapter number
+            chapter_num += 1
+            
+            # Try to extract title
+            chapter_title = None
+            
+            # From title tag
+            if soup.title and soup.title.string:
+                chapter_title = soup.title.string.strip()
+            
+            # From first header
+            if not chapter_title:
+                for header_tag in ['h1', 'h2', 'h3']:
+                    header = soup.find(header_tag)
+                    if header:
+                        chapter_title = header.get_text(strip=True)
+                        break
+            
+            # From filename
+            if not chapter_title:
+                chapter_title = os.path.splitext(os.path.basename(file_path))[0]
+            
+            # Count images
+            images = soup.find_all('img')
+            
+            # Create content hash
+            content_hash = hashlib.md5(content_html.encode('utf-8')).hexdigest()
+            
+            # Store chapter
+            chapter_info = {
+                "num": chapter_num,
+                "title": chapter_title or f"Chapter {chapter_num}",
+                "body": content_html,
+                "filename": file_path,
+                "content_hash": content_hash,
+                "detection_method": "comprehensive_sequential",
+                "file_size": len(content_text),
+                "has_images": len(images) > 0,
+                "image_count": len(images),
+                "is_empty": len(content_text.strip()) == 0
+            }
+            
+            chapters.append(chapter_info)
+            
+            # Log what we found
+            if len(images) > 0 and len(content_text) < 500:
+                print(f"[{chapter_num:04d}] 📸 Image chapter: {chapter_title} ({len(images)} images)")
+            elif len(content_text) < 50:
+                print(f"[{chapter_num:04d}] 📄 Empty/placeholder: {chapter_title}")
+            else:
+                print(f"[{chapter_num:04d}] 📖 Text chapter: {chapter_title} ({len(content_text)} chars)")
+                
+        except Exception as e:
+            print(f"[ERROR] Failed to process {file_path}: {e}")
+            continue
+    
+    print(f"\n📊 Comprehensive extraction complete: {len(chapters)} chapters found")
+    
+    # Quick stats
+    image_only = sum(1 for c in chapters if c.get('has_images') and c.get('file_size', 0) < 500)
+    text_chapters = sum(1 for c in chapters if c.get('file_size', 0) >= 500)
+    empty_chapters = sum(1 for c in chapters if c.get('is_empty'))
+    
+    print(f"   • Text chapters: {text_chapters}")
+    print(f"   • Image-only chapters: {image_only}")
+    print(f"   • Empty/placeholder: {empty_chapters}")
+    
+    return chapters, 'unknown'
+    
+def _extract_chapters_smart(zf):
     """Extract comprehensive chapter information with improved detection for image-only chapters"""
     chapters = []
     
@@ -3049,9 +3221,85 @@ def main(log_callback=None, stop_callback=None):
 
         print(f"\n🔄 Processing Chapter {idx+1}/{total_chapters}: {c['title']}")
         
+        # Determine chapter type
+        is_image_chapter = c.get('has_images', False) and c.get('file_size', 0) < 500
+        is_empty_chapter = c.get('is_empty', False) or c.get('file_size', 0) < 50
+        
+        # Handle different chapter types
+        if is_empty_chapter and not c.get('has_images'):
+            # Empty chapter with no images - just copy it
+            print(f"📄 Empty chapter detected - copying as-is")
+            
+            safe_title = make_safe_filename(c['title'], c['num'])   
+            fname = f"response_{c['num']:03d}_{safe_title}.html"
+            
+            # Write the empty chapter
+            with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                f.write(c["body"])
+            
+            # Update progress
+            update_progress(prog, idx, chap_num, content_hash, fname, status="completed")
+            save_progress()
+            continue
+            
+        elif is_image_chapter and image_translator and ENABLE_IMAGE_TRANSLATION:
+            # Image-only chapter - use image translator
+            print(f"📸 Image-only chapter detected with {c.get('image_count', 0)} images")
+            
+            # Process with image translator
+            translated_html, image_translations = process_chapter_images(
+                c["body"], 
+                chap_num, 
+                image_translator,
+                check_stop
+            )
+            
+            # Save the result
+            safe_title = make_safe_filename(c['title'], c['num'])   
+            fname = f"response_{c['num']:03d}_{safe_title}.html"
+            
+            with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                f.write(translated_html)
+            
+            if image_translations:
+                print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved image-translated chapter")
+                status = "completed"
+            else:
+                print(f"[Chapter {idx+1}/{total_chapters}] ⚠️ Saved image chapter (no translations)")
+                status = "completed_no_translation"
+            
+            # Update progress
+            update_progress(prog, idx, chap_num, content_hash, fname, status=status)
+            save_progress()
+            continue
+            
+        elif c.get('has_images') and c.get('file_size', 0) >= 500:
+            # Mixed content - has both text and images
+            print(f"📖 Mixed content chapter with {c.get('image_count', 0)} images and {c.get('file_size', 0)} chars of text")
+            
+            # First, process any images if image translation is enabled
+            chapter_content = c["body"]
+            if image_translator and ENABLE_IMAGE_TRANSLATION:
+                print(f"   🖼️ Processing images first...")
+                chapter_content, image_translations = process_chapter_images(
+                    chapter_content, 
+                    chap_num, 
+                    image_translator,
+                    check_stop
+                )
+                if image_translations:
+                    print(f"   ✅ Translated {len(image_translations)} images")
+            
+            # Now process the text content normally
+            # Update c["body"] with the image-processed content
+            c["body"] = chapter_content
+            
+        print(f"📖 Processing as text chapter ({c.get('file_size', 0)} characters)")
+        
         # Mark as in-progress (output_filename is None until completed)
         update_progress(prog, idx, chap_num, content_hash, output_filename=None, status="in_progress")
         save_progress()
+        
 
         # Parse token limit
         _tok_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
