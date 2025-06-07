@@ -95,6 +95,12 @@ a = Analysis(
         'tiktoken_ext',
         'tiktoken_ext.openai_public',
         'regex',  # Added - tiktoken dependency
+		
+		# Time/Date handling - ADDED
+        'tzdata',  # FIXES THE WARNING
+        'zoneinfo',  # Python 3.9+ timezone support
+        '_zoneinfo',  # Internal zoneinfo module
+        'pytz',  # Alternative timezone library (if used)
         
         # Text processing
         'langdetect',
@@ -209,7 +215,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='Glossarion v1.7.0',  # Updated version
+    name='Glossarion v1.7.1',  # Updated version
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
