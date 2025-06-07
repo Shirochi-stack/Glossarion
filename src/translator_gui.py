@@ -226,7 +226,11 @@ class TranslatorGUI:
         )
         self.comprehensive_extraction_var = tk.BooleanVar(
             value=self.config.get('comprehensive_extraction', False)  # Default to False (smart mode)
+        )
+        self.use_tesseract_var = tk.BooleanVar(
+            value=self.config.get('use_tesseract_ocr', False)
         )        
+        
         # Default prompts
         self.default_prompts = {
             "korean": "You are a professional Korean to English novel translator, you must strictly output only English/HTML text while following these rules:\n- Use a context rich and natural translation style.\n- Retain honorifics, and suffixes like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
@@ -377,7 +381,7 @@ class TranslatorGUI:
         print(f"[DEBUG] Setting model to: {default_model}")  # Debug logging
         self.model_var = tk.StringVar(value=default_model)
         tb.Combobox(self.frame, textvariable=self.model_var,
-                    values=["gpt-4o","gpt-4o-mini","gpt-4-turbo","gpt-4.1-nano","gpt-4.1-mini","gpt-4.1","gpt-3.5-turbo","gemini-1.5-pro","gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-exp","deepseek-chat","claude-3-5-sonnet-20241022","claude-3-7-sonnet-20250219"], state="normal").grid(
+                    values=["gpt-4o","gpt-4o-mini","gpt-4-turbo","gpt-4.1-nano","gpt-4.1-mini","gpt-4.1","gpt-3.5-turbo","o4-mini","gemini-1.5-pro","gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-exp","deepseek-chat","claude-3-5-sonnet-20241022","claude-3-7-sonnet-20250219"], state="normal").grid(
             row=1, column=1, columnspan=2, sticky=tk.EW, padx=5, pady=5)
 
         # Language
@@ -1429,6 +1433,9 @@ class TranslatorGUI:
         # Configure grid columns for the scrollable frame
         scrollable_frame.grid_columnconfigure(0, weight=1, uniform="column")
         scrollable_frame.grid_columnconfigure(1, weight=1, uniform="column")
+
+               
+        os.environ["USE_TESSERACT_OCR"] = "1" if self.use_tesseract_var.get() else "0"
         
         # =================================================================
         # SECTION 1: CONTEXT MANAGEMENT (Top Left)
@@ -1676,7 +1683,7 @@ class TranslatorGUI:
         tk.Label(grid_frame, text="Min height:", font=('TkDefaultFont', 9)).grid(row=0, column=0, sticky=tk.W)
         tb.Entry(grid_frame, width=7, textvariable=self.webnovel_min_height_var).grid(row=0, column=1, padx=(2, 5))
         
-        tk.Label(grid_frame, text="Max tokens:", font=('TkDefaultFont', 9)).grid(row=0, column=2, sticky=tk.W)
+        tk.Label(grid_frame, text="Image Output Token Limit:", font=('TkDefaultFont', 9)).grid(row=0, column=2, sticky=tk.W)
         tb.Entry(grid_frame, width=7, textvariable=self.image_max_tokens_var).grid(row=0, column=3, padx=2)
         
         # Row 2: Max per chapter
