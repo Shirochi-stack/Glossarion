@@ -1433,9 +1433,8 @@ class TranslatorGUI:
         # Configure grid columns for the scrollable frame
         scrollable_frame.grid_columnconfigure(0, weight=1, uniform="column")
         scrollable_frame.grid_columnconfigure(1, weight=1, uniform="column")
+        
 
-               
-        os.environ["USE_TESSERACT_OCR"] = "1" if self.use_tesseract_var.get() else "0"
         
         # =================================================================
         # SECTION 1: CONTEXT MANAGEMENT (Top Left)
