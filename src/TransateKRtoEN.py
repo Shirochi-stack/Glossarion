@@ -1689,74 +1689,201 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
     all_text = ' '.join(clean_html(c["body"]) for c in chapters)
     print(f"📑 Total text length: {len(all_text):,} characters")
     
+    # Character range checkers using decimal values
+    def is_korean_char(char):
+        code = ord(char)
+        return 44032 <= code <= 55215  # Hangul syllables (0xAC00-0xD7AF)
+    
+    def is_japanese_char(char):
+        code = ord(char)
+        return (12352 <= code <= 12447 or   # Hiragana (0x3040-0x309F)
+                12448 <= code <= 12543 or   # Katakana (0x30A0-0x30FF)
+                19968 <= code <= 40959)      # Kanji (0x4E00-0x9FFF)
+    
+    def is_chinese_char(char):
+        code = ord(char)
+        return 19968 <= code <= 40959  # CJK (0x4E00-0x9FFF)
+    
     # Define honorifics by language
     if base_language == "korean":
         honorifics = ['님', '씨', '아', '야', '이', '선배', '후배', '형', '누나', '언니', '오빠', '동생', '군', '양', '선생님', '교수님', '사장님', '회장님']
-        # Common Korean words to exclude
-        exclude_words = {
-            '나', '너', '그', '이', '저', '우리', '그것', '이것', '저것', '여기', '거기', '저기',
-            '때문', '위해', '대해', '통해', '의해', '부터', '까지', '처럼', '같이', '보다',
-            '그리고', '그러나', '하지만', '그래서', '그런데', '그러면', '그러므로'
-        }
+        exclude_words = {'나', '너', '그', '이', '저', '우리', '그것', '이것', '저것'}
     elif base_language == "japanese":
         honorifics = ['さん', 'ちゃん', '君', 'くん', '様', 'さま', '殿', 'どの', '先生', '先輩', '後輩', 'たん', '氏']
-        exclude_words = {'それ', 'これ', 'あれ', 'どれ', 'その', 'この', 'あの', 'どの'}
+        exclude_words = {'それ', 'これ', 'あれ', 'どれ', 'その', 'この', 'あの', 'どの', 'わたし', 'ぼく', 'おれ', 'あなた', 'きみ'}
     elif base_language == "chinese":
-        honorifics = ['公子', '小姐', '夫人', '先生', '大人', '少爷', '老爷', '姑娘', '爷', '哥', '姐', '弟', '妹', '兄', '师父', '师傅', '老师', '总', '老']
-        exclude_words = {'那个', '这个', '什么', '怎么', '为什么', '因为', '所以', '但是', '可是', '然后'}
+        # More comprehensive Chinese honorifics
+        honorifics = [
+            # Multi-character honorifics (more formal)
+            '先生', '小姐', '夫人', '太太', '公子', '大人', '少爷', '老爷', '姑娘', 
+            '同学', '老师', '师父', '师傅', '师兄', '师姐', '师弟', '师妹',
+            '前辈', '学长', '学姐', '大哥', '大姐', '小弟', '小妹', '老板',
+            # Single character ones (more casual, often attached)
+            '哥', '姐', '弟', '妹', '爷', '总', '老', '小', '阿', '君', '氏', '兄', '公', '娘'
+        ]
+        exclude_words = {'那个', '这个', '什么', '怎么', '为什么', '我', '你', '他', '她', '它', '的', '了', '是', '在', '有', '和'}
     else:
         honorifics = ['さん', 'ちゃん', '君', '様']
         exclude_words = set()
     
     print(f"📑 Using {len(honorifics)} honorifics: {', '.join(honorifics[:5])}...")
     
+    # Debug: Show sample of text to verify encoding
+    sample = all_text[:200]
+    print(f"📑 Text sample: {sample}...")
+    
     # Find names with honorifics
     found_names = {}  # name -> count
     found_combos = {}  # name+honorific -> count
     
-    # Split text into words/tokens
-    import re
-    # Split on spaces and punctuation
-    tokens = re.findall(r'[\w가-힣ぁ-んァ-ヶー一-龯]+', all_text)
+    # Count how many times each honorific appears
+    honorific_counts = {}
+    for honorific in honorifics:
+        count = all_text.count(honorific)
+        if count > 0:
+            honorific_counts[honorific] = count
     
-    for i, token in enumerate(tokens):
-        # Check each honorific
-        for honorific in honorifics:
-            if token.endswith(honorific):
-                # Extract the base name
-                base_name = token[:-len(honorific)]
-                
-                # Validate the base name
-                if not base_name or len(base_name) > 6:
-                    continue
-                
-                # For Korean: typically 2-3 characters
-                if base_language == "korean" and not (2 <= len(base_name) <= 3):
-                    continue
+    if honorific_counts:
+        print(f"📑 Found honorifics in text:")
+        for hon, cnt in sorted(honorific_counts.items(), key=lambda x: x[1], reverse=True)[:10]:
+            print(f"   • '{hon}' appears {cnt} times")
+    else:
+        print(f"📑 WARNING: No honorifics found in text!")
+    
+    # For each honorific, search directly in text
+    for honorific in honorifics:
+        # Find all occurrences of this honorific
+        pos = 0
+        while True:
+            pos = all_text.find(honorific, pos)
+            if pos == -1:
+                break
+            
+            # Different extraction methods for different languages
+            name = ""
+            
+            if base_language == "korean":
+                # Korean: handle both attached (철수님) and separated (철수 님) cases
+                # Look back for Korean characters
+                name = ""
+                for i in range(pos - 1, max(0, pos - 10), -1):
+                    char = all_text[i]
                     
-                # For Japanese: typically 1-4 characters  
-                if base_language == "japanese" and not (1 <= len(base_name) <= 4):
-                    continue
+                    # If it's a Korean character, add it
+                    if is_korean_char(char):
+                        name = char + name
+                    # Stop at any non-Korean character (including spaces)
+                    else:
+                        break
+                
+                # Clean up
+                name = name.strip()
+                
+            elif base_language == "chinese":
+                # Chinese: names are typically 2-4 characters before honorific
+                # Special handling for Chinese
+                name = ""
+                consecutive_chinese = 0
+                
+                for i in range(pos - 1, max(0, pos - 10), -1):
+                    char = all_text[i]
                     
-                # For Chinese: typically 1-3 characters
-                if base_language == "chinese" and not (1 <= len(base_name) <= 3):
-                    continue
+                    # If it's a Chinese character
+                    if is_chinese_char(char):
+                        name = char + name
+                        consecutive_chinese += 1
+                        # Chinese names rarely exceed 4 characters
+                        if consecutive_chinese >= 4:
+                            break
+                    # Allow middle dot for foreign names
+                    elif char in '·・':
+                        name = char + name
+                        consecutive_chinese = 0  # Reset counter
+                    # Stop at any other character
+                    else:
+                        break
                 
-                # Skip if it's an excluded word
-                if base_name in exclude_words:
-                    continue
+                # Clean up
+                name = name.strip('·・')
                 
-                # Count the name
-                if base_name in found_names:
-                    found_names[base_name] += 1
-                else:
-                    found_names[base_name] = 1
+                # Handle compound Chinese surnames
+                if len(name) >= 3:
+                    # Check if it starts with a compound surname
+                    compound_surnames = ['欧阳', '司马', '上官', '诸葛', '司徒', '公孙', '令狐', '东方', '皇甫', '尉迟']
+                    for surname in compound_surnames:
+                        if name.startswith(surname):
+                            # This is valid even if longer than usual
+                            break
+                    
+            else:
+                # For Japanese/Chinese, work character by character backwards
+                start = max(0, pos - 10)
+                before_text = all_text[start:pos]
                 
-                # Count the combo
-                if token in found_combos:
-                    found_combos[token] += 1
-                else:
-                    found_combos[token] = 1
+                for i in range(len(before_text) - 1, -1, -1):
+                    char = before_text[i]
+                    
+                    if base_language == "japanese":
+                        # Check if character is Japanese
+                        if is_japanese_char(char):
+                            name = char + name
+                        else:
+                            break
+                            
+                    else:
+                        # Default: any non-space character
+                        if char not in ' \t\n\r.,!?;:()[]{}""''""\'\"':
+                            name = char + name
+                        else:
+                            break
+            
+            # Validate the name
+            if name and 1 <= len(name) <= 6:
+                # Check language-specific constraints
+                valid = True
+                
+                if base_language == "korean" and not (2 <= len(name) <= 3):
+                    valid = False
+                elif base_language == "japanese" and not (1 <= len(name) <= 5):
+                    valid = False
+                elif base_language == "chinese" and not (1 <= len(name) <= 4):
+                    # Chinese names are typically 2-3 chars, but can be 1-4
+                    valid = False
+                
+                # Skip excluded words
+                if name in exclude_words:
+                    valid = False
+                
+                # Additional validation for Chinese
+                if base_language == "chinese" and valid:
+                    # Skip single character names that are too common
+                    if len(name) == 1 and name in {'我', '你', '他', '她', '它', '人', '子', '儿', '的', '了', '是', '在', '有', '和'}:
+                        valid = False
+                    
+                    # Special case: if honorific is '阿' and name is 1-2 chars, it's likely valid
+                    if honorific == '阿' and 1 <= len(name) <= 2:
+                        valid = True
+                
+                if valid:
+                    # Count the name
+                    if name in found_names:
+                        found_names[name] += 1
+                    else:
+                        found_names[name] = 1
+                    
+                    # Count the combo
+                    combo = name + honorific
+                    if combo in found_combos:
+                        found_combos[combo] += 1
+                    else:
+                        found_combos[combo] = 1
+                    
+                    # Debug output for first few finds
+                    if len(found_names) <= 5 and base_language == "chinese":
+                        print(f"   [DEBUG] Found: '{name}' + '{honorific}' = '{combo}'")
+            
+            # Move to next position
+            pos += len(honorific)
     
     # Filter by minimum frequency
     frequent_names = {name: count for name, count in found_names.items() if count >= min_frequency}
@@ -1788,7 +1915,11 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
     all_terms = final_names + final_combos
     
     if not all_terms:
-        print("📑 No character names found (no words with honorifics detected)")
+        print("📑 No character names found")
+        print("📑 This may mean:")
+        print("   • The text doesn't use honorifics with names")
+        print("   • The minimum frequency is too high")
+        print("   • The text is too short")
         glossary_path = os.path.join(output_dir, "glossary.json")
         with open(glossary_path, 'w', encoding='utf-8') as f:
             json.dump({}, f, ensure_ascii=False, indent=2)
@@ -1851,7 +1982,7 @@ def translate_terms_batch(term_list, source_lang, batch_size=50):
             
             # Direct prompt
             prompt = f"""Translate these {source_lang} character names to English.
-For each name, provide the romanized version or English equivalent.
+For each name, provide the romanized version with honorifics/suffixes intact.
 
 {terms_list}
 
@@ -1901,7 +2032,6 @@ Reply with the same numbered format, just the translations."""
     except Exception as e:
         print(f"⚠️ Translation failed: {e}")
         return {term: term for term in term_list}
-
 
 def parse_json_response(response, original_terms):
     """Parse JSON translation response"""
@@ -2265,20 +2395,14 @@ def main(log_callback=None, stop_callback=None):
     elif not disable_auto_glossary:
         print("📑 Starting automatic glossary generation...")
         
-        # Use detected language from enhanced extraction
-        detected_lang = metadata.get('detected_language', TRANSLATION_LANG)
-        print(f"📑 Detected language: {detected_lang}")
+
         
         # Generate glossary and WAIT for completion
         try:
-            save_glossary(out, chapters, instructions, detected_lang)
+            save_glossary(out, chapters, instructions)  # No language parameter needed
             print("✅ Automatic glossary generation COMPLETED")
         except Exception as e:
             print(f"❌ Glossary generation failed: {e}")
-            print("📑 Continuing without glossary...")
-            # Create empty glossary file
-            with open(os.path.join(out, "glossary.json"), 'w', encoding='utf-8') as f:
-                json.dump({}, f, ensure_ascii=False, indent=2)
     else:
         print("📑 Automatic glossary disabled - no glossary will be used")
         # Create empty glossary file for consistency
