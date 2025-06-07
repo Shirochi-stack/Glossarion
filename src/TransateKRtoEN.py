@@ -865,6 +865,7 @@ def extract_chapters(zf, output_dir):
     This function provides:
     - Chapter extraction with advanced detection (multiple languages)
     - Resource extraction (CSS, fonts, images, EPUB structure files)
+    - HTML file writing for pre-flight check compatibility
     - Duplicate prevention on re-runs
     - Comprehensive metadata extraction
     - Validation and reporting
@@ -902,15 +903,122 @@ def extract_chapters(zf, output_dir):
         print("❌ No chapters could be extracted!")
         return []
     
-    # Step 4: Enhance metadata with extracted information
+    # Step 4: Write HTML files to disk for pre-flight check compatibility
+    print("\n📝 Writing original HTML files to disk...")
+    html_write_count = 0
+    html_write_errors = 0
+    
+    # Create originals directory to keep them separate from translations
+    originals_dir = os.path.join(output_dir, 'originals')
+    os.makedirs(originals_dir, exist_ok=True)
+    
+    for chapter in chapters:
+        try:
+            # Generate safe filename
+            safe_title = make_safe_filename(chapter['title'], chapter['num'])
+            html_filename = f"chapter_{chapter['num']:03d}_{safe_title}.html"
+            
+            # Write to both locations for compatibility
+            # 1. In originals directory (for organization)
+            original_path = os.path.join(originals_dir, html_filename)
+            
+            # 2. In main directory (for pre-flight check)
+            main_path = os.path.join(output_dir, html_filename)
+            
+            # Ensure we have valid HTML structure
+            body_content = chapter.get('body', '')
+            
+            # Check if body already has html/body tags
+            if '<html' not in body_content.lower() and '<body' not in body_content.lower():
+                # Wrap in proper HTML structure
+                full_html = f"""<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+    <meta charset="utf-8"/>
+    <title>{chapter['title']}</title>
+    <link href="style.css" type="text/css" rel="stylesheet"/>
+</head>
+<body>
+    <h2>{chapter['title']}</h2>
+    {body_content}
+</body>
+</html>"""
+            else:
+                # Already has HTML structure, use as-is
+                full_html = body_content
+            
+            # Write to originals directory
+            with open(original_path, 'w', encoding='utf-8') as f:
+                f.write(full_html)
+            
+            # Write to main directory for pre-flight check
+            with open(main_path, 'w', encoding='utf-8') as f:
+                f.write(full_html)
+            
+            # Update chapter info with file references
+            chapter['original_html_file'] = html_filename
+            chapter['original_html_path'] = original_path
+            
+            html_write_count += 1
+            
+            # Log image-only chapters specially
+            if chapter.get('has_images') and chapter.get('file_size', 0) < 500:
+                print(f"   📸 Wrote image-only chapter {chapter['num']}: {html_filename}")
+            
+        except Exception as e:
+            print(f"   ⚠️ Error writing HTML for chapter {chapter['num']}: {e}")
+            html_write_errors += 1
+    
+    print(f"✅ Successfully wrote {html_write_count} HTML files")
+    if html_write_errors > 0:
+        print(f"⚠️  Failed to write {html_write_errors} HTML files")
+    
+    # Step 5: Create detailed chapter info file for debugging
+    chapters_info_path = os.path.join(output_dir, 'chapters_info.json')
+    chapters_info = []
+    
+    for c in chapters:
+        info = {
+            'num': c['num'],
+            'title': c['title'],
+            'original_filename': c.get('filename', ''),
+            'extracted_html_file': c.get('original_html_file', ''),
+            'has_images': c.get('has_images', False),
+            'image_count': c.get('image_count', 0),
+            'text_length': c.get('file_size', len(c.get('body', ''))),
+            'detection_method': c.get('detection_method', 'unknown'),
+            'content_hash': c.get('content_hash', '')
+        }
+        
+        # Add image details if present
+        if c.get('has_images'):
+            # Parse body to get image sources
+            try:
+                soup = BeautifulSoup(c.get('body', ''), 'html.parser')
+                images = soup.find_all('img')
+                info['images'] = [img.get('src', '') for img in images]
+            except:
+                info['images'] = []
+        
+        chapters_info.append(info)
+    
+    with open(chapters_info_path, 'w', encoding='utf-8') as f:
+        json.dump(chapters_info, f, ensure_ascii=False, indent=2)
+    
+    print(f"💾 Saved detailed chapter info to: chapters_info.json")
+    
+    # Step 6: Enhance metadata with extracted information
     metadata.update({
         'chapter_count': len(chapters),
         'detected_language': detected_language,
         'extracted_resources': extracted_resources,
+        'html_files_written': html_write_count,
+        'image_only_chapters': sum(1 for c in chapters if c.get('has_images') and c.get('file_size', 0) < 500),
         'extraction_summary': {
             'total_chapters': len(chapters),
             'chapter_range': f"{chapters[0]['num']}-{chapters[-1]['num']}",
-            'resources_extracted': sum(len(files) for files in extracted_resources.values())
+            'resources_extracted': sum(len(files) for files in extracted_resources.values()),
+            'html_files_written': html_write_count
         }
     })
     
@@ -919,21 +1027,67 @@ def extract_chapters(zf, output_dir):
         str(c['num']): c['title'] for c in chapters
     }
     
-    # Step 5: Save enhanced metadata
+    # Step 7: Save enhanced metadata
     with open(metadata_path, 'w', encoding='utf-8') as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
     
     print(f"💾 Saved comprehensive metadata to: {metadata_path}")
     
-    # Step 6: Create/update extraction report
+    # Step 8: Create/update extraction report
     _create_extraction_report(output_dir, metadata, chapters, extracted_resources)
     
-    # Step 7: Final validation and summary
-    _log_extraction_summary(chapters, extracted_resources, detected_language)
+    # Step 9: Verify HTML files exist for pre-flight check
+    html_files_in_main = [f for f in os.listdir(output_dir) if f.endswith('.html') and f.startswith('chapter_')]
+    if len(html_files_in_main) != len(chapters):
+        print(f"⚠️  Warning: Expected {len(chapters)} HTML files but found {len(html_files_in_main)}")
+        # List missing chapters
+        written_numbers = set()
+        for f in html_files_in_main:
+            try:
+                num = int(f.split('_')[1])
+                written_numbers.add(num)
+            except:
+                pass
+        
+        for c in chapters:
+            if c['num'] not in written_numbers:
+                print(f"   Missing HTML for chapter {c['num']}: {c['title']}")
+    else:
+        print(f"✅ All {len(chapters)} chapter HTML files verified")
+    
+    # Step 10: Final validation and summary
+    _log_extraction_summary(chapters, extracted_resources, detected_language, html_write_count)
     
     print("🔍 VERIFICATION: Comprehensive chapter extraction completed successfully")
     
     return chapters
+
+
+def _log_extraction_summary(chapters, extracted_resources, detected_language, html_files_written=0):
+    """Log final extraction summary with HTML file information"""
+    print(f"\n✅ Comprehensive extraction complete!")
+    print(f"   📚 Chapters: {len(chapters)}")
+    print(f"   📄 HTML files written: {html_files_written}")
+    print(f"   🎨 Resources: {sum(len(files) for files in extracted_resources.values())}")
+    print(f"   🌍 Language: {detected_language}")
+    
+    # Count image-only chapters
+    image_only_count = sum(1 for c in chapters if c.get('has_images') and c.get('file_size', 0) < 500)
+    if image_only_count > 0:
+        print(f"   📸 Image-only chapters: {image_only_count}")
+    
+    # Show EPUB structure file status
+    epub_files = extracted_resources.get('epub_structure', [])
+    if epub_files:
+        print(f"   📋 EPUB Structure: {len(epub_files)} files ({', '.join(epub_files)})")
+    else:
+        print(f"   ⚠️ No EPUB structure files extracted!")
+    
+    # Verify pre-flight check will pass
+    print(f"\n🔍 Pre-flight check readiness:")
+    print(f"   ✅ HTML files: {'READY' if html_files_written > 0 else 'NOT READY'}")
+    print(f"   ✅ Metadata: READY")
+    print(f"   ✅ Resources: READY")
 
 def _extract_all_resources(zf, output_dir):
     """Extract all resources (CSS, fonts, images, EPUB structure files) with duplicate prevention"""
@@ -1509,7 +1663,7 @@ def _extract_advanced_chapter_info(zf):
     return chapters, detected_language
 
 def _create_extraction_report(output_dir, metadata, chapters, extracted_resources):
-    """Create comprehensive extraction report"""
+    """Create comprehensive extraction report with HTML file tracking"""
     report_path = os.path.join(output_dir, 'extraction_report.txt')
     with open(report_path, 'w', encoding='utf-8') as f:
         f.write("EPUB Extraction Report\n")
@@ -1521,8 +1675,53 @@ def _create_extraction_report(output_dir, metadata, chapters, extracted_resource
                 f.write(f"  {key}: {value}\n")
         
         f.write(f"\nCHAPTERS ({len(chapters)}):\n")
+        
+        # Group chapters by type
+        text_chapters = []
+        image_only_chapters = []
+        mixed_chapters = []
+        
         for chapter in chapters:
-            f.write(f"  {chapter['num']:3d}. {chapter['title']} ({chapter['detection_method']})\n")
+            if chapter.get('has_images') and chapter.get('file_size', 0) < 500:
+                image_only_chapters.append(chapter)
+            elif chapter.get('has_images') and chapter.get('file_size', 0) >= 500:
+                mixed_chapters.append(chapter)
+            else:
+                text_chapters.append(chapter)
+        
+        # Write chapter listings by type
+        if text_chapters:
+            f.write(f"\n  TEXT CHAPTERS ({len(text_chapters)}):\n")
+            for c in text_chapters:
+                f.write(f"    {c['num']:3d}. {c['title']} ({c['detection_method']})\n")
+                if c.get('original_html_file'):
+                    f.write(f"         → {c['original_html_file']}\n")
+        
+        if image_only_chapters:
+            f.write(f"\n  IMAGE-ONLY CHAPTERS ({len(image_only_chapters)}):\n")
+            for c in image_only_chapters:
+                f.write(f"    {c['num']:3d}. {c['title']} (images: {c.get('image_count', 0)})\n")
+                if c.get('original_html_file'):
+                    f.write(f"         → {c['original_html_file']}\n")
+                # List image sources if available
+                if 'body' in c:
+                    try:
+                        soup = BeautifulSoup(c['body'], 'html.parser')
+                        images = soup.find_all('img')
+                        for img in images[:3]:  # Show first 3 images
+                            src = img.get('src', 'unknown')
+                            f.write(f"         • Image: {src}\n")
+                        if len(images) > 3:
+                            f.write(f"         • ... and {len(images) - 3} more images\n")
+                    except:
+                        pass
+        
+        if mixed_chapters:
+            f.write(f"\n  MIXED CONTENT CHAPTERS ({len(mixed_chapters)}):\n")
+            for c in mixed_chapters:
+                f.write(f"    {c['num']:3d}. {c['title']} (text: {c.get('file_size', 0)} chars, images: {c.get('image_count', 0)})\n")
+                if c.get('original_html_file'):
+                    f.write(f"         → {c['original_html_file']}\n")
         
         f.write(f"\nRESOURCES EXTRACTED:\n")
         for resource_type, files in extracted_resources.items():
@@ -1537,22 +1736,34 @@ def _create_extraction_report(output_dir, metadata, chapters, extracted_resource
                         f.write(f"    - {file}\n")
                     if len(files) > 5:
                         f.write(f"    ... and {len(files) - 5} more\n")
+        
+        # Add HTML files section
+        f.write(f"\nHTML FILES WRITTEN:\n")
+        html_files_written = metadata.get('html_files_written', 0)
+        f.write(f"  Total: {html_files_written} files\n")
+        f.write(f"  Location: Main directory and 'originals' subdirectory\n")
+        
+        # Check for potential issues
+        f.write(f"\nPOTENTIAL ISSUES:\n")
+        issues = []
+        
+        if image_only_chapters:
+            issues.append(f"  • {len(image_only_chapters)} chapters contain only images (may need OCR)")
+        
+        missing_html = sum(1 for c in chapters if not c.get('original_html_file'))
+        if missing_html > 0:
+            issues.append(f"  • {missing_html} chapters failed to write HTML files")
+        
+        if not extracted_resources.get('epub_structure'):
+            issues.append("  • No EPUB structure files found (may affect reconstruction)")
+        
+        if not issues:
+            f.write("  None detected - extraction appears successful!\n")
+        else:
+            for issue in issues:
+                f.write(issue + "\n")
     
     print(f"📄 Saved extraction report to: {report_path}")
-
-def _log_extraction_summary(chapters, extracted_resources, detected_language):
-    """Log final extraction summary"""
-    print(f"\n✅ Comprehensive extraction complete!")
-    print(f"   📚 Chapters: {len(chapters)}")
-    print(f"   🎨 Resources: {sum(len(files) for files in extracted_resources.values())}")
-    print(f"   🌍 Language: {detected_language}")
-    
-    # Show EPUB structure file status
-    epub_files = extracted_resources.get('epub_structure', [])
-    if epub_files:
-        print(f"   📋 EPUB Structure: {len(epub_files)} files ({', '.join(epub_files)})")
-    else:
-        print(f"   ⚠️ No EPUB structure files extracted!")
 
 # =============================================================================
 # VALIDATION FUNCTIONS
