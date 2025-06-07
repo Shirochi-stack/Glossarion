@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any, Tuple, List
 import logging
 import re
+import base64
+from PIL import Image
+import io
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -108,7 +111,171 @@ class UnifiedClient:
 
         else:
             raise ValueError("Unsupported model type. Use a model starting with 'gpt', 'gemini', 'deepseek', 'claude', or 'sonnet'")
+    def send_image(self, messages, image_data, temperature=0.3, max_tokens=8192, context=None) -> Tuple[str, Optional[str]]:
+        """
+        Send messages with image to vision-capable APIs
+        
+        Args:
+            messages: List of message dicts
+            image_data: Either bytes of image or base64 string
+            temperature: Temperature for generation
+            max_tokens: Max tokens to generate
+            context: Context for the request (e.g., 'image_translation')
+        
+        Returns:
+            (content, finish_reason) tuple
+        """
+        self.context = context or 'image_translation'
+        self.conversation_message_count += 1
+        
+        # Convert image data to base64 if needed
+        if isinstance(image_data, bytes):
+            image_base64 = base64.b64encode(image_data).decode('utf-8')
+        else:
+            image_base64 = image_data
+        
+        try:
+            os.makedirs("Payloads", exist_ok=True)
+            
+            # Apply reinforcement if needed
+            messages = self._apply_pure_reinforcement(messages)
+            
+            # Determine payload filename
+            payload_name = f"{self.context}_payload.json"
+            response_name = f"{self.context}_response.txt"
+            
+            # Route to appropriate handler based on client type
+            if self.client_type == 'gemini':
+                return self._send_gemini_image(messages, image_base64, temperature, max_tokens, response_name)
+            elif self.client_type == 'openai':
+                # Check if model supports vision
+                if 'gpt-4' in self.model and ('vision' in self.model or 'turbo' in self.model):
+                    return self._send_openai_image(messages, image_base64, temperature, max_tokens, response_name)
+                else:
+                    raise UnifiedClientError(f"Model {self.model} does not support image input")
+            else:
+                raise UnifiedClientError(f"Image input not supported for {self.client_type}")
+                
+        except Exception as e:
+            logger.error(f"UnifiedClient image error: {e}")
+            raise UnifiedClientError(f"Image processing error: {e}") from e
 
+    def _send_gemini_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send image request to Gemini API"""
+        try:
+            # Format prompt for Gemini with image
+            formatted_parts = []
+            
+            # Add system message if present
+            for msg in messages:
+                if msg.get('role') == 'system':
+                    formatted_parts.append(f"Instructions: {msg['content']}")
+                elif msg.get('role') == 'user':
+                    formatted_parts.append(f"User: {msg['content']}")
+            
+            text_prompt = "\n\n".join(formatted_parts)
+            
+            # Create the model
+            model = genai.GenerativeModel(self.model)
+            
+            # Decode base64 to PIL Image
+            image_bytes = base64.b64decode(image_base64)
+            image = Image.open(io.BytesIO(image_bytes))
+            
+            # Generate content with image
+            response = model.generate_content(
+                [text_prompt, image],
+                generation_config={
+                    "temperature": temperature,
+                    "max_output_tokens": max_tokens
+                }
+            )
+            
+            # Extract response
+            try:
+                result = response.text
+                finish_reason = 'stop'
+            except Exception:
+                result = ""
+                finish_reason = 'error'
+                if hasattr(response, 'candidates') and response.candidates:
+                    candidate = response.candidates[0]
+                    if hasattr(candidate, 'content'):
+                        parts = candidate.content.parts
+                        result = ''.join(part.text for part in parts if hasattr(part, 'text'))
+            
+            self._save_response(result, response_name)
+            
+            return UnifiedResponse(
+                content=result,
+                finish_reason=finish_reason,
+                raw_response=response
+            )
+            
+        except Exception as e:
+            logger.error(f"Gemini image API error: {e}")
+            raise UnifiedClientError(f"Gemini image API error: {e}")
+
+    def _send_openai_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send image request to OpenAI Vision API"""
+        try:
+            # Format messages with image for OpenAI
+            vision_messages = []
+            
+            for msg in messages[:-1]:  # All messages except the last
+                vision_messages.append(msg)
+            
+            # Add the last user message with image
+            last_msg = messages[-1]
+            vision_messages.append({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": last_msg["content"]
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{image_base64}"
+                        }
+                    }
+                ]
+            })
+            
+            # Make API call
+            response = openai.chat.completions.create(
+                model=self.model,
+                messages=vision_messages,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            
+            choice = response.choices[0]
+            content = choice.message.content
+            finish_reason = choice.finish_reason
+            
+            # Extract usage
+            usage = None
+            if hasattr(response, 'usage'):
+                usage = {
+                    'prompt_tokens': response.usage.prompt_tokens,
+                    'completion_tokens': response.usage.completion_tokens,
+                    'total_tokens': response.usage.total_tokens
+                }
+            
+            self._save_response(content, response_name)
+            
+            return UnifiedResponse(
+                content=content,
+                finish_reason=finish_reason,
+                usage=usage,
+                raw_response=response
+            )
+            
+        except Exception as e:
+            logger.error(f"OpenAI Vision API error: {e}")
+            raise UnifiedClientError(f"OpenAI Vision API error: {e}")
     def send(self, messages, temperature=0.3, max_tokens=8192, context=None) -> Tuple[str, Optional[str]]:
         """
         Send messages to the API with PURE frequency-based reinforcement
