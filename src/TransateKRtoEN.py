@@ -1657,12 +1657,12 @@ def cleanup_previous_extraction(output_dir):
 # =============================================================================
 def save_glossary(output_dir, chapters, instructions, language="korean"):
     """
-    Universal glossary generator - works for ANY language
+    automatic glossary generator - works for ANY language
     Finds character names by looking for words that appear with honorifics
     PRESERVED ALL ORIGINAL FUNCTIONALITY
     """
     
-    print("📑 Universal Glossary Generator v2.0")
+    print("📑 Automatic Glossary Generator v2.0")
     print("📑 Language-agnostic character name detection")
     
     # Load settings
@@ -1682,7 +1682,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
     all_text = ' '.join(clean_html(chapter["body"]) for chapter in chapters)
     print(f"📑 Processing {len(all_text):,} characters of text")
     
-    # Universal honorifics from all languages
+    # automatic honorifics from all languages
     UNIVERSAL_HONORIFICS = [
         # Korean honorifics and titles
         '님', '씨', '선배', '형', '누나', '언니', '오빠', '선생님', '교수님', 
@@ -1869,7 +1869,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
     with open(glossary_path, 'w', encoding='utf-8') as f:
         json.dump(glossary_entries, f, ensure_ascii=False, indent=2)
     
-    print(f"\n📑 ✅ UNIVERSAL GLOSSARY SAVED!")
+    print(f"\n📑 ✅ AUTOMATIC GLOSSARY SAVED!")
     print(f"📑 File: {glossary_path}")
     print(f"📑 Entries: {len(glossary_entries)}")
     
@@ -1883,7 +1883,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
         if len(glossary_entries) > sample_count:
             print(f"   ... and {len(glossary_entries) - sample_count} more entries")
     
-    print(f"\n📑 🌍 Universal detection complete!")
+    print(f"\n📑 🌍 AUTOMATIC detection complete!")
     print(f"📑 Works for Korean, Japanese, Chinese, and mixed content!")
 
 def translate_terms_batch(term_list, source_lang, batch_size=50):
