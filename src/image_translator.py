@@ -84,6 +84,22 @@ class ImageTranslator:
         if image_path in self.processed_images:
             return False
             
+        # Check file extension - ADD GIF SUPPORT
+        ext = os.path.splitext(image_path)[1].lower()
+        if ext not in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']:
+            return False
+            
+        # Check file size (skip very small images)
+        if os.path.exists(image_path):
+            size = os.path.getsize(image_path)
+            if size < 5000:  # Less than 5KB (lowered threshold for GIFs)
+                return False
+                
+        # For GIF files from web novels, always process them
+        if ext == '.gif' and 'chapter' in os.path.basename(image_path).lower():
+            print(f"   📜 Web novel GIF detected: {os.path.basename(image_path)}")
+            return True
+            
         # Check file size (skip very small images)
         if os.path.exists(image_path):
             size = os.path.getsize(image_path)
@@ -221,34 +237,32 @@ class ImageTranslator:
     def translate_image(self, image_path: str, context: str = "") -> Optional[str]:
         """
         Translate text in an image using vision API
-        
-        Args:
-            image_path: Path to the image file
-            context: Additional context about where the image appears
-            
-        Returns:
-            HTML string with image and translation, or None if no text/failed
         """
         if not os.path.exists(image_path):
             logger.warning(f"Image not found: {image_path}")
             return None
             
         try:
-            # Check if this might be a watermarked image (web novel, etc)
-            is_long_text = False
-            with Image.open(image_path) as img:
-                width, height = img.size
-                is_long_text = height > self.webnovel_min_height and (width / height) < 0.5
-            
-            # Read and optionally preprocess image data
-            if is_long_text:
-                print(f"   🔧 Preprocessing long text image for better OCR")
-                image_data = self.preprocess_image_for_watermarks(image_path)
-                if not image_data:
-                    # Fallback to original if preprocessing fails
-                    with open(image_path, 'rb') as f:
-                        image_data = f.read()
+            # Special handling for GIF files
+            if image_path.lower().endswith('.gif'):
+                print(f"   🔧 Converting GIF to PNG for better OCR")
+                
+                # Convert GIF to PNG for better compatibility
+                with Image.open(image_path) as img:
+                    # Get the first frame of GIF
+                    img.seek(0)
+                    
+                    # Convert to RGB if necessary
+                    if img.mode not in ('RGB', 'RGBA'):
+                        img = img.convert('RGB')
+                    
+                    # Save as PNG in memory
+                    img_bytes = io.BytesIO()
+                    img.save(img_bytes, format='PNG')
+                    img_bytes.seek(0)
+                    image_data = img_bytes.read()
             else:
+                # Regular image handling
                 with open(image_path, 'rb') as f:
                     image_data = f.read()
                     
