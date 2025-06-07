@@ -1955,6 +1955,13 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
         all_text, UNIVERSAL_HONORIFICS, ALL_EXCLUSIONS, min_frequency
     )
     
+    # Apply limits and convert to final format
+    final_standalone_names = list(standalone_names)[:max_names]
+    final_names_with_honorifics = list(set(names_with_honorifics))[:max_suffixes]
+
+    # Then define all_terms
+    all_terms = final_standalone_names + final_names_with_honorifics
+    
     # Language detection for translation
     def detect_primary_language(text):
         """Simple language detection for translation purposes"""
