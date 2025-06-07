@@ -84,7 +84,7 @@ class TranslatorGUI:
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
-        master.title("Glossarion v1.7.1")
+        master.title("Glossarion v1.8.0")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1550, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
@@ -203,7 +203,27 @@ class TranslatorGUI:
         self.glossary_batch_size_var = tk.StringVar(
             value=str(self.config.get('glossary_batch_size', 50))
         )
-
+        # ─── IMAGE TRANSLATION SETTINGS ───
+        self.enable_image_translation_var = tk.BooleanVar(
+            value=self.config.get('enable_image_translation', False)  # Default OFF
+        )
+        
+        # Web novel image settings
+        self.process_webnovel_images_var = tk.BooleanVar(
+            value=self.config.get('process_webnovel_images', True)  # Default ON
+        )
+        
+        self.webnovel_min_height_var = tk.StringVar(
+            value=str(self.config.get('webnovel_min_height', '1000'))
+        )
+        
+        self.image_max_tokens_var = tk.StringVar(
+            value=str(self.config.get('image_max_tokens', '8192'))
+        )
+        
+        self.max_images_per_chapter_var = tk.StringVar(
+            value=str(self.config.get('max_images_per_chapter', '10'))
+        )
         # Default prompts
         self.default_prompts = {
             "korean": "You are a professional Korean to English novel translator, you must strictly output only English/HTML text while following these rules:\n- Use a context rich and natural translation style.\n- Retain honorifics, and suffixes like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
@@ -502,10 +522,15 @@ class TranslatorGUI:
         self.run_base_h = self.run_button.winfo_height()
         self.master.bind('<Configure>', self.on_resize)
 
-        # Log area
+        # Log area - Fixed scrolling issue
         self.log_text = scrolledtext.ScrolledText(self.frame, wrap=tk.WORD,
                                                   state=tk.DISABLED)
         self.log_text.grid(row=10, column=0, columnspan=5, sticky=tk.NSEW, padx=5, pady=5)
+
+        # Make log read-only by binding events instead of disabling
+        self.log_text.bind("<Key>", lambda e: "break")  # Prevent keyboard input
+        self.log_text.bind("<Button-2>", lambda e: "break")  # Prevent middle-click paste on Linux
+        self.log_text.bind("<Button-3>", lambda e: "break")  # Prevent right-click menu
 
         # Bottom toolbar
         self._make_bottom_toolbar()
@@ -524,7 +549,7 @@ class TranslatorGUI:
         print("[DEBUG] GUI setup completed with config values loaded")  # Debug logging
         
         # Add initial log message
-        self.append_log("🚀 Glossarion v1.7.1 - Ready to use!")
+        self.append_log("🚀 Glossarion v1.8.0 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
 
     def force_retranslation(self):
@@ -795,7 +820,15 @@ class TranslatorGUI:
                     'GLOSSARY_MIN_FREQUENCY': self.glossary_min_frequency_var.get(),
                     'GLOSSARY_MAX_NAMES': self.glossary_max_names_var.get(),
                     'GLOSSARY_MAX_TITLES': self.glossary_max_titles_var.get(),
-                    'GLOSSARY_BATCH_SIZE': self.glossary_batch_size_var.get()
+                    'GLOSSARY_BATCH_SIZE': self.glossary_batch_size_var.get(),
+                    # Image translation settings
+                    'ENABLE_IMAGE_TRANSLATION': "1" if self.enable_image_translation_var.get() else "0",
+                    'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var.get() else "0",
+                    'WEBNOVEL_MIN_HEIGHT': self.webnovel_min_height_var.get(),
+                    'IMAGE_MAX_TOKENS': self.image_max_tokens_var.get(),
+                    'MAX_IMAGES_PER_CHAPTER': self.max_images_per_chapter_var.get(),
+                    'IMAGE_API_DELAY': '1.0',  # Delay between image API calls
+                    'SAVE_IMAGE_TRANSLATIONS': '1'  # Save individual translations
                 })
                 
                 # Set chapter range if specified
@@ -827,6 +860,20 @@ class TranslatorGUI:
                 
                 # Debug log to verify
                 self.append_log(f"[DEBUG] MAX_INPUT_TOKENS env var = '{os.environ.get('MAX_INPUT_TOKENS', 'NOT SET')}'")
+                
+                # Log image translation status
+                if self.enable_image_translation_var.get():
+                    self.append_log("🖼️ Image translation ENABLED")
+                    if self.model_var.get().lower() in ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-exp', 'gpt-4-turbo', 'gpt-4o']:
+                        self.append_log(f"   ✅ Using vision-capable model: {self.model_var.get()}")
+                        self.append_log(f"   • Max images per chapter: {self.max_images_per_chapter_var.get()}")
+                        if self.process_webnovel_images_var.get():
+                            self.append_log(f"   • Web novel images: Enabled (min height: {self.webnovel_min_height_var.get()}px)")
+                    else:
+                        self.append_log(f"   ⚠️ Model {self.model_var.get()} does not support vision")
+                        self.append_log("   ⚠️ Image translation will be skipped")
+                else:
+                    self.append_log("🖼️ Image translation disabled")
 
                     
                 # Set manual glossary if loaded
@@ -1299,6 +1346,20 @@ class TranslatorGUI:
         else:
             self.master.after(0, _append)
 
+    # Make log read-only but allow selection and copying
+    def block_editing(event):
+        # Allow Ctrl+C for copy and text selection
+        if event.state & 0x4 and event.keysym.lower() == 'c':  # Ctrl+C
+            return None
+        if event.keysym in ['Left', 'Right', 'Up', 'Down', 'Home', 'End', 'Prior', 'Next']:
+            return None  # Allow navigation
+        if event.state & 0x1:  # Shift key for selection
+            return None
+        return "break"  # Block everything else
+
+        self.log_text.bind("<Key>", block_editing)
+        self.log_text.bind("<Button-2>", lambda e: "break")  # Prevent middle-click paste on Linux
+    
     def browse_file(self):
         path = filedialog.askopenfilename(filetypes=[("EPUB files","*.epub")])
         if path:
@@ -1330,13 +1391,24 @@ class TranslatorGUI:
         """Open the Other Settings dialog with all advanced options in a grid layout"""
         top = tk.Toplevel(self.master)
         top.title("Other Settings")
-        top.geometry("735x920")  # Made taller to accommodate new controls
+        top.geometry("860x1040")
         top.transient(self.master)
         top.grab_set()
         
-        # Create a canvas and scrollbar for scrolling
-        canvas = tk.Canvas(top)
-        scrollbar = ttk.Scrollbar(top, orient="vertical", command=canvas.yview)
+        # Store reference to prevent garbage collection issues
+        self._settings_window = top
+            
+        # Main container
+        main_container = tk.Frame(top)
+        main_container.pack(fill=tk.BOTH, expand=True)
+        
+        # Scrollable content area
+        content_area = tk.Frame(main_container)
+        content_area.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Create canvas and scrollbar
+        canvas = tk.Canvas(content_area, bg='white')
+        scrollbar = ttk.Scrollbar(content_area, orient="vertical", command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas)
         
         scrollable_frame.bind(
@@ -1351,7 +1423,7 @@ class TranslatorGUI:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         
-        # Configure grid columns for the scrollable frame (2 columns layout)
+        # Configure grid columns for the scrollable frame
         scrollable_frame.grid_columnconfigure(0, weight=1, uniform="column")
         scrollable_frame.grid_columnconfigure(1, weight=1, uniform="column")
         
@@ -1550,10 +1622,56 @@ class TranslatorGUI:
         tk.Label(section6_frame, 
                  text="Check if all required EPUB files are\npresent for compilation",
                  font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 5))
+    
+        # =================================================================
+        # SECTION 7: IMAGE TRANSLATION (Optimized Layout)
+        # =================================================================
+        # Use only left column, keep right column free
+        section7_frame = tk.LabelFrame(scrollable_frame, text="Image Translation", padx=10, pady=8)
+        section7_frame.grid(row=3, column=0, sticky="nsew", padx=(10, 5), pady=5)
         
+        # Enable checkbox with description on same line
+        enable_frame = tk.Frame(section7_frame)
+        enable_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        tb.Checkbutton(enable_frame, text="Enable Image Translation", 
+                       variable=self.enable_image_translation_var,
+                       bootstyle="round-toggle").pack(side=tk.LEFT)
+        
+        # Web novel option on same line
+        tb.Checkbutton(enable_frame, text="Include Long Images", 
+                       variable=self.process_webnovel_images_var,
+                       bootstyle="round-toggle").pack(side=tk.LEFT, padx=(20, 0))
+        
+        # Compact grid for numeric settings
+        grid_frame = tk.Frame(section7_frame)
+        grid_frame.pack(fill=tk.X, pady=5)
+        
+        # Configure columns for alignment
+        grid_frame.columnconfigure(1, minsize=60)
+        grid_frame.columnconfigure(3, minsize=60)
+        
+        # Row 1: Two settings side by side
+        tk.Label(grid_frame, text="Min height:", font=('TkDefaultFont', 9)).grid(row=0, column=0, sticky=tk.W)
+        tb.Entry(grid_frame, width=7, textvariable=self.webnovel_min_height_var).grid(row=0, column=1, padx=(2, 5))
+        
+        tk.Label(grid_frame, text="Max tokens:", font=('TkDefaultFont', 9)).grid(row=0, column=2, sticky=tk.W)
+        tb.Entry(grid_frame, width=7, textvariable=self.image_max_tokens_var).grid(row=0, column=3, padx=2)
+        
+        # Row 2: Max per chapter
+        tk.Label(grid_frame, text="Max/chapter:", font=('TkDefaultFont', 9)).grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
+        tb.Entry(grid_frame, width=7, textvariable=self.max_images_per_chapter_var).grid(row=1, column=1, padx=(2, 5), pady=(5, 0))
+        
+        # Supported models as compact text
+        tk.Label(section7_frame, 
+                 text="Vision models: Gemini 1.5-pro/flash, GPT-4V/4o",
+                 font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(5, 0))
+
+
         # =================================================================
         # SAVE & CLOSE FUNCTIONALITY (Bottom spanning both columns)
         # =================================================================
+
         def save_and_close():
             """Save all settings and close the dialog"""
             try:
@@ -1586,6 +1704,13 @@ class TranslatorGUI:
                 self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()
                 self.config['reset_failed_chapters'] = self.reset_failed_chapters_var.get()
                 
+                # Image Translation Settings
+                self.config['enable_image_translation'] = self.enable_image_translation_var.get()
+                self.config['process_webnovel_images'] = self.process_webnovel_images_var.get()
+                self.config['webnovel_min_height'] = int(self.webnovel_min_height_var.get())
+                self.config['image_max_tokens'] = int(self.image_max_tokens_var.get())
+                self.config['max_images_per_chapter'] = int(self.max_images_per_chapter_var.get())
+                
                 # Set environment variables for immediate effect
                 os.environ["USE_ROLLING_SUMMARY"] = "1" if self.rolling_summary_var.get() else "0"
                 os.environ["SUMMARY_ROLE"] = self.summary_role_var.get()
@@ -1600,6 +1725,11 @@ class TranslatorGUI:
                 os.environ["APPEND_GLOSSARY"] = "1" if self.append_glossary_var.get() else "0"
                 os.environ["EMERGENCY_PARAGRAPH_RESTORE"] = "1" if self.emergency_restore_var.get() else "0"
                 os.environ["RESET_FAILED_CHAPTERS"] = "1" if self.reset_failed_chapters_var.get() else "0"
+                os.environ["ENABLE_IMAGE_TRANSLATION"] = "1" if self.enable_image_translation_var.get() else "0"
+                os.environ["PROCESS_WEBNOVEL_IMAGES"] = "1" if self.process_webnovel_images_var.get() else "0"
+                os.environ["WEBNOVEL_MIN_HEIGHT"] = self.webnovel_min_height_var.get()
+                os.environ["IMAGE_MAX_TOKENS"] = self.image_max_tokens_var.get()
+                os.environ["MAX_IMAGES_PER_CHAPTER"] = self.max_images_per_chapter_var.get()
                 
                 # NEW: Glossary extraction environment variables
                 os.environ["GLOSSARY_MIN_FREQUENCY"] = self.glossary_min_frequency_var.get()
@@ -1620,47 +1750,75 @@ class TranslatorGUI:
                 print(f"❌ Failed to save Other Settings: {e}")
                 messagebox.showerror("Error", f"Failed to save settings: {e}")
         
-        # Save button frame spanning both columns
-        button_frame = tk.Frame(scrollable_frame)
-        button_frame.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=20)
+        # =================================================================
+        # SAVE & CLOSE BUTTONS (Right side of row 3, next to Image Translation)
+        # =================================================================
         
-        # Center the buttons
+        # Save button frame in the empty space next to Image Translation
+        button_frame = tk.LabelFrame(scrollable_frame, text="Actions", padx=10, pady=10)
+        button_frame.grid(row=3, column=1, sticky="nsew", padx=(5, 10), pady=5)
+        
+        # Center buttons vertically
         button_container = tk.Frame(button_frame)
-        button_container.pack(expand=True)
+        button_container.pack(expand=True, fill='both')
         
-        tb.Button(button_container, text="💾 Save Settings", command=save_and_close, 
-                  bootstyle="success", width=20).pack(side=tk.LEFT, padx=5)
-        
-        tb.Button(button_container, text="❌ Cancel", command=top.destroy, 
-                  bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
-        
+
+                    
         # =================================================================
         # MOUSE WHEEL SCROLLING SUPPORT
         # =================================================================
+        # Mouse wheel scrolling with proper cleanup
         def _on_mousewheel(event):
-            """Handle mouse wheel scrolling"""
             try:
                 canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-            except tk.TclError:
-                # Canvas was destroyed, ignore
-                pass
-
-        # Bind mouse wheel events
-        canvas.bind("<MouseWheel>", _on_mousewheel)
-        scrollable_frame.bind("<MouseWheel>", _on_mousewheel)
-        canvas.focus_set()
-
-        # Cleanup on close
-        def on_close():
-            """Cleanup when dialog is closed"""
-            try:
-                canvas.unbind("<MouseWheel>")
-                scrollable_frame.unbind("<MouseWheel>")
             except:
                 pass
-            top.destroy()
 
-        top.protocol("WM_DELETE_WINDOW", on_close)
+        # Bind to canvas only, not all widgets
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        canvas.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))  # Linux
+        canvas.bind("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))   # Linux
+
+        def _on_mousewheel_linux(event, direction):
+            """Handle mouse wheel scrolling on Linux"""
+            try:
+                if canvas.winfo_exists():
+                    canvas.yview_scroll(direction, "units")
+            except tk.TclError:
+                pass
+
+        # Create event handler references for cleanup
+        wheel_handler = lambda e: _on_mousewheel(e)
+        wheel_up_handler = lambda e: _on_mousewheel_linux(e, -1)
+        wheel_down_handler = lambda e: _on_mousewheel_linux(e, 1)
+        
+        # Bind mouse wheel events
+        top.bind_all("<MouseWheel>", wheel_handler)
+        top.bind_all("<Button-4>", wheel_up_handler)  # Linux
+        top.bind_all("<Button-5>", wheel_down_handler)  # Linux
+        
+        # Clean up bindings when window is destroyed
+        def cleanup_bindings():
+            try:
+                top.unbind_all("<MouseWheel>")
+                top.unbind_all("<Button-4>")
+                top.unbind_all("<Button-5>")
+            except:
+                pass
+        
+        top.protocol("WM_DELETE_WINDOW", lambda: [cleanup_bindings(), top.destroy()])
+        
+        # Also clean up when dialog is closed via buttons
+        def save_and_close_with_cleanup():
+            cleanup_bindings()
+            save_and_close()
+        
+        # Update the save button to use the new function
+        tb.Button(button_container, text="💾 Save Settings", command=save_and_close_with_cleanup, 
+                  bootstyle="success", width=20).pack(pady=5)
+        
+        tb.Button(button_container, text="❌ Cancel", command=lambda: [cleanup_bindings(), top.destroy()], 
+                  bootstyle="secondary", width=20).pack(pady=5)
 
 
 
@@ -1968,6 +2126,11 @@ class TranslatorGUI:
             self.config['glossary_max_names'] = int(self.glossary_max_names_var.get())
             self.config['glossary_max_titles'] = int(self.glossary_max_titles_var.get())
             self.config['glossary_batch_size'] = int(self.glossary_batch_size_var.get())
+            self.config['enable_image_translation'] = self.enable_image_translation_var.get()
+            self.config['process_webnovel_images'] = self.process_webnovel_images_var.get()
+            self.config['webnovel_min_height'] = int(self.webnovel_min_height_var.get())
+            self.config['image_max_tokens'] = int(self.image_max_tokens_var.get())
+            self.config['max_images_per_chapter'] = int(self.max_images_per_chapter_var.get())
 
             
             _tl = self.token_limit_entry.get().strip()
@@ -2000,7 +2163,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time  # Add this import
     
-    print("🚀 Starting Glossarion v1.7.1...")
+    print("🚀 Starting Glossarion v1.8.0...")
     
     # Initialize splash screen (main thread only)
     splash_manager = None
