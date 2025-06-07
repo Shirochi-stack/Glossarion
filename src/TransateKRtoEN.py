@@ -1655,143 +1655,222 @@ def cleanup_previous_extraction(output_dir):
 # =============================================================================
 # GLOSSARY MANAGEMENT
 # =============================================================================
-def save_glossary(output_dir, chapters, instructions, language="korean"):
-    """
-    automatic glossary generator - works for ANY language
-    Finds character names by looking for words that appear with honorifics
-    PRESERVED ALL ORIGINAL FUNCTIONALITY
-    """
-    
-    print("📑 Automatic Glossary Generator v2.0")
-    print("📑 Language-agnostic character name detection")
-    
-    # Load settings
-    min_frequency = int(os.getenv("GLOSSARY_MIN_FREQUENCY", "2"))
-    max_names = int(os.getenv("GLOSSARY_MAX_NAMES", "50"))
-    max_suffixes = int(os.getenv("GLOSSARY_MAX_SUFFIXES", "50"))
-    batch_size = int(os.getenv("GLOSSARY_BATCH_SIZE", "50"))
-    
-    print(f"📑 Min frequency: {min_frequency}, Max names: {max_names}, Max suffixes: {max_suffixes}")
-    
-    def clean_html(html_text):
-        """Remove HTML tags to get clean text"""
-        soup = BeautifulSoup(html_text, 'html.parser')
-        return soup.get_text()
-    
-    # Extract and combine all text from chapters
-    all_text = ' '.join(clean_html(chapter["body"]) for chapter in chapters)
-    print(f"📑 Processing {len(all_text):,} characters of text")
-    
-    # automatic honorifics from all languages
-    UNIVERSAL_HONORIFICS = [
-        # Korean honorifics and titles
-        '님', '씨', '선배', '형', '누나', '언니', '오빠', '선생님', '교수님', 
-        '공주', '왕자', '폐하', '전하', '각하', '원님', '대감', '영감',
-        
-        # Japanese honorifics and titles
-        'さん', 'ちゃん', '君', 'くん', '様', 'さま', '先生', 'せんせい',
-        '殿', 'どの', '姫', 'ひめ', '王', '皇', '陛下', '閣下', '大人',
-        
-        # Chinese honorifics and titles
-        '公子', '小姐', '夫人', '先生', '大人', '师父', '师傅', '老师',
-        '陛下', '殿下', '王爷', '公主', '皇上', '将军', '大师', '长老',
-        
-        # English honorifics (for mixed content)
-        '-san', '-chan', '-kun', '-sama', '-sensei', '-senpai'
-    ]
-    
-    # Universal exclusion list
-    UNIVERSAL_EXCLUSIONS = {
-        # Korean common words and particles
-        '나', '너', '그', '이', '저', '것', '수', '때', '곳', '중', '안', '밖', '위', '아래', '앞', '뒤',
-        '나는', '나를', '나의', '나도', '나만', '나조차', '나부터', '나까지',
-        '너는', '너를', '너의', '너도', '너만', '그는', '그를', '그의', '그도',
-        '그것', '이것', '저것', '무엇', '어떤', '모든', '각각', '서로', '함께', '혼자',
-        '같은', '다른', '새로운', '오래된', '많은', '적은', '좋은', '나쁜', '큰', '작은',
-        '지금', '오늘', '내일', '어제', '이제', '그때', '언제', '항상', '가끔', '자주',
-        '여기', '거기', '저기', '어디', '어디서', '어디로', '어디까지', '어디든',
-        '하는', '되는', '있는', '없는', '하고', '되고', '있고', '없고', '해서', '돼서',
-        '때문', '위해', '대해', '통해', '의해', '로서', '로써', '부터', '까지', '마다',
-        
-        # Japanese common words and particles  
-        'それ', 'これ', 'あれ', 'どれ', 'その', 'この', 'あの', 'どの',
-        'そう', 'こう', 'ああ', 'どう', 'そこ', 'ここ', 'あそこ', 'どこ',
-        'みんな', 'だれ', 'なに', 'なん', 'いつ', 'なぜ', 'どんな', 'いろいろ',
-        'とても', 'すごく', 'ちょっと', 'すこし', 'たくさん', 'いっぱい', 'もっと',
-        'もう', 'まだ', 'きっと', 'たぶん', 'やっぱり', 'やはり', 'ほんとう',
-        'ひと', 'もの', 'こと', 'とき', 'ところ', 'ほう', 'よう', 'ふう', 'やつ', 'かた',
-        'です', 'ます', 'した', 'する', 'いる', 'ある', 'ない', 'から', 'まで', 'など',
-        
-        # Chinese common words
-        '那个', '这个', '什么', '哪里', '怎么', '为什么', '什么时候', '多少', '怎样', '如何',
-        '所有', '每个', '任何', '没有', '一些', '很多', '一点', '非常', '特别', '真的',
-        '可能', '应该', '必须', '需要', '想要', '喜欢', '觉得', '认为', '知道', '明白',
-        
-        # English common words (for mixed content)
-        'that', 'this', 'what', 'where', 'when', 'how', 'why', 'who', 'which',
-        'some', 'many', 'very', 'good', 'bad', 'big', 'small', 'new', 'old',
-        'here', 'there', 'now', 'then', 'yes', 'no', 'and', 'but', 'or',
-        
-        # Single characters and particles (usually not names)
-        'a', 'i', 'u', 'e', 'o', 'の', 'は', 'が', 'を', 'に', 'で', 'と', 'も', 'か', 'よ', 'ね',
-        '은', '는', '이', '가', '을', '를', '에', '의', '와', '과', '도', '만', '부터', '까지',
-        '了', '的', '在', '是', '有', '不', '我', '你', '他', '她', '它', '们', '也', '都'
+# In save_glossary function, add these Japanese-specific exclusions to UNIVERSAL_EXCLUSIONS:
+
+    # Add this right after the UNIVERSAL_EXCLUSIONS definition:
+    # Japanese-specific common words to exclude
+    JAPANESE_EXCLUSIONS = {
+        # Common Japanese particles and words
+        'これ', 'それ', 'あれ', 'この', 'その', 'あの', 'こんな', 'そんな', 'あんな',
+        'ここ', 'そこ', 'あそこ', 'こちら', 'そちら', 'あちら', 'こっち', 'そっち', 'あっち',
+        'いつ', 'いま', 'きょう', 'あした', 'きのう', 'まえ', 'あと', 'つぎ',
+        'みんな', 'だれ', 'なに', 'どこ', 'どう', 'なぜ', 'いくつ', 'いくら',
+        'ひと', 'もの', 'こと', 'とき', 'ところ', 'かた', 'ほう',
+        'わたし', 'あなた', 'かれ', 'かのじょ', 'われわれ', 'かれら',
+        'じぶん', 'みずから', 'おれ', 'ぼく', 'きみ', 'おまえ',
+        # Common kanji words
+        '今日', '明日', '昨日', '今', '後', '前', '時', '人', '事', '物',
+        '所', '方', '何', '誰', '私', '僕', '君', '彼', '彼女', '自分',
+        '皆', '全部', '少し', '沢山', '大体', '普通', '特別', '本当',
+        # Common non-name kanji combinations
+        '時間', '場所', '毎日', '最近', '大切', '必要', '可能', '簡単', 
+        '困難', '重要', '部屋', '学校', '会社', '仕事', '友達', '家族'
     }
     
-    print(f"📑 Using {len(UNIVERSAL_HONORIFICS)} honorifics from all languages")
-    print(f"📑 Excluding {len(UNIVERSAL_EXCLUSIONS)} common words")
-    
+    # Combine exclusions - FIXED: union() works with both sets and lists
+    ALL_EXCLUSIONS = set(UNIVERSAL_EXCLUSIONS).union(set(JAPANESE_EXCLUSIONS))
+
+    # Then replace the entire find_names_with_honorifics function:
     def find_names_with_honorifics(text, honorifics, exclusions, min_freq):
-        """Core algorithm: Find names that appear with honorifics"""
+        """Core algorithm: Find names that appear with honorifics - ENHANCED for Japanese"""
         names_with_honorifics = []
         standalone_names = set()
         
         print("📑 Scanning for name + honorific combinations...")
         
-        # Split text into words for processing
-        words = text.split()
-        print(f"📑 Processing {len(words):,} words...")
+        # Detect if text contains Japanese
+        japanese_chars = sum(1 for char in text if 
+                           (12352 <= ord(char) <= 12447) or  # Hiragana
+                           (12448 <= ord(char) <= 12543) or  # Katakana
+                           (19968 <= ord(char) <= 40959))    # Kanji
         
-        # Check each honorific
+        total_chars = len(text)
+        is_japanese = (japanese_chars / total_chars > 0.1) if total_chars > 0 else False
+        
+        if is_japanese:
+            print("📑 Detected Japanese text - using enhanced detection")
+        
+        # Process each honorific
         for honorific in honorifics:
             honorific_count = 0
+            found_names = set()  # Avoid duplicates per honorific
             
-            # Find words ending with this honorific
-            for word in words:
-                if word.endswith(honorific) and len(word) > len(honorific):
-                    # Extract the potential name part
-                    potential_name = word[:-len(honorific)]
+            # Japanese honorifics need special handling
+            if honorific in ['さん', 'ちゃん', '君', 'くん', '様', 'さま', '先生', 'せんせい', 
+                           '殿', 'どの', '姫', 'ひめ', '陛下', '閣下', '-san', '-chan', 
+                           '-kun', '-sama', '-sensei', '-senpai']:
+                
+                # Search for honorific in text
+                search_pos = 0
+                while True:
+                    pos = text.find(honorific, search_pos)
+                    if pos == -1:
+                        break
                     
-                    # Apply filtering criteria
-                    if is_valid_name(potential_name, exclusions):
-                        # Count occurrences in full text
-                        full_combination = potential_name + honorific
-                        count = text.count(full_combination)
+                    # Extract name before honorific
+                    name_chars = []
+                    char_pos = pos - 1
+                    
+                    # Scan backwards to find name
+                    while char_pos >= 0 and len(name_chars) < 6:  # Max 6 chars for safety
+                        char = text[char_pos]
+                        char_code = ord(char)
                         
-                        if count >= min_freq:
-                            names_with_honorifics.append(full_combination)
-                            standalone_names.add(potential_name)
-                            honorific_count += 1
-                            print(f"   ✅ {potential_name} + {honorific} ({count}x)")
+                        # Check if character could be part of a name
+                        if (12352 <= char_code <= 12447 or    # Hiragana
+                            12448 <= char_code <= 12543 or    # Katakana  
+                            19968 <= char_code <= 40959 or    # Kanji
+                            (char.isalpha() and char_code < 128)):  # ASCII letters
+                            name_chars.insert(0, char)
+                            char_pos -= 1
+                        # Check for Japanese punctuation and spaces
+                        elif char in ' ' or char == '　' or char in '、。「」『』・':
+                            break
+                        else:
+                            break
+                    
+                    # Process found name
+                    if name_chars:
+                        potential_name = ''.join(name_chars)
+                        
+                        if is_valid_name(potential_name, exclusions) and potential_name not in found_names:
+                            full_combination = potential_name + honorific
+                            count = text.count(full_combination)
+                            
+                            if count >= min_freq:
+                                names_with_honorifics.append(full_combination)
+                                standalone_names.add(potential_name)
+                                found_names.add(potential_name)
+                                honorific_count += 1
+                                
+                                if honorific_count <= 10:  # Show first 10
+                                    print("   ✅ {} + {} ({}x)".format(potential_name, honorific, count))
+                    
+                    search_pos = pos + len(honorific)
+            
+            else:
+                # Non-Japanese honorifics - use word splitting
+                words = text.split()
+                for word in words:
+                    if word.endswith(honorific) and len(word) > len(honorific):
+                        potential_name = word[:-len(honorific)]
+                        
+                        if is_valid_name(potential_name, exclusions):
+                            full_combination = potential_name + honorific
+                            count = text.count(full_combination)
+                            
+                            if count >= min_freq:
+                                names_with_honorifics.append(full_combination)
+                                standalone_names.add(potential_name)
+                                honorific_count += 1
+                                print("   ✅ {} + {} ({}x)".format(potential_name, honorific, count))
             
             if honorific_count > 0:
-                print(f"   📊 Found {honorific_count} names with '{honorific}'")
+                print("   📊 Found {} unique names with '{}'".format(honorific_count, honorific))
         
-        return names_with_honorifics, standalone_names
-    
+        # Additional pattern detection for Japanese names
+        if is_japanese and len(standalone_names) < 10:  # If we found few names
+            print("📑 Running additional Japanese name pattern detection...")
+            
+            # Common name kanji patterns
+            name_patterns = [
+                # Family name endings
+                ('田', 1, 3), ('山', 1, 3), ('川', 1, 3), ('村', 1, 3), 
+                ('木', 1, 3), ('野', 1, 3), ('原', 1, 3), ('藤', 1, 3),
+                ('井', 1, 3), ('本', 1, 3), ('谷', 1, 3), ('口', 1, 3),
+                # Given name patterns  
+                ('子', 1, 2), ('美', 1, 2), ('郎', 1, 2), ('太', 1, 2)
+            ]
+            
+            additional_names = set()
+            for pattern_char, min_prefix, max_prefix in name_patterns:
+                search_pos = 0
+                while True:
+                    pos = text.find(pattern_char, search_pos)
+                    if pos == -1:
+                        break
+                    
+                    # Try different name lengths
+                    for prefix_len in range(min_prefix, max_prefix + 1):
+                        if pos >= prefix_len:
+                            candidate = text[pos - prefix_len:pos + 1]
+                            
+                            # Validate it's all kanji
+                            if all(19968 <= ord(c) <= 40959 for c in candidate):
+                                if is_valid_name(candidate, exclusions):
+                                    count = text.count(candidate)
+                                    if count >= min_freq:
+                                        additional_names.add(candidate)
+                    
+                    search_pos = pos + 1
+            
+            # Add additional names found
+            for name in additional_names:
+                if name not in standalone_names:
+                    standalone_names.add(name)
+                    print("   ✅ {} (pattern match, {}x)".format(name, text.count(name)))
+        
+        return list(set(names_with_honorifics)), standalone_names
+
+    # And update is_valid_name function:
     def is_valid_name(name, exclusions):
-        """Check if a potential name meets our criteria"""
-        return (
-            2 <= len(name) <= 12 and           # Reasonable name length
-            name not in exclusions and         # Not a common word
-            not name.isdigit() and            # Not a number
-            name.strip() and                  # Not empty/whitespace
-            len(name.strip()) > 1             # More than 1 character
-        )
+        """Check if a potential name meets our criteria - ENHANCED for Japanese"""
+        if not name or not name.strip():
+            return False
+        
+        name = name.strip()
+        
+        # Check against all exclusions
+        if name in exclusions:
+            return False
+        
+        # Length validation based on script
+        name_length = len(name)
+        contains_kanji = any(19968 <= ord(char) <= 40959 for char in name)
+        contains_kana = any((12352 <= ord(char) <= 12447) or 
+                           (12448 <= ord(char) <= 12543) for char in name)
+        
+        if contains_kanji or contains_kana:
+            # Japanese names: 1-4 characters typical
+            if not (1 <= name_length <= 5):
+                return False
+            
+            # Single character validation for Japanese
+            if name_length == 1:
+                # Common single kanji that aren't names
+                single_exclusions = {'人', '日', '月', '年', '時', '分', '今', '中', 
+                                   '上', '下', '左', '右', '前', '後', '内', '外'}
+                if name in single_exclusions:
+                    return False
+        else:
+            # Non-Japanese names: 2-12 characters
+            if not (2 <= name_length <= 12):
+                return False
+        
+        # Reject pure numbers
+        if name.isdigit():
+            return False
+        
+        # Reject if too many non-letter characters
+        letter_count = sum(1 for c in name if c.isalpha() or 19968 <= ord(c) <= 40959)
+        if letter_count < name_length * 0.8:
+            return False
+        
+        return True
     
-    # Execute name detection
+    # Make sure to use ALL_EXCLUSIONS when calling the function:
     names_with_honorifics, standalone_names = find_names_with_honorifics(
-        all_text, UNIVERSAL_HONORIFICS, UNIVERSAL_EXCLUSIONS, min_frequency
+        all_text, UNIVERSAL_HONORIFICS, ALL_EXCLUSIONS, min_frequency
     )
     
     # Apply limits and convert to final format
@@ -2752,10 +2831,21 @@ def main(log_callback=None, stop_callback=None):
                         time.sleep(2)
                     
                     # Restore original values
+                    # Restore original values
                     MAX_OUTPUT_TOKENS = original_max_tokens
                     TEMP = original_temp
                     user_prompt = original_user_prompt
-                    print(f"    🔄 Restored original temperature: {TEMP}")
+                    
+                    # Only print restoration message if values were actually changed
+                    if retry_count > 0 or duplicate_retry_count > 0:
+                        if duplicate_retry_count > 0:
+                            print(f"    🔄 Restored original temperature: {TEMP} (after {duplicate_retry_count} duplicate retries)")
+                        elif retry_count > 0:
+                            print(f"    🔄 Restored original settings after {retry_count} retries")
+                    
+                    # If duplicate was detected but not resolved, add a warning
+                    if duplicate_retry_count >= max_duplicate_retries:
+                        print(f"    ⚠️ WARNING: Duplicate content issue persists after {max_duplicate_retries} attempts")
                     
                     # Clean AI artifacts ONLY if the toggle is enabled
                     if REMOVE_AI_ARTIFACTS:
