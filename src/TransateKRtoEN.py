@@ -3528,7 +3528,51 @@ def main(log_callback=None, stop_callback=None):
     if check_stop():
         print("❌ Translation stopped before building EPUB")
         return
+    # FIX: Ensure we have response_ files for EPUB builder
+    print("🔍 Checking for translated chapters...")
+    response_files = [f for f in os.listdir(out) if f.startswith('response_') and f.endswith('.html')]
+    chapter_files = [f for f in os.listdir(out) if f.startswith('chapter_') and f.endswith('.html')]
 
+    if not response_files and chapter_files:
+        print(f"⚠️ No translated files found, but {len(chapter_files)} original chapters exist")
+        print("📝 Creating placeholder response files for EPUB compilation...")
+        
+        # Create response files from chapter files
+        # These are the ORIGINAL untranslated files, but at least EPUB can build
+        for chapter_file in chapter_files:
+            response_file = chapter_file.replace('chapter_', 'response_', 1)
+            src = os.path.join(out, chapter_file)
+            dst = os.path.join(out, response_file)
+            
+            try:
+                # Read the original content
+                with open(src, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                # Add a notice that this is untranslated
+                soup = BeautifulSoup(content, 'html.parser')
+                notice = soup.new_tag('p')
+                notice.string = "[Note: This chapter could not be translated - showing original content]"
+                notice['style'] = "color: red; font-style: italic;"
+                
+                # Insert notice at the beginning of body
+                if soup.body:
+                    soup.body.insert(0, notice)
+                
+                # Write as response file
+                with open(dst, 'w', encoding='utf-8') as f:
+                    f.write(str(soup))
+                    
+            except Exception as e:
+                print(f"⚠️ Error processing {chapter_file}: {e}")
+                # Fallback - just copy the file
+                try:
+                    shutil.copy2(src, dst)
+                except:
+                    pass
+        
+        print(f"✅ Created {len(chapter_files)} placeholder response files")
+        print("⚠️ Note: The EPUB will contain untranslated content")
     # Build final EPUB
     print("📘 Building final EPUB…")
     try:
