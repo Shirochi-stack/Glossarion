@@ -884,25 +884,11 @@ def sanitize_resource_filename(filename):
 # CONSOLIDATED CHAPTER AND RESOURCE EXTRACTION
 # =============================================================================
 
+
 def extract_chapters(zf, output_dir):
     """
-    Extract chapters and all resources from EPUB with comprehensive handling
-    
-    This function provides:
-    - Chapter extraction with advanced detection (multiple languages)
-    - Resource extraction (CSS, fonts, images, EPUB structure files)
-    - HTML file writing for pre-flight check compatibility
-    - Duplicate prevention on re-runs
-    - Comprehensive metadata extraction
-    - Validation and reporting
-    - Smart cleanup of previous extractions
-    
-    Args:
-        zf: ZipFile object of the EPUB
-        output_dir: Directory to extract content to
-        
-    Returns:
-        List of chapter dictionaries with enhanced metadata
+    Extract chapters and all resources from EPUB
+    This only extracts resources and loads chapters into memory - no HTML writing
     """
     
     print("🚀 Starting comprehensive EPUB extraction...")
@@ -929,75 +915,8 @@ def extract_chapters(zf, output_dir):
         print("❌ No chapters could be extracted!")
         return []
     
-    # Step 4: Write HTML files to disk for pre-flight check compatibility
-    print("\n📝 Writing original HTML files to disk...")
-    html_write_count = 0
-    html_write_errors = 0
-    
-    # Create originals directory to keep them separate from translations
-    originals_dir = os.path.join(output_dir, 'originals')
-    os.makedirs(originals_dir, exist_ok=True)
-    
-    for chapter in chapters:
-        try:
-            # Generate safe filename
-            safe_title = make_safe_filename(chapter['title'], chapter['num'])
-            html_filename = f"chapter_{chapter['num']:03d}_{safe_title}.html"
-            
-            # Write to both locations for compatibility
-            # 1. In originals directory (for organization)
-            original_path = os.path.join(originals_dir, html_filename)
-            
-            # 2. In main directory (for pre-flight check)
-            main_path = os.path.join(output_dir, html_filename)
-            
-            # Ensure we have valid HTML structure
-            body_content = chapter.get('body', '')
-            
-            # Check if body already has html/body tags
-            if '<html' not in body_content.lower() and '<body' not in body_content.lower():
-                # Wrap in proper HTML structure
-                full_html = f"""<!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml">
-<head>
-    <meta charset="utf-8"/>
-    <title>{chapter['title']}</title>
-    <link href="style.css" type="text/css" rel="stylesheet"/>
-</head>
-<body>
-    <h2>{chapter['title']}</h2>
-    {body_content}
-</body>
-</html>"""
-            else:
-                # Already has HTML structure, use as-is
-                full_html = body_content
-            
-            # Write to originals directory
-            with open(original_path, 'w', encoding='utf-8') as f:
-                f.write(full_html)
-            
-            # Write to main directory for pre-flight check
-            with open(main_path, 'w', encoding='utf-8') as f:
-                f.write(full_html)
-            
-            # Update chapter info with file references
-            chapter['original_html_file'] = html_filename
-            chapter['original_html_path'] = original_path
-            
-            html_write_count += 1
-            
-            # Log image-only chapters specially
-            if chapter.get('has_images') and chapter.get('file_size', 0) < 500:
-                print(f"   📸 Wrote image-only chapter {chapter['num']}: {html_filename}")
-            
-        except Exception as e:
-            print(f"   ⚠️ Error writing HTML for chapter {chapter['num']}: {e}")
-            html_write_errors += 1
-    
-    print(f"✅ Successfully wrote {html_write_count} HTML files")
-    if html_write_errors > 0:
-        print(f"⚠️  Failed to write {html_write_errors} HTML files")
+    # Step 4: REMOVED - Don't write HTML files during extraction
+    # Original HTML content is already stored in chapter['body']
     
     # Step 5: Create detailed chapter info file for debugging
     chapters_info_path = os.path.join(output_dir, 'chapters_info.json')
@@ -1008,7 +927,6 @@ def extract_chapters(zf, output_dir):
             'num': c['num'],
             'title': c['title'],
             'original_filename': c.get('filename', ''),
-            'extracted_html_file': c.get('original_html_file', ''),
             'has_images': c.get('has_images', False),
             'image_count': c.get('image_count', 0),
             'text_length': c.get('file_size', len(c.get('body', ''))),
@@ -1018,7 +936,6 @@ def extract_chapters(zf, output_dir):
         
         # Add image details if present
         if c.get('has_images'):
-            # Parse body to get image sources
             try:
                 soup = BeautifulSoup(c.get('body', ''), 'html.parser')
                 images = soup.find_all('img')
@@ -1038,13 +955,10 @@ def extract_chapters(zf, output_dir):
         'chapter_count': len(chapters),
         'detected_language': detected_language,
         'extracted_resources': extracted_resources,
-        'html_files_written': html_write_count,
-        'image_only_chapters': sum(1 for c in chapters if c.get('has_images') and c.get('file_size', 0) < 500),
         'extraction_summary': {
             'total_chapters': len(chapters),
             'chapter_range': f"{chapters[0]['num']}-{chapters[-1]['num']}",
-            'resources_extracted': sum(len(files) for files in extracted_resources.values()),
-            'html_files_written': html_write_count
+            'resources_extracted': sum(len(files) for files in extracted_resources.values())
         }
     })
     
@@ -1062,27 +976,8 @@ def extract_chapters(zf, output_dir):
     # Step 8: Create/update extraction report
     _create_extraction_report(output_dir, metadata, chapters, extracted_resources)
     
-    # Step 9: Verify HTML files exist for pre-flight check
-    html_files_in_main = [f for f in os.listdir(output_dir) if f.endswith('.html') and f.startswith('chapter_')]
-    if len(html_files_in_main) != len(chapters):
-        print(f"⚠️  Warning: Expected {len(chapters)} HTML files but found {len(html_files_in_main)}")
-        # List missing chapters
-        written_numbers = set()
-        for f in html_files_in_main:
-            try:
-                num = int(f.split('_')[1])
-                written_numbers.add(num)
-            except:
-                pass
-        
-        for c in chapters:
-            if c['num'] not in written_numbers:
-                print(f"   Missing HTML for chapter {c['num']}: {c['title']}")
-    else:
-        print(f"✅ All {len(chapters)} chapter HTML files verified")
-    
-    # Step 10: Final validation and summary
-    _log_extraction_summary(chapters, extracted_resources, detected_language, html_write_count)
+    # Step 9: Final validation and summary
+    _log_extraction_summary(chapters, extracted_resources, detected_language)
     
     print("🔍 VERIFICATION: Comprehensive chapter extraction completed successfully")
     
