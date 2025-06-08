@@ -248,13 +248,11 @@ class UnifiedClient:
                 ]
             })
             
+            # Build parameters based on model type
+            params = self._build_openai_params(vision_messages, temperature, max_tokens)
+            
             # Make API call
-            response = openai.chat.completions.create(
-                model=self.model,
-                messages=vision_messages,
-                temperature=temperature,
-                max_tokens=max_tokens
-            )
+            response = openai.chat.completions.create(**params)
             
             choice = response.choices[0]
             content = choice.message.content
@@ -483,16 +481,32 @@ class UnifiedClient:
             return self._send_deepseek(messages, temperature, max_tokens, response_name)
         elif self.client_type == 'anthropic':
             return self._send_anthropic(messages, temperature, max_tokens, response_name)
-
+            
+    def _build_openai_params(self, messages, temperature, max_tokens):
+        """Build parameters for OpenAI API call based on model type"""
+        params = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature
+        }
+        
+        # o4 models use max_completion_tokens instead of max_tokens
+        model_lower = self.model.lower().replace(' ', '-')
+        if model_lower.startswith('o4'):
+            params["max_completion_tokens"] = max_tokens
+        else:
+            params["max_tokens"] = max_tokens
+            
+        return params
+        
     def _send_openai(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to OpenAI API"""
         try:
-            resp = openai.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens
-            )
+            # Build parameters based on model type
+            params = self._build_openai_params(messages, temperature, max_tokens)
+            
+            # Make API call
+            resp = openai.chat.completions.create(**params)
             
             choice = resp.choices[0]
             content = choice.message.content
@@ -519,7 +533,6 @@ class UnifiedClient:
         except Exception as e:
             logger.error(f"OpenAI API error: {e}")
             raise UnifiedClientError(f"OpenAI API error: {e}")
-
     def _send_gemini(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to Gemini API with simple formatting (no complex restructuring)"""
         # Simple Gemini formatting - just concatenate messages
