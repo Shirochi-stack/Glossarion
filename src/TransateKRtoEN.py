@@ -2196,7 +2196,7 @@ def parse_translation_response(response, original_terms):
     
     return translations
 
-def translate_terms_batch(term_list, source_lang, batch_size=50):
+def translate_terms_batch(term_list, profile_name, batch_size=50):
     """Use GUI-controlled batch size for translation"""
     if not term_list or os.getenv("DISABLE_GLOSSARY_TRANSLATION", "0") == "1":
         print(f"📑 Glossary translation disabled or no terms to translate")
@@ -2214,7 +2214,7 @@ def translate_terms_batch(term_list, source_lang, batch_size=50):
             print(f"📑 No API key found, skipping translation")
             return {term: term for term in term_list}
         
-        print(f"📑 Translating {len(term_list)} {source_lang} terms to English using batch size {batch_size}...")
+        print(f"📑 Translating {len(term_list)} {profile_name} terms to English using batch size {batch_size}...")
         
         # Import UnifiedClient
         from unified_api_client import UnifiedClient
@@ -2237,14 +2237,14 @@ def translate_terms_batch(term_list, source_lang, batch_size=50):
             
             # More focused prompt for names/terms only
             system_prompt = (
-                f"You are translating {source_lang} character names and important terms to English. "
+                f"You are translating {profile_name} character names and important terms to English. "
                 "For character names, provide English transliterations or keep as romanized. "
                 "Retain honorifics/suffixes in romaji. "
                 "Keep the same number format in your response."
             )
             
             user_prompt = (
-                f"Translate these {source_lang} character names and terms to English:\n\n"
+                f"Translate these {profile_name} character names and terms to English:\n\n"
                 f"{terms_text}\n"
                 "Respond with the same numbered format. For names, provide transliteration or keep romanized."
             )
