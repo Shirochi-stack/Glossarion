@@ -23,7 +23,45 @@ from chapter_splitter import ChapterSplitter
 from image_translator import ImageTranslator
 from typing import Dict, List, Tuple 
 
-
+def is_meaningful_text_content(html_content):
+    """Check if chapter has meaningful text beyond just structure"""
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Create a copy to work with
+        soup_copy = BeautifulSoup(str(soup), 'html.parser')
+        
+        # Remove images and their containers
+        for img in soup_copy.find_all('img'):
+            img.decompose()
+        
+        # Check for actual text content in paragraphs and divs
+        text_elements = soup_copy.find_all(['p', 'div', 'span'])
+        text_content = ' '.join(elem.get_text(strip=True) for elem in text_elements)
+        
+        # Check headers separately
+        headers = soup_copy.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+        header_text = ' '.join(h.get_text(strip=True) for h in headers)
+        
+        # If we have headers AND some paragraph text, it's mixed content
+        if headers and len(text_content.strip()) > 50:
+            return True
+        
+        # If we have substantial text content even without headers
+        if len(text_content.strip()) > 200:
+            return True
+        
+        # If headers are substantial (like a long chapter title + subtitle)
+        if len(header_text.strip()) > 100:
+            return True
+            
+        return False
+        
+    except Exception as e:
+        # If parsing fails, err on the side of caution and process as mixed
+        print(f"Warning: Error checking text content: {e}")
+        return True
+        
 def make_safe_filename(title, chapter_num):
     """Create a safe filename that works across different filesystems"""
     
@@ -3206,97 +3244,115 @@ def main(log_callback=None, stop_callback=None):
 
         print(f"\n🔄 Processing Chapter {idx+1}/{total_chapters}: {c['title']}")
         
-        # Determine chapter type
-        is_image_chapter = c.get('is_image_only', False) or (c.get('has_images', False) and c.get('file_size', 0) < 500)
-        is_empty_chapter = c.get('is_empty', False) or c.get('file_size', 0) < 50
+        # Enhanced chapter type detection
+        has_images = c.get('has_images', False)
+        has_meaningful_text = is_meaningful_text_content(c["body"])
+        text_size = c.get('file_size', 0)
+        
+        # Determine chapter type with better logic
+        is_empty_chapter = (not has_images and text_size < 50)
+        is_image_only_chapter = (has_images and not has_meaningful_text)
+        is_mixed_content = (has_images and has_meaningful_text)
+        is_text_only = (not has_images and has_meaningful_text)
+        
+        # Debug logging for chapter type
+        if is_empty_chapter:
+            print(f"📄 Empty chapter detected")
+        elif is_image_only_chapter:
+            print(f"📸 Image-only chapter: {c.get('image_count', 0)} images, no meaningful text")
+        elif is_mixed_content:
+            print(f"📖📸 Mixed content: {text_size} chars + {c.get('image_count', 0)} images")
+        else:
+            print(f"📖 Text-only chapter: {text_size} characters")
 
-        # Handle different chapter types
-        if is_empty_chapter and not c.get('has_images'):
-            # Empty chapter with no images - just copy it
-            print(f"📄 Empty chapter detected - copying as-is")
-            # ... existing empty chapter handling ...
+        # Process empty chapters
+        if is_empty_chapter:
+            print(f"📄 Copying empty chapter as-is")
+            safe_title = make_safe_filename(c['title'], c['num'])
+            fname = f"response_{c['num']:03d}_{safe_title}.html"
             
-        elif is_image_chapter:
-            # Image-only chapter
-            print(f"📸 Image-only chapter detected with {c.get('image_count', 0)} images")
+            with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                f.write(c["body"])
             
+            print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved empty chapter")
+            update_progress(prog, idx, chap_num, content_hash, fname, status="completed_empty")
+            save_progress()
+            continue
+
+        # Process image-only chapters
+        elif is_image_only_chapter:
             if image_translator and ENABLE_IMAGE_TRANSLATION:
-                # Process with image translator
+                print(f"🖼️ Translating {c.get('image_count', 0)} images...")
                 translated_html, image_translations = process_chapter_images(
                     c["body"], 
                     chap_num, 
                     image_translator,
                     check_stop
                 )
+                
+                # Check if any translations were made
+                if '<div class="image-translation">' in translated_html:
+                    print(f"✅ Successfully translated images")
+                    status = "completed"
+                else:
+                    print(f"ℹ️ No text found in images")
+                    status = "completed_image_only"
             else:
-                # Just copy the chapter as-is
+                print(f"ℹ️ Image translation disabled - copying chapter as-is")
                 translated_html = c["body"]
-                image_translations = {}
+                status = "completed_image_only"
             
             # Save the result
-            safe_title = make_safe_filename(c['title'], c['num'])   
+            safe_title = make_safe_filename(c['title'], c['num'])
             fname = f"response_{c['num']:03d}_{safe_title}.html"
             
             with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
                 f.write(translated_html)
             
-            if '<div class="image-translation">' in translated_html:
-                print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved image-translated chapter")
-                status = "completed"
-            else:
-                print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved image-only chapter (no translations)")
-                status = "completed_image_only"
-            
-            # Update progress
+            print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved image-only chapter")
             update_progress(prog, idx, chap_num, content_hash, fname, status=status)
             save_progress()
             continue
-            
-        elif c.get('has_images') and c.get('file_size', 0) >= 500:
-            # Mixed content - has both text and images
-            print(f"📖 Mixed content chapter with {c.get('image_count', 0)} images and {c.get('file_size', 0)} chars of text")
-            
-            # First, process any images if image translation is enabled
-            chapter_content = c["body"]
-            if image_translator and ENABLE_IMAGE_TRANSLATION:
-                print(f"   🖼️ Processing images first...")
-                chapter_content, image_translations = process_chapter_images(
-                    chapter_content, 
+
+        # Process chapters with text (either mixed or text-only)
+        else:
+            # For mixed content, process images first
+            if is_mixed_content and image_translator and ENABLE_IMAGE_TRANSLATION:
+                print(f"🖼️ Processing {c.get('image_count', 0)} images first...")
+                c["body"], image_translations = process_chapter_images(
+                    c["body"], 
                     chap_num, 
                     image_translator,
                     check_stop
                 )
                 if image_translations:
-                    print(f"   ✅ Translated {len(image_translations)} images")
-            
-            # Now process the text content normally
-            # Update c["body"] with the image-processed content
-            c["body"] = chapter_content
-            
-        print(f"📖 Processing as text chapter ({c.get('file_size', 0)} characters)")
-        
-        # Mark as in-progress (output_filename is None until completed)
-        update_progress(prog, idx, chap_num, content_hash, output_filename=None, status="in_progress")
-        save_progress()
-        
+                    print(f"✅ Translated {len(image_translations)} images")
+                else:
+                    print(f"ℹ️ No translatable text found in images")
 
-        # Parse token limit
-        _tok_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
-        max_tokens_limit, budget_str = parse_token_limit(_tok_env)
-        
-        # Calculate available tokens for content
-        system_tokens = chapter_splitter.count_tokens(system)
-        history_tokens = HIST_LIMIT * 2 * 1000
-        safety_margin = 1000
-        
-        # Determine if we need to split the chapter
-        if max_tokens_limit is not None:
-            available_tokens = max_tokens_limit - system_tokens - history_tokens - safety_margin
-            chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
-        else:
-            chunks = [(c["body"], 1, 1)]
-        
-        print(f"📄 Chapter will be processed in {len(chunks)} chunk(s)")
+            # Mark as in-progress for text translation
+            print(f"📖 Translating text content ({text_size} characters)")
+            update_progress(prog, idx, chap_num, content_hash, output_filename=None, status="in_progress")
+            save_progress()
+            
+            # Continue with the existing text translation logic...
+            # Parse token limit
+            _tok_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
+            max_tokens_limit, budget_str = parse_token_limit(_tok_env)
+            
+            # Calculate available tokens for content
+            system_tokens = chapter_splitter.count_tokens(system)
+            history_tokens = HIST_LIMIT * 2 * 1000
+            safety_margin = 1000
+            
+            # Determine if we need to split the chapter
+            if max_tokens_limit is not None:
+                available_tokens = max_tokens_limit - system_tokens - history_tokens - safety_margin
+                chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
+            else:
+                chunks = [(c["body"], 1, 1)]
+            
+            print(f"📄 Chapter will be processed in {len(chunks)} chunk(s)")
         
         # Show token information if split was needed
         if len(chunks) > 1:
