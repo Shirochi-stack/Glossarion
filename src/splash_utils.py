@@ -10,6 +10,7 @@ class SplashManager:
         self.progress_value = 0  # Track actual progress 0-100
         self.canvas_width = 320  # Progress bar dimensions (increased from 300)
         self.canvas_height = 36  # Increased from 30
+        self._after_id = None
         
     def start_splash(self):
         """Create splash window on main thread"""
@@ -40,7 +41,7 @@ class SplashManager:
             self._load_icon(main_frame)
             
             # Title
-            title_label = tk.Label(main_frame, text="Glossarion v1.8.1", 
+            title_label = tk.Label(main_frame, text="Glossarion v1.8.2", 
                                   bg='#2b2b2b', fg='#4a9eff', font=('Arial', 20, 'bold'))
             title_label.pack(pady=(10, 5))
             
@@ -166,6 +167,14 @@ class SplashManager:
 
     def _animate_progress(self):
         """Animate progress bar filling up"""
+        # Cancel any existing after callback first
+        if self._after_id:
+            try:
+                self.splash_window.after_cancel(self._after_id)
+            except:
+                pass
+            self._after_id = None
+            
         if self.splash_window and self.splash_window.winfo_exists():
             try:
                 # Auto-increment progress for visual effect during startup
@@ -219,11 +228,12 @@ class SplashManager:
                 # Ensure text stays on top of progress fill
                 self.progress_bg.tag_raise("outline")
                 self.progress_bg.tag_raise(self.progress_text)
+
+                # Store the after ID so we can cancel it later
+                self._after_id = self.splash_window.after(100, self._animate_progress)
                 
-                # Continue animation
-                self.splash_window.after(100, self._animate_progress)
-                
-            except:
+            except Exception:
+                self._after_id = None
                 pass
     
     def update_status(self, message):
@@ -259,14 +269,40 @@ class SplashManager:
     def close_splash(self):
         """Close the splash screen"""
         try:
+            # IMPORTANT: Cancel the animation first
+            if self._after_id and self.splash_window:
+                try:
+                    self.splash_window.after_cancel(self._after_id)
+                except:
+                    pass
+                self._after_id = None
+            
             if self.splash_window and self.splash_window.winfo_exists():
                 # Set to 100% briefly before closing
                 self.progress_value = 100
-                self._animate_progress()
+                
+                # Update display one last time without scheduling another callback
+                if self.progress_fill:
+                    self.progress_bg.delete(self.progress_fill)
+                self.progress_bg.delete("highlight")
+                
+                fill_width = int((self.progress_value / 100) * (self.canvas_width - 6))
+                if fill_width > 0:
+                    self.progress_fill = self.progress_bg.create_rectangle(
+                        3, 3, 3 + fill_width, self.canvas_height - 3, 
+                        fill='#4a9eff', outline=''
+                    )
+                
+                self.progress_bg.itemconfig(self.progress_text, text="100%")
+                for item in self.progress_bg.find_withtag("outline"):
+                    self.progress_bg.itemconfig(item, text="100%")
+                
                 self.splash_window.update()
-                time.sleep(0.1)  # Brief pause to show completion
+                time.sleep(0.1)
                 
                 self.splash_window.destroy()
                 self.splash_window = None
         except:
-            pass
+            # Ensure cleanup even on error
+            self._after_id = None
+            self.splash_window = None
