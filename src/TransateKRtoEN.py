@@ -215,7 +215,7 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
             time.sleep(delay)
             
         # Translate the image
-        translation_result = image_translator.translate_image(img_path, context)
+        translation_result = image_translator.translate_image(img_path, context, check_stop_fn)
         
         if translation_result:
             # CRITICAL FIX: Update the HTML to include translation
@@ -3088,26 +3088,26 @@ def main(log_callback=None, stop_callback=None):
     system = build_system_prompt(SYSTEM_PROMPT, glossary_path, instructions)
     base_msg = [{"role": "system", "content": system}]
     
-    # Initialize image translator if using vision-capable model
+    # Initialize image translator based on toggle only
     image_translator = None
     ENABLE_IMAGE_TRANSLATION = os.getenv("ENABLE_IMAGE_TRANSLATION", "1") == "1"
-    
-    # Check for vision-capable models
-    vision_capable_models = [
-        'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-exp', 
-        'gpt-4-turbo', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1-nano', 'o4-mini'
-    ]
 
-    if ENABLE_IMAGE_TRANSLATION and MODEL.lower() in vision_capable_models:
-        print("🖼️ Vision-capable model detected - enabling image translation")
+    if ENABLE_IMAGE_TRANSLATION:
+        print(f"🖼️ Image translation enabled for model: {MODEL}")
         print("🖼️ Image translation will use your custom system prompt and glossary")
         # Pass the complete system prompt (including GUI prompt + glossary + instructions)
-        image_translator = ImageTranslator(client, out, TRANSLATION_LANG, system)
+        image_translator = ImageTranslator(client, out, TRANSLATION_LANG, system, TEMP)
+        
+        # Optional: Warn about potentially unsupported models
+        known_vision_models = [
+            'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-exp', 
+            'gpt-4-turbo', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1-nano', 'o4-mini'
+        ]
+        
+        if MODEL.lower() not in known_vision_models:
+            print(f"⚠️ Note: {MODEL} may not have vision capabilities. Image translation will be attempted anyway.")
     else:
-        if not ENABLE_IMAGE_TRANSLATION:
-            print("ℹ️ Image translation disabled by user")
-        else:
-            print("ℹ️ Model does not support vision - image translation disabled")
+        print("ℹ️ Image translation disabled by user")
     
     total_chapters = len(chapters)
     
@@ -3240,7 +3240,7 @@ def main(log_callback=None, stop_callback=None):
             with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
                 f.write(translated_html)
             
-            if image_translations:
+            if '<div class="image-translation">' in translated_html:
                 print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved image-translated chapter")
                 status = "completed"
             else:
