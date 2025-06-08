@@ -44,6 +44,7 @@ a = Analysis(
         'ebooklib.utils',  # Added for completeness
         'bs4',
         'BeautifulSoup',
+        'soupsieve',  # ADDED - BeautifulSoup4 dependency
         'lxml',
         'lxml.etree',
         'lxml._elementpath',
@@ -52,6 +53,7 @@ a = Analysis(
         'html5lib',
         'html',  # Added for html.escape
         'html.parser',  # Added
+        'cgi',  # ADDED - Used in epub_converter.py for HTML escaping fallback
         
         # GUI
         'ttkbootstrap',
@@ -72,6 +74,10 @@ a = Analysis(
         'PIL.ImageFont',         # NEW - Used by image_translator
         'PIL.ImageEnhance',      # NEW - Used by image_translator
         'PIL.ImageFilter',       # NEW - Used by image_translator
+        'PIL.ImageOps',          # ADDED - Common image operations
+        'PIL.ImageChops',        # ADDED - Image channel operations
+        'PIL.ImageStat',         # ADDED - Image statistics
+        'PIL.ImagePalette',      # ADDED - For palette-based images
         'PIL._binary',
         'PIL._imaging',
         'PIL._imagingft',
@@ -134,6 +140,7 @@ a = Analysis(
         'idna',
         'ssl',  # Added
         'socket',  # Added
+        'six',  # ADDED - Common compatibility library
         
         # Additional commonly missed modules
         'pkg_resources',
@@ -168,7 +175,7 @@ a = Analysis(
         'os',
         'os.path',  # Added
         'sys',
-        'dataclasses',
+        'dataclasses',  # ADDED - Used in unified_api_client.py
         'typing',
         'typing_extensions',  # Added - often needed
         'argparse',
@@ -194,6 +201,10 @@ a = Analysis(
         'xml',  # Added - used by BeautifulSoup
         'xml.etree',  # Added
         'xml.etree.ElementTree',  # Added
+        'atexit',  # ADDED - Used in splash_utils.py
+        'multiprocessing',  # ADDED - Used in translator_gui.py
+        'multiprocessing.freeze_support',  # ADDED - Specifically for freeze_support()
+        'gc',  # ADDED - Garbage collection (might be implicitly used)
     ],
     hookspath=[],
     hooksconfig={},
