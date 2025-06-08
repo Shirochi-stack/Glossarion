@@ -815,7 +815,7 @@ class TranslatorGUI:
                     'REMOVE_AI_ARTIFACTS': "1" if self.REMOVE_AI_ARTIFACTS_var.get() else "0",
                     'USE_ROLLING_SUMMARY': "1" if self.config.get('use_rolling_summary') else "0",
                     'SUMMARY_ROLE': self.config.get('summary_role', 'user'),
-                    'TRANSLATION_LANG': self.lang_var.get().lower(),
+                    'PROFILE_NAME': self.lang_var.get().lower(),
                     'TRANSLATION_TEMPERATURE': str(self.trans_temp.get()),
                     'TRANSLATION_HISTORY_LIMIT': str(self.trans_history.get()),
                     'EPUB_OUTPUT_DIR': os.getcwd(),
@@ -1361,6 +1361,23 @@ class TranslatorGUI:
             _append()
         else:
             self.master.after(0, _append)
+            
+    def append_chunk_progress(self, chunk_num, total_chunks, chunk_type="text", chapter_info=""):
+        """Append chunk progress with visual indicator"""
+        progress_bar_width = 20
+        progress = chunk_num / total_chunks if total_chunks > 0 else 0
+        filled = int(progress_bar_width * progress)
+        bar = "█" * filled + "░" * (progress_bar_width - filled)
+        
+        icon = "📄" if chunk_type == "text" else "🖼️"
+        
+        # Build the progress message
+        if chapter_info:
+            msg = f"{icon} {chapter_info} [{bar}] {chunk_num}/{total_chunks} chunks ({progress*100:.1f}%)"
+        else:
+            msg = f"{icon} [{bar}] {chunk_num}/{total_chunks} chunks ({progress*100:.1f}%)"
+        
+        self.append_log(msg)    
 
     # Make log read-only but allow selection and copying
     def block_editing(event):
