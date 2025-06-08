@@ -3152,7 +3152,7 @@ def main(log_callback=None, stop_callback=None):
             PROFILE_NAME, 
             system, 
             TEMP,
-            log_callback
+            log_callback 
         )
         
         # Optional: Warn about potentially unsupported models
