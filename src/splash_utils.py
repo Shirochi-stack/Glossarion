@@ -40,7 +40,7 @@ class SplashManager:
             self._load_icon(main_frame)
             
             # Title
-            title_label = tk.Label(main_frame, text="Glossarion v1.8.0", 
+            title_label = tk.Label(main_frame, text="Glossarion v1.8.1", 
                                   bg='#2b2b2b', fg='#4a9eff', font=('Arial', 20, 'bold'))
             title_label.pack(pady=(10, 5))
             
