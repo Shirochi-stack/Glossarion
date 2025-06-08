@@ -90,6 +90,7 @@ class UnifiedClient:
         self.conversation_message_count = 0
         self.last_reinforcement_count = 0
         self.current_session_context = None
+        self._cancelled = False
 
         if 'gpt' in self.model or 'o4' in self.model:
             if openai is None:
@@ -111,6 +112,12 @@ class UnifiedClient:
 
         else:
             raise ValueError("Unsupported model type. Use a model starting with 'gpt', 'gemini', 'deepseek', 'claude', or 'sonnet'")
+            
+    def cancel_current_operation(self):
+        """Mark current operation as cancelled"""
+        self._cancelled = True
+        print("🛑 Marked current operation as cancelled")
+
     def send_image(self, messages, image_data, temperature=0.3, max_tokens=8192, context=None) -> Tuple[str, Optional[str]]:
         """
         Send messages with image to vision-capable APIs
@@ -125,6 +132,9 @@ class UnifiedClient:
         Returns:
             (content, finish_reason) tuple
         """
+        # Reset cancelled flag at the start
+        self._cancelled = False
+        
         self.context = context or 'image_translation'
         self.conversation_message_count += 1
         
@@ -147,23 +157,28 @@ class UnifiedClient:
             # Route to appropriate handler based on client type
             if self.client_type == 'gemini':
                 response = self._send_gemini_image(messages, image_base64, temperature, max_tokens, response_name)
-                return response.content, response.finish_reason
-            elif self.client_type == 'openai':
-                # Check if model supports vision
-                vision_models = ['gpt-4.1-mini', 'gpt-4.1-nano', 'o4-mini']
-                model_lower = self.model.lower()
                 
-                if ('gpt-4' in model_lower and ('vision' in model_lower or 'turbo' in model_lower or 'o' in model_lower)) or model_lower in vision_models:
-                    response = self._send_openai_image(messages, image_base64, temperature, max_tokens, response_name)
-                    return response.content, response.finish_reason
-                else:
-                    raise UnifiedClientError(f"Model {self.model} does not support image input")
+                # Check if cancelled after getting response
+                if self._cancelled:
+                    raise UnifiedClientError("Operation cancelled by user")
+                    
+                return response.content, response.finish_reason
+                
+            elif self.client_type == 'openai':
+                # Always attempt to send the image - let the API handle capability errors
+                response = self._send_openai_image(messages, image_base64, temperature, max_tokens, response_name)
+                
+                # Check if cancelled after getting response
+                if self._cancelled:
+                    raise UnifiedClientError("Operation cancelled by user")
+                    
+                return response.content, response.finish_reason
             else:
                 raise UnifiedClientError(f"Image input not supported for {self.client_type}")
                 
         except Exception as e:
             logger.error(f"UnifiedClient image error: {e}")
-            raise UnifiedClientError(f"Image processing error: {e}") from e
+            raise UnifiedClientError(f"Image processing error: {e}") from e         
 
     def _send_gemini_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send image request to Gemini API"""
