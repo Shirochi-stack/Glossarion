@@ -46,15 +46,6 @@ class ImageTranslator:
         self.webnovel_min_height = int(os.getenv("WEBNOVEL_MIN_HEIGHT", "1000"))
         self.image_max_tokens = int(os.getenv("IMAGE_MAX_TOKENS", "8192"))
 
-        if os.name == 'nt':  # Windows
-            pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-        
-        # Map language codes for Tesseract
-        self.tesseract_lang_map = {
-            'korean': 'kor',
-            'japanese': 'jpn+eng',  # Japanese + English
-            'chinese': 'chi_sim+chi_tra+eng',  # Simplified + Traditional + English
-            'english': 'eng'
         }
         
     def extract_images_from_chapter(self, chapter_html: str) -> List[Dict]:
