@@ -535,16 +535,18 @@ class TranslatorGUI:
         self.run_base_h = self.run_button.winfo_height()
         self.master.bind('<Configure>', self.on_resize)
 
-        # Log area - Fixed scrolling issue
-        self.log_text = scrolledtext.ScrolledText(self.frame, wrap=tk.WORD,
-                                                  state=tk.DISABLED)
+        # Log area - Fixed scrolling and copying issue
+        self.log_text = scrolledtext.ScrolledText(self.frame, wrap=tk.WORD)
         self.log_text.grid(row=10, column=0, columnspan=5, sticky=tk.NSEW, padx=5, pady=5)
 
-        # Make log read-only by binding events instead of disabling
-        self.log_text.bind("<Key>", lambda e: "break")  # Prevent keyboard input
-        self.log_text.bind("<Button-2>", lambda e: "break")  # Prevent middle-click paste on Linux
-        self.log_text.bind("<Button-3>", lambda e: "break")  # Prevent right-click menu
+        # Make log read-only but allow selection and copying
+        self.log_text.bind("<Key>", self._block_editing)
 
+        # Enable right-click context menu for copying
+        self.log_text.bind("<Button-3>", self._show_context_menu)  # Right-click on Windows/Linux
+        if sys.platform == "darwin":  # macOS
+            self.log_text.bind("<Button-2>", self._show_context_menu)
+            
         # Bottom toolbar
         self._make_bottom_toolbar()
 
@@ -1351,20 +1353,28 @@ class TranslatorGUI:
             sys.exit(0)
 
     def append_log(self, message):
+        """Append message to log"""
         def _append():
-            self.log_text.configure(state=tk.NORMAL)
+            # Get current scroll position
+            at_bottom = self.log_text.yview()[1] >= 0.98
+            
+            # Add the message
             self.log_text.insert(tk.END, message + "\n")
-            self.log_text.see(tk.END)
-            self.log_text.configure(state=tk.DISABLED)
+            
+            # Auto-scroll only if we were at the bottom
+            if at_bottom:
+                self.log_text.see(tk.END)
         
         if threading.current_thread() is threading.main_thread():
             _append()
         else:
             self.master.after(0, _append)
             
-    def append_chunk_progress(self, chunk_num, total_chunks, chunk_type="text", chapter_info=""):
+    def append_chunk_progress(self, chunk_num, total_chunks, chunk_type="text", chapter_info="", 
+                             overall_current=None, overall_total=None):
         """Append chunk progress with visual indicator"""
         progress_bar_width = 20
+        # Calculate progress for this specific item
         progress = chunk_num / total_chunks if total_chunks > 0 else 0
         filled = int(progress_bar_width * progress)
         bar = "█" * filled + "░" * (progress_bar_width - filled)
@@ -1377,21 +1387,75 @@ class TranslatorGUI:
         else:
             msg = f"{icon} [{bar}] {chunk_num}/{total_chunks} chunks ({progress*100:.1f}%)"
         
-        self.append_log(msg)    
+        # Add overall progress if provided
+        if overall_current is not None and overall_total is not None:
+            overall_progress = overall_current / overall_total if overall_total > 0 else 0
+            msg += f" | Overall: {overall_current}/{overall_total} ({overall_progress*100:.1f}%)"
+        
+        self.append_log(msg)
 
-    # Make log read-only but allow selection and copying
-    def block_editing(event):
-        # Allow Ctrl+C for copy and text selection
+
+
+    def _block_editing(self, event):
+        """Block editing in log text but allow selection and copying"""
+        # Allow Ctrl+C for copy
         if event.state & 0x4 and event.keysym.lower() == 'c':  # Ctrl+C
             return None
+        # Allow Ctrl+A for select all
+        if event.state & 0x4 and event.keysym.lower() == 'a':  # Ctrl+A
+            self.log_text.tag_add(tk.SEL, "1.0", tk.END)
+            self.log_text.mark_set(tk.INSERT, "1.0")
+            self.log_text.see(tk.INSERT)
+            return "break"
+        # Allow navigation keys
         if event.keysym in ['Left', 'Right', 'Up', 'Down', 'Home', 'End', 'Prior', 'Next']:
-            return None  # Allow navigation
-        if event.state & 0x1:  # Shift key for selection
             return None
-        return "break"  # Block everything else
+        # Allow selection with Shift
+        if event.state & 0x1:  # Shift key
+            return None
+        # Block everything else
+        return "break"
 
-        self.log_text.bind("<Key>", block_editing)
-        self.log_text.bind("<Button-2>", lambda e: "break")  # Prevent middle-click paste on Linux
+    def _show_context_menu(self, event):
+        """Show context menu for log text"""
+        try:
+            # Create context menu
+            context_menu = tk.Menu(self.master, tearoff=0)
+            
+            # Check if there's selected text
+            try:
+                self.log_text.selection_get()
+                context_menu.add_command(label="Copy", command=self.copy_selection)
+            except tk.TclError:
+                # No selection
+                context_menu.add_command(label="Copy", state="disabled")
+            
+            context_menu.add_separator()
+            context_menu.add_command(label="Select All", command=self.select_all_log)
+            
+            # Show the menu
+            context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            # Make sure to release the grab
+            context_menu.grab_release()
+
+    def copy_selection(self):
+        """Copy selected text from log to clipboard"""
+        try:
+            text = self.log_text.selection_get()
+            self.master.clipboard_clear()
+            self.master.clipboard_append(text)
+        except tk.TclError:
+            # No selection
+            pass
+
+    def select_all_log(self):
+        """Select all text in the log"""
+        self.log_text.tag_add(tk.SEL, "1.0", tk.END)
+        self.log_text.mark_set(tk.INSERT, "1.0")
+        self.log_text.see(tk.INSERT)
+
+
     
     def browse_file(self):
         path = filedialog.askopenfilename(filetypes=[("EPUB files","*.epub")])
