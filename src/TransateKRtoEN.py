@@ -193,35 +193,66 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
             
         img_src = img_info['src']
         
-        # Build full image path
-        if img_src.startswith('../'):
-            img_path = os.path.join(image_translator.output_dir, img_src[3:])
-        elif img_src.startswith('./'):
-            img_path = os.path.join(image_translator.output_dir, img_src[2:])
-        elif img_src.startswith('/'):
-            img_path = os.path.join(image_translator.output_dir, img_src[1:])
-        else:
-            # Check multiple possible locations
-            possible_paths = [
-                os.path.join(image_translator.images_dir, os.path.basename(img_src)),
-                os.path.join(image_translator.output_dir, img_src),
-                os.path.join(image_translator.output_dir, 'images', os.path.basename(img_src)),
-                os.path.join(image_translator.output_dir, os.path.basename(img_src)),
-                # Also check without 'images' subdirectory
-                os.path.join(image_translator.output_dir, os.path.dirname(img_src), os.path.basename(img_src))
-            ]
+        # Check if this is a remote URL
+        if img_src.startswith(('http://', 'https://')):
+            print(f"   🌐 Remote image detected: {img_src[:50]}...")
             
-            img_path = None
-            for path in possible_paths:
-                if os.path.exists(path):
-                    img_path = path
-                    print(f"   ✅ Found image at: {path}")
-                    break
+            # Create temp directory for downloaded images
+            temp_dir = os.path.join(image_translator.output_dir, "temp_remote_images")
+            os.makedirs(temp_dir, exist_ok=True)
             
-            if not img_path:
-                print(f"   ❌ Image not found in any location for: {img_src}")
-                print(f"   Tried: {possible_paths}")
+            # Download the image
+            try:
+                print(f"   ⬇️ Downloading remote image...")
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                }
+                response = requests.get(img_src, timeout=30, headers=headers)
+                response.raise_for_status()
+                
+                # Save to temp file
+                temp_filename = f"chapter{chapter_num}_img{idx}.jpg"
+                img_path = os.path.join(temp_dir, temp_filename)
+                
+                with open(img_path, 'wb') as f:
+                    f.write(response.content)
+                
+                print(f"   ✅ Downloaded to: {temp_filename} ({len(response.content)} bytes)")
+                
+            except Exception as e:
+                print(f"   ❌ Failed to download image: {e}")
+                print(f"   ❌ URL was: {img_src}")
                 continue
+        else:
+            # Build full image path for local images
+            if img_src.startswith('../'):
+                img_path = os.path.join(image_translator.output_dir, img_src[3:])
+            elif img_src.startswith('./'):
+                img_path = os.path.join(image_translator.output_dir, img_src[2:])
+            elif img_src.startswith('/'):
+                img_path = os.path.join(image_translator.output_dir, img_src[1:])
+            else:
+                # Check multiple possible locations
+                possible_paths = [
+                    os.path.join(image_translator.images_dir, os.path.basename(img_src)),
+                    os.path.join(image_translator.output_dir, img_src),
+                    os.path.join(image_translator.output_dir, 'images', os.path.basename(img_src)),
+                    os.path.join(image_translator.output_dir, os.path.basename(img_src)),
+                    # Also check without 'images' subdirectory
+                    os.path.join(image_translator.output_dir, os.path.dirname(img_src), os.path.basename(img_src))
+                ]
+                
+                img_path = None
+                for path in possible_paths:
+                    if os.path.exists(path):
+                        img_path = path
+                        print(f"   ✅ Found image at: {path}")
+                        break
+                
+                if not img_path:
+                    print(f"   ❌ Image not found in any location for: {img_src}")
+                    print(f"   Tried: {possible_paths}")
+                    continue
         
         # Normalize path
         img_path = os.path.normpath(img_path)
@@ -237,6 +268,17 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
             if os.path.exists(image_translator.images_dir):
                 files = os.listdir(image_translator.images_dir)
                 print(f"   📁 Files in images dir: {files[:5]}...")  # Show first 5 files
+            continue
+        
+        # Check if we should actually translate this image
+        if not image_translator.should_translate_image(img_path):
+            print(f"   ⏭️ Skipping image (no text detected): {os.path.basename(img_path)}")
+            # Clean up temp file if it was a remote image
+            if img_src.startswith(('http://', 'https://')) and os.path.exists(img_path):
+                try:
+                    os.remove(img_path)
+                except:
+                    pass
             continue
         
         
@@ -268,7 +310,12 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
                 # Create a container div for the image and translation
                 container = soup.new_tag('div', **{'class': 'image-with-translation'})               
                 
-                # Keep original image
+                # If this was a remote image, update the src to point to the downloaded file
+                if img_src.startswith(('http://', 'https://')):
+                    # Update the img tag to use the local downloaded image
+                    img_tag['src'] = os.path.relpath(img_path, image_translator.output_dir)
+                
+                # Keep original image (now with updated src if it was remote)
                 img_tag.replace_with(container)
                 container.append(img_tag)
                 
@@ -317,6 +364,16 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
                 print(f"   ✅ Saved translation to: {trans_filename}")
             else:
                 print(f"   ⚠️ Could not find image tag in HTML for: {img_src}")
+        else:
+            print(f"   ⚠️ No translation result for image")
+        
+        # Clean up temp file if it was a remote image
+        if img_src.startswith(('http://', 'https://')) and 'img_path' in locals() and os.path.exists(img_path):
+            try:
+                os.remove(img_path)
+                print(f"   🗑️ Cleaned up temp file: {os.path.basename(img_path)}")
+            except Exception as e:
+                print(f"   ⚠️ Could not clean up temp file: {e}")
     
     # After all images are processed, clean up completed chunks
     if translated_count > 0:
