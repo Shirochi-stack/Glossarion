@@ -186,9 +186,6 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
         print(f"   ⚠️ Chapter has {len(images)} images - processing first {max_images_per_chapter} only")
         images = images[:max_images_per_chapter]
     
-    # Get hide_label setting
-    hide_label = os.getenv("HIDE_IMAGE_TRANSLATION_LABEL", "0") == "1"
-    
     for idx, img_info in enumerate(images, 1):
         if check_stop_fn and check_stop_fn():
             print("❌ Image translation stopped by user")
@@ -196,66 +193,35 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
             
         img_src = img_info['src']
         
-        # Check if this is a remote URL
-        if img_src.startswith(('http://', 'https://')):
-            print(f"   🌐 Remote image detected: {img_src[:50]}...")
-            
-            # Create temp directory for downloaded images
-            temp_dir = os.path.join(image_translator.output_dir, "temp_remote_images")
-            os.makedirs(temp_dir, exist_ok=True)
-            
-            # Download the image
-            try:
-                print(f"   ⬇️ Downloading remote image...")
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-                }
-                response = requests.get(img_src, timeout=30, headers=headers)
-                response.raise_for_status()
-                
-                # Save to temp file
-                temp_filename = f"chapter{chapter_num}_img{idx}.jpg"
-                img_path = os.path.join(temp_dir, temp_filename)
-                
-                with open(img_path, 'wb') as f:
-                    f.write(response.content)
-                
-                print(f"   ✅ Downloaded to: {temp_filename} ({len(response.content)} bytes)")
-                
-            except Exception as e:
-                print(f"   ❌ Failed to download image: {e}")
-                print(f"   ❌ URL was: {img_src}")
-                continue
+        # Build full image path
+        if img_src.startswith('../'):
+            img_path = os.path.join(image_translator.output_dir, img_src[3:])
+        elif img_src.startswith('./'):
+            img_path = os.path.join(image_translator.output_dir, img_src[2:])
+        elif img_src.startswith('/'):
+            img_path = os.path.join(image_translator.output_dir, img_src[1:])
         else:
-            # Build full image path for local images
-            if img_src.startswith('../'):
-                img_path = os.path.join(image_translator.output_dir, img_src[3:])
-            elif img_src.startswith('./'):
-                img_path = os.path.join(image_translator.output_dir, img_src[2:])
-            elif img_src.startswith('/'):
-                img_path = os.path.join(image_translator.output_dir, img_src[1:])
-            else:
-                # Check multiple possible locations
-                possible_paths = [
-                    os.path.join(image_translator.images_dir, os.path.basename(img_src)),
-                    os.path.join(image_translator.output_dir, img_src),
-                    os.path.join(image_translator.output_dir, 'images', os.path.basename(img_src)),
-                    os.path.join(image_translator.output_dir, os.path.basename(img_src)),
-                    # Also check without 'images' subdirectory
-                    os.path.join(image_translator.output_dir, os.path.dirname(img_src), os.path.basename(img_src))
-                ]
-                
-                img_path = None
-                for path in possible_paths:
-                    if os.path.exists(path):
-                        img_path = path
-                        print(f"   ✅ Found image at: {path}")
-                        break
-                
-                if not img_path:
-                    print(f"   ❌ Image not found in any location for: {img_src}")
-                    print(f"   Tried: {possible_paths}")
-                    continue
+            # Check multiple possible locations
+            possible_paths = [
+                os.path.join(image_translator.images_dir, os.path.basename(img_src)),
+                os.path.join(image_translator.output_dir, img_src),
+                os.path.join(image_translator.output_dir, 'images', os.path.basename(img_src)),
+                os.path.join(image_translator.output_dir, os.path.basename(img_src)),
+                # Also check without 'images' subdirectory
+                os.path.join(image_translator.output_dir, os.path.dirname(img_src), os.path.basename(img_src))
+            ]
+            
+            img_path = None
+            for path in possible_paths:
+                if os.path.exists(path):
+                    img_path = path
+                    print(f"   ✅ Found image at: {path}")
+                    break
+            
+            if not img_path:
+                print(f"   ❌ Image not found in any location for: {img_src}")
+                print(f"   Tried: {possible_paths}")
+                continue
         
         # Normalize path
         img_path = os.path.normpath(img_path)
@@ -271,17 +237,6 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
             if os.path.exists(image_translator.images_dir):
                 files = os.listdir(image_translator.images_dir)
                 print(f"   📁 Files in images dir: {files[:5]}...")  # Show first 5 files
-            continue
-        
-        # Check if we should actually translate this image
-        if not image_translator.should_translate_image(img_path):
-            print(f"   ⏭️ Skipping image (no text detected): {os.path.basename(img_path)}")
-            # Clean up temp file if it was a remote image
-            if img_src.startswith(('http://', 'https://')) and os.path.exists(img_path):
-                try:
-                    os.remove(img_path)
-                except:
-                    pass
             continue
         
         
@@ -310,55 +265,48 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
                     break
             
             if img_tag:
-                # Parse the translation result
-                trans_soup = BeautifulSoup(translation_result, 'html.parser')
+                # Check if we should hide labels and remove image
+                hide_label = os.getenv("HIDE_IMAGE_TRANSLATION_LABEL", "0") == "1"
                 
-                # Check if the translation has actual content
-                trans_div = trans_soup.find('div', class_='image-translation')
-                if trans_div and trans_div.get_text(strip=True):
-                    # Create a container div for the image and translation
-                    container = soup.new_tag('div', **{'class': 'image-with-translation'})
-                    
-                    # If this was a remote image, update the src to point to the downloaded file
-                    if img_src.startswith(('http://', 'https://')):
-                        # Update the img tag to use the local downloaded image
-                        img_tag['src'] = os.path.relpath(img_path, image_translator.output_dir)
-                    
-                    # Keep original image (now with updated src if it was remote)
-                    img_tag.replace_with(container)
+                # Create a container div for the translation
+                container = soup.new_tag('div', **{'class': 'translated-text-only' if hide_label else 'image-with-translation'})
+                
+                # Replace the image with the container
+                img_tag.replace_with(container)
+                
+                # Only append the image if hide_label is False
+                if not hide_label:
                     container.append(img_tag)
-                    
-                    # Add translation below image
-                    translation_div = soup.new_tag('div', **{'class': 'image-translation'})
-                    
-                    # Extract the translated text from the result
-                    if '<div class="image-translation">' in translation_result:
-                        trans_content = trans_soup.find('div', class_='image-translation')
-                        if trans_content:
-                            # Add the content to our div
-                            for element in trans_content.children:
-                                if element.name:
-                                    translation_div.append(element)
-                    else:
-                        # Just add the text
-                        trans_p = soup.new_tag('p')
-                        trans_p.string = translation_result
-                        translation_div.append(trans_p)
-                    
-                    container.append(translation_div)
-                    translated_count += 1
-                else:
-                    # No actual content in translation - remove the image entirely
-                    img_tag.decompose()
-                    print(f"   🗑️ Removed image with no translatable content")
                 
-                # Save individual translation file (only if there was content)
-                if translated_count > 0:
-                    trans_filename = f"ch{chapter_num:03d}_img{idx:02d}_translation.html"
-                    trans_filepath = os.path.join(image_translator.translated_images_dir, trans_filename)
-                    
-                    with open(trans_filepath, 'w', encoding='utf-8') as f:
-                        f.write(f"""<!DOCTYPE html>
+                # Add translation below (or in place of) image
+                translation_div = soup.new_tag('div', **{'class': 'image-translation'})
+                
+                # Parse the translation result to extract just the text
+                if '<div class="image-translation">' in translation_result:
+                    # Extract the translated text from the result
+                    trans_soup = BeautifulSoup(translation_result, 'html.parser')
+                    trans_content = trans_soup.find('div', class_='image-translation')
+                    if trans_content:
+                        # Add the content to our div
+                        for element in trans_content.children:
+                            if element.name:
+                                translation_div.append(element)
+                else:
+                    # Just add the text
+                    trans_p = soup.new_tag('p')
+                    trans_p.string = translation_result
+                    translation_div.append(trans_p)
+                
+                container.append(translation_div)
+                
+                translated_count += 1
+                
+                # Save individual translation file
+                trans_filename = f"ch{chapter_num:03d}_img{idx:02d}_translation.html"
+                trans_filepath = os.path.join(image_translator.translated_images_dir, trans_filename)
+                
+                with open(trans_filepath, 'w', encoding='utf-8') as f:
+                    f.write(f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8"/>
@@ -371,31 +319,10 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
     {translation_div}
 </body>
 </html>""")
-                    
-                    print(f"   ✅ Saved translation to: {trans_filename}")
+                
+                print(f"   ✅ Saved translation to: {trans_filename}")
             else:
                 print(f"   ⚠️ Could not find image tag in HTML for: {img_src}")
-        else:
-            # No translation result - remove the image if toggle removed everything
-            if hide_label:
-                img_tag = None
-                for img in soup.find_all('img'):
-                    if img.get('src') == img_src:
-                        img_tag = img
-                        break
-                if img_tag:
-                    img_tag.decompose()
-                    print(f"   🗑️ Removed image (no content after URL removal)")
-            else:
-                print(f"   ⚠️ No translation result for image")
-        
-        # Clean up temp file if it was a remote image
-        if img_src.startswith(('http://', 'https://')) and 'img_path' in locals() and os.path.exists(img_path):
-            try:
-                os.remove(img_path)
-                print(f"   🗑️ Cleaned up temp file: {os.path.basename(img_path)}")
-            except Exception as e:
-                print(f"   ⚠️ Could not clean up temp file: {e}")
     
     # After all images are processed, clean up completed chunks
     if translated_count > 0:
@@ -2803,14 +2730,16 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
 # API AND TRANSLATION UTILITIES
 # =============================================================================
 
-def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn):
-    """Send API request with interrupt capability"""
+def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None):
+    """Send API request with interrupt capability and timeout retry"""
     result_queue = queue.Queue()
     
     def api_call():
         try:
+            start_time = time.time()
             result = client.send(messages, temperature=temperature, max_tokens=max_tokens)
-            result_queue.put(result)
+            elapsed = time.time() - start_time
+            result_queue.put((result, elapsed))
         except Exception as e:
             result_queue.put(e)
     
@@ -2818,8 +2747,8 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     api_thread.daemon = True
     api_thread.start()
     
-    # Check for stop every 0.5 seconds while waiting for API
-    timeout = 300  # 5 minute total timeout
+    # Use chunk timeout if provided, otherwise use default
+    timeout = chunk_timeout if chunk_timeout else 300
     check_interval = 0.5
     elapsed = 0
     
@@ -2828,6 +2757,12 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             result = result_queue.get(timeout=check_interval)
             if isinstance(result, Exception):
                 raise result
+            if isinstance(result, tuple):
+                api_result, api_time = result
+                # Check if it took too long
+                if chunk_timeout and api_time > chunk_timeout:
+                    raise UnifiedClientError(f"API call took {api_time:.1f}s (timeout: {chunk_timeout}s)")
+                return api_result
             return result
         except queue.Empty:
             if stop_check_fn():
@@ -2970,7 +2905,7 @@ def build_system_prompt(user_prompt, glossary_path, instructions):
 # =============================================================================
 
 def main(log_callback=None, stop_callback=None):
-    """Main translation function with enhanced duplicate detection"""
+    """Main translation function with enhanced duplicate detection and progress tracking"""
     if log_callback:
         set_output_redirect(log_callback)
     
@@ -3155,8 +3090,6 @@ def main(log_callback=None, stop_callback=None):
         with open(os.path.join(out, "metadata.json"), 'w', encoding='utf-8') as mf:
             json.dump(metadata, mf, ensure_ascii=False, indent=2)
         
-# Replace the glossary handling section in main() function (around line 1400)
-
     # Handle glossary - ENSURE IT COMPLETES BEFORE TRANSLATION
     manual_gloss = os.getenv("MANUAL_GLOSSARY")
     disable_auto_glossary = os.getenv("DISABLE_AUTO_GLOSSARY", "0") == "1"
@@ -3170,8 +3103,6 @@ def main(log_callback=None, stop_callback=None):
         print("📑 Using manual glossary from:", manual_gloss)
     elif not disable_auto_glossary:
         print("📑 Starting automatic glossary generation...")
-        
-
         
         # Generate glossary and WAIT for completion
         try:
@@ -3251,6 +3182,7 @@ def main(log_callback=None, stop_callback=None):
     print("📊 Calculating total chunks needed...")
     total_chunks_needed = 0
     chunks_per_chapter = {}
+    chapters_to_process = 0  # Count chapters that need processing
     
     for idx, c in enumerate(chapters):
         chap_num = c["num"]
@@ -3268,6 +3200,9 @@ def main(log_callback=None, stop_callback=None):
         if not needs_translation:
             chunks_per_chapter[idx] = 0
             continue
+        
+        # Count this as a chapter to process
+        chapters_to_process += 1
         
         # For in-progress chapters, check if they have partial chunks completed
         chapter_key = str(idx)
@@ -3302,6 +3237,7 @@ def main(log_callback=None, stop_callback=None):
         total_chunks_needed += chunks_per_chapter[idx]
     
     print(f"📊 Total chunks to translate: {total_chunks_needed}")
+    print(f"📚 Chapters to process: {chapters_to_process}")
     
     # Print chapter breakdown if there are multi-chunk chapters
     multi_chunk_chapters = [(idx, count) for idx, count in chunks_per_chapter.items() if count > 1]
@@ -3314,6 +3250,7 @@ def main(log_callback=None, stop_callback=None):
     # Track timing for ETA calculation
     translation_start_time = time.time()
     chunks_completed = 0
+    chapters_completed = 0  # Track completed chapters
     
     # Process each chapter with chunk counting
     current_chunk_number = 0
@@ -3340,7 +3277,10 @@ def main(log_callback=None, stop_callback=None):
             print(f"[SKIP] {skip_reason}")
             continue
 
-        print(f"\n🔄 Processing Chapter {idx+1}/{total_chapters}: {c['title']}")
+        # Calculate chapter position for progress
+        chapter_position = f"{chapters_completed + 1}/{chapters_to_process}"
+        
+        print(f"\n🔄 Processing Chapter {idx+1}/{total_chapters} ({chapter_position} to translate): {c['title']}")
         
         # Enhanced chapter type detection
         has_images = c.get('has_images', False)
@@ -3375,6 +3315,7 @@ def main(log_callback=None, stop_callback=None):
             print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved empty chapter")
             update_progress(prog, idx, chap_num, content_hash, fname, status="completed_empty")
             save_progress()
+            chapters_completed += 1
             continue
 
         # Process image-only chapters
@@ -3410,6 +3351,7 @@ def main(log_callback=None, stop_callback=None):
             print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved image-only chapter")
             update_progress(prog, idx, chap_num, content_hash, fname, status=status)
             save_progress()
+            chapters_completed += 1
             continue
 
         # Process chapters with text (either mixed or text-only)
@@ -3446,7 +3388,6 @@ def main(log_callback=None, stop_callback=None):
             update_progress(prog, idx, chap_num, content_hash, output_filename=None, status="in_progress")
             save_progress()
             
-            # Continue with the existing text translation logic...
             # Parse token limit
             _tok_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
             max_tokens_limit, budget_str = parse_token_limit(_tok_env)
@@ -3508,7 +3449,7 @@ def main(log_callback=None, stop_callback=None):
             current_chunk_number += 1
             
             # Calculate progress and ETA
-            progress_percent = (current_chunk_number / total_chunks_needed) * 100
+            progress_percent = (current_chunk_number / total_chunks_needed) * 100 if total_chunks_needed > 0 else 0
             
             if chunks_completed > 0:
                 elapsed_time = time.time() - translation_start_time
@@ -3522,24 +3463,45 @@ def main(log_callback=None, stop_callback=None):
             else:
                 eta_str = "calculating..."
             
+            # Enhanced logging for all chunks
             if total_chunks > 1:
                 print(f"  🔄 Translating chunk {chunk_idx}/{total_chunks} (Overall: {current_chunk_number}/{total_chunks_needed} - {progress_percent:.1f}% - ETA: {eta_str})")
-                # ADD THESE LINES:
                 print(f"  ⏳ Chunk size: {len(chunk_html):,} characters (~{chapter_splitter.count_tokens(chunk_html):,} tokens)")
-                print(f"  ℹ️ This chunk may take 30-60 seconds. Stop will take effect after completion.")
+            else:
+                # Single chunk - show more meaningful info
+                print(f"  📄 Translating chapter content (Overall: {current_chunk_number}/{total_chunks_needed} - {progress_percent:.1f}% - ETA: {eta_str})")
+                print(f"  📊 Chapter {chap_num} size: {len(chunk_html):,} characters (~{chapter_splitter.count_tokens(chunk_html):,} tokens)")
             
+            print(f"  ℹ️ This may take 30-60 seconds. Stop will take effect after completion.")
+            
+            # Enhanced callback with more info
             if log_callback:
-                # Check if it's the append_chunk_progress method
                 if hasattr(log_callback, '__self__') and hasattr(log_callback.__self__, 'append_chunk_progress'):
-                    log_callback.__self__.append_chunk_progress(
-                        chunk_idx, 
-                        total_chunks, 
-                        "text", 
-                        f"Chapter {chap_num}"
-                    )
+                    if total_chunks == 1:
+                        # For single chunks, pass chapter progress info
+                        log_callback.__self__.append_chunk_progress(
+                            1, 1, "text", 
+                            f"Chapter {chap_num}",
+                            overall_current=current_chunk_number,
+                            overall_total=total_chunks_needed,
+                            extra_info=f"{len(chunk_html):,} chars"
+                        )
+                    else:
+                        # Multi-chunk progress
+                        log_callback.__self__.append_chunk_progress(
+                            chunk_idx, 
+                            total_chunks, 
+                            "text", 
+                            f"Chapter {chap_num}",
+                            overall_current=current_chunk_number,
+                            overall_total=total_chunks_needed
+                        )
                 else:
-                    # Fallback to regular log
-                    log_callback(f"📄 Processing text chunk {chunk_idx}/{total_chunks} for Chapter {chap_num}")    
+                    # Fallback logging
+                    if total_chunks == 1:
+                        log_callback(f"📄 Processing Chapter {chap_num} ({chapters_completed + 1}/{chapters_to_process}) - {progress_percent:.1f}% complete")
+                    else:
+                        log_callback(f"📄 Processing chunk {chunk_idx}/{total_chunks} for Chapter {chap_num} - {progress_percent:.1f}% complete")   
                     
             # Add chunk context to prompt if multi-chunk
             if total_chunks > 1:
@@ -3588,176 +3550,255 @@ def main(log_callback=None, stop_callback=None):
                     max_retries = 3
                     duplicate_retry_count = 0
                     max_duplicate_retries = 6
+                    timeout_retry_count = 0
+                    max_timeout_retries = 2
                     history_purged = False
-                    
+
                     # Store original values for retry
                     original_max_tokens = MAX_OUTPUT_TOKENS
                     original_temp = TEMP
                     original_user_prompt = user_prompt
-                    
-                    while retry_count <= max_retries or (duplicate_retry_count < max_duplicate_retries):
-                        # Use current values (may be modified by retry logic)
-                        current_max_tokens = MAX_OUTPUT_TOKENS
-                        current_temp = TEMP
-                        current_user_prompt = user_prompt
+
+                    # Get timeout settings
+                    chunk_timeout = None
+                    if os.getenv("RETRY_TIMEOUT", "1") == "1":
+                        chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "120"))
+
+                    # Initialize result variable
+                    result = None
+                    finish_reason = None
+
+                    while True:
+                        # Check for stop before API call
+                        if check_stop():
+                            print(f"❌ Translation stopped during chapter {idx+1}")
+                            return
                         
-                        # Make API call
-                        result, finish_reason = send_with_interrupt(
-                            msgs, client, current_temp, current_max_tokens, check_stop
-                        )
-                        
-                        # Check if retry is needed
-                        retry_needed = False
-                        retry_reason = ""
-                        is_duplicate_retry = False
-                        
-                        # Check for truncation (existing toggle)
-                        if finish_reason == "length" and os.getenv("RETRY_TRUNCATED", "0") == "1":
-                            if retry_count < max_retries:
-                                retry_needed = True
-                                retry_reason = "truncated output"
-                                retry_max_tokens = int(os.getenv("MAX_RETRY_TOKENS", "16384"))
-                                MAX_OUTPUT_TOKENS = min(MAX_OUTPUT_TOKENS * 2, retry_max_tokens)
-                        
-                        # SIMPLIFIED duplicate detection (safer)
-                        if not retry_needed and os.getenv("RETRY_DUPLICATE_BODIES", "1") == "1":
-                            if duplicate_retry_count < max_duplicate_retries:
-                                try:
-                                    # Simple text comparison
-                                    result_clean = re.sub(r'<[^>]+>', '', result).strip().lower()
-                                    result_sample = result_clean[:1000]  # First 1000 chars
-                                    
-                                    # Check against last few chapters only
-                                    lookback_chapters = int(os.getenv("DUPLICATE_LOOKBACK_CHAPTERS", "3"))
-                                    
-                                    for prev_idx in range(max(0, idx - lookback_chapters), idx):
-                                        prev_key = str(prev_idx)
-                                        if prev_key in prog["chapters"] and prog["chapters"][prev_key].get("output_file"):
-                                            prev_file = prog["chapters"][prev_key]["output_file"]
-                                            prev_path = os.path.join(out, prev_file)
-                                            
-                                            if os.path.exists(prev_path):
-                                                try:
-                                                    with open(prev_path, 'r', encoding='utf-8') as f:
-                                                        prev_content = f.read()
-                                                    
-                                                    prev_clean = re.sub(r'<[^>]+>', '', prev_content).strip().lower()
-                                                    prev_sample = prev_clean[:1000]
-                                                    
-                                                    # Simple similarity check
-                                                    if len(result_sample) > 100 and len(prev_sample) > 100:
-                                                        # Count common words
-                                                        result_words = set(result_sample.split())
-                                                        prev_words = set(prev_sample.split())
-                                                        
-                                                        if len(result_words) > 0 and len(prev_words) > 0:
-                                                            common = len(result_words & prev_words)
-                                                            total = len(result_words | prev_words)
-                                                            similarity = common / total if total > 0 else 0
-                                                            
-                                                            # More conservative 85% threshold
-                                                            if similarity > 0.85:
-                                                                retry_needed = True
-                                                                is_duplicate_retry = True
-                                                                retry_reason = f"duplicate content (similarity: {int(similarity*100)}%)"
-                                                                
-                                                                # Temperature management
-                                                                if duplicate_retry_count >= 3 and not history_purged:
-                                                                    print(f"    🧹 Clearing history after 3 attempts...")
-                                                                    history_manager.save_history([])
-                                                                    history = []
-                                                                    trimmed = []
-                                                                    history_purged = True
-                                                                    TEMP = original_temp
-                                                                    
-                                                                    # Rebuild messages
-                                                                    if base_msg:
-                                                                        msgs = base_msg + [{"role": "user", "content": user_prompt}]
-                                                                    else:
-                                                                        msgs = [{"role": "user", "content": user_prompt}]
-                                                                
-                                                                elif duplicate_retry_count == 0:
-                                                                    # First retry: same temperature
-                                                                    print(f"    🔄 First duplicate retry - same temperature")
-                                                                
-                                                                elif history_purged:
-                                                                    # Post-purge: gradual increase
-                                                                    attempts_since_purge = duplicate_retry_count - 3
-                                                                    TEMP = min(original_temp + (0.1 * attempts_since_purge), 1.0)
-                                                                    print(f"    🌡️ Post-purge temp: {TEMP}")
-                                                                
-                                                                else:
-                                                                    # Pre-purge: gradual increase
-                                                                    TEMP = min(original_temp + (0.1 * duplicate_retry_count), 1.0)
-                                                                    print(f"    🌡️ Gradual temp increase: {TEMP}")
-                                                                
-                                                                # Simple prompt variation
-                                                                if duplicate_retry_count == 0:
-                                                                    user_prompt = f"[RETRY] Chapter {c['num']}: Ensure unique translation.\n{chunk_html}"
-                                                                elif duplicate_retry_count <= 2:
-                                                                    user_prompt = f"[ATTEMPT {duplicate_retry_count + 1}] Translate uniquely:\n{chunk_html}"
-                                                                else:
-                                                                    user_prompt = f"Chapter {c['num']}:\n{chunk_html}"
-                                                                
-                                                                msgs[-1] = {"role": "user", "content": user_prompt}
-                                                                break
+                        try:
+                            # Use current values (may be modified by retry logic)
+                            current_max_tokens = MAX_OUTPUT_TOKENS
+                            current_temp = TEMP
+                            current_user_prompt = user_prompt
+                            
+                            # Calculate actual token usage
+                            total_tokens = sum(chapter_splitter.count_tokens(m["content"]) for m in msgs)
+                            print(f"    [DEBUG] Chunk {chunk_idx}/{total_chunks} tokens = {total_tokens:,} / {budget_str}")
+                            
+                            client.context = 'translation'
+                            
+                            # Make API call
+                            result, finish_reason = send_with_interrupt(
+                                msgs, client, current_temp, current_max_tokens, check_stop, chunk_timeout
+                            )
+                            
+                            # Check if retry is needed
+                            retry_needed = False
+                            retry_reason = ""
+                            is_duplicate_retry = False
+                            is_timeout_retry = False
+                            
+                            # Check for truncation (existing toggle)
+                            if finish_reason == "length" and os.getenv("RETRY_TRUNCATED", "0") == "1":
+                                if retry_count < max_retries:
+                                    retry_needed = True
+                                    retry_reason = "truncated output"
+                                    retry_max_tokens = int(os.getenv("MAX_RETRY_TOKENS", "16384"))
+                                    MAX_OUTPUT_TOKENS = min(MAX_OUTPUT_TOKENS * 2, retry_max_tokens)
+                                    retry_count += 1
+                            
+                            # Check for duplicate content
+                            if not retry_needed and os.getenv("RETRY_DUPLICATE_BODIES", "1") == "1":
+                                if duplicate_retry_count < max_duplicate_retries:
+                                    try:
+                                        # Simple text comparison
+                                        result_clean = re.sub(r'<[^>]+>', '', result).strip().lower()
+                                        result_sample = result_clean[:1000]  # First 1000 chars
+                                        
+                                        # Check against last few chapters only
+                                        lookback_chapters = int(os.getenv("DUPLICATE_LOOKBACK_CHAPTERS", "3"))
+                                        
+                                        for prev_idx in range(max(0, idx - lookback_chapters), idx):
+                                            prev_key = str(prev_idx)
+                                            if prev_key in prog["chapters"] and prog["chapters"][prev_key].get("output_file"):
+                                                prev_file = prog["chapters"][prev_key]["output_file"]
+                                                prev_path = os.path.join(out, prev_file)
                                                 
-                                                except Exception as e:
-                                                    print(f"    [WARN] Error checking file: {e}")
-                                                    continue
+                                                if os.path.exists(prev_path):
+                                                    try:
+                                                        with open(prev_path, 'r', encoding='utf-8') as f:
+                                                            prev_content = f.read()
+                                                        
+                                                        prev_clean = re.sub(r'<[^>]+>', '', prev_content).strip().lower()
+                                                        prev_sample = prev_clean[:1000]
+                                                        
+                                                        # Simple similarity check
+                                                        if len(result_sample) > 100 and len(prev_sample) > 100:
+                                                            # Count common words
+                                                            result_words = set(result_sample.split())
+                                                            prev_words = set(prev_sample.split())
+                                                            
+                                                            if len(result_words) > 0 and len(prev_words) > 0:
+                                                                common = len(result_words & prev_words)
+                                                                total = len(result_words | prev_words)
+                                                                similarity = common / total if total > 0 else 0
+                                                                
+                                                                # More conservative 85% threshold
+                                                                if similarity > 0.85:
+                                                                    retry_needed = True
+                                                                    is_duplicate_retry = True
+                                                                    retry_reason = f"duplicate content (similarity: {int(similarity*100)}%)"
+                                                                    duplicate_retry_count += 1
+                                                                    
+                                                                    # Handle temperature and history management
+                                                                    if duplicate_retry_count >= 3 and not history_purged:
+                                                                        print(f"    🧹 Clearing history after 3 attempts...")
+                                                                        history_manager.save_history([])
+                                                                        history = []
+                                                                        trimmed = []
+                                                                        history_purged = True
+                                                                        TEMP = original_temp
+                                                                        
+                                                                        # Rebuild messages
+                                                                        if base_msg:
+                                                                            if os.getenv("USE_ROLLING_SUMMARY", "0") == "0":
+                                                                                filtered_base = [msg for msg in base_msg if "summary of the previous" not in msg.get("content", "")]
+                                                                                msgs = filtered_base + [{"role": "user", "content": user_prompt}]
+                                                                            else:
+                                                                                msgs = base_msg + [{"role": "user", "content": user_prompt}]
+                                                                        else:
+                                                                            msgs = [{"role": "user", "content": user_prompt}]
+                                                                    
+                                                                    elif duplicate_retry_count == 1:
+                                                                        # First retry: same temperature
+                                                                        print(f"    🔄 First duplicate retry - same temperature")
+                                                                    
+                                                                    elif history_purged:
+                                                                        # Post-purge: gradual increase
+                                                                        attempts_since_purge = duplicate_retry_count - 3
+                                                                        TEMP = min(original_temp + (0.1 * attempts_since_purge), 1.0)
+                                                                        print(f"    🌡️ Post-purge temp: {TEMP}")
+                                                                    
+                                                                    else:
+                                                                        # Pre-purge: gradual increase
+                                                                        TEMP = min(original_temp + (0.1 * (duplicate_retry_count - 1)), 1.0)
+                                                                        print(f"    🌡️ Gradual temp increase: {TEMP}")
+                                                                    
+                                                                    # Simple prompt variation
+                                                                    if duplicate_retry_count == 1:
+                                                                        user_prompt = f"[RETRY] Chapter {c['num']}: Ensure unique translation.\n{chunk_html}"
+                                                                    elif duplicate_retry_count <= 3:
+                                                                        user_prompt = f"[ATTEMPT {duplicate_retry_count}] Translate uniquely:\n{chunk_html}"
+                                                                    else:
+                                                                        user_prompt = f"Chapter {c['num']}:\n{chunk_html}"
+                                                                    
+                                                                    msgs[-1] = {"role": "user", "content": user_prompt}
+                                                                    break
+                                                    
+                                                    except Exception as e:
+                                                        print(f"    [WARN] Error checking file: {e}")
+                                                        continue
+                                    
+                                    except Exception as e:
+                                        print(f"    [WARN] Duplicate check error: {e}")
+                                        # Continue without duplicate detection
+                            
+                            # If retry is needed, log and continue
+                            if retry_needed:
+                                if is_duplicate_retry:
+                                    print(f"    🔄 Duplicate retry {duplicate_retry_count}/{max_duplicate_retries}")
+                                else:
+                                    print(f"    🔄 Retry {retry_count}/{max_retries}: {retry_reason}")
                                 
-                                except Exception as e:
-                                    print(f"    [WARN] Duplicate check error: {e}")
-                                    # Continue without duplicate detection
-                        
-                        # Break if no retry needed
-                        if not retry_needed:
+                                time.sleep(2)
+                                continue
+                            
+                            # If we get here, we have a successful result
                             break
                             
-                        # Update counters
-                        if is_duplicate_retry:
-                            duplicate_retry_count += 1
-                            if duplicate_retry_count > max_duplicate_retries:
-                                print(f"    ❌ Max duplicate retries reached, proceeding")
-                                break
-                        else:
-                            retry_count += 1
-                            if retry_count > max_retries:
-                                print(f"    ❌ Max retries reached, proceeding")
-                                break
+                        except UnifiedClientError as e:
+                            error_msg = str(e)
+                            
+                            # Handle user stop
+                            if "stopped by user" in error_msg:
+                                print("❌ Translation stopped by user during API call")
+                                return
+                            
+                            # Handle timeout specifically
+                            if "took" in error_msg and "timeout:" in error_msg:
+                                if timeout_retry_count < max_timeout_retries:
+                                    timeout_retry_count += 1
+                                    print(f"    ⏱️ Chunk took too long, retry {timeout_retry_count}/{max_timeout_retries}")
+                                    
+                                    # Reduce token count for faster response
+                                    MAX_OUTPUT_TOKENS = int(MAX_OUTPUT_TOKENS * 0.75)
+                                    print(f"    📉 Reduced output tokens to {MAX_OUTPUT_TOKENS} for faster response")
+                                    
+                                    # Increase temperature slightly for variety
+                                    TEMP = min(original_temp + 0.1, 1.0)
+                                    
+                                    time.sleep(2)
+                                    continue
+                                else:
+                                    print(f"    ❌ Max timeout retries reached")
+                                    raise UnifiedClientError("Translation failed after timeout retries")
+                            
+                            # Handle regular timeout
+                            elif "timed out" in error_msg and "timeout:" not in error_msg:
+                                print(f"⚠️ {error_msg}, retrying...")
+                                time.sleep(5)
+                                continue
+                            
+                            # Handle rate limiting
+                            elif getattr(e, "http_status", None) == 429:
+                                print("⚠️ Rate limited, sleeping 60s…")
+                                for i in range(60):
+                                    if check_stop():
+                                        print("❌ Translation stopped during rate limit wait")
+                                        return
+                                    time.sleep(1)
+                                continue
+                            
+                            # Re-raise other errors
+                            else:
+                                raise
                         
-                        # Simple logging
-                        if is_duplicate_retry:
-                            print(f"    🔄 Duplicate retry {duplicate_retry_count}/{max_duplicate_retries}")
-                        else:
-                            print(f"    🔄 Retry {retry_count}/{max_retries}: {retry_reason}")
-                        
-                        time.sleep(2)
-                    
-                    # Restore original values
+                        except Exception as e:
+                            # Catch any other unexpected errors
+                            print(f"❌ Unexpected error during API call: {e}")
+                            raise
+
+                    # Check if we exhausted all retries without success
+                    if result is None:
+                        print(f"❌ Failed to get translation after all retries")
+                        update_progress(prog, idx, chap_num, content_hash, output_filename=None, status="failed")
+                        save_progress()
+                        continue
+
                     # Restore original values
                     MAX_OUTPUT_TOKENS = original_max_tokens
                     TEMP = original_temp
                     user_prompt = original_user_prompt
-                    
+
                     # Only print restoration message if values were actually changed
-                    if retry_count > 0 or duplicate_retry_count > 0:
+                    if retry_count > 0 or duplicate_retry_count > 0 or timeout_retry_count > 0:
                         if duplicate_retry_count > 0:
                             print(f"    🔄 Restored original temperature: {TEMP} (after {duplicate_retry_count} duplicate retries)")
+                        elif timeout_retry_count > 0:
+                            print(f"    🔄 Restored original settings after {timeout_retry_count} timeout retries")
                         elif retry_count > 0:
                             print(f"    🔄 Restored original settings after {retry_count} retries")
-                    
+
                     # If duplicate was detected but not resolved, add a warning
                     if duplicate_retry_count >= max_duplicate_retries:
                         print(f"    ⚠️ WARNING: Duplicate content issue persists after {max_duplicate_retries} attempts")
-                    
+
                     # Clean AI artifacts ONLY if the toggle is enabled
                     if REMOVE_AI_ARTIFACTS:
                         result = clean_ai_artifacts(result)
-                    
+
                     if EMERGENCY_RESTORE:
                         result = emergency_restore_paragraphs(result, chunk_html)
-                    
+
                     # Additional cleaning if remove artifacts is enabled
                     if REMOVE_AI_ARTIFACTS:
                         # Remove any JSON artifacts at the very beginning
@@ -3781,18 +3822,18 @@ def main(log_callback=None, stop_callback=None):
                             if remaining.strip() and len(remaining) > 100:
                                 result = remaining
                                 print(f"✂️ Removed {json_line_count} lines of JSON artifacts")
-                    
+
                     # Remove chunk markers if present
                     result = re.sub(r'\[PART \d+/\d+\]\s*', '', result, flags=re.IGNORECASE)
-                    
+
                     # Save chunk result
                     translated_chunks.append((result, chunk_idx, total_chunks))
-                    
+
                     # Update progress for this chunk
                     prog["chapter_chunks"][chapter_key_str]["completed"].append(chunk_idx)
                     prog["chapter_chunks"][chapter_key_str]["chunks"][str(chunk_idx)] = result
                     save_progress()
-                    
+
                     # Increment completed chunks counter
                     chunks_completed += 1
                         
@@ -3881,10 +3922,32 @@ def main(log_callback=None, stop_callback=None):
 
                 except UnifiedClientError as e:
                     error_msg = str(e)
+                    
+                    # Handle timeout specifically
+                    if "took" in error_msg and "timeout:" in error_msg:
+                        if timeout_retry_count < max_timeout_retries:
+                            timeout_retry_count += 1
+                            print(f"    ⏱️ Chunk took too long, retry {timeout_retry_count}/{max_timeout_retries}")
+                            
+                            # Reduce token count for faster response
+                            MAX_OUTPUT_TOKENS = int(MAX_OUTPUT_TOKENS * 0.75)
+                            print(f"    📉 Reduced output tokens to {MAX_OUTPUT_TOKENS} for faster response")
+                            
+                            # Increase temperature slightly for variety
+                            TEMP = min(original_temp + 0.1, 1.0)
+                            
+                            time.sleep(2)
+                            continue
+                        else:
+                            print(f"    ❌ Max timeout retries reached")
+                            # For timeout failures, we don't have a result, so we need to fail
+                            raise UnifiedClientError("Translation failed after timeout retries")
+                    
+                    # Handle other errors as before
                     if "stopped by user" in error_msg:
                         print("❌ Translation stopped by user during API call")
                         return
-                    elif "timed out" in error_msg:
+                    elif "timed out" in error_msg and "timeout:" not in error_msg:  # Different kind of timeout
                         print(f"⚠️ {error_msg}, retrying...")
                         continue
                     elif getattr(e, "http_status", None) == 429:
@@ -3894,6 +3957,7 @@ def main(log_callback=None, stop_callback=None):
                                 print("❌ Translation stopped during rate limit wait")
                                 return
                             time.sleep(1)
+                        continue  # ADD THIS to retry after rate limit
                     else:
                         raise
 
@@ -3931,11 +3995,15 @@ def main(log_callback=None, stop_callback=None):
         # Update progress with completed status
         update_progress(prog, idx, chap_num, content_hash, fname, status="completed")
         save_progress()
+        
+        # Increment chapters completed
+        chapters_completed += 1
 
     # Check for stop before building EPUB
     if check_stop():
         print("❌ Translation stopped before building EPUB")
         return
+        
     # FIX: Ensure we have response_ files for EPUB builder
     print("🔍 Checking for translated chapters...")
     response_files = [f for f in os.listdir(out) if f.startswith('response_') and f.endswith('.html')]
@@ -3946,7 +4014,6 @@ def main(log_callback=None, stop_callback=None):
         print("📝 Creating placeholder response files for EPUB compilation...")
         
         # Create response files from chapter files
-        # These are the ORIGINAL untranslated files, but at least EPUB can build
         for chapter_file in chapter_files:
             response_file = chapter_file.replace('chapter_', 'response_', 1)
             src = os.path.join(out, chapter_file)
@@ -3981,6 +4048,7 @@ def main(log_callback=None, stop_callback=None):
         
         print(f"✅ Created {len(chapter_files)} placeholder response files")
         print("⚠️ Note: The EPUB will contain untranslated content")
+        
     # Build final EPUB
     print("📘 Building final EPUB…")
     try:
