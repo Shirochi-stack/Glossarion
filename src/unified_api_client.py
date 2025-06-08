@@ -9,6 +9,7 @@ import re
 import base64
 from PIL import Image
 import io
+import time
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -201,7 +202,8 @@ class UnifiedClient:
             # Decode base64 to PIL Image
             image_bytes = base64.b64decode(image_base64)
             image = Image.open(io.BytesIO(image_bytes))
-            
+
+            start_time = time.time()
             # Generate content with image
             response = model.generate_content(
                 [text_prompt, image],
@@ -210,6 +212,9 @@ class UnifiedClient:
                     "max_output_tokens": max_tokens
                 }
             )
+            # Calculate elapsed time
+            elapsed = time.time() - start_time
+            print(f"   ⏱️ Vision API call took {elapsed:.1f} seconds")
             
             # Extract response
             try:
@@ -266,8 +271,15 @@ class UnifiedClient:
             # Build parameters based on model type
             params = self._build_openai_params(vision_messages, temperature, max_tokens)
             
+            # START TIMING HERE - Right before the actual API call
+            start_time = time.time()
+            
             # Make API call
             response = openai.chat.completions.create(**params)
+            
+            # Calculate elapsed time right after the API call
+            elapsed = time.time() - start_time
+            print(f"   ⏱️ Vision API call took {elapsed:.1f} seconds")
             
             choice = response.choices[0]
             content = choice.message.content
