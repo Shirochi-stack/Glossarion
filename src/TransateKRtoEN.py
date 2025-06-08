@@ -186,6 +186,9 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
         print(f"   ⚠️ Chapter has {len(images)} images - processing first {max_images_per_chapter} only")
         images = images[:max_images_per_chapter]
     
+    # Get hide_label setting
+    hide_label = os.getenv("HIDE_IMAGE_TRANSLATION_LABEL", "0") == "1"
+    
     for idx, img_info in enumerate(images, 1):
         if check_stop_fn and check_stop_fn():
             print("❌ Image translation stopped by user")
@@ -307,47 +310,55 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
                     break
             
             if img_tag:
-                # Create a container div for the image and translation
-                container = soup.new_tag('div', **{'class': 'image-with-translation'})               
+                # Parse the translation result
+                trans_soup = BeautifulSoup(translation_result, 'html.parser')
                 
-                # If this was a remote image, update the src to point to the downloaded file
-                if img_src.startswith(('http://', 'https://')):
-                    # Update the img tag to use the local downloaded image
-                    img_tag['src'] = os.path.relpath(img_path, image_translator.output_dir)
-                
-                # Keep original image (now with updated src if it was remote)
-                img_tag.replace_with(container)
-                container.append(img_tag)
-                
-                # Add translation below image
-                translation_div = soup.new_tag('div', **{'class': 'image-translation'})
-                
-                # Parse the translation result to extract just the text
-                if '<div class="image-translation">' in translation_result:
+                # Check if the translation has actual content
+                trans_div = trans_soup.find('div', class_='image-translation')
+                if trans_div and trans_div.get_text(strip=True):
+                    # Create a container div for the image and translation
+                    container = soup.new_tag('div', **{'class': 'image-with-translation'})
+                    
+                    # If this was a remote image, update the src to point to the downloaded file
+                    if img_src.startswith(('http://', 'https://')):
+                        # Update the img tag to use the local downloaded image
+                        img_tag['src'] = os.path.relpath(img_path, image_translator.output_dir)
+                    
+                    # Keep original image (now with updated src if it was remote)
+                    img_tag.replace_with(container)
+                    container.append(img_tag)
+                    
+                    # Add translation below image
+                    translation_div = soup.new_tag('div', **{'class': 'image-translation'})
+                    
                     # Extract the translated text from the result
-                    trans_soup = BeautifulSoup(translation_result, 'html.parser')
-                    trans_content = trans_soup.find('div', class_='image-translation')
-                    if trans_content:
-                        # Add the content to our div
-                        for element in trans_content.children:
-                            if element.name:
-                                translation_div.append(element)
+                    if '<div class="image-translation">' in translation_result:
+                        trans_content = trans_soup.find('div', class_='image-translation')
+                        if trans_content:
+                            # Add the content to our div
+                            for element in trans_content.children:
+                                if element.name:
+                                    translation_div.append(element)
+                    else:
+                        # Just add the text
+                        trans_p = soup.new_tag('p')
+                        trans_p.string = translation_result
+                        translation_div.append(trans_p)
+                    
+                    container.append(translation_div)
+                    translated_count += 1
                 else:
-                    # Just add the text
-                    trans_p = soup.new_tag('p')
-                    trans_p.string = translation_result
-                    translation_div.append(trans_p)
+                    # No actual content in translation - remove the image entirely
+                    img_tag.decompose()
+                    print(f"   🗑️ Removed image with no translatable content")
                 
-                container.append(translation_div)
-                
-                translated_count += 1
-                
-                # Save individual translation file
-                trans_filename = f"ch{chapter_num:03d}_img{idx:02d}_translation.html"
-                trans_filepath = os.path.join(image_translator.translated_images_dir, trans_filename)
-                
-                with open(trans_filepath, 'w', encoding='utf-8') as f:
-                    f.write(f"""<!DOCTYPE html>
+                # Save individual translation file (only if there was content)
+                if translated_count > 0:
+                    trans_filename = f"ch{chapter_num:03d}_img{idx:02d}_translation.html"
+                    trans_filepath = os.path.join(image_translator.translated_images_dir, trans_filename)
+                    
+                    with open(trans_filepath, 'w', encoding='utf-8') as f:
+                        f.write(f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8"/>
@@ -360,12 +371,23 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
     {translation_div}
 </body>
 </html>""")
-                
-                print(f"   ✅ Saved translation to: {trans_filename}")
+                    
+                    print(f"   ✅ Saved translation to: {trans_filename}")
             else:
                 print(f"   ⚠️ Could not find image tag in HTML for: {img_src}")
         else:
-            print(f"   ⚠️ No translation result for image")
+            # No translation result - remove the image if toggle removed everything
+            if hide_label:
+                img_tag = None
+                for img in soup.find_all('img'):
+                    if img.get('src') == img_src:
+                        img_tag = img
+                        break
+                if img_tag:
+                    img_tag.decompose()
+                    print(f"   🗑️ Removed image (no content after URL removal)")
+            else:
+                print(f"   ⚠️ No translation result for image")
         
         # Clean up temp file if it was a remote image
         if img_src.startswith(('http://', 'https://')) and 'img_path' in locals() and os.path.exists(img_path):
