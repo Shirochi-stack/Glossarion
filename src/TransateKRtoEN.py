@@ -243,7 +243,7 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
         print(f"   🔍 Processing image {idx}/{len(images)}: {os.path.basename(img_path)}")
         
         # Build context for translation
-        context = f"Chapter {chapter_num}"
+        context = ""
         if img_info.get('alt'):
             context += f", Alt text: {img_info['alt']}"
             
