@@ -46,6 +46,8 @@ class ImageTranslator:
         self.process_webnovel = os.getenv("PROCESS_WEBNOVEL_IMAGES", "1") == "1"
         self.webnovel_min_height = int(os.getenv("WEBNOVEL_MIN_HEIGHT", "1000"))
         self.image_max_tokens = int(os.getenv("IMAGE_MAX_TOKENS", "8192"))
+        self.chunk_height = int(os.getenv("IMAGE_CHUNK_HEIGHT", "2000"))
+
 
         
     def extract_images_from_chapter(self, chapter_html: str) -> List[Dict]:
@@ -268,14 +270,14 @@ class ImageTranslator:
                 is_long_text = height > self.webnovel_min_height and aspect_ratio < 0.5
                 
                 # Set max height for chunks
-                MAX_HEIGHT = 2000  # Maximum height per chunk for good OCR
+                MAX_HEIGHT = self.chunk_height  # Maximum height per chunk for good OCR
                 
                 all_translations = []
                 was_stopped = False
                 
                 if height > MAX_HEIGHT:
                     # Image needs to be split into chunks
-                    print(f"   ✂️ Image too tall ({height}px), splitting into chunks...")
+                    print(f"   ✂️ Image too tall ({height}px), splitting into chunks of {MAX_HEIGHT}px...")
                     
                     # Calculate number of chunks needed
                     num_chunks = (height + MAX_HEIGHT - 1) // MAX_HEIGHT
