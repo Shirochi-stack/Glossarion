@@ -521,6 +521,8 @@ class ImageTranslator:
         # Build the label HTML if needed
         if hide_label:
             label_html = ""
+            # Also remove HTTP/HTTPS links when hide_label is enabled
+            translated_text = self._remove_http_links(translated_text)
         else:
             partial_text = " (partial)" if was_stopped else ""
             label_html = f'<p><em>[Image text translation{partial_text}:]</em></p>\n            '
