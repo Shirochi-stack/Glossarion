@@ -257,232 +257,41 @@ class ImageTranslator:
                 print(f"   ❌ Image file does not exist!")
                 return None
             
+            # Get configuration
+            hide_label = os.getenv("HIDE_IMAGE_TRANSLATION_LABEL", "0") == "1"
+            
             # Open and process the image
             with Image.open(image_path) as img:
                 width, height = img.size
                 aspect_ratio = width / height if height > 0 else 1
                 print(f"   📐 Image dimensions: {width}x{height}, aspect ratio: {aspect_ratio:.2f}")
                 
-                # Convert to RGB if necessary (for GIF and other formats)
+                # Convert to RGB if necessary
                 if img.mode not in ('RGB', 'RGBA'):
                     img = img.convert('RGB')
                 
                 # Determine if it's a long text image
                 is_long_text = height > self.webnovel_min_height and aspect_ratio < 0.5
                 
-                # Set max height for chunks
-                MAX_HEIGHT = self.chunk_height  # Maximum height per chunk for good OCR
-                
-                all_translations = []
-                was_stopped = False
-                
-                if height > MAX_HEIGHT:
-                    # Image needs to be split into chunks
-                    print(f"   ✂️ Image too tall ({height}px), splitting into chunks of {MAX_HEIGHT}px...")
-                    
-                    # Calculate number of chunks needed
-                    num_chunks = (height + MAX_HEIGHT - 1) // MAX_HEIGHT
-                    overlap = 100  # Pixels of overlap between chunks to avoid cutting text
-                    
-                    for i in range(num_chunks):
-                        # Check for stop before processing each chunk
-                        if check_stop_fn and check_stop_fn():
-                            print(f"   ❌ Stopped at chunk {i+1}/{num_chunks}")
-                            was_stopped = True
-                            break
-                        
-                        # Calculate chunk boundaries with overlap
-                        start_y = max(0, i * MAX_HEIGHT - (overlap if i > 0 else 0))
-                        end_y = min(height, (i + 1) * MAX_HEIGHT)
-                        
-                        print(f"   📄 Processing chunk {i+1}/{num_chunks} (y: {start_y}-{end_y})")
-                        
-                        # Crop the chunk
-                        chunk = img.crop((0, start_y, width, end_y))
-                        
-                        # Convert chunk to bytes
-                        chunk_bytes = io.BytesIO()
-                        chunk.save(chunk_bytes, format='PNG', optimize=False)
-                        chunk_bytes.seek(0)
-                        chunk_data = chunk_bytes.read()
-                        
-                        # Build messages for this chunk
-                        chunk_context = f"This is part {i+1} of {num_chunks} of a longer image. {context}"
-                        messages = [
-                            {"role": "system", "content": self.system_prompt},
-                            {"role": "user", "content": context if context else ""}
-                        ]
-                        # Translate this chunk
-                        try:
-                            print(f"   🔄 Calling vision API for chunk {i+1}...")
-                            
-                            # Check for stop right before API call
-                            if check_stop_fn and check_stop_fn():
-                                print(f"   ❌ Stopped before API call for chunk {i+1}")
-                                was_stopped = True
-                                break
-                            
-                            translation_response, trans_finish = self.client.send_image(
-                                messages,
-                                chunk_data,
-                                temperature=self.temperature,
-                                max_tokens=self.image_max_tokens,
-                                context='image_translation'
-                            )
-                            
-                            if translation_response and translation_response.strip():
-                                # Clean AI artifacts from chunk
-                                chunk_text = translation_response.strip()
-                                if chunk_text.startswith(('Sure', 'Here', "I'll translate", 'Certainly')):
-                                    lines = chunk_text.split('\n')
-                                    if len(lines) > 1:
-                                        chunk_text = '\n'.join(lines[1:]).strip()
-                                
-                                all_translations.append(chunk_text)
-                                print(f"   ✅ Chunk {i+1} translated ({len(chunk_text)} chars)")
-                                
-                                # Check if truncated
-                                if trans_finish in ["length", "max_tokens"]:
-                                    print(f"   ⚠️ Chunk {i+1} was TRUNCATED!")
-                                    
-                            else:
-                                print(f"   ⚠️ Chunk {i+1} returned no text")
-                                
-                        except Exception as e:
-                            print(f"   ❌ Error translating chunk {i+1}: {e}")
-                            all_translations.append(f"[Error in chunk {i+1}: {str(e)}]")
-                        
-                        # Check for stop after processing chunk
-                        if check_stop_fn and check_stop_fn():
-                            print(f"   ❌ Stopped after chunk {i+1}/{num_chunks}")
-                            was_stopped = True
-                            break
-                        
-                        # Small delay between chunks to avoid rate limiting
-                        if i < num_chunks - 1:
-                            # Check for stop during delay (0.5s in 0.1s increments)
-                            for i in range(int(self.api_delay * 10)):  # Split into 0.1s intervals for stop checking
-                                if check_stop_fn and check_stop_fn():
-                                    print("   ❌ Stopped during chunk delay")
-                                    was_stopped = True
-                                    break
-                                time.sleep(0.1)
-                            
-                            if was_stopped:
-                                break
-                    
-                    # Combine all chunk translations
-                    if all_translations:
-                        translated_text = "\n\n".join(all_translations)
-                        if was_stopped:
-                            translated_text += "\n\n[TRANSLATION STOPPED BY USER]"
-                        print(f"   ✅ Combined {len(all_translations)} chunks into final translation")
-                    else:
-                        print(f"   ❌ No successful translations from any chunks")
-                        return None
-                        
+                # Process chunks if image is too tall
+                if height > self.chunk_height:
+                    translated_text = self._process_image_chunks(img, width, height, context, check_stop_fn)
                 else:
-                    # Image is small enough to process in one go
-                    print(f"   👍 Image height OK ({height}px), processing as single image...")
-                    
-                    # Check for stop before processing
-                    if check_stop_fn and check_stop_fn():
-                        print("   ❌ Image translation stopped by user")
-                        return None
-                    
-                    # Convert entire image to bytes
-                    img_bytes = io.BytesIO()
-                    img.save(img_bytes, format='PNG', optimize=False)
-                    img_bytes.seek(0)
-                    image_data = img_bytes.read()
-                    
-                    # Build messages
-                    messages = [
-                        {"role": "system", "content": self.system_prompt},
-                        {"role": "user", "content": f"Translate all text in this image from {self.profile_name} to English. {context}"}
-                    ]
-                    
-                    # Single API call for translation
-                    try:
-                        print(f"   🔄 Calling vision API...")
-                        print(f"   📊 Using temperature: {self.temperature}")
-                        print(f"   📊 Max tokens: {self.image_max_tokens}")
-                        
-                        # Final stop check before API call
-                        if check_stop_fn and check_stop_fn():
-                            print("   ❌ Stopped before API call")
-                            return None
-                        
-                        translation_response, trans_finish = self.client.send_image(
-                            messages,
-                            image_data,
-                            temperature=self.temperature,
-                            max_tokens=self.image_max_tokens,
-                            context='image_translation'
-                        )
-                        
-                        print(f"   📡 API response received, finish_reason: {trans_finish}")
-                        translated_text = translation_response.strip()
-                        
-                        # Check if translation was truncated
-                        if trans_finish in ["length", "max_tokens"]:
-                            print(f"   ⚠️ Translation was TRUNCATED! Consider increasing Max tokens.")
-                            translated_text += "\n\n[TRANSLATION TRUNCATED DUE TO TOKEN LIMIT]"
-                            
-                    except Exception as e:
-                        print(f"   ❌ Translation failed: {e}")
-                        print(f"   ❌ Error type: {type(e).__name__}")
-                        translated_text = f"[Translation Error: {str(e)}]"
-            
-            # Check if we got any translation
-            if not translated_text or not translated_text.strip():
-                print(f"   ❌ Translation returned empty result")
-                return None
-            
-            # Clean any remaining AI artifacts (unless stopped)
-            if not was_stopped and translated_text.startswith(('Sure', 'Here', "I'll translate", 'Certainly')):
-                lines = translated_text.split('\n')
-                if len(lines) > 1:
-                    translated_text = '\n'.join(lines[1:]).strip()
-            
-            print(f"   ✅ Final translation completed ({len(translated_text)} characters)")
+                    translated_text = self._process_single_image(img, context, check_stop_fn)
+                
+                if not translated_text:
+                    return None
             
             # Store the result for caching
             self.processed_images[image_path] = translated_text
             
             # Save translation for debugging
-            trans_filename = f"translated_{os.path.basename(image_path)}.txt"
-            trans_filepath = os.path.join(self.translated_images_dir, trans_filename)
-            try:
-                with open(trans_filepath, 'w', encoding='utf-8') as f:
-                    f.write(translated_text)
-                print(f"   💾 Saved translation to: {trans_filename}")
-            except Exception as e:
-                print(f"   ⚠️ Could not save translation file: {e}")
+            self._save_translation_debug(image_path, translated_text)
             
             # Create HTML output
             img_rel_path = os.path.relpath(image_path, self.output_dir)
-            
-            # For long text images, make the original collapsible
-            if is_long_text:
-                html_output = f"""<div class="image-with-translation webnovel-image">
-        <details>
-            <summary>📖 View Original Image</summary>
-            <img src="{img_rel_path}" alt="Original image" />
-        </details>
-        <div class="image-translation">
-            <p><em>[Image text translation{' (partial)' if was_stopped else ''}:]</em></p>
-            {self._format_translation_as_html(translated_text)}
-        </div>
-    </div>"""
-            else:
-                html_output = f"""<div class="image-with-translation">
-        <img src="{img_rel_path}" alt="Original image" />
-        <div class="image-translation">
-            <p><em>[Image text translation{' (partial)' if was_stopped else ''}:]</em></p>
-            {self._format_translation_as_html(translated_text)}
-        </div>
-    </div>"""
+            html_output = self._create_html_output(img_rel_path, translated_text, is_long_text, 
+                                                 hide_label, check_stop_fn and check_stop_fn())
             
             return html_output
             
@@ -492,6 +301,195 @@ class ImageTranslator:
             import traceback
             traceback.print_exc()
             return None
+
+    def _process_image_chunks(self, img, width, height, context, check_stop_fn):
+        """Process a tall image by splitting it into chunks"""
+        num_chunks = (height + self.chunk_height - 1) // self.chunk_height
+        overlap = 100  # Pixels of overlap between chunks
+        
+        print(f"   ✂️ Image too tall ({height}px), splitting into {num_chunks} chunks of {self.chunk_height}px...")
+        
+        all_translations = []
+        was_stopped = False
+        
+        for i in range(num_chunks):
+            # Check for stop before processing each chunk
+            if check_stop_fn and check_stop_fn():
+                print(f"   ❌ Stopped at chunk {i+1}/{num_chunks}")
+                was_stopped = True
+                break
+            
+            # Calculate chunk boundaries with overlap
+            start_y = max(0, i * self.chunk_height - (overlap if i > 0 else 0))
+            end_y = min(height, (i + 1) * self.chunk_height)
+            
+            print(f"   📄 Processing chunk {i+1}/{num_chunks} (y: {start_y}-{end_y})")
+            
+            # Crop and process the chunk
+            chunk = img.crop((0, start_y, width, end_y))
+            chunk_bytes = self._image_to_bytes(chunk)
+            
+            # Build context for this chunk
+            chunk_context = f"This is part {i+1} of {num_chunks} of a longer image. {context}"
+            
+            # Translate chunk
+            translation = self._call_vision_api(chunk_bytes, chunk_context, check_stop_fn)
+            
+            if translation:
+                # Clean AI artifacts from chunk
+                chunk_text = self._clean_translation_response(translation)
+                all_translations.append(chunk_text)
+                print(f"   ✅ Chunk {i+1} translated ({len(chunk_text)} chars)")
+            else:
+                print(f"   ⚠️ Chunk {i+1} returned no text")
+            
+            # Delay between chunks if not the last one
+            if i < num_chunks - 1 and not was_stopped:
+                self._api_delay_with_stop_check(check_stop_fn)
+                if check_stop_fn and check_stop_fn():
+                    was_stopped = True
+                    break
+        
+        # Combine all chunk translations
+        if all_translations:
+            translated_text = "\n\n".join(all_translations)
+            if was_stopped:
+                translated_text += "\n\n[TRANSLATION STOPPED BY USER]"
+            print(f"   ✅ Combined {len(all_translations)} chunks into final translation")
+            return translated_text
+        else:
+            print(f"   ❌ No successful translations from any chunks")
+            return None
+
+    def _process_single_image(self, img, context, check_stop_fn):
+        """Process a single image that doesn't need chunking"""
+        print(f"   👍 Image height OK ({img.height}px), processing as single image...")
+        
+        # Check for stop before processing
+        if check_stop_fn and check_stop_fn():
+            print("   ❌ Image translation stopped by user")
+            return None
+        
+        # Convert image to bytes
+        image_bytes = self._image_to_bytes(img)
+        
+        # Call API
+        translation = self._call_vision_api(image_bytes, context, check_stop_fn)
+        
+        if translation:
+            return self._clean_translation_response(translation)
+        else:
+            print(f"   ❌ Translation returned empty result")
+            return None
+
+    def _image_to_bytes(self, img):
+        """Convert PIL Image to bytes"""
+        img_bytes = io.BytesIO()
+        img.save(img_bytes, format='PNG', optimize=False)
+        img_bytes.seek(0)
+        return img_bytes.read()
+
+    def _call_vision_api(self, image_data, context, check_stop_fn):
+        """Make the actual API call for vision translation"""
+        # Build messages - NO HARDCODED PROMPT
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": context if context else ""}
+        ]
+        
+        try:
+            print(f"   🔄 Calling vision API...")
+            print(f"   📊 Using temperature: {self.temperature}")
+            print(f"   📊 Max tokens: {self.image_max_tokens}")
+            
+            # Final stop check before API call
+            if check_stop_fn and check_stop_fn():
+                print("   ❌ Stopped before API call")
+                return None
+            
+            translation_response, trans_finish = self.client.send_image(
+                messages,
+                image_data,
+                temperature=self.temperature,
+                max_tokens=self.image_max_tokens,
+                context='image_translation'
+            )
+            
+            print(f"   📡 API response received, finish_reason: {trans_finish}")
+            
+            # Check if translation was truncated
+            if trans_finish in ["length", "max_tokens"]:
+                print(f"   ⚠️ Translation was TRUNCATED! Consider increasing Max tokens.")
+                translation_response += "\n\n[TRANSLATION TRUNCATED DUE TO TOKEN LIMIT]"
+            
+            return translation_response.strip()
+            
+        except Exception as e:
+            print(f"   ❌ Translation failed: {e}")
+            print(f"   ❌ Error type: {type(e).__name__}")
+            return f"[Translation Error: {str(e)}]"
+
+    def _clean_translation_response(self, response):
+        """Clean AI artifacts from translation response"""
+        if not response or not response.strip():
+            return response
+        
+        # Remove common AI prefixes
+        if response.startswith(('Sure', 'Here', "I'll translate", 'Certainly')):
+            lines = response.split('\n')
+            if len(lines) > 1:
+                response = '\n'.join(lines[1:]).strip()
+        
+        return response
+
+    def _save_translation_debug(self, image_path, translated_text):
+        """Save translation to file for debugging"""
+        trans_filename = f"translated_{os.path.basename(image_path)}.txt"
+        trans_filepath = os.path.join(self.translated_images_dir, trans_filename)
+        
+        try:
+            with open(trans_filepath, 'w', encoding='utf-8') as f:
+                f.write(translated_text)
+            print(f"   💾 Saved translation to: {trans_filename}")
+        except Exception as e:
+            print(f"   ⚠️ Could not save translation file: {e}")
+
+    def _create_html_output(self, img_rel_path, translated_text, is_long_text, hide_label, was_stopped):
+        """Create the final HTML output"""
+        # Build the label HTML if needed
+        if hide_label:
+            label_html = ""
+        else:
+            partial_text = " (partial)" if was_stopped else ""
+            label_html = f'<p><em>[Image text translation{partial_text}:]</em></p>\n            '
+        
+        # Build the image HTML based on type
+        if is_long_text:
+            image_html = f"""<details>
+                <summary>📖 View Original Image</summary>
+                <img src="{img_rel_path}" alt="Original image" />
+            </details>"""
+            css_class = "image-with-translation webnovel-image"
+        else:
+            image_html = f'<img src="{img_rel_path}" alt="Original image" />'
+            css_class = "image-with-translation"
+        
+        # Combine everything
+        return f"""<div class="{css_class}">
+            {image_html}
+            <div class="image-translation">
+                {label_html}{self._format_translation_as_html(translated_text)}
+            </div>
+        </div>"""
+
+    def _api_delay_with_stop_check(self, check_stop_fn):
+        """API delay with stop checking"""
+        # Check for stop during delay (split into 0.1s intervals)
+        for i in range(int(self.api_delay * 10)):
+            if check_stop_fn and check_stop_fn():
+                return True
+            time.sleep(0.1)
+        return False
     
     def _format_translation_as_html(self, text: str) -> str:
         """Format translated text as HTML paragraphs"""
