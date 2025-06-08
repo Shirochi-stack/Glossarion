@@ -15,8 +15,57 @@ import re
 from bs4 import BeautifulSoup
 import logging
 import time
+import queue
+import threading
+from unified_api_client import UnifiedClientError
 
 logger = logging.getLogger(__name__)
+
+def send_image_with_interrupt(client, messages, image_data, temperature, max_tokens, stop_check_fn, chunk_timeout=None, context='image_translation'):
+    """Send image API request with interrupt capability and timeout retry"""
+    import queue
+    import threading
+    from unified_api_client import UnifiedClientError
+    
+    result_queue = queue.Queue()
+    
+    def api_call():
+        try:
+            start_time = time.time()
+            result = client.send_image(messages, image_data, temperature=temperature, 
+                                     max_tokens=max_tokens, context=context)
+            elapsed = time.time() - start_time
+            result_queue.put((result, elapsed))
+        except Exception as e:
+            result_queue.put(e)
+    
+    api_thread = threading.Thread(target=api_call)
+    api_thread.daemon = True
+    api_thread.start()
+    
+    # Use chunk timeout if provided, otherwise use default
+    timeout = chunk_timeout if chunk_timeout else 300
+    check_interval = 0.5
+    elapsed = 0
+    
+    while elapsed < timeout:
+        try:
+            result = result_queue.get(timeout=check_interval)
+            if isinstance(result, Exception):
+                raise result
+            if isinstance(result, tuple):
+                api_result, api_time = result
+                # Check if it took too long
+                if chunk_timeout and api_time > chunk_timeout:
+                    raise UnifiedClientError(f"Image API call took {api_time:.1f}s (timeout: {chunk_timeout}s)")
+                return api_result
+            return result
+        except queue.Empty:
+            if stop_check_fn and stop_check_fn():
+                raise UnifiedClientError("Image translation stopped by user")
+            elapsed += check_interval
+    
+    raise UnifiedClientError(f"Image API call timed out after {timeout} seconds")
 
 class ImageTranslator:
     def __init__(self, client, output_dir: str, profile_name: str = "", system_prompt: str = "", temperature: float = 0.3, log_callback=None):
@@ -256,7 +305,7 @@ class ImageTranslator:
         except Exception as e:
             logger.warning(f"Could not preprocess image: {e}")
             return None
-            
+    
     def translate_image(self, image_path: str, context: str = "", check_stop_fn=None) -> Optional[str]:
         """
         Translate text in an image using vision API - with chunking for tall images and stop support
@@ -326,6 +375,12 @@ class ImageTranslator:
         overlap = 100  # Pixels of overlap between chunks
         
         print(f"   ✂️ Image too tall ({height}px), splitting into {num_chunks} chunks of {self.chunk_height}px...")
+        
+        # Add retry info if enabled
+        if os.getenv("RETRY_TIMEOUT", "1") == "1":
+            timeout_seconds = int(os.getenv("CHUNK_TIMEOUT", "180"))
+            print(f"   ⏱️ Auto-retry enabled: Will retry if chunks take > {timeout_seconds}s")
+        
         print(f"   ⏳ This may take {num_chunks * 30}-{num_chunks * 60} seconds to complete")
         print(f"   ℹ️ Stop will take effect after current chunk completes")
         
@@ -452,44 +507,116 @@ class ImageTranslator:
         return img_bytes.read()
 
     def _call_vision_api(self, image_data, context, check_stop_fn):
-        """Make the actual API call for vision translation"""
+        """Make the actual API call for vision translation with retry support"""
         # Build messages - NO HARDCODED PROMPT
         messages = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": context if context else ""}
         ]
         
-        try:
-            print(f"   🔄 Calling vision API...")
-            print(f"   📊 Using temperature: {self.temperature}")
-            print(f"   📊 Max tokens: {self.image_max_tokens}")
-            
-            # Final stop check before API call
-            if check_stop_fn and check_stop_fn():
-                print("   ❌ Stopped before API call")
-                return None
-            
-            translation_response, trans_finish = self.client.send_image(
-                messages,
-                image_data,
-                temperature=self.temperature,
-                max_tokens=self.image_max_tokens,
-                context='image_translation'
-            )
-            
-            print(f"   📡 API response received, finish_reason: {trans_finish}")
-            
-            # Check if translation was truncated
-            if trans_finish in ["length", "max_tokens"]:
-                print(f"   ⚠️ Translation was TRUNCATED! Consider increasing Max tokens.")
-                translation_response += "\n\n[TRANSLATION TRUNCATED DUE TO TOKEN LIMIT]"
-            
-            return translation_response.strip()
-            
-        except Exception as e:
-            print(f"   ❌ Translation failed: {e}")
-            print(f"   ❌ Error type: {type(e).__name__}")
-            return f"[Translation Error: {str(e)}]"
+        # Get retry settings
+        retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "1") == "1"
+        chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "180")) if retry_timeout_enabled else None
+        max_timeout_retries = 2
+        
+        # Store original values
+        original_max_tokens = self.image_max_tokens
+        original_temp = self.temperature
+        
+        # Initialize retry counters
+        timeout_retry_count = 0
+        
+        while True:
+            try:
+                current_max_tokens = self.image_max_tokens
+                current_temp = self.temperature
+                
+                print(f"   🔄 Calling vision API...")
+                print(f"   📊 Using temperature: {current_temp}")
+                print(f"   📊 Max tokens: {current_max_tokens}")
+                
+                if chunk_timeout:
+                    print(f"   ⏱️ Timeout enabled: {chunk_timeout} seconds")
+                
+                # Final stop check before API call
+                if check_stop_fn and check_stop_fn():
+                    print("   ❌ Stopped before API call")
+                    return None
+                
+                # Use the new interrupt function
+                translation_response, trans_finish = send_image_with_interrupt(
+                    self.client,
+                    messages,
+                    image_data,
+                    current_temp,
+                    current_max_tokens,
+                    check_stop_fn,
+                    chunk_timeout,
+                    'image_translation'
+                )
+                
+                print(f"   📡 API response received, finish_reason: {trans_finish}")
+                
+                # Check if translation was truncated
+                if trans_finish in ["length", "max_tokens"]:
+                    print(f"   ⚠️ Translation was TRUNCATED! Consider increasing Max tokens.")
+                    translation_response += "\n\n[TRANSLATION TRUNCATED DUE TO TOKEN LIMIT]"
+                
+                # Success - restore original values if they were changed
+                if timeout_retry_count > 0:
+                    self.image_max_tokens = original_max_tokens
+                    self.temperature = original_temp
+                    print(f"   ✅ Restored original settings after successful retry")
+                
+                return translation_response.strip()
+                
+            except Exception as e:
+                from unified_api_client import UnifiedClientError
+                error_msg = str(e)
+                
+                # Handle user stop
+                if "stopped by user" in error_msg:
+                    print("   ❌ Image translation stopped by user")
+                    return None
+                
+                # Handle timeout with retry
+                if "took" in error_msg and "timeout:" in error_msg and retry_timeout_enabled:
+                    if timeout_retry_count < max_timeout_retries:
+                        timeout_retry_count += 1
+                        print(f"   ⏱️ Image chunk took too long, retry {timeout_retry_count}/{max_timeout_retries}")
+                        
+                        # Reduce token count for faster response (75% of current)
+                        self.image_max_tokens = int(self.image_max_tokens * 0.75)
+                        print(f"   📉 Reduced max tokens to {self.image_max_tokens} for faster response")
+                        
+                        # Increase temperature slightly for variety
+                        self.temperature = min(original_temp + 0.1, 1.0)
+                        print(f"   🌡️ Increased temperature to {self.temperature}")
+                        
+                        # Short delay before retry
+                        time.sleep(2)
+                        continue
+                    else:
+                        print(f"   ❌ Max timeout retries reached for image")
+                        # Restore original values
+                        self.image_max_tokens = original_max_tokens
+                        self.temperature = original_temp
+                        return f"[Image Translation Error: Timeout after {max_timeout_retries} retries]"
+                
+                # Handle other timeouts
+                elif "timed out" in error_msg and "timeout:" not in error_msg:
+                    print(f"   ⚠️ {error_msg}, retrying...")
+                    time.sleep(5)
+                    continue
+                
+                # For other errors, restore values and return error
+                if timeout_retry_count > 0:
+                    self.image_max_tokens = original_max_tokens
+                    self.temperature = original_temp
+                
+                print(f"   ❌ Translation failed: {e}")
+                print(f"   ❌ Error type: {type(e).__name__}")
+                return f"[Image Translation Error: {str(e)}]"
 
     def _clean_translation_response(self, response):
         """Clean AI artifacts from translation response"""
@@ -530,48 +657,52 @@ class ImageTranslator:
         return cleaned_text
 
     def _create_html_output(self, img_rel_path, translated_text, is_long_text, hide_label, was_stopped):
-            """Create the final HTML output"""
-            # Check if the translation is primarily a URL (only a URL and nothing else)
-            url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+(?:\.[^\s<>"{}|\\^`\[\]]+)*'
+        """Create the final HTML output"""
+        # Check if the translation is primarily a URL (only a URL and nothing else)
+        url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+(?:\.[^\s<>"{}|\\^`\[\]]+)*'
+        
+        # Check if the entire content is just a URL
+        url_match = re.match(r'^\s*' + url_pattern + r'\s*$', translated_text.strip())
+        is_only_url = bool(url_match)
+        
+        # Build the label HTML if needed
+        if hide_label:
+            label_html = ""
+            # Remove URLs from the text, but keep other content
+            cleaned_text = self._remove_http_links(translated_text)
             
-            # Check if the entire content is just a URL
-            url_match = re.match(r'^\s*' + url_pattern + r'\s*$', translated_text.strip())
-            is_only_url = bool(url_match)
-            
-            # Build the label HTML if needed
-            if hide_label:
-                label_html = ""
-                # Remove URLs from the text, but keep other content
-                cleaned_text = self._remove_http_links(translated_text)
-                
-                # If after removing URLs there's no content left, and original was only URL
-                if not cleaned_text and is_only_url:
-                    translated_text = "[Image contains only URL]"
-                else:
-                    # Use the cleaned text (URLs removed, other content preserved)
-                    translated_text = cleaned_text
+            # If after removing URLs there's no content left, and original was only URL
+            if not cleaned_text and is_only_url:
+                translated_text = "[Image contains only URL]"
             else:
-                partial_text = " (partial)" if was_stopped else ""
-                label_html = f'<p><em>[Image text translation{partial_text}:]</em></p>\n'
-            
-            # Build the image HTML based on type
-            if is_long_text:
-                image_html = f"""<details>
-                    <summary>📖 View Original Image</summary>
-                    <img src="{img_rel_path}" alt="Original image" />
-                </details>"""
-                css_class = "image-with-translation webnovel-image"
-            else:
-                image_html = f'<img src="{img_rel_path}" alt="Original image" />'
-                css_class = "image-with-translation"
-            
-            # Combine everything
-            return f"""<div class="{css_class}">
-                {image_html}
-                <div class="image-translation">
-                    {label_html}{self._format_translation_as_html(translated_text)}
-                </div>
-            </div>"""
+                # Use the cleaned text (URLs removed, other content preserved)
+                translated_text = cleaned_text
+        else:
+            partial_text = " (partial)" if was_stopped else ""
+            label_html = f'<p><em>[Image text translation{partial_text}:]</em></p>\n'
+        
+        # Build the image HTML based on type - or skip it entirely if hide_label is enabled
+        if hide_label:
+            # Don't include the image at all when hide_label is enabled
+            image_html = ""
+            css_class = "translated-text-only"
+        elif is_long_text:
+            image_html = f"""<details>
+                <summary>📖 View Original Image</summary>
+                <img src="{img_rel_path}" alt="Original image" />
+            </details>"""
+            css_class = "image-with-translation webnovel-image"
+        else:
+            image_html = f'<img src="{img_rel_path}" alt="Original image" />'
+            css_class = "image-with-translation"
+        
+        # Combine everything
+        return f"""<div class="{css_class}">
+            {image_html}
+            <div class="image-translation">
+                {label_html}{self._format_translation_as_html(translated_text)}
+            </div>
+        </div>"""
             
     def _api_delay_with_stop_check(self, check_stop_fn):
         """API delay with stop checking"""
