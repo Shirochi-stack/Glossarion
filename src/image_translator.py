@@ -401,7 +401,7 @@ class ImageTranslator:
                 
                 print(f"   ✅ Chunk {i+1} translated and saved ({len(chunk_text)} chars)")
             else:
-                print(f"   ⚠️ Chunk {i+1} returned no text"
+                print(f"   ⚠️ Chunk {i+1} returned no text")
             
             # Delay between chunks if not the last one
             if i < num_chunks - 1 and not was_stopped:
