@@ -163,16 +163,44 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
         elif img_src.startswith('/'):
             img_path = os.path.join(image_translator.output_dir, img_src[1:])
         else:
-            # Check in images directory
-            img_path = os.path.join(image_translator.images_dir, os.path.basename(img_src))
+            # Check multiple possible locations
+            possible_paths = [
+                os.path.join(image_translator.images_dir, os.path.basename(img_src)),
+                os.path.join(image_translator.output_dir, img_src),
+                os.path.join(image_translator.output_dir, 'images', os.path.basename(img_src)),
+                os.path.join(image_translator.output_dir, os.path.basename(img_src)),
+                # Also check without 'images' subdirectory
+                os.path.join(image_translator.output_dir, os.path.dirname(img_src), os.path.basename(img_src))
+            ]
             
+            img_path = None
+            for path in possible_paths:
+                if os.path.exists(path):
+                    img_path = path
+                    print(f"   ✅ Found image at: {path}")
+                    break
+            
+            if not img_path:
+                print(f"   ❌ Image not found in any location for: {img_src}")
+                print(f"   Tried: {possible_paths}")
+                continue
+        
         # Normalize path
         img_path = os.path.normpath(img_path)
         
         # Check if file exists
         if not os.path.exists(img_path):
             print(f"   ⚠️ Image not found: {img_path}")
+            print(f"   📁 Images directory: {image_translator.images_dir}")
+            print(f"   📁 Output directory: {image_translator.output_dir}")
+            print(f"   📁 Working directory: {os.getcwd()}")
+            
+            # List files in images directory to help debug
+            if os.path.exists(image_translator.images_dir):
+                files = os.listdir(image_translator.images_dir)
+                print(f"   📁 Files in images dir: {files[:5]}...")  # Show first 5 files
             continue
+        
         
         print(f"   🔍 Processing image {idx}/{len(images)}: {os.path.basename(img_path)}")
         
@@ -1227,7 +1255,7 @@ def _extract_advanced_chapter_info(zf):
 
 
 def _extract_all_chapters_comprehensive(zf):
-    """Comprehensive extraction - includes ALL HTML files"""
+    """Comprehensive extraction - includes ALL HTML files including image-only chapters"""
     chapters = []
     
     # Get ALL HTML-type files
@@ -1299,7 +1327,7 @@ def _extract_all_chapters_comprehensive(zf):
             if soup.title and soup.title.string:
                 chapter_title = soup.title.string.strip()
             
-            # From first header
+            # From first header (including h2)
             if not chapter_title:
                 for header_tag in ['h1', 'h2', 'h3']:
                     header = soup.find(header_tag)
@@ -1313,6 +1341,9 @@ def _extract_all_chapters_comprehensive(zf):
             
             # Count images
             images = soup.find_all('img')
+            
+            # Determine if it's image-only
+            is_image_only = len(images) > 0 and len(content_text.strip()) < 500
             
             # Create content hash
             content_hash = hashlib.md5(content_html.encode('utf-8')).hexdigest()
@@ -1328,14 +1359,17 @@ def _extract_all_chapters_comprehensive(zf):
                 "file_size": len(content_text),
                 "has_images": len(images) > 0,
                 "image_count": len(images),
-                "is_empty": len(content_text.strip()) == 0
+                "is_empty": len(content_text.strip()) == 0,
+                "is_image_only": is_image_only  # Add this flag
             }
             
             chapters.append(chapter_info)
             
             # Log what we found
-            if len(images) > 0 and len(content_text) < 500:
-                print(f"[{chapter_num:04d}] 📸 Image chapter: {chapter_title} ({len(images)} images)")
+            if is_image_only:
+                print(f"[{chapter_num:04d}] 📸 Image-only chapter: {chapter_title} ({len(images)} images)")
+            elif len(images) > 0 and len(content_text) >= 500:
+                print(f"[{chapter_num:04d}] 📖📸 Mixed chapter: {chapter_title} ({len(content_text)} chars, {len(images)} images)")
             elif len(content_text) < 50:
                 print(f"[{chapter_num:04d}] 📄 Empty/placeholder: {chapter_title}")
             else:
@@ -1348,12 +1382,14 @@ def _extract_all_chapters_comprehensive(zf):
     print(f"\n📊 Comprehensive extraction complete: {len(chapters)} chapters found")
     
     # Quick stats
-    image_only = sum(1 for c in chapters if c.get('has_images') and c.get('file_size', 0) < 500)
-    text_chapters = sum(1 for c in chapters if c.get('file_size', 0) >= 500)
+    image_only = sum(1 for c in chapters if c.get('is_image_only', False))
+    text_chapters = sum(1 for c in chapters if c.get('file_size', 0) >= 500 and not c.get('is_image_only', False))
+    mixed_chapters = sum(1 for c in chapters if c.get('has_images') and c.get('file_size', 0) >= 500)
     empty_chapters = sum(1 for c in chapters if c.get('is_empty'))
     
     print(f"   • Text chapters: {text_chapters}")
     print(f"   • Image-only chapters: {image_only}")
+    print(f"   • Mixed content chapters: {mixed_chapters}")
     print(f"   • Empty/placeholder: {empty_chapters}")
     
     return chapters, 'unknown'
@@ -1441,6 +1477,10 @@ def _extract_chapters_smart(zf):
     seen_chapters = {}
     file_size_groups = {}
     
+    # Track h1 vs h2 usage for better detection
+    h1_count = 0
+    h2_count = 0
+    
     print("🔍 Analyzing content files for chapters...")
     
     for idx, file_path in enumerate(sorted(html_files)):
@@ -1470,10 +1510,29 @@ def _extract_chapters_smart(zf):
                 content_html = str(soup)
                 content_text = soup.get_text(strip=True)
             
-            # Skip very short files
-            if len(content_text.strip()) < 200:
-                print(f"[DEBUG] Skipping short file: {file_path} ({len(content_text)} chars)")
+            # Check for h1 and h2 usage
+            h1_tags = soup.find_all('h1')
+            h2_tags = soup.find_all('h2')
+            if h1_tags:
+                h1_count += 1
+            if h2_tags:
+                h2_count += 1
+            
+            # Check for images FIRST - this is critical for image-only chapters
+            images = soup.find_all('img')
+            has_images = len(images) > 0
+            
+            # CRITICAL FIX: Check if this is an image-only chapter
+            is_image_only_chapter = has_images and len(content_text.strip()) < 500
+            
+            # Skip only if it has NO content at all (no text AND no images)
+            if len(content_text.strip()) < 10 and not has_images:
+                print(f"[DEBUG] Skipping empty file: {file_path} (no text, no images)")
                 continue
+            
+            # For image-only chapters, always process them
+            if is_image_only_chapter:
+                print(f"[DEBUG] Image-only chapter detected: {file_path} ({len(images)} images, {len(content_text)} chars)")
             
             # Create comprehensive content hash
             content_hash = extract_comprehensive_content_hash(content_html)
@@ -1498,6 +1557,9 @@ def _extract_chapters_smart(zf):
             chapter_num = None
             chapter_title = None
             detection_method = None
+            
+            # Determine header priority based on usage
+            header_priority = ['h2', 'h1', 'h3'] if h2_count > h1_count else ['h1', 'h2', 'h3']
             
             # Method 1: Check filename
             for pattern, flags, method in chapter_patterns:
@@ -1553,7 +1615,7 @@ def _extract_chapters_smart(zf):
                 
                 # Look in headers if not found in title
                 if not chapter_num:
-                    for header_tag in ['h1', 'h2', 'h3']:
+                    for header_tag in header_priority:
                         headers = soup.find_all(header_tag)
                         for header in headers:
                             header_text = header.get_text(strip=True)
@@ -1570,14 +1632,14 @@ def _extract_chapters_smart(zf):
                                         if num_str.isdigit():
                                             chapter_num = int(num_str)
                                             chapter_title = header_text
-                                            detection_method = f"header_{method}"
+                                            detection_method = f"header_{header_tag}_{method}"
                                             break
                                         elif method == 'chinese_chapter_cn':
                                             converted = convert_chinese_number(num_str)
                                             if converted:
                                                 chapter_num = converted
                                                 chapter_title = header_text
-                                                detection_method = f"header_{method}"
+                                                detection_method = f"header_{header_tag}_{method}"
                                                 break
                                     except (ValueError, IndexError):
                                         continue
@@ -1650,7 +1712,7 @@ def _extract_chapters_smart(zf):
                     chapter_title = soup.title.string.strip()
                 else:
                     # Look for first header
-                    for header_tag in ['h1', 'h2', 'h3']:
+                    for header_tag in header_priority:
                         header = soup.find(header_tag)
                         if header:
                             chapter_title = header.get_text(strip=True)
@@ -1665,7 +1727,7 @@ def _extract_chapters_smart(zf):
             if len(chapter_title) > 150:
                 chapter_title = chapter_title[:147] + "..."
             
-            # Store chapter information
+            # Store chapter information with image-only flag
             chapter_info = {
                 "num": chapter_num,
                 "title": chapter_title,
@@ -1674,6 +1736,10 @@ def _extract_chapters_smart(zf):
                 "content_hash": content_hash,
                 "detection_method": detection_method,
                 "file_size": file_size,
+                "has_images": has_images,
+                "image_count": len(images),
+                "is_empty": len(content_text.strip()) == 0,
+                "is_image_only": is_image_only_chapter,  # Add this flag
                 "language_sample": content_text[:500]
             }
             
@@ -1689,7 +1755,11 @@ def _extract_chapters_smart(zf):
                 'filename': file_path
             }
             
-            print(f"[DEBUG] ✅ Chapter {chapter_num}: {chapter_title[:50]}... ({detection_method})")
+            # Enhanced logging for different chapter types
+            if is_image_only_chapter:
+                print(f"[DEBUG] ✅ Chapter {chapter_num}: {chapter_title[:50]}... (IMAGE-ONLY, {detection_method})")
+            else:
+                print(f"[DEBUG] ✅ Chapter {chapter_num}: {chapter_title[:50]}... ({detection_method})")
             
         except Exception as e:
             print(f"[ERROR] Failed to process {file_path}: {e}")
@@ -1697,6 +1767,10 @@ def _extract_chapters_smart(zf):
     
     # Sort chapters by number
     chapters.sort(key=lambda x: x["num"])
+    
+    # Report h1 vs h2 usage
+    if h2_count > h1_count:
+        print(f"📊 Note: This EPUB uses primarily <h2> tags ({h2_count} files) vs <h1> tags ({h1_count} files)")
     
     # Detect primary language
     combined_sample = ' '.join(sample_texts)
@@ -1708,6 +1782,16 @@ def _extract_chapters_smart(zf):
         print(f"   • Total chapters extracted: {len(chapters)}")
         print(f"   • Chapter range: {chapters[0]['num']} to {chapters[-1]['num']}")
         print(f"   • Detected language: {detected_language}")
+        print(f"   • Primary header type: {'<h2>' if h2_count > h1_count else '<h1>'}")
+        
+        # Count different chapter types
+        image_only_count = sum(1 for c in chapters if c.get('is_image_only', False))
+        text_only_count = sum(1 for c in chapters if not c.get('has_images', False) and c.get('file_size', 0) >= 500)
+        mixed_count = sum(1 for c in chapters if c.get('has_images', False) and c.get('file_size', 0) >= 500)
+        
+        print(f"   • Text-only chapters: {text_only_count}")
+        print(f"   • Image-only chapters: {image_only_count}")
+        print(f"   • Mixed content chapters: {mixed_count}")
         
         # Check for missing chapters
         expected_chapters = set(range(chapters[0]['num'], chapters[-1]['num'] + 1))
@@ -3008,7 +3092,13 @@ def main(log_callback=None, stop_callback=None):
     image_translator = None
     ENABLE_IMAGE_TRANSLATION = os.getenv("ENABLE_IMAGE_TRANSLATION", "1") == "1"
     
-    if ENABLE_IMAGE_TRANSLATION and MODEL.lower() in ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-exp', 'gpt-4-turbo', 'gpt-4o']:
+    # Check for vision-capable models
+    vision_capable_models = [
+        'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-exp', 
+        'gpt-4-turbo', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1-nano', 'o4-mini'
+    ]
+
+    if ENABLE_IMAGE_TRANSLATION and MODEL.lower() in vision_capable_models:
         print("🖼️ Vision-capable model detected - enabling image translation")
         print("🖼️ Image translation will use your custom system prompt and glossary")
         # Pass the complete system prompt (including GUI prompt + glossary + instructions)
@@ -3117,37 +3207,31 @@ def main(log_callback=None, stop_callback=None):
         print(f"\n🔄 Processing Chapter {idx+1}/{total_chapters}: {c['title']}")
         
         # Determine chapter type
-        is_image_chapter = c.get('has_images', False) and c.get('file_size', 0) < 500
+        is_image_chapter = c.get('is_image_only', False) or (c.get('has_images', False) and c.get('file_size', 0) < 500)
         is_empty_chapter = c.get('is_empty', False) or c.get('file_size', 0) < 50
-        
+
         # Handle different chapter types
         if is_empty_chapter and not c.get('has_images'):
             # Empty chapter with no images - just copy it
             print(f"📄 Empty chapter detected - copying as-is")
+            # ... existing empty chapter handling ...
             
-            safe_title = make_safe_filename(c['title'], c['num'])   
-            fname = f"response_{c['num']:03d}_{safe_title}.html"
-            
-            # Write the empty chapter
-            with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                f.write(c["body"])
-            
-            # Update progress
-            update_progress(prog, idx, chap_num, content_hash, fname, status="completed")
-            save_progress()
-            continue
-            
-        elif is_image_chapter and image_translator and ENABLE_IMAGE_TRANSLATION:
-            # Image-only chapter - use image translator
+        elif is_image_chapter:
+            # Image-only chapter
             print(f"📸 Image-only chapter detected with {c.get('image_count', 0)} images")
             
-            # Process with image translator
-            translated_html, image_translations = process_chapter_images(
-                c["body"], 
-                chap_num, 
-                image_translator,
-                check_stop
-            )
+            if image_translator and ENABLE_IMAGE_TRANSLATION:
+                # Process with image translator
+                translated_html, image_translations = process_chapter_images(
+                    c["body"], 
+                    chap_num, 
+                    image_translator,
+                    check_stop
+                )
+            else:
+                # Just copy the chapter as-is
+                translated_html = c["body"]
+                image_translations = {}
             
             # Save the result
             safe_title = make_safe_filename(c['title'], c['num'])   
@@ -3160,8 +3244,8 @@ def main(log_callback=None, stop_callback=None):
                 print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved image-translated chapter")
                 status = "completed"
             else:
-                print(f"[Chapter {idx+1}/{total_chapters}] ⚠️ Saved image chapter (no translations)")
-                status = "completed_no_translation"
+                print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved image-only chapter (no translations)")
+                status = "completed_image_only"
             
             # Update progress
             update_progress(prog, idx, chap_num, content_hash, fname, status=status)
