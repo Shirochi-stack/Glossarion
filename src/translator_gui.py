@@ -234,7 +234,9 @@ class TranslatorGUI:
         self.image_chunk_height_var = tk.StringVar(
             value=str(self.config.get('image_chunk_height', '2000'))
         )        
-        
+        self.hide_image_translation_label_var = tk.BooleanVar(
+            value=self.config.get('hide_image_translation_label', False)
+        )        
         # Default prompts
         self.default_prompts = {
             "korean": "You are a professional Korean to English novel translator, you must strictly output only English/HTML text while following these rules:\n- Use a context rich and natural translation style.\n- Retain honorifics, and suffixes like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
@@ -840,7 +842,9 @@ class TranslatorGUI:
                     'MAX_IMAGES_PER_CHAPTER': self.max_images_per_chapter_var.get(),
                     'IMAGE_API_DELAY': '1.0',  # Delay between image API calls
                     'SAVE_IMAGE_TRANSLATIONS': '1',  # Save individual translations
-                    'IMAGE_CHUNK_HEIGHT': self.image_chunk_height_var.get()
+                    'IMAGE_CHUNK_HEIGHT': self.image_chunk_height_var.get(),
+                    'HIDE_IMAGE_TRANSLATION_LABEL': "1" if self.hide_image_translation_label_var.get() else "0"
+
                 })
                 
                 # Set chapter range if specified
@@ -1403,7 +1407,7 @@ class TranslatorGUI:
         """Open the Other Settings dialog with all advanced options in a grid layout"""
         top = tk.Toplevel(self.master)
         top.title("Other Settings")
-        top.geometry("860x1070")
+        top.geometry("860x1080")
         top.transient(self.master)
         top.grab_set()
         
@@ -1706,7 +1710,9 @@ class TranslatorGUI:
                  text="Chunk height: Pixels per chunk for tall images",
                  font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(2, 0))        
 
-
+        tb.Checkbutton(section7_frame, text="Hide 'Image text translation' label", 
+                       variable=self.hide_image_translation_label_var,
+                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
         # =================================================================
         # SAVE & CLOSE FUNCTIONALITY (Bottom spanning both columns)
         # =================================================================
@@ -1750,6 +1756,8 @@ class TranslatorGUI:
                 self.config['image_max_tokens'] = int(self.image_max_tokens_var.get())
                 self.config['max_images_per_chapter'] = int(self.max_images_per_chapter_var.get())
                 self.config['image_chunk_height'] = int(self.image_chunk_height_var.get())
+                self.config['hide_image_translation_label'] = self.hide_image_translation_label_var.get()
+
                 
                 # Set environment variables for immediate effect
                 os.environ["USE_ROLLING_SUMMARY"] = "1" if self.rolling_summary_var.get() else "0"
