@@ -516,25 +516,43 @@ class ImageTranslator:
         except Exception as e:
             print(f"   ⚠️ Could not save translation file: {e}")
 
+    def _remove_http_links(self, text: str) -> str:
+        """Remove HTTP/HTTPS URLs from text while preserving other content"""
+        # Pattern to match URLs
+        url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+(?:\.[^\s<>"{}|\\^`\[\]]+)*'
+        
+        # Replace URLs with empty string
+        cleaned_text = re.sub(url_pattern, '', text)
+        
+        # Clean up extra whitespace that may result from URL removal
+        cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+        
+        return cleaned_text
+
     def _create_html_output(self, img_rel_path, translated_text, is_long_text, hide_label, was_stopped):
             """Create the final HTML output"""
-            # Check if the translation is primarily a URL
+            # Check if the translation is primarily a URL (only a URL and nothing else)
             url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+(?:\.[^\s<>"{}|\\^`\[\]]+)*'
-            is_primarily_url = bool(re.match(r'^\s*' + url_pattern + r'\s*', translated_text.strip()))
+            
+            # Check if the entire content is just a URL
+            url_match = re.match(r'^\s*' + url_pattern + r'\s*$', translated_text.strip())
+            is_only_url = bool(url_match)
             
             # Build the label HTML if needed
             if hide_label:
                 label_html = ""
-                # Only remove URLs if they're not the primary content
-                if not is_primarily_url:
-                    translated_text = self._remove_http_links(translated_text)
+                # Remove URLs from the text, but keep other content
+                cleaned_text = self._remove_http_links(translated_text)
+                
+                # If after removing URLs there's no content left, and original was only URL
+                if not cleaned_text and is_only_url:
+                    translated_text = "[Image contains only URL]"
+                else:
+                    # Use the cleaned text (URLs removed, other content preserved)
+                    translated_text = cleaned_text
             else:
                 partial_text = " (partial)" if was_stopped else ""
-                label_html = f'<p><em>[Image text translation{partial_text}:]</em></p>\n '
-            
-            # If we removed URLs and nothing is left, but the original was a URL, show a message
-            if hide_label and is_primarily_url:
-                translated_text = "[Image contains URL placeholder]"
+                label_html = f'<p><em>[Image text translation{partial_text}:]</em></p>\n'
             
             # Build the image HTML based on type
             if is_long_text:
