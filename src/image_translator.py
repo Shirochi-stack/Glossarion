@@ -33,7 +33,8 @@ class ImageTranslator:
         self.output_dir = output_dir
         self.profile_name = profile_name
         self.system_prompt = system_prompt
-        self.temperature = temperature  # Add this
+        self.temperature = temperature
+        self.log_callback = log_callback
         self.images_dir = os.path.join(output_dir, "images")
         self.translated_images_dir = os.path.join(output_dir, "translated_images")
         os.makedirs(self.translated_images_dir, exist_ok=True)
@@ -245,6 +246,7 @@ class ImageTranslator:
         Translate text in an image using vision API - with chunking for tall images and stop support
         """
         try:
+            self.current_image_path = image_path
             print(f"   🔍 translate_image called for: {image_path}")
             
             # Check for stop at the beginning
@@ -301,18 +303,61 @@ class ImageTranslator:
             import traceback
             traceback.print_exc()
             return None
+            
+    def load_progress(self):
+        """Load progress tracking for image chunks"""
+        progress_file = os.path.join(self.output_dir, "translation_progress.json")
+        if os.path.exists(progress_file):
+            with open(progress_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {"image_chunks": {}}
 
+    def save_progress(self, prog):
+        """Save progress tracking"""
+        progress_file = os.path.join(self.output_dir, "translation_progress.json")
+        with open(progress_file, 'w', encoding='utf-8') as f:
+            json.dump(prog, f, ensure_ascii=False, indent=2)
+            
     def _process_image_chunks(self, img, width, height, context, check_stop_fn):
         """Process a tall image by splitting it into chunks"""
         num_chunks = (height + self.chunk_height - 1) // self.chunk_height
-        overlap = 100  # Pixels of overlap between chunks
+        overlap = 100
         
         print(f"   ✂️ Image too tall ({height}px), splitting into {num_chunks} chunks of {self.chunk_height}px...")
+        print(f"   ⏳ This may take {num_chunks * 30}-{num_chunks * 60} seconds to complete")
+        print(f"   ℹ️ Stop will take effect after current chunk completes")
+        
+        # Load progress
+        prog = self.load_progress()
+        
+        # Create unique key for this image
+        image_key = os.path.basename(image_path) if hasattr(self, 'current_image_path') else str(hash(str(img)))
+        
+        # Initialize image chunk tracking
+        if "image_chunks" not in prog:
+            prog["image_chunks"] = {}
+            
+        if image_key not in prog["image_chunks"]:
+            prog["image_chunks"][image_key] = {
+                "total": num_chunks,
+                "completed": [],
+                "chunks": {},
+                "height": height,
+                "width": width
+            }
         
         all_translations = []
         was_stopped = False
         
         for i in range(num_chunks):
+            # Check if this chunk was already translated
+            if i in prog["image_chunks"][image_key]["completed"]:
+                saved_chunk = prog["image_chunks"][image_key]["chunks"].get(str(i))
+                if saved_chunk:
+                    all_translations.append(saved_chunk)
+                    print(f"   ⏭️ Chunk {i+1}/{num_chunks} already translated, skipping")
+                    continue
+            
             # Check for stop before processing each chunk
             if check_stop_fn and check_stop_fn():
                 print(f"   ❌ Stopped at chunk {i+1}/{num_chunks}")
@@ -324,7 +369,16 @@ class ImageTranslator:
             end_y = min(height, (i + 1) * self.chunk_height)
             
             print(f"   📄 Processing chunk {i+1}/{num_chunks} (y: {start_y}-{end_y})")
+            if self.log_callback and hasattr(self.log_callback, '__self__') and hasattr(self.log_callback.__self__, 'append_chunk_progress'):
+                self.log_callback.__self__.append_chunk_progress(
+                    i + 1, 
+                    num_chunks, 
+                    "image", 
+                    f"Image: {os.path.basename(self.current_image_path) if hasattr(self, 'current_image_path') else 'unknown'}"
+                )            
             
+            print(f"   ⏳ Estimated time: 30-60 seconds for this chunk")
+                
             # Crop and process the chunk
             chunk = img.crop((0, start_y, width, end_y))
             chunk_bytes = self._image_to_bytes(chunk)
@@ -339,9 +393,15 @@ class ImageTranslator:
                 # Clean AI artifacts from chunk
                 chunk_text = self._clean_translation_response(translation)
                 all_translations.append(chunk_text)
-                print(f"   ✅ Chunk {i+1} translated ({len(chunk_text)} chars)")
+                
+                # Save chunk progress
+                prog["image_chunks"][image_key]["completed"].append(i)
+                prog["image_chunks"][image_key]["chunks"][str(i)] = chunk_text
+                self.save_progress(prog)
+                
+                print(f"   ✅ Chunk {i+1} translated and saved ({len(chunk_text)} chars)")
             else:
-                print(f"   ⚠️ Chunk {i+1} returned no text")
+                print(f"   ⚠️ Chunk {i+1} returned no text"
             
             # Delay between chunks if not the last one
             if i < num_chunks - 1 and not was_stopped:
