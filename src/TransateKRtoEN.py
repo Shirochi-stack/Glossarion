@@ -3729,13 +3729,8 @@ def main(log_callback=None, stop_callback=None):
                                     timeout_retry_count += 1
                                     print(f"    ⏱️ Chunk took too long, retry {timeout_retry_count}/{max_timeout_retries}")
                                     
-                                    # Reduce token count for faster response
-                                    MAX_OUTPUT_TOKENS = int(MAX_OUTPUT_TOKENS * 0.75)
-                                    print(f"    📉 Reduced output tokens to {MAX_OUTPUT_TOKENS} for faster response")
-                                    
-                                    # Increase temperature slightly for variety
-                                    TEMP = min(original_temp + 0.1, 1.0)
-                                    
+                                    print(f"    🔄 Retrying")
+                                   
                                     time.sleep(2)
                                     continue
                                 else:
@@ -3929,13 +3924,8 @@ def main(log_callback=None, stop_callback=None):
                             timeout_retry_count += 1
                             print(f"    ⏱️ Chunk took too long, retry {timeout_retry_count}/{max_timeout_retries}")
                             
-                            # Reduce token count for faster response
-                            MAX_OUTPUT_TOKENS = int(MAX_OUTPUT_TOKENS * 0.75)
-                            print(f"    📉 Reduced output tokens to {MAX_OUTPUT_TOKENS} for faster response")
-                            
-                            # Increase temperature slightly for variety
-                            TEMP = min(original_temp + 0.1, 1.0)
-                            
+                            print(f"    🔄 Retrying")
+                           
                             time.sleep(2)
                             continue
                         else:
