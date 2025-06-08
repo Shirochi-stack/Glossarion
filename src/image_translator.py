@@ -19,19 +19,19 @@ import time
 logger = logging.getLogger(__name__)
 
 class ImageTranslator:
-    def __init__(self, client, output_dir: str, source_lang: str = "korean", system_prompt: str = "", temperature: float = 0.3):
+    def __init__(self, client, output_dir: str, profile_name: str = "", system_prompt: str = "", temperature: float = 0.3):
         """
         Initialize the image translator
         
         Args:
             client: UnifiedClient instance for API calls
             output_dir: Directory to save translated images
-            source_lang: Source language for translation
+            profile_name: Source language for translation
             system_prompt: System prompt from GUI to use for translation
         """
         self.client = client
         self.output_dir = output_dir
-        self.source_lang = source_lang
+        self.profile_name = profile_name
         self.system_prompt = system_prompt
         self.temperature = temperature  # Add this
         self.images_dir = os.path.join(output_dir, "images")
@@ -309,9 +309,8 @@ class ImageTranslator:
                         chunk_context = f"This is part {i+1} of {num_chunks} of a longer image. {context}"
                         messages = [
                             {"role": "system", "content": self.system_prompt},
-                            {"role": "user", "content": f"Translate all text in this image from {self.source_lang} to English. {chunk_context}"}
+                            {"role": "user", "content": context if context else ""}
                         ]
-                        
                         # Translate this chunk
                         try:
                             print(f"   🔄 Calling vision API for chunk {i+1}...")
@@ -399,7 +398,7 @@ class ImageTranslator:
                     # Build messages
                     messages = [
                         {"role": "system", "content": self.system_prompt},
-                        {"role": "user", "content": f"Translate all text in this image from {self.source_lang} to English. {context}"}
+                        {"role": "user", "content": f"Translate all text in this image from {self.profile_name} to English. {context}"}
                     ]
                     
                     # Single API call for translation
