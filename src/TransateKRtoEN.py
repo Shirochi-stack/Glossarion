@@ -318,9 +318,25 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
             else:
                 print(f"   ⚠️ Could not find image tag in HTML for: {img_src}")
     
-    # Summary
+    # After all images are processed, clean up completed chunks
     if translated_count > 0:
         print(f"   🖼️ Successfully translated {translated_count} images")
+        
+        # Clean up completed image chunks from progress
+        prog = image_translator.load_progress()
+        if "image_chunks" in prog:
+            # Remove completed images to save space
+            completed_images = []
+            for img_key, img_data in prog["image_chunks"].items():
+                if len(img_data["completed"]) == img_data["total"]:
+                    completed_images.append(img_key)
+            
+            for img_key in completed_images:
+                del prog["image_chunks"][img_key]
+                
+            if completed_images:
+                image_translator.save_progress(prog)
+                print(f"   🧹 Cleaned up progress for {len(completed_images)} completed images")
         
         # Save translation log
         image_translator.save_translation_log(chapter_num, image_translations)
@@ -409,8 +425,9 @@ def init_progress_tracking(payloads_dir):
         prog = {
             "chapters": {},          # Main tracking: idx -> chapter info
             "content_hashes": {},    # Content deduplication
-            "chapter_chunks": {},    # Chunk tracking for large chapters
-            "version": "2.0"         # Track format version
+            "chapter_chunks": {},    # Text chunk tracking for large chapters
+            "image_chunks": {},      # NEW: Image chunk tracking
+            "version": "2.1"         # Updated version
         }
     
     return prog, PROGRESS_FILE
@@ -2888,7 +2905,7 @@ def main(log_callback=None, stop_callback=None):
     # Parse all environment variables
     MODEL = os.getenv("MODEL", "gemini-1.5-flash")
     EPUB_PATH = os.getenv("EPUB_PATH", "default.epub")
-    TRANSLATION_LANG = os.getenv("TRANSLATION_LANG", "korean").lower()
+    PROFILE_NAME = os.getenv("PROFILE_NAME", "korean").lower()
     CONTEXTUAL = os.getenv("CONTEXTUAL", "1") == "1"
     DELAY = int(os.getenv("SEND_INTERVAL_SECONDS", "2"))
     SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "").strip()
@@ -2920,7 +2937,7 @@ def main(log_callback=None, stop_callback=None):
         start, end = None, None
     
     # Get instructions for the language
-    instructions = get_instructions(TRANSLATION_LANG)
+    instructions = get_instructions(PROFILE_NAME)
     
     # Set up tokenizer
     try:
@@ -3129,7 +3146,14 @@ def main(log_callback=None, stop_callback=None):
         print(f"🖼️ Image translation enabled for model: {MODEL}")
         print("🖼️ Image translation will use your custom system prompt and glossary")
         # Pass the complete system prompt (including GUI prompt + glossary + instructions)
-        image_translator = ImageTranslator(client, out, TRANSLATION_LANG, system, TEMP)
+        image_translator = ImageTranslator(
+            client, 
+            out, 
+            PROFILE_NAME, 
+            system, 
+            TEMP,
+            log_callback
+        )
         
         # Optional: Warn about potentially unsupported models
         known_vision_models = [
@@ -3421,9 +3445,23 @@ def main(log_callback=None, stop_callback=None):
             
             if total_chunks > 1:
                 print(f"  🔄 Translating chunk {chunk_idx}/{total_chunks} (Overall: {current_chunk_number}/{total_chunks_needed} - {progress_percent:.1f}% - ETA: {eta_str})")
-            else:
-                print(f"  🔄 Translating chapter (Overall: {current_chunk_number}/{total_chunks_needed} - {progress_percent:.1f}% - ETA: {eta_str})")
+                # ADD THESE LINES:
+                print(f"  ⏳ Chunk size: {len(chunk_html):,} characters (~{chapter_splitter.count_tokens(chunk_html):,} tokens)")
+                print(f"  ℹ️ This chunk may take 30-60 seconds. Stop will take effect after completion.")
             
+            if log_callback:
+                # Check if it's the append_chunk_progress method
+                if hasattr(log_callback, '__self__') and hasattr(log_callback.__self__, 'append_chunk_progress'):
+                    log_callback.__self__.append_chunk_progress(
+                        chunk_idx, 
+                        total_chunks, 
+                        "text", 
+                        f"Chapter {chap_num}"
+                    )
+                else:
+                    # Fallback to regular log
+                    log_callback(f"📄 Processing text chunk {chunk_idx}/{total_chunks} for Chapter {chap_num}")    
+                    
             # Add chunk context to prompt if multi-chunk
             if total_chunks > 1:
                 user_prompt = f"[PART {chunk_idx}/{total_chunks}]\n{chunk_html}"
