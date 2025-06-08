@@ -37,6 +37,7 @@ class ImageTranslator:
         self.images_dir = os.path.join(output_dir, "images")
         self.translated_images_dir = os.path.join(output_dir, "translated_images")
         os.makedirs(self.translated_images_dir, exist_ok=True)
+        self.api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
         
         # Track processed images to avoid duplicates
         self.processed_images = {}
@@ -360,7 +361,7 @@ class ImageTranslator:
                         # Small delay between chunks to avoid rate limiting
                         if i < num_chunks - 1:
                             # Check for stop during delay (0.5s in 0.1s increments)
-                            for _ in range(5):
+                            for i in range(int(self.api_delay * 10)):  # Split into 0.1s intervals for stop checking
                                 if check_stop_fn and check_stop_fn():
                                     print("   ❌ Stopped during chunk delay")
                                     was_stopped = True
