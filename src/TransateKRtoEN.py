@@ -44,7 +44,7 @@ def is_meaningful_text_content(html_content):
         header_text = ' '.join(h.get_text(strip=True) for h in headers)
         
         # If we have headers AND some paragraph text, it's mixed content
-        if headers and len(text_content.strip()) > 0:
+        if headers and len(text_content.strip()) > 1:
             return True
         
         # If we have substantial text content even without headers
