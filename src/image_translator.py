@@ -46,7 +46,6 @@ class ImageTranslator:
         self.webnovel_min_height = int(os.getenv("WEBNOVEL_MIN_HEIGHT", "1000"))
         self.image_max_tokens = int(os.getenv("IMAGE_MAX_TOKENS", "8192"))
 
-        }
         
     def extract_images_from_chapter(self, chapter_html: str) -> List[Dict]:
         """
