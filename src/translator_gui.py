@@ -235,7 +235,7 @@ class TranslatorGUI:
             value=str(self.config.get('image_chunk_height', '2000'))
         )        
         self.hide_image_translation_label_var = tk.BooleanVar(
-            value=self.config.get('hide_image_translation_label', False)
+            value=self.config.get('hide_image_translation_label', True)
         )        
         # Default prompts
         self.default_prompts = {
@@ -1791,7 +1791,7 @@ class TranslatorGUI:
                  text="Chunk height: Pixels per chunk for tall images",
                  font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(2, 0))        
 
-        tb.Checkbutton(section7_frame, text="Hide 'Image text translation' label", 
+        tb.Checkbutton(section7_frame, text="Hide 'Image text translation' label & remove URLs", 
                        variable=self.hide_image_translation_label_var,
                        bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
         # =================================================================
