@@ -89,7 +89,8 @@ class TranslatorGUI:
         master.minsize(1550, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
         master.bind('<Escape>', lambda e: master.attributes('-fullscreen', False))
-        self.payloads_dir = os.path.join(os.getcwd(), "Payloads")        
+        self.payloads_dir = os.path.join(os.getcwd(), "Payloads") 
+        
         
         # Module loading state
         self._modules_loaded = False
@@ -229,6 +230,9 @@ class TranslatorGUI:
         )
         self.use_tesseract_var = tk.BooleanVar(
             value=self.config.get('use_tesseract_ocr', False)
+        )
+        self.image_chunk_height_var = tk.StringVar(
+            value=str(self.config.get('image_chunk_height', '2000'))
         )        
         
         # Default prompts
@@ -835,7 +839,8 @@ class TranslatorGUI:
                     'IMAGE_MAX_TOKENS': self.image_max_tokens_var.get(),
                     'MAX_IMAGES_PER_CHAPTER': self.max_images_per_chapter_var.get(),
                     'IMAGE_API_DELAY': '1.0',  # Delay between image API calls
-                    'SAVE_IMAGE_TRANSLATIONS': '1'  # Save individual translations
+                    'SAVE_IMAGE_TRANSLATIONS': '1',  # Save individual translations
+                    'IMAGE_CHUNK_HEIGHT': self.image_chunk_height_var.get()
                 })
                 
                 # Set chapter range if specified
@@ -1398,7 +1403,7 @@ class TranslatorGUI:
         """Open the Other Settings dialog with all advanced options in a grid layout"""
         top = tk.Toplevel(self.master)
         top.title("Other Settings")
-        top.geometry("860x1050")
+        top.geometry("860x1070")
         top.transient(self.master)
         top.grab_set()
         
@@ -1673,26 +1678,33 @@ class TranslatorGUI:
         # Compact grid for numeric settings
         grid_frame = tk.Frame(section7_frame)
         grid_frame.pack(fill=tk.X, pady=5)
-        
+
         # Configure columns for alignment
         grid_frame.columnconfigure(1, minsize=60)
         grid_frame.columnconfigure(3, minsize=60)
-        
-        # Row 1: Two settings side by side
+
+        # Row 1: Min height and Image Output Token Limit
         tk.Label(grid_frame, text="Min height:", font=('TkDefaultFont', 9)).grid(row=0, column=0, sticky=tk.W)
         tb.Entry(grid_frame, width=7, textvariable=self.webnovel_min_height_var).grid(row=0, column=1, padx=(2, 5))
-        
+
         tk.Label(grid_frame, text="Image Output Token Limit:", font=('TkDefaultFont', 9)).grid(row=0, column=2, sticky=tk.W)
         tb.Entry(grid_frame, width=7, textvariable=self.image_max_tokens_var).grid(row=0, column=3, padx=2)
-        
-        # Row 2: Max per chapter
+
+        # Row 2: Max per chapter and Chunk height (now under token limit)
         tk.Label(grid_frame, text="Max/chapter:", font=('TkDefaultFont', 9)).grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
         tb.Entry(grid_frame, width=7, textvariable=self.max_images_per_chapter_var).grid(row=1, column=1, padx=(2, 5), pady=(5, 0))
-        
-        # Supported models as compact text
+
+        tk.Label(grid_frame, text="Chunk height:", font=('TkDefaultFont', 9)).grid(row=1, column=2, sticky=tk.W, pady=(5, 0))
+        tb.Entry(grid_frame, width=7, textvariable=self.image_chunk_height_var).grid(row=1, column=3, padx=2, pady=(5, 0))
+
+        # Help text
         tk.Label(section7_frame, 
                  text="Vision models: Gemini 1.5-pro/flash, GPT-4V/4o",
-                 font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(5, 0))
+                 font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(2, 0))
+
+        tk.Label(section7_frame, 
+                 text="Chunk height: Pixels per chunk for tall images",
+                 font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(2, 0))        
 
 
         # =================================================================
@@ -1737,6 +1749,7 @@ class TranslatorGUI:
                 self.config['webnovel_min_height'] = int(self.webnovel_min_height_var.get())
                 self.config['image_max_tokens'] = int(self.image_max_tokens_var.get())
                 self.config['max_images_per_chapter'] = int(self.max_images_per_chapter_var.get())
+                self.config['image_chunk_height'] = int(self.image_chunk_height_var.get())
                 
                 # Set environment variables for immediate effect
                 os.environ["USE_ROLLING_SUMMARY"] = "1" if self.rolling_summary_var.get() else "0"
@@ -1757,6 +1770,7 @@ class TranslatorGUI:
                 os.environ["WEBNOVEL_MIN_HEIGHT"] = self.webnovel_min_height_var.get()
                 os.environ["IMAGE_MAX_TOKENS"] = self.image_max_tokens_var.get()
                 os.environ["MAX_IMAGES_PER_CHAPTER"] = self.max_images_per_chapter_var.get()
+                os.environ["IMAGE_CHUNK_HEIGHT"] = self.image_chunk_height_var.get()
                 
                 # NEW: Glossary extraction environment variables
                 os.environ["GLOSSARY_MIN_FREQUENCY"] = self.glossary_min_frequency_var.get()
