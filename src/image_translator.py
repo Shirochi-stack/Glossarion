@@ -15,9 +15,6 @@ import re
 from bs4 import BeautifulSoup
 import logging
 import time
-import pytesseract
-from PIL import Image, ImageEnhance, ImageFilter
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
