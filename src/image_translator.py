@@ -19,7 +19,7 @@ import time
 logger = logging.getLogger(__name__)
 
 class ImageTranslator:
-    def __init__(self, client, output_dir: str, profile_name: str = "", system_prompt: str = "", temperature: float = 0.3):
+    def __init__(self, client, output_dir: str, profile_name: str = "", system_prompt: str = "", temperature: float = 0.3, log_callback=None):
         """
         Initialize the image translator
         
@@ -28,6 +28,8 @@ class ImageTranslator:
             output_dir: Directory to save translated images
             profile_name: Source language for translation
             system_prompt: System prompt from GUI to use for translation
+            temperature: Temperature for translation
+            log_callback: Optional callback function for logging
         """
         self.client = client
         self.output_dir = output_dir
@@ -201,6 +203,20 @@ class ImageTranslator:
         # Default to False to avoid processing regular illustrations
         return False
     
+    def load_progress(self):
+        """Load progress tracking for image chunks"""
+        progress_file = os.path.join(self.output_dir, "translation_progress.json")
+        if os.path.exists(progress_file):
+            with open(progress_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {"image_chunks": {}}
+
+    def save_progress(self, prog):
+        """Save progress tracking"""
+        progress_file = os.path.join(self.output_dir, "translation_progress.json")
+        with open(progress_file, 'w', encoding='utf-8') as f:
+            json.dump(prog, f, ensure_ascii=False, indent=2)
+    
     def preprocess_image_for_watermarks(self, image_path: str) -> Optional[bytes]:
         """
         Preprocess images to improve text visibility when watermarks are present
@@ -303,25 +319,11 @@ class ImageTranslator:
             import traceback
             traceback.print_exc()
             return None
-            
-    def load_progress(self):
-        """Load progress tracking for image chunks"""
-        progress_file = os.path.join(self.output_dir, "translation_progress.json")
-        if os.path.exists(progress_file):
-            with open(progress_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {"image_chunks": {}}
 
-    def save_progress(self, prog):
-        """Save progress tracking"""
-        progress_file = os.path.join(self.output_dir, "translation_progress.json")
-        with open(progress_file, 'w', encoding='utf-8') as f:
-            json.dump(prog, f, ensure_ascii=False, indent=2)
-            
     def _process_image_chunks(self, img, width, height, context, check_stop_fn):
         """Process a tall image by splitting it into chunks"""
         num_chunks = (height + self.chunk_height - 1) // self.chunk_height
-        overlap = 100
+        overlap = 100  # Pixels of overlap between chunks
         
         print(f"   ✂️ Image too tall ({height}px), splitting into {num_chunks} chunks of {self.chunk_height}px...")
         print(f"   ⏳ This may take {num_chunks * 30}-{num_chunks * 60} seconds to complete")
@@ -331,7 +333,7 @@ class ImageTranslator:
         prog = self.load_progress()
         
         # Create unique key for this image
-        image_key = os.path.basename(image_path) if hasattr(self, 'current_image_path') else str(hash(str(img)))
+        image_key = os.path.basename(self.current_image_path) if hasattr(self, 'current_image_path') else str(hash(str(img)))
         
         # Initialize image chunk tracking
         if "image_chunks" not in prog:
@@ -375,7 +377,7 @@ class ImageTranslator:
                     num_chunks, 
                     "image", 
                     f"Image: {os.path.basename(self.current_image_path) if hasattr(self, 'current_image_path') else 'unknown'}"
-                )            
+                )
             
             print(f"   ⏳ Estimated time: 30-60 seconds for this chunk")
                 
