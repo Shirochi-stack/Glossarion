@@ -518,14 +518,23 @@ class ImageTranslator:
 
     def _create_html_output(self, img_rel_path, translated_text, is_long_text, hide_label, was_stopped):
         """Create the final HTML output"""
+        # Check if the translation is primarily a URL
+        url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+(?:\.[^\s<>"{}|\\^`\[\]]+)*'
+        is_primarily_url = bool(re.match(r'^\s*' + url_pattern + r'\s*, translated_text.strip()))
+        
         # Build the label HTML if needed
         if hide_label:
             label_html = ""
-            # Also remove HTTP/HTTPS links when hide_label is enabled
-            translated_text = self._remove_http_links(translated_text)
+            # Only remove URLs if they're not the primary content
+            if not is_primarily_url:
+                translated_text = self._remove_http_links(translated_text)
         else:
             partial_text = " (partial)" if was_stopped else ""
             label_html = f'<p><em>[Image text translation{partial_text}:]</em></p>\n            '
+        
+        # If we removed URLs and nothing is left, but the original was a URL, show a message
+        if hide_label and is_primarily_url:
+            translated_text = "[Image contains URL placeholder]"
         
         # Build the image HTML based on type
         if is_long_text:
