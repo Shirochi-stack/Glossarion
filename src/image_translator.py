@@ -14,6 +14,10 @@ from typing import List, Dict, Optional, Tuple
 import re
 from bs4 import BeautifulSoup
 import logging
+import time
+import pytesseract
+from PIL import Image, ImageEnhance, ImageFilter
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +48,17 @@ class ImageTranslator:
         self.process_webnovel = os.getenv("PROCESS_WEBNOVEL_IMAGES", "1") == "1"
         self.webnovel_min_height = int(os.getenv("WEBNOVEL_MIN_HEIGHT", "1000"))
         self.image_max_tokens = int(os.getenv("IMAGE_MAX_TOKENS", "8192"))
+
+        if os.name == 'nt':  # Windows
+            pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+        
+        # Map language codes for Tesseract
+        self.tesseract_lang_map = {
+            'korean': 'kor',
+            'japanese': 'jpn+eng',  # Japanese + English
+            'chinese': 'chi_sim+chi_tra+eng',  # Simplified + Traditional + English
+            'english': 'eng'
+        }
         
     def extract_images_from_chapter(self, chapter_html: str) -> List[Dict]:
         """
@@ -233,138 +248,175 @@ class ImageTranslator:
         except Exception as e:
             logger.warning(f"Could not preprocess image: {e}")
             return None
-    
+        
     def translate_image(self, image_path: str, context: str = "") -> Optional[str]:
         """
-        Translate text in an image using vision API
+        Translate text in an image using vision API - with two-step process
         """
-        if not os.path.exists(image_path):
-            logger.warning(f"Image not found: {image_path}")
-            return None
-            
         try:
+            print(f"   🔍 translate_image called for: {image_path}")
+            
+            if not os.path.exists(image_path):
+                logger.warning(f"Image not found: {image_path}")
+                print(f"   ❌ Image file does not exist!")
+                return None
+            
             # Special handling for GIF files
             if image_path.lower().endswith('.gif'):
                 print(f"   🔧 Converting GIF to PNG for better OCR")
                 
-                # Convert GIF to PNG for better compatibility
                 with Image.open(image_path) as img:
-                    # Get the first frame of GIF
                     img.seek(0)
-                    
-                    # Convert to RGB if necessary
                     if img.mode not in ('RGB', 'RGBA'):
                         img = img.convert('RGB')
-                    
-                    # Save as PNG in memory
                     img_bytes = io.BytesIO()
                     img.save(img_bytes, format='PNG')
                     img_bytes.seek(0)
                     image_data = img_bytes.read()
             else:
-                # Regular image handling
                 with open(image_path, 'rb') as f:
                     image_data = f.read()
+            
+            # Determine if it's a long text image
+            is_long_text = False
+            try:
+                with Image.open(image_path) as img:
+                    width, height = img.size
+                    aspect_ratio = width / height if height > 0 else 1
                     
-            # Prepare messages for vision API
-            # Use GUI system prompt as base, but add image-specific instructions
-            image_instructions = f"""
-For images containing text:
-1. Translate all text following the same rules as regular text translation
-2. If the image contains dialogue, narrative text, signs, or any readable content, translate it
-3. Format the translation as if it were part of the story flow
-4. If there's no text in the image (just artwork/illustration), respond with "NO_TEXT_FOUND"
-5. For web novel or long text images: Extract ALL visible text, even if partially obscured by watermarks
-
-Important: Output ONLY the translated text in a natural reading format, not JSON."""
-
-            # Combine GUI system prompt with image-specific instructions
-            if self.system_prompt:
-                combined_system_prompt = f"{self.system_prompt}\n\n{image_instructions}"
-            else:
-                # Fallback if no GUI prompt
-                combined_system_prompt = f"You are a {self.source_lang} to English translator.\n{image_instructions}"
-
-            user_prompt = f"Translate any text in this image to English. Output only the translation."
-            if context:
-                user_prompt += f"\nContext: {context}"
+                    if hasattr(self, 'webnovel_min_height'):
+                        min_height = int(getattr(self, 'webnovel_min_height', 1000))
+                    else:
+                        min_height = 1000
+                        
+                    is_long_text = height > min_height and aspect_ratio < 0.5
+                    print(f"   📐 Image: {width}x{height}, aspect: {aspect_ratio:.2f}, long_text: {is_long_text}")
+                    
+            except Exception as e:
+                print(f"   ⚠️ Error checking image dimensions: {e}")
+                is_long_text = False
             
-            # Add hint for long text images
-            if is_long_text:
-                user_prompt += "\nNote: This appears to be a web novel or long text image. Please extract and translate ALL visible text from top to bottom."
-                
-            messages = [
-                {"role": "system", "content": combined_system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
-            
-            # Send to vision API
-            print(f"🖼️ Analyzing image: {os.path.basename(image_path)}")
-            
-            # Use appropriate token limit based on image type
+            # Use appropriate token limit
             max_tokens = self.image_max_tokens if is_long_text else 2048
             
-            response, _ = self.client.send_image(
-                messages,
+            # STEP 1: OCR - Extract text only
+            print(f"📋 Step 1: Extracting text via OCR...")
+            
+            ocr_instructions = f"""
+    Extract ALL text from this image EXACTLY as it appears.
+    Do NOT translate - output the original text only.
+    Maintain the original formatting and line breaks.
+    If there's no text in the image, respond with "NO_TEXT_FOUND".
+    For web novel or long text images: Extract ALL visible text from top to bottom.
+    Output the raw text only, no explanations."""
+
+            ocr_messages = [
+                {"role": "system", "content": ocr_instructions},
+                {"role": "user", "content": "Extract all text from this image. Output ONLY the original text, no translation."}
+            ]
+            
+            # Use vision API for OCR
+            ocr_response, ocr_finish = self.client.send_image(
+                ocr_messages,
                 image_data,
-                temperature=0.1,  # Low temperature for accuracy
+                temperature=0.1,
                 max_tokens=max_tokens,
-                context='image_translation'
+                context='image_ocr'
             )
             
             # Check if no text was found
-            if "NO_TEXT_FOUND" in response or not response.strip():
-                print(f"   ℹ️ No text detected - keeping original image")
+            if "NO_TEXT_FOUND" in ocr_response or not ocr_response.strip():
+                print(f"   ℹ️ No text detected in image")
+                return None
+            
+            print(f"   ✅ OCR extracted {len(ocr_response)} characters")
+            
+            # Save OCR result for debugging
+            ocr_filename = f"ocr_{os.path.basename(image_path)}.txt"
+            ocr_filepath = os.path.join(self.translated_images_dir, ocr_filename)
+            try:
+                with open(ocr_filepath, 'w', encoding='utf-8') as f:
+                    f.write(ocr_response)
+                print(f"   💾 Saved OCR text to: {ocr_filename}")
+            except Exception as e:
+                print(f"   ⚠️ Could not save OCR file: {e}")
+            
+            # STEP 2: Translate the extracted text using text API
+            print(f"📝 Step 2: Translating extracted text...")
+            
+            # Build translation messages with the system prompt
+            translation_messages = [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": ocr_response}
+            ]
+            
+            # Use regular text translation
+            try:
+                translation_response, trans_finish = self.client.send(
+                    translation_messages,
+                    temperature=0.3,
+                    max_tokens=max_tokens,
+                    context='translation'  # Use translation context
+                )
+                
+                translated_text = translation_response.strip()
+                
+            except Exception as e:
+                print(f"   ❌ Translation failed: {e}")
+                translated_text = f"[Translation Error: {str(e)}]"
+                trans_finish = "error"
+            
+            if not translated_text:
+                print(f"   ❌ Translation returned empty result")
                 return None
                 
-            # Clean the response
-            translated_text = response.strip()
+            print(f"   ✅ Translation completed ({len(translated_text)} characters)")
             
-            # Remove any AI artifacts if they slipped through
+            # Check if translation was truncated
+            if trans_finish in ["length", "max_tokens"]:
+                print(f"   ⚠️ Translation was TRUNCATED! Consider increasing Max tokens.")
+                translated_text += "\n\n[TRANSLATION TRUNCATED DUE TO TOKEN LIMIT]"
+            
+            # Clean any AI artifacts
             if translated_text.startswith(('Sure', 'Here', "I'll translate", 'Certainly')):
                 lines = translated_text.split('\n')
                 if len(lines) > 1:
                     translated_text = '\n'.join(lines[1:]).strip()
             
-            print(f"   ✅ Translated image text ({len(translated_text)} characters)")
-            
             # Store the result for caching
             self.processed_images[image_path] = translated_text
             
-            # Create HTML output that includes both image and translation
-            # Get relative path for the image
+            # Create HTML output
             img_rel_path = os.path.relpath(image_path, self.output_dir)
             
-            # For long text images, add a special class
-            div_class = "image-with-translation webnovel-image" if is_long_text else "image-with-translation"
-            
-            # Format as HTML
+            # For long text images, make the original collapsible
             if is_long_text:
-                # For web novel images, make the original collapsible
-                html_output = f"""<div class="{div_class}">
-    <details>
-        <summary>📖 View Original Image</summary>
-        <img src="{img_rel_path}" alt="Original image" />
-    </details>
-    <div class="image-translation">
-        <p><em>[Image text translation:]</em></p>
-        {self._format_translation_as_html(translated_text)}
-    </div>
-</div>"""
+                html_output = f"""<div class="image-with-translation webnovel-image">
+        <details>
+            <summary>📖 View Original Image</summary>
+            <img src="{img_rel_path}" alt="Original image" />
+        </details>
+        <div class="image-translation">
+            <p><em>[Image text translation:]</em></p>
+            {self._format_translation_as_html(translated_text)}
+        </div>
+    </div>"""
             else:
-                # For regular images, show both
-                html_output = f"""<div class="{div_class}">
-    <img src="{img_rel_path}" alt="Original image" />
-    <div class="image-translation">
-        <p><em>[Image text translation:]</em></p>
-        {self._format_translation_as_html(translated_text)}
-    </div>
-</div>"""
+                html_output = f"""<div class="image-with-translation">
+        <img src="{img_rel_path}" alt="Original image" />
+        <div class="image-translation">
+            <p><em>[Image text translation:]</em></p>
+            {self._format_translation_as_html(translated_text)}
+        </div>
+    </div>"""
             
             return html_output
-                
+            
         except Exception as e:
             logger.error(f"Error translating image {image_path}: {e}")
+            print(f"   ❌ Exception in translate_image: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def _format_translation_as_html(self, text: str) -> str:
