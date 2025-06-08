@@ -9,20 +9,7 @@ from ebooklib import epub, ITEM_DOCUMENT, ITEM_IMAGE, ITEM_STYLE
 from bs4 import BeautifulSoup
 import unicodedata
 from xml.etree import ElementTree as ET
-
-# Handle Python 2/3 compatibility for HTML escaping
-try:
-    from html import escape, unescape
-    def safe_escape(text):
-        return escape(text)
-except ImportError:
-    # Python 2 compatibility
-    from cgi import escape as cgi_escape
-    import HTMLParser
-    h = HTMLParser.HTMLParser()
-    unescape = h.unescape
-    def safe_escape(text):
-        return cgi_escape(text, quote=True)
+import html as html_module  # Use the standard html module for better entity handling
 
 # Configure stdout for UTF-8
 try:
@@ -39,12 +26,103 @@ except AttributeError:
             pass
 
 
+def decode_html_entities(text):
+    """
+    Comprehensive HTML entity decoding that handles all types of entities
+    """
+    if not text:
+        return text
+    
+    # First pass: decode using html module (handles named and numeric entities)
+    text = html_module.unescape(text)
+    
+    # Second pass: handle any remaining numeric entities manually
+    # Decimal entities
+    def decode_decimal(match):
+        try:
+            code = int(match.group(1))
+            if is_valid_xml_char_code(code):
+                return chr(code)
+        except:
+            pass
+        return match.group(0)  # Return original if can't decode
+    
+    # Hexadecimal entities
+    def decode_hex(match):
+        try:
+            code = int(match.group(1), 16)
+            if is_valid_xml_char_code(code):
+                return chr(code)
+        except:
+            pass
+        return match.group(0)  # Return original if can't decode
+    
+    text = re.sub(r'&#(\d+);', decode_decimal, text)
+    text = re.sub(r'&#x([0-9a-fA-F]+);', decode_hex, text)
+    
+    # Third pass: handle common entities that might have been missed
+    entity_replacements = {
+        '&nbsp;': ' ',
+        '&ldquo;': '"',
+        '&rdquo;': '"',
+        '&lsquo;': ''',
+        '&rsquo;': ''',
+        '&mdash;': '—',
+        '&ndash;': '–',
+        '&hellip;': '…',
+        '&bull;': '•',
+        '&trade;': '™',
+        '&copy;': '©',
+        '&reg;': '®',
+        '&uuml;': 'ü',
+        '&auml;': 'ä',
+        '&ouml;': 'ö',
+        '&Uuml;': 'Ü',
+        '&Auml;': 'Ä',
+        '&Ouml;': 'Ö',
+        '&szlig;': 'ß',
+        '&agrave;': 'à',
+        '&egrave;': 'è',
+        '&eacute;': 'é',
+        '&iuml;': 'ï',
+        '&ccedil;': 'ç',
+        '&ntilde;': 'ñ',
+    }
+    
+    for entity, char in entity_replacements.items():
+        text = text.replace(entity, char)
+    
+    return text
+
+
+def safe_escape(text):
+    """Enhanced escape function that preserves Unicode characters"""
+    if not text:
+        return ''
+    
+    # First decode any HTML entities to prevent double-escaping
+    text = decode_html_entities(str(text))
+    
+    # Only escape XML special characters, not entities
+    # Be careful not to re-escape already valid entities
+    text = re.sub(r'&(?!amp;|lt;|gt;|quot;|apos;|#\d+;|#x[0-9a-fA-F]+;)', '&amp;', text)
+    text = text.replace('<', '&lt;')
+    text = text.replace('>', '&gt;')
+    text = text.replace('"', '&quot;')
+    text = text.replace("'", '&apos;')
+    
+    return text
+
+
 def extract_translated_title_from_html(html_content, chapter_num=None, filename=None):
     """
     Extract the translated title from HTML content using multiple strategies
     Returns: (title, confidence_score)
     """
     try:
+        # First decode all HTML entities in the content
+        html_content = decode_html_entities(html_content)
+        
         soup = BeautifulSoup(html_content, 'html.parser')
         
         candidates = []
@@ -52,28 +130,28 @@ def extract_translated_title_from_html(html_content, chapter_num=None, filename=
         # Strategy 1: Look for <title> tag (highest confidence)
         title_tag = soup.find('title')
         if title_tag and title_tag.string:
-            title_text = title_tag.string.strip()
+            title_text = decode_html_entities(title_tag.string.strip())
             if title_text and len(title_text) > 1 and title_text.lower() not in ['untitled', 'chapter']:
                 candidates.append((title_text, 0.95, "title_tag"))
         
         # Strategy 2: Look for h1 tags (high confidence)
         h1_tags = soup.find_all('h1')
         for h1 in h1_tags:
-            h1_text = h1.get_text(strip=True)
+            h1_text = decode_html_entities(h1.get_text(strip=True))
             if h1_text and len(h1_text) < 300:
                 candidates.append((h1_text, 0.9, "h1_tag"))
         
         # Strategy 3: Look for h2 tags (medium-high confidence)
         h2_tags = soup.find_all('h2')
         for h2 in h2_tags:
-            h2_text = h2.get_text(strip=True)
+            h2_text = decode_html_entities(h2.get_text(strip=True))
             if h2_text and len(h2_text) < 250:
                 candidates.append((h2_text, 0.8, "h2_tag"))
         
         # Strategy 4: Look for h3 tags (medium confidence) 
         h3_tags = soup.find_all('h3')
         for h3 in h3_tags:
-            h3_text = h3.get_text(strip=True)
+            h3_text = decode_html_entities(h3.get_text(strip=True))
             if h3_text and len(h3_text) < 200:
                 candidates.append((h3_text, 0.7, "h3_tag"))
         
@@ -82,14 +160,14 @@ def extract_translated_title_from_html(html_content, chapter_num=None, filename=
         for elem in first_elements:
             bold_tags = elem.find_all(['b', 'strong'])
             for bold in bold_tags:
-                bold_text = bold.get_text(strip=True)
+                bold_text = decode_html_entities(bold.get_text(strip=True))
                 if bold_text and 3 <= len(bold_text) <= 150:
                     candidates.append((bold_text, 0.6, "bold_text"))
         
         # Strategy 6: Look for patterns in first paragraph
         first_p = soup.find('p')
         if first_p:
-            p_text = first_p.get_text(strip=True)
+            p_text = decode_html_entities(first_p.get_text(strip=True))
             # Look for patterns like "Chapter X: Title"
             chapter_pattern = re.match(r'^(Chapter\s+\d+\s*[:\-\u2013\u2014]\s*)(.{3,100})(?:\.|$|Chapter)', p_text, re.IGNORECASE)
             if chapter_pattern:
@@ -143,6 +221,9 @@ def clean_extracted_title(title):
     if not title:
         return ""
     
+    # Decode any remaining HTML entities
+    title = decode_html_entities(title)
+    
     # Remove HTML tags if any
     title = re.sub(r'<[^>]+>', '', title)
     
@@ -191,6 +272,173 @@ def is_valid_title(title):
     
     return True
 
+
+def clean_chapter_content(html_content):
+    """Clean and prepare chapter content for XHTML conversion"""
+    # Decode all HTML entities first
+    html_content = decode_html_entities(html_content)
+    
+    # Remove any existing XML declarations or DOCTYPE
+    html_content = re.sub(r'<\?xml[^>]*\?>', '', html_content)
+    html_content = re.sub(r'<!DOCTYPE[^>]*>', '', html_content)
+    
+    # Remove any namespace declarations from html tag
+    html_content = re.sub(r'<html[^>]*>', '<html>', html_content)
+    
+    # Remove NULL bytes and control characters
+    html_content = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]', '', html_content)
+    
+    # Fix malformed tags
+    html_content = fix_malformed_tags(html_content)
+    
+    # Remove any remaining invalid characters
+    html_content = ''.join(c for c in html_content if is_valid_xml_char(c))
+    
+    return html_content
+
+
+def ensure_xhtml_compliance(html_content, title="Chapter", css_links=None):
+    """
+    Ensure HTML content is XHTML-compliant for strict EPUB readers.
+    """
+    try:
+        # First, check if the content is already properly formatted XHTML
+        if html_content.strip().startswith('<?xml') and '<html xmlns=' in html_content:
+            return html_content
+        
+        # Clean the content
+        html_content = clean_chapter_content(html_content)
+        
+        # Parse with BeautifulSoup - use 'html.parser' to avoid entity issues
+        if isinstance(html_content, bytes):
+            soup = BeautifulSoup(html_content, 'html.parser', from_encoding='utf-8')
+        else:
+            soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Extract title if available (this is where we get the translated title)
+        extracted_title = None
+        if soup.title and soup.title.string:
+            extracted_title = str(soup.title.string).strip()
+        elif soup.h1:
+            extracted_title = soup.h1.get_text(strip=True)
+        elif soup.h2:
+            extracted_title = soup.h2.get_text(strip=True)
+        
+        # Use extracted title if found, otherwise use provided title
+        if extracted_title:
+            title = extracted_title
+        
+        # Clean title
+        title = re.sub(r'[<>&"\']+', '', title)
+        if not title:
+            title = "Chapter"
+        
+        # Extract existing CSS links if not provided
+        if css_links is None and soup.head:
+            css_links = []
+            for link in soup.head.find_all('link', rel='stylesheet'):
+                href = link.get('href', '')
+                if href:
+                    css_links.append(href)
+        
+        # Extract body content
+        body_content = ""
+        if soup.body:
+            body_parts = []
+            for child in soup.body.children:
+                if hasattr(child, 'name'):  # It's a tag
+                    try:
+                        # Use minimal formatting to avoid re-escaping entities
+                        if hasattr(child, 'decode_contents'):
+                            child_str = str(child)
+                        else:
+                            child_str = str(child)
+                    except:
+                        child_str = str(child)
+                    
+                    # Fix self-closing tags
+                    child_str = fix_self_closing_tags(child_str)
+                    # Don't re-escape ampersands that are part of valid entities
+                    child_str = re.sub(r'&(?!amp;|lt;|gt;|quot;|apos;|#\d+;|#x[0-9a-fA-F]+;)', '&amp;', child_str)
+                    body_parts.append(child_str)
+                else:  # It's text
+                    text = str(child)
+                    if text.strip():
+                        # Don't escape if it looks like it contains entities
+                        if '&' in text and ';' in text:
+                            # Check if it contains valid entities
+                            if re.search(r'&[a-zA-Z]+;|&#\d+;|&#x[0-9a-fA-F]+;', text):
+                                # Decode entities first, then escape
+                                text = decode_html_entities(text)
+                        # Now escape XML special characters
+                        text = safe_escape(text)
+                        body_parts.append(text)
+            body_content = '\n'.join(body_parts)
+        else:
+            # If no body tag, try to extract meaningful content
+            for tag in soup(['script', 'style']):
+                tag.decompose()
+            
+            body_content = str(soup)
+            body_content = fix_self_closing_tags(body_content)
+        
+        # If body_content is still empty, add some default content
+        if not body_content.strip():
+            body_content = '<p>Empty chapter</p>'
+        
+        # Build proper XHTML document
+        xhtml_parts = []
+        
+        # XML declaration and DOCTYPE
+        xhtml_parts.append('<?xml version="1.0" encoding="utf-8"?>')
+        xhtml_parts.append('<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">')
+        xhtml_parts.append('<html xmlns="http://www.w3.org/1999/xhtml">')
+        xhtml_parts.append('<head>')
+        xhtml_parts.append('<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />')
+        xhtml_parts.append(f'<title>{safe_escape(title)}</title>')
+        
+        # Add CSS links
+        if css_links:
+            for css_link in css_links:
+                if css_link.startswith('<link'):
+                    # Extract href from existing link tag
+                    href_match = re.search(r'href="([^"]+)"', css_link)
+                    if href_match:
+                        css_link = href_match.group(1)
+                    else:
+                        continue
+                
+                xhtml_parts.append(f'<link rel="stylesheet" type="text/css" href="{safe_escape(css_link)}" />')
+        
+        xhtml_parts.append('</head>')
+        xhtml_parts.append('<body>')
+        xhtml_parts.append(body_content)
+        xhtml_parts.append('</body>')
+        xhtml_parts.append('</html>')
+        
+        return '\n'.join(xhtml_parts)
+        
+    except Exception as e:
+        # If anything fails, return a minimal but valid XHTML document
+        print(f"[WARNING] Failed to ensure XHTML compliance: {e}")
+        safe_title = re.sub(r'[<>&"\']+', '', str(title))
+        if not safe_title:
+            safe_title = "Chapter"
+            
+        return f'''<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<title>{safe_escape(safe_title)}</title>
+</head>
+<body>
+<p>Error processing content. Please check the source file.</p>
+</body>
+</html>'''
+
+
+# Keep all the other functions from the original file unchanged
 def extract_chapter_info_from_filename(filename):
     """Extract chapter number and basic info from filename"""
     # Pattern: response_001_title.html
@@ -397,55 +645,6 @@ def fix_self_closing_tags(content):
     return content
 
 
-def clean_chapter_content(html_content):
-    """Clean and prepare chapter content for XHTML conversion"""
-    # Remove any existing XML declarations or DOCTYPE
-    html_content = re.sub(r'<\?xml[^>]*\?>', '', html_content)
-    html_content = re.sub(r'<!DOCTYPE[^>]*>', '', html_content)
-    
-    # Remove any namespace declarations from html tag
-    html_content = re.sub(r'<html[^>]*>', '<html>', html_content)
-    
-    # Decode HTML entities to their actual characters
-    try:
-        html_content = unescape(html_content)
-    except:
-        pass
-    
-    # Remove NULL bytes and control characters
-    html_content = re.sub(r'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]', '', html_content)
-    
-    # Fix malformed tags
-    html_content = fix_malformed_tags(html_content)
-    
-    # Fix numeric entities that might be invalid
-    def fix_numeric_entity(match):
-        try:
-            num = int(match.group(1))
-            if is_valid_xml_char_code(num):
-                return chr(num)
-        except:
-            pass
-        return ''  # Remove invalid entity
-    
-    def fix_hex_entity(match):
-        try:
-            num = int(match.group(1), 16)
-            if is_valid_xml_char_code(num):
-                return chr(num)
-        except:
-            pass
-        return ''  # Remove invalid entity
-    
-    html_content = re.sub(r'&#(\d+);', fix_numeric_entity, html_content)
-    html_content = re.sub(r'&#x([0-9a-fA-F]+);', fix_hex_entity, html_content)
-    
-    # Remove any remaining invalid characters
-    html_content = ''.join(c for c in html_content if is_valid_xml_char(c))
-    
-    return html_content
-
-
 def is_valid_xml_char_code(codepoint):
     """Check if a codepoint is valid for XML"""
     return (
@@ -473,144 +672,6 @@ def ensure_bytes(content):
     if not isinstance(content, str):
         content = str(content)
     return content.encode('utf-8')
-
-
-def ensure_xhtml_compliance(html_content, title="Chapter", css_links=None):
-    """
-    Ensure HTML content is XHTML-compliant for strict EPUB readers.
-    """
-    try:
-        # First, check if the content is already properly formatted XHTML
-        if html_content.strip().startswith('<?xml') and '<html xmlns=' in html_content:
-            return html_content
-        
-        # Clean the content
-        html_content = clean_chapter_content(html_content)
-        
-        # Parse with BeautifulSoup
-        if isinstance(html_content, bytes):
-            soup = BeautifulSoup(html_content, 'html.parser', from_encoding='utf-8')
-        else:
-            soup = BeautifulSoup(html_content, 'html.parser')
-        
-        # Extract title if available (this is where we get the translated title)
-        extracted_title = None
-        if soup.title and soup.title.string:
-            extracted_title = str(soup.title.string).strip()
-        elif soup.h1:
-            extracted_title = soup.h1.get_text(strip=True)
-        elif soup.h2:
-            extracted_title = soup.h2.get_text(strip=True)
-        
-        # Use extracted title if found, otherwise use provided title
-        if extracted_title:
-            title = extracted_title
-        
-        # Clean title
-        title = re.sub(r'[<>&"\']+', '', title)
-        if not title:
-            title = "Chapter"
-        
-        # Extract existing CSS links if not provided
-        if css_links is None and soup.head:
-            css_links = []
-            for link in soup.head.find_all('link', rel='stylesheet'):
-                href = link.get('href', '')
-                if href:
-                    css_links.append(href)
-        
-        # Extract body content
-        body_content = ""
-        if soup.body:
-            body_parts = []
-            for child in soup.body.children:
-                if hasattr(child, 'name'):  # It's a tag
-                    try:
-                        if hasattr(child, 'encode'):
-                            child_str = child.encode(formatter='html').decode('utf-8')
-                        else:
-                            child_str = str(child)
-                    except:
-                        child_str = str(child)
-                    
-                    # Fix self-closing tags
-                    child_str = fix_self_closing_tags(child_str)
-                    # Fix any remaining unescaped ampersands
-                    child_str = re.sub(r'&(?!amp;|lt;|gt;|quot;|apos;|#\d+;|#x[0-9a-fA-F]+;)', '&amp;', child_str)
-                    body_parts.append(child_str)
-                else:  # It's text
-                    text = str(child)
-                    if text.strip():
-                        # Escape XML special characters
-                        text = re.sub(r'&(?!amp;|lt;|gt;|quot;|apos;|#\d+;|#x[0-9a-fA-F]+;)', '&amp;', text)
-                        text = text.replace('<', '&lt;')
-                        text = text.replace('>', '&gt;')
-                        text = text.replace('"', '&quot;')
-                        text = text.replace("'", '&apos;')
-                        body_parts.append(text)
-            body_content = '\n'.join(body_parts)
-        else:
-            # If no body tag, try to extract meaningful content
-            for tag in soup(['script', 'style']):
-                tag.decompose()
-            
-            body_content = str(soup)
-            body_content = fix_self_closing_tags(body_content)
-        
-        # If body_content is still empty, add some default content
-        if not body_content.strip():
-            body_content = '<p>Empty chapter</p>'
-        
-        # Build proper XHTML document
-        xhtml_parts = []
-        
-        # XML declaration and DOCTYPE
-        xhtml_parts.append('<?xml version="1.0" encoding="utf-8"?>')
-        xhtml_parts.append('<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">')
-        xhtml_parts.append('<html xmlns="http://www.w3.org/1999/xhtml">')
-        xhtml_parts.append('<head>')
-        xhtml_parts.append('<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />')
-        xhtml_parts.append(f'<title>{safe_escape(title)}</title>')
-        
-        # Add CSS links
-        if css_links:
-            for css_link in css_links:
-                if css_link.startswith('<link'):
-                    # Extract href from existing link tag
-                    href_match = re.search(r'href="([^"]+)"', css_link)
-                    if href_match:
-                        css_link = href_match.group(1)
-                    else:
-                        continue
-                
-                xhtml_parts.append(f'<link rel="stylesheet" type="text/css" href="{safe_escape(css_link)}" />')
-        
-        xhtml_parts.append('</head>')
-        xhtml_parts.append('<body>')
-        xhtml_parts.append(body_content)
-        xhtml_parts.append('</body>')
-        xhtml_parts.append('</html>')
-        
-        return '\n'.join(xhtml_parts)
-        
-    except Exception as e:
-        # If anything fails, return a minimal but valid XHTML document
-        print(f"[WARNING] Failed to ensure XHTML compliance: {e}")
-        safe_title = re.sub(r'[<>&"\']+', '', str(title))
-        if not safe_title:
-            safe_title = "Chapter"
-            
-        return f'''<?xml version="1.0" encoding="utf-8"?>
-<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
-<html xmlns="http://www.w3.org/1999/xhtml">
-<head>
-<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
-<title>{safe_escape(safe_title)}</title>
-</head>
-<body>
-<p>Error processing content. Please check the source file.</p>
-</body>
-</html>'''
 
 
 def validate_xhtml(content):
@@ -1114,12 +1175,16 @@ def fallback_compile_epub(base_dir, log_callback=None):
                 
                 log(f"[DEBUG] File size: {len(raw)} characters")
                 
+                # IMPORTANT: Decode HTML entities immediately after reading
+                raw = decode_html_entities(raw)
+                log(f"[DEBUG] Decoded HTML entities in content")
+                
                 if not raw.strip():
                     log(f"[WARNING] Chapter {num} is empty, skipping")
                     empty_chapters += 1
                     continue
                 
-                # Clean the content
+                # Clean the content (this will not re-encode entities)
                 raw = clean_chapter_content(raw)
                 
                 # IMPROVED: Get title with multiple fallback attempts
@@ -1185,18 +1250,13 @@ def fallback_compile_epub(base_dir, log_callback=None):
 </body>
 </html>'''
                 
-                # Process images in content (existing code continues...)
+                # Process images in content
                 try:
-                    soup = BeautifulSoup(xhtml_content, 'lxml-xml')
-                except:
-                    try:
-                        soup = BeautifulSoup(xhtml_content, 'lxml')
-                    except:
-                        try:
-                            soup = BeautifulSoup(xhtml_content, 'html.parser')
-                        except Exception as e:
-                            log(f"[ERROR] Failed to parse chapter {num}: {e}")
-                            continue
+                    # Use html.parser to avoid XML parsing issues
+                    soup = BeautifulSoup(xhtml_content, 'html.parser')
+                except Exception as e:
+                    log(f"[ERROR] Failed to parse chapter {num}: {e}")
+                    continue
                 
                 # Fix image paths
                 changed = False
@@ -1417,8 +1477,12 @@ def fallback_compile_epub(base_dir, log_callback=None):
                             log("⚠️ WARNING: EPUB might be malformed (missing mimetype)")
                 except Exception as e:
                     log(f"⚠️ WARNING: EPUB validation error: {e}")
+                    # Don't raise an error if the file exists and has content
+                    if file_size > 0:
+                        log("ℹ️ Note: EPUB file exists with content, ignoring validation warning")
             else:
                 log("❌ ERROR: EPUB file was not created!")
+                raise Exception("EPUB file was not created")
             
             # Final notes
             if css_items:
@@ -1444,9 +1508,17 @@ def fallback_compile_epub(base_dir, log_callback=None):
             log("   • Special characters properly escaped")
             log("   • Malformed tags automatically fixed")
             log("   • Table of Contents uses extracted translated titles")
+            log("   • Enhanced HTML entity decoding for umlauts and special characters")
             
         except Exception as e:
             log(f"❌ Failed to write EPUB: {e}")
+            # Check if file was actually created despite the error
+            if 'out_path' in locals() and os.path.exists(out_path):
+                file_size = os.path.getsize(out_path)
+                if file_size > 0:
+                    log(f"ℹ️ NOTE: EPUB file exists at {out_path} ({file_size:,} bytes)")
+                    log("ℹ️ The error may be a false positive - check if the EPUB opens correctly")
+                    return  # Don't raise if file exists
             raise
 
     except Exception as e:
