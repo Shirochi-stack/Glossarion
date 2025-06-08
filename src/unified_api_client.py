@@ -91,7 +91,7 @@ class UnifiedClient:
         self.last_reinforcement_count = 0
         self.current_session_context = None
 
-        if 'gpt' in self.model:
+        if 'gpt' in self.model or 'o4' in self.model:
             if openai is None:
                 raise ImportError("OpenAI library not installed.")
             openai.api_key = self.api_key
@@ -146,11 +146,16 @@ class UnifiedClient:
             
             # Route to appropriate handler based on client type
             if self.client_type == 'gemini':
-                return self._send_gemini_image(messages, image_base64, temperature, max_tokens, response_name)
+                response = self._send_gemini_image(messages, image_base64, temperature, max_tokens, response_name)
+                return response.content, response.finish_reason
             elif self.client_type == 'openai':
                 # Check if model supports vision
-                if 'gpt-4' in self.model and ('vision' in self.model or 'turbo' in self.model):
-                    return self._send_openai_image(messages, image_base64, temperature, max_tokens, response_name)
+                vision_models = ['gpt-4.1-mini', 'gpt-4.1-nano', 'o4-mini']
+                model_lower = self.model.lower()
+                
+                if ('gpt-4' in model_lower and ('vision' in model_lower or 'turbo' in model_lower or 'o' in model_lower)) or model_lower in vision_models:
+                    response = self._send_openai_image(messages, image_base64, temperature, max_tokens, response_name)
+                    return response.content, response.finish_reason
                 else:
                     raise UnifiedClientError(f"Model {self.model} does not support image input")
             else:
