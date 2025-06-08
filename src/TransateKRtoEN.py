@@ -266,12 +266,7 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
             
             if img_tag:
                 # Create a container div for the image and translation
-                container = soup.new_tag('div', **{'class': 'image-with-translation'})
-                
-                # Add a note about translation
-                note = soup.new_tag('p', **{'class': 'translation-note'})
-                note.string = f"[Image {idx} - Translated text below]"
-                container.append(note)
+                container = soup.new_tag('div', **{'class': 'image-with-translation'})               
                 
                 # Keep original image
                 img_tag.replace_with(container)
