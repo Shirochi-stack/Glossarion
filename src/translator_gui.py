@@ -228,15 +228,19 @@ class TranslatorGUI:
         self.comprehensive_extraction_var = tk.BooleanVar(
             value=self.config.get('comprehensive_extraction', False)  # Default to False (smart mode)
         )
-        self.use_tesseract_var = tk.BooleanVar(
-            value=self.config.get('use_tesseract_ocr', False)
-        )
         self.image_chunk_height_var = tk.StringVar(
             value=str(self.config.get('image_chunk_height', '2000'))
         )        
         self.hide_image_translation_label_var = tk.BooleanVar(
             value=self.config.get('hide_image_translation_label', True)
-        )        
+        )
+        self.chunk_timeout_var = tk.StringVar(
+            value=str(self.config.get('chunk_timeout', '300'))  # 5 minutes default
+        )
+        self.retry_timeout_var = tk.BooleanVar(
+            value=self.config.get('retry_timeout', True)
+        )
+        
         # Default prompts
         self.default_prompts = {
             "korean": "You are a professional Korean to English novel translator, you must strictly output only English/HTML text while following these rules:\n- Use a context rich and natural translation style.\n- Retain honorifics, and suffixes like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
@@ -845,7 +849,9 @@ class TranslatorGUI:
                     'IMAGE_API_DELAY': '1.0',  # Delay between image API calls
                     'SAVE_IMAGE_TRANSLATIONS': '1',  # Save individual translations
                     'IMAGE_CHUNK_HEIGHT': self.image_chunk_height_var.get(),
-                    'HIDE_IMAGE_TRANSLATION_LABEL': "1" if self.hide_image_translation_label_var.get() else "0"
+                    'HIDE_IMAGE_TRANSLATION_LABEL': "1" if self.hide_image_translation_label_var.get() else "0",
+                    'RETRY_TIMEOUT': "1" if self.retry_timeout_var.get() else "0",
+                    'CHUNK_TIMEOUT': self.chunk_timeout_var.get()
 
                 })
                 
@@ -1369,28 +1375,132 @@ class TranslatorGUI:
             _append()
         else:
             self.master.after(0, _append)
+         
+    def update_status_line(self, message, progress_percent=None):
+        """Update a status line in the log (overwrites the last line if it's a status)"""
+        def _update():
+            # Get current content
+            content = self.log_text.get("1.0", "end-1c")
+            lines = content.split('\n')
             
-    def append_chunk_progress(self, chunk_num, total_chunks, chunk_type="text", chapter_info="", 
-                             overall_current=None, overall_total=None):
-        """Append chunk progress with visual indicator"""
-        progress_bar_width = 20
-        # Calculate progress for this specific item
-        progress = chunk_num / total_chunks if total_chunks > 0 else 0
-        filled = int(progress_bar_width * progress)
-        bar = "█" * filled + "░" * (progress_bar_width - filled)
+            # Check if last line is a status line (starts with specific markers)
+            status_markers = ['⏳', '📊', '✅', '❌', '🔄']
+            is_status_line = False
+            
+            if lines and any(lines[-1].strip().startswith(marker) for marker in status_markers):
+                is_status_line = True
+            
+            # Build new status message
+            if progress_percent is not None:
+                # Create a mini progress bar
+                bar_width = 10
+                filled = int(bar_width * progress_percent / 100)
+                bar = "▓" * filled + "░" * (bar_width - filled)
+                status_msg = f"⏳ {message} [{bar}] {progress_percent:.1f}%"
+            else:
+                status_msg = f"📊 {message}"
+            
+            # Update or append
+            if is_status_line and lines[-1].strip().startswith(('⏳', '📊')):
+                # Delete last line and replace
+                start_pos = f"{len(lines)}.0"
+                self.log_text.delete(f"{start_pos} linestart", "end")
+                if len(lines) > 1:
+                    self.log_text.insert("end", "\n" + status_msg)
+                else:
+                    self.log_text.insert("end", status_msg)
+            else:
+                # Just append
+                if content and not content.endswith('\n'):
+                    self.log_text.insert("end", "\n" + status_msg)
+                else:
+                    self.log_text.insert("end", status_msg + "\n")
+            
+            # Auto-scroll
+            self.log_text.see("end")
         
-        icon = "📄" if chunk_type == "text" else "🖼️"
-        
-        # Build the progress message
-        if chapter_info:
-            msg = f"{icon} {chapter_info} [{bar}] {chunk_num}/{total_chunks} chunks ({progress*100:.1f}%)"
+        if threading.current_thread() is threading.main_thread():
+            _update()
         else:
-            msg = f"{icon} [{bar}] {chunk_num}/{total_chunks} chunks ({progress*100:.1f}%)"
+            self.master.after(0, _update)
         
-        # Add overall progress if provided
-        if overall_current is not None and overall_total is not None:
-            overall_progress = overall_current / overall_total if overall_total > 0 else 0
-            msg += f" | Overall: {overall_current}/{overall_total} ({overall_progress*100:.1f}%)"
+    def append_chunk_progress(self, chunk_num, total_chunks, chunk_type="text", chapter_info="", 
+                             overall_current=None, overall_total=None, extra_info=None):
+        """Append chunk progress with enhanced visual indicator for all chunks"""
+        progress_bar_width = 20
+        
+        # Calculate overall progress
+        overall_progress = 0
+        if overall_current is not None and overall_total is not None and overall_total > 0:
+            overall_progress = overall_current / overall_total
+        
+        # Create overall progress bar
+        overall_filled = int(progress_bar_width * overall_progress)
+        overall_bar = "█" * overall_filled + "░" * (progress_bar_width - overall_filled)
+        
+        # For single chunks, show enhanced formatting
+        if total_chunks == 1:
+            icon = "📄" if chunk_type == "text" else "🖼️"
+            
+            # Create a more informative message
+            msg_parts = [f"{icon} {chapter_info}"]
+            
+            # Add size info if provided
+            if extra_info:
+                msg_parts.append(f"[{extra_info}]")
+            
+            # Add overall progress
+            if overall_current is not None and overall_total is not None:
+                # Show both numeric and visual progress
+                msg_parts.append(f"\n    Progress: [{overall_bar}] {overall_current}/{overall_total} ({overall_progress*100:.1f}%)")
+                
+                # Add ETA if we can calculate it
+                if hasattr(self, '_chunk_start_times'):
+                    if overall_current > 1:
+                        # Calculate average time per chunk
+                        elapsed = time.time() - self._translation_start_time
+                        avg_time = elapsed / (overall_current - 1)
+                        remaining = overall_total - overall_current + 1
+                        eta_seconds = remaining * avg_time
+                        
+                        if eta_seconds < 60:
+                            eta_str = f"{int(eta_seconds)}s"
+                        elif eta_seconds < 3600:
+                            eta_str = f"{int(eta_seconds/60)}m {int(eta_seconds%60)}s"
+                        else:
+                            hours = int(eta_seconds / 3600)
+                            minutes = int((eta_seconds % 3600) / 60)
+                            eta_str = f"{hours}h {minutes}m"
+                        
+                        msg_parts.append(f" - ETA: {eta_str}")
+                else:
+                    # Initialize timing
+                    self._translation_start_time = time.time()
+                    self._chunk_start_times = {}
+            
+            msg = " ".join(msg_parts)
+            
+        else:
+            # Multi-chunk display with enhanced formatting
+            chunk_progress = chunk_num / total_chunks if total_chunks > 0 else 0
+            chunk_filled = int(progress_bar_width * chunk_progress)
+            chunk_bar = "█" * chunk_filled + "░" * (progress_bar_width - chunk_filled)
+            
+            icon = "📄" if chunk_type == "text" else "🖼️"
+            
+            # Build the progress message with both chunk and overall progress
+            msg_parts = [f"{icon} {chapter_info}"]
+            msg_parts.append(f"\n    Chunk: [{chunk_bar}] {chunk_num}/{total_chunks} ({chunk_progress*100:.1f}%)")
+            
+            # Add overall progress on a new line
+            if overall_current is not None and overall_total is not None:
+                msg_parts.append(f"\n    Overall: [{overall_bar}] {overall_current}/{overall_total} ({overall_progress*100:.1f}%)")
+            
+            msg = "".join(msg_parts)
+        
+        # Track timing for current chunk
+        if hasattr(self, '_chunk_start_times'):
+            self._chunk_start_times[f"{chapter_info}_{chunk_num}"] = time.time()
         
         self.append_log(msg)
 
@@ -1484,6 +1594,7 @@ class TranslatorGUI:
             self.append_log(f"✅ Output token limit set to {val}")
 
 
+
     def open_other_settings(self):
         """Open the Other Settings dialog with all advanced options in a grid layout"""
         top = tk.Toplevel(self.master)
@@ -1524,29 +1635,38 @@ class TranslatorGUI:
         scrollable_frame.grid_columnconfigure(0, weight=1, uniform="column")
         scrollable_frame.grid_columnconfigure(1, weight=1, uniform="column")
         
-
-        
         # =================================================================
-        # SECTION 1: CONTEXT MANAGEMENT (Top Left)
+        # SECTION 1: CONTEXT MANAGEMENT (Top Left) - COMPACT VERSION
         # =================================================================
         section1_frame = tk.LabelFrame(scrollable_frame, text="Context Management", padx=10, pady=10)
         section1_frame.grid(row=0, column=0, sticky="nsew", padx=(10, 5), pady=(10, 5))
         
+        # Create inner frame to control content placement
+        content_frame = tk.Frame(section1_frame)
+        content_frame.pack(anchor=tk.NW, fill=tk.X)
+        
         # Rolling Summary
-        tb.Checkbutton(section1_frame, text="Use Rolling Summary", 
+        tb.Checkbutton(content_frame, text="Use Rolling Summary", 
                        variable=self.rolling_summary_var,
                        bootstyle="round-toggle").pack(anchor=tk.W)
         
-        tk.Label(section1_frame, 
+        tk.Label(content_frame, 
                  text="Generates context summaries to maintain\ncontinuity when history is cleared",
                  font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
         
-        # Summary Role
-        summary_frame = tk.Frame(section1_frame)
-        summary_frame.pack(anchor=tk.W, padx=20, pady=(0, 10))
+        # Summary Role in same row
+        summary_frame = tk.Frame(content_frame)
+        summary_frame.pack(anchor=tk.W, padx=20, pady=(0, 5))
         tk.Label(summary_frame, text="Summary Role:").pack(side=tk.LEFT)
         ttk.Combobox(summary_frame, textvariable=self.summary_role_var,
                      values=["user", "system"], state="readonly", width=10).pack(side=tk.LEFT, padx=5)
+        
+        # Add a separator line and note about context management
+        ttk.Separator(section1_frame, orient='horizontal').pack(fill=tk.X, pady=(15, 10))
+        
+        tk.Label(section1_frame, 
+                 text="💡 Tip: Rolling summaries help maintain story\ncontinuity across long translations by preserving\nkey context when conversation history is cleared.",
+                 font=('TkDefaultFont', 9), fg='#666', justify=tk.LEFT).pack(anchor=tk.W, padx=5)
         
         # =================================================================
         # SECTION 2: RESPONSE HANDLING (Top Right)
@@ -1582,6 +1702,21 @@ class TranslatorGUI:
         tk.Label(section2_frame, 
                  text="Detects when AI returns same content\nfor different chapters",
                  font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(5, 5))
+                     
+        # Retry Slow Chunks
+        tb.Checkbutton(section2_frame, text="Auto-retry Slow Chunks", 
+                       variable=self.retry_timeout_var,
+                       bootstyle="round-toggle").pack(anchor=tk.W, pady=(10, 0))
+
+        timeout_frame = tk.Frame(section2_frame)
+        timeout_frame.pack(anchor=tk.W, padx=20, pady=(5, 0))
+        tk.Label(timeout_frame, text="Timeout after").pack(side=tk.LEFT)
+        tb.Entry(timeout_frame, width=6, textvariable=self.chunk_timeout_var).pack(side=tk.LEFT, padx=5)
+        tk.Label(timeout_frame, text="seconds").pack(side=tk.LEFT)
+
+        tk.Label(section2_frame, 
+                 text="Retry chunks/images that take too long\n(reduces tokens for faster response)",
+                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
         
         # =================================================================
         # SECTION 3: PROMPT MANAGEMENT (Middle Left)
@@ -1610,7 +1745,7 @@ class TranslatorGUI:
                  font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
         
         # =================================================================
-        # SECTION 4: GLOSSARY SETTINGS (Middle Right) - EXPANDED
+        # SECTION 4: GLOSSARY SETTINGS (Middle Right)
         # =================================================================
         section4_frame = tk.LabelFrame(scrollable_frame, text="Glossary Settings", padx=10, pady=10)
         section4_frame.grid(row=1, column=1, sticky="nsew", padx=(5, 10), pady=5)
@@ -1639,7 +1774,7 @@ class TranslatorGUI:
                  font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 8))
         
         # =================================================================
-        # SECTION 5: AUTOMATIC GLOSSARY EXTRACTION CONTROLS (NEW - Bottom Left)
+        # SECTION 5: AUTOMATIC GLOSSARY EXTRACTION CONTROLS (Bottom Left)
         # =================================================================
         section5_frame = tk.LabelFrame(scrollable_frame, text="Targeted Automatic Glossary Extraction", padx=10, pady=10)
         section5_frame.grid(row=2, column=0, sticky="nsew", padx=(10, 5), pady=5)
@@ -1685,6 +1820,7 @@ class TranslatorGUI:
         tk.Label(section5_frame, 
                  text="Terms per API call for translation",
                  font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=(0, 5))
+        
         # =================================================================
         # SECTION 6: PROCESSING OPTIONS (Bottom Right)
         # =================================================================
@@ -1730,20 +1866,10 @@ class TranslatorGUI:
         tk.Label(section6_frame, 
                  text="Extract ALL files (disable smart filtering)",
                  font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
-
-        # In the save_and_close function within open_other_settings, add:
-        self.config['comprehensive_extraction'] = self.comprehensive_extraction_var.get()
-
-        # In save_config method, add:
-        self.config['comprehensive_extraction'] = self.comprehensive_extraction_var.get()
-
-        # In the environment variables section of run_translation_direct, add:
-        os.environ["COMPREHENSIVE_EXTRACTION"] = "1" if self.comprehensive_extraction_var.get() else "0"                 
-    
+        
         # =================================================================
-        # SECTION 7: IMAGE TRANSLATION (Optimized Layout)
+        # SECTION 7: IMAGE TRANSLATION
         # =================================================================
-        # Use only left column, keep right column free
         section7_frame = tk.LabelFrame(scrollable_frame, text="Image Translation", padx=10, pady=8)
         section7_frame.grid(row=3, column=0, sticky="nsew", padx=(10, 5), pady=5)
         
@@ -1775,7 +1901,7 @@ class TranslatorGUI:
         tk.Label(grid_frame, text="Image Output Token Limit:", font=('TkDefaultFont', 9)).grid(row=0, column=2, sticky=tk.W)
         tb.Entry(grid_frame, width=7, textvariable=self.image_max_tokens_var).grid(row=0, column=3, padx=2)
 
-        # Row 2: Max per chapter and Chunk height (now under token limit)
+        # Row 2: Max per chapter and Chunk height
         tk.Label(grid_frame, text="Max/chapter:", font=('TkDefaultFont', 9)).grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
         tb.Entry(grid_frame, width=7, textvariable=self.max_images_per_chapter_var).grid(row=1, column=1, padx=(2, 5), pady=(5, 0))
 
@@ -1791,9 +1917,10 @@ class TranslatorGUI:
                  text="Chunk height: Pixels per chunk for tall images",
                  font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(2, 0))        
 
-        tb.Checkbutton(section7_frame, text="Hide 'Image text translation' label & remove URLs", 
+        tb.Checkbutton(section7_frame, text="Hide labels and remove OCR images", 
                        variable=self.hide_image_translation_label_var,
                        bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+        
         # =================================================================
         # SAVE & CLOSE FUNCTIONALITY (Bottom spanning both columns)
         # =================================================================
@@ -1810,6 +1937,8 @@ class TranslatorGUI:
                 self.config['max_retry_tokens'] = int(self.max_retry_tokens_var.get())
                 self.config['retry_duplicate_bodies'] = self.retry_duplicate_var.get()
                 self.config['duplicate_lookback_chapters'] = int(self.duplicate_lookback_var.get())
+                self.config['retry_timeout'] = self.retry_timeout_var.get()
+                self.config['chunk_timeout'] = int(self.chunk_timeout_var.get())
                 
                 # Prompt Management
                 self.config['reinforcement_frequency'] = int(self.reinforcement_freq_var.get())
@@ -1820,7 +1949,7 @@ class TranslatorGUI:
                 self.config['disable_glossary_translation'] = self.disable_glossary_translation_var.get()
                 self.config['append_glossary'] = self.append_glossary_var.get()
                 
-                # NEW: Glossary Extraction Controls
+                # Glossary Extraction Controls
                 self.config['glossary_min_frequency'] = int(self.glossary_min_frequency_var.get())
                 self.config['glossary_max_names'] = int(self.glossary_max_names_var.get())
                 self.config['glossary_max_titles'] = int(self.glossary_max_titles_var.get()) 
@@ -1829,6 +1958,7 @@ class TranslatorGUI:
                 # Processing Options
                 self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()
                 self.config['reset_failed_chapters'] = self.reset_failed_chapters_var.get()
+                self.config['comprehensive_extraction'] = self.comprehensive_extraction_var.get()
                 
                 # Image Translation Settings
                 self.config['enable_image_translation'] = self.enable_image_translation_var.get()
@@ -1838,34 +1968,37 @@ class TranslatorGUI:
                 self.config['max_images_per_chapter'] = int(self.max_images_per_chapter_var.get())
                 self.config['image_chunk_height'] = int(self.image_chunk_height_var.get())
                 self.config['hide_image_translation_label'] = self.hide_image_translation_label_var.get()
-
                 
                 # Set environment variables for immediate effect
-                os.environ["USE_ROLLING_SUMMARY"] = "1" if self.rolling_summary_var.get() else "0"
-                os.environ["SUMMARY_ROLE"] = self.summary_role_var.get()
-                os.environ["RETRY_TRUNCATED"] = "1" if self.retry_truncated_var.get() else "0"
-                os.environ["MAX_RETRY_TOKENS"] = self.max_retry_tokens_var.get()
-                os.environ["RETRY_DUPLICATE_BODIES"] = "1" if self.retry_duplicate_var.get() else "0"
-                os.environ["DUPLICATE_LOOKBACK_CHAPTERS"] = self.duplicate_lookback_var.get()
-                os.environ["REINFORCEMENT_FREQUENCY"] = self.reinforcement_freq_var.get()
-                os.environ["DISABLE_SYSTEM_PROMPT"] = "1" if self.disable_system_prompt_var.get() else "0"
-                os.environ["DISABLE_AUTO_GLOSSARY"] = "1" if self.disable_auto_glossary_var.get() else "0"
-                os.environ["DISABLE_GLOSSARY_TRANSLATION"] = "1" if self.disable_glossary_translation_var.get() else "0"
-                os.environ["APPEND_GLOSSARY"] = "1" if self.append_glossary_var.get() else "0"
-                os.environ["EMERGENCY_PARAGRAPH_RESTORE"] = "1" if self.emergency_restore_var.get() else "0"
-                os.environ["RESET_FAILED_CHAPTERS"] = "1" if self.reset_failed_chapters_var.get() else "0"
-                os.environ["ENABLE_IMAGE_TRANSLATION"] = "1" if self.enable_image_translation_var.get() else "0"
-                os.environ["PROCESS_WEBNOVEL_IMAGES"] = "1" if self.process_webnovel_images_var.get() else "0"
-                os.environ["WEBNOVEL_MIN_HEIGHT"] = self.webnovel_min_height_var.get()
-                os.environ["IMAGE_MAX_TOKENS"] = self.image_max_tokens_var.get()
-                os.environ["MAX_IMAGES_PER_CHAPTER"] = self.max_images_per_chapter_var.get()
-                os.environ["IMAGE_CHUNK_HEIGHT"] = self.image_chunk_height_var.get()
-                
-                # NEW: Glossary extraction environment variables
-                os.environ["GLOSSARY_MIN_FREQUENCY"] = self.glossary_min_frequency_var.get()
-                os.environ["GLOSSARY_MAX_NAMES"] = self.glossary_max_names_var.get()
-                os.environ["GLOSSARY_MAX_TITLES"] = self.glossary_max_titles_var.get()
-                os.environ["GLOSSARY_BATCH_SIZE"] = self.glossary_batch_size_var.get()
+                os.environ.update({
+                    "USE_ROLLING_SUMMARY": "1" if self.rolling_summary_var.get() else "0",
+                    "SUMMARY_ROLE": self.summary_role_var.get(),
+                    "RETRY_TRUNCATED": "1" if self.retry_truncated_var.get() else "0",
+                    "MAX_RETRY_TOKENS": self.max_retry_tokens_var.get(),
+                    "RETRY_DUPLICATE_BODIES": "1" if self.retry_duplicate_var.get() else "0",
+                    "DUPLICATE_LOOKBACK_CHAPTERS": self.duplicate_lookback_var.get(),
+                    "RETRY_TIMEOUT": "1" if self.retry_timeout_var.get() else "0",
+                    "CHUNK_TIMEOUT": self.chunk_timeout_var.get(),
+                    "REINFORCEMENT_FREQUENCY": self.reinforcement_freq_var.get(),
+                    "DISABLE_SYSTEM_PROMPT": "1" if self.disable_system_prompt_var.get() else "0",
+                    "DISABLE_AUTO_GLOSSARY": "1" if self.disable_auto_glossary_var.get() else "0",
+                    "DISABLE_GLOSSARY_TRANSLATION": "1" if self.disable_glossary_translation_var.get() else "0",
+                    "APPEND_GLOSSARY": "1" if self.append_glossary_var.get() else "0",
+                    "EMERGENCY_PARAGRAPH_RESTORE": "1" if self.emergency_restore_var.get() else "0",
+                    "RESET_FAILED_CHAPTERS": "1" if self.reset_failed_chapters_var.get() else "0",
+                    "COMPREHENSIVE_EXTRACTION": "1" if self.comprehensive_extraction_var.get() else "0",
+                    "ENABLE_IMAGE_TRANSLATION": "1" if self.enable_image_translation_var.get() else "0",
+                    "PROCESS_WEBNOVEL_IMAGES": "1" if self.process_webnovel_images_var.get() else "0",
+                    "WEBNOVEL_MIN_HEIGHT": self.webnovel_min_height_var.get(),
+                    "IMAGE_MAX_TOKENS": self.image_max_tokens_var.get(),
+                    "MAX_IMAGES_PER_CHAPTER": self.max_images_per_chapter_var.get(),
+                    "IMAGE_CHUNK_HEIGHT": self.image_chunk_height_var.get(),
+                    "HIDE_IMAGE_TRANSLATION_LABEL": "1" if self.hide_image_translation_label_var.get() else "0",
+                    "GLOSSARY_MIN_FREQUENCY": self.glossary_min_frequency_var.get(),
+                    "GLOSSARY_MAX_NAMES": self.glossary_max_names_var.get(),
+                    "GLOSSARY_MAX_TITLES": self.glossary_max_titles_var.get(),
+                    "GLOSSARY_BATCH_SIZE": self.glossary_batch_size_var.get()
+                })
                 
                 # Save to config file
                 with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
@@ -1892,8 +2025,12 @@ class TranslatorGUI:
         button_container = tk.Frame(button_frame)
         button_container.pack(expand=True, fill='both')
         
-
-                    
+        tb.Button(button_container, text="💾 Save Settings", command=save_and_close, 
+                  bootstyle="success", width=20).pack(pady=5)
+        
+        tb.Button(button_container, text="❌ Cancel", command=lambda: [cleanup_bindings(), top.destroy()], 
+                  bootstyle="secondary", width=20).pack(pady=5)
+                        
         # =================================================================
         # MOUSE WHEEL SCROLLING SUPPORT
         # =================================================================
@@ -1938,17 +2075,6 @@ class TranslatorGUI:
         
         top.protocol("WM_DELETE_WINDOW", lambda: [cleanup_bindings(), top.destroy()])
         
-        # Also clean up when dialog is closed via buttons
-        def save_and_close_with_cleanup():
-            cleanup_bindings()
-            save_and_close()
-        
-        # Update the save button to use the new function
-        tb.Button(button_container, text="💾 Save Settings", command=save_and_close_with_cleanup, 
-                  bootstyle="success", width=20).pack(pady=5)
-        
-        tb.Button(button_container, text="❌ Cancel", command=lambda: [cleanup_bindings(), top.destroy()], 
-                  bootstyle="secondary", width=20).pack(pady=5)
 
 
 
