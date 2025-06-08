@@ -578,22 +578,14 @@ class ImageTranslator:
                 if "stopped by user" in error_msg:
                     print("   ❌ Image translation stopped by user")
                     return None
-                
-                # Handle timeout with retry
-                if "took" in error_msg and "timeout:" in error_msg and retry_timeout_enabled:
+                # Handle timeout specifically
+                if "took" in error_msg and "timeout:" in error_msg:
                     if timeout_retry_count < max_timeout_retries:
                         timeout_retry_count += 1
-                        print(f"   ⏱️ Image chunk took too long, retry {timeout_retry_count}/{max_timeout_retries}")
+                        print(f"    ⏱️ Chunk took too long, retry {timeout_retry_count}/{max_timeout_retries}")
                         
-                        # Reduce token count for faster response (75% of current)
-                        self.image_max_tokens = int(self.image_max_tokens * 0.75)
-                        print(f"   📉 Reduced max tokens to {self.image_max_tokens} for faster response")
-                        
-                        # Increase temperature slightly for variety
-                        self.temperature = min(original_temp + 0.1, 1.0)
-                        print(f"   🌡️ Increased temperature to {self.temperature}")
-                        
-                        # Short delay before retry
+                        print(f"    🔄 Retrying")
+                       
                         time.sleep(2)
                         continue
                     else:
