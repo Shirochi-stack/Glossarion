@@ -84,7 +84,7 @@ class TranslatorGUI:
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
-        master.title("Glossarion v1.9.1")
+        master.title("Glossarion v1.9.2")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1550, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
@@ -568,7 +568,7 @@ class TranslatorGUI:
         print("[DEBUG] GUI setup completed with config values loaded")  # Debug logging
         
         # Add initial log message
-        self.append_log("🚀 Glossarion v1.9.1 - Ready to use!")
+        self.append_log("🚀 Glossarion v1.9.2 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
 
     def force_retranslation(self):
@@ -1118,13 +1118,15 @@ class TranslatorGUI:
             )
             
             if not self.stop_requested:
-                # Update to use the new filename format
-                base_name = os.path.basename(folder)
-                out_file = os.path.join(folder, f"{base_name}.epub")
+                self.append_log("✅ EPUB Converter completed successfully!")
                 
-                # Check if the file was actually created
-                if os.path.exists(out_file):
-                    self.append_log("✅ EPUB Converter completed successfully!")
+                # Look for the actual EPUB file that was created
+                epub_files = [f for f in os.listdir(folder) if f.endswith('.epub')]
+                if epub_files:
+                    # Use the most recently created EPUB file
+                    epub_files.sort(key=lambda x: os.path.getmtime(os.path.join(folder, x)), reverse=True)
+                    out_file = os.path.join(folder, epub_files[0])
+                    
                     # Show success message on main thread
                     self.master.after(0, lambda: messagebox.showinfo("EPUB Compilation Success", f"Created: {out_file}"))
                 else:
@@ -2419,7 +2421,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time  # Add this import
     
-    print("🚀 Starting Glossarion v1.9.1...")
+    print("🚀 Starting Glossarion v1.9.2...")
     
     # Initialize splash screen (main thread only)
     splash_manager = None
