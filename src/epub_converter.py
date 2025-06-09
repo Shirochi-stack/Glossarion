@@ -924,6 +924,26 @@ def fallback_compile_epub(base_dir, log_callback=None):
                 with open(METADATA, 'r', encoding='utf-8') as f:
                     meta = json.load(f)
                 log("[DEBUG] Metadata loaded successfully")
+                
+                # Debug: Show ALL metadata keys
+                log(f"[DEBUG] Metadata keys: {list(meta.keys())}")
+                
+                # Debug: Show title-related fields
+                if 'title' in meta:
+                    log(f"[DEBUG] Found 'title' in metadata: '{meta['title']}'")
+                else:
+                    log("[DEBUG] No 'title' field in metadata!")
+                    
+                if 'original_title' in meta:
+                    log(f"[DEBUG] Found 'original_title' in metadata: '{meta['original_title']}'")
+                else:
+                    log("[DEBUG] No 'original_title' field in metadata")
+                    
+                # Check for any other title variations
+                for key in meta.keys():
+                    if 'title' in key.lower():
+                        log(f"[DEBUG] Found title-related key: {key} = '{meta[key]}'")
+                    
             except (json.JSONDecodeError, IOError) as e:
                 log(f"[WARNING] Failed to load metadata.json: {e}")
                 meta = {}
@@ -936,12 +956,52 @@ def fallback_compile_epub(base_dir, log_callback=None):
         
         # Set book metadata
         book.set_identifier(meta.get("identifier", f"translated-{os.path.basename(base_dir)}"))
-        book.set_title(meta.get("title", os.path.basename(base_dir)))
+        
+        # ENHANCED: Use translated title with better fallback logic
+        book_title = None
+        
+        # First try: Look for 'title' field (should be the translated title)
+        if 'title' in meta and meta['title'] and str(meta['title']).strip():
+            book_title = str(meta['title']).strip()
+            log(f"✅ [INFO] Using translated title from metadata: '{book_title}'")
+            
+        # Second try: Look for 'original_title' field
+        elif 'original_title' in meta and meta['original_title'] and str(meta['original_title']).strip():
+            book_title = str(meta['original_title']).strip()
+            log(f"⚠️ [INFO] Using original title (no translation found): '{book_title}'")
+            
+        # Third try: Check if there's a title_translated flag and the title is actually translated
+        elif 'title_translated' in meta and meta.get('title_translated') == True:
+            # Title was supposedly translated but might be empty
+            log("⚠️ [WARNING] Title was marked as translated but is empty or missing")
+            book_title = os.path.basename(base_dir)
+            log(f"📁 [INFO] Falling back to directory name: '{book_title}'")
+            
+        # Final fallback: Use directory name
+        else:
+            book_title = os.path.basename(base_dir)
+            log(f"📁 [INFO] No title found in metadata, using directory name: '{book_title}'")
+        
+        # Ensure we have a valid title
+        if not book_title or not book_title.strip():
+            book_title = os.path.basename(base_dir)
+            log(f"⚠️ [WARNING] Title was empty, using directory name: '{book_title}'")
+        
+        # Set the title
+        print(f"DEBUG: meta.get('title') = {meta.get('title')}, basename = {os.path.basename(base_dir)}")
+        book.set_title(book_title)
+        log(f"📚 [FINAL] Book title set to: '{book_title}'")
+        
         book.set_language(meta.get("language", "en"))
+        
+        # Also add original title as metadata if it exists and is different
+        if meta.get('original_title') and meta.get('original_title') != book_title:
+            book.add_metadata('DC', 'title', meta['original_title'], {'type': 'original'})
+            log(f"[INFO] Added original title as metadata: '{meta['original_title']}'")
         
         if meta.get("creator"):
             book.add_author(meta["creator"])
-
+            log(f"[INFO] Set author: {meta['creator']}")
         spine = []
         toc = []
         processed_images = {}
@@ -1427,8 +1487,17 @@ def fallback_compile_epub(base_dir, log_callback=None):
             ]
 
         # Write EPUB
-        base_name = os.path.basename(OUTPUT_DIR)
-        out_path = os.path.join(OUTPUT_DIR, f"{base_name}.epub")
+        # Write EPUB - Use translated title for filename if available
+        if book_title and book_title != os.path.basename(OUTPUT_DIR):
+            # Sanitize the translated title for use as filename
+            safe_filename = sanitize_filename(book_title, allow_unicode=True)
+            out_path = os.path.join(OUTPUT_DIR, f"{safe_filename}.epub")
+            log(f"[INFO] Using translated title for filename: {safe_filename}.epub")
+        else:
+            # Fallback to directory name
+            base_name = os.path.basename(OUTPUT_DIR)
+            out_path = os.path.join(OUTPUT_DIR, f"{base_name}.epub")
+            log(f"[INFO] Using directory name for filename: {base_name}.epub")
         try:
             log(f"[DEBUG] Writing EPUB to: {out_path}")
             log(f"[DEBUG] Total CSS files included: {len(css_items)}")
