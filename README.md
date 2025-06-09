@@ -23,7 +23,7 @@
 * Fully retains HTML structure and embedded images.
 * Manual glossary override supported.
 * Configurable context-memory window per chapter.
-* Rate-limit handling with delay configuration and retry logic.
+* Rate-limit handling with delay configuration and retry logic for timeouts & duplicates
   
     ### 🖼️ OCR Translation
   
@@ -31,7 +31,6 @@
   * Auto-split tall images (>2000 px) for reliable OCR
   * Configurable chunk sizing
   * OpenAI & Gemini API support
-  * Header detection, retry logic & toggle controls  
 
 
 
