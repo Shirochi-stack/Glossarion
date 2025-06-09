@@ -33,6 +33,7 @@
   * Header detection, retry logic & toggle controls  
 
 
+
 ### 📓 Glossary Extraction
 
 * AI-powered extraction of:
@@ -44,6 +45,7 @@
 * Output in `.json` and Markdown `.md` formats.
 * Intelligent merging of duplicate entries.
 
+
 ### ✂️ Glossary Management
 
 * GUI glossary trimmer with field-specific controls:
@@ -52,6 +54,7 @@
   * Aggregate all locations into a summary entry.
 * Import and override glossary files manually.
 
+
 ### 🖥️ Full GUI Support
 
 * Built with `ttkbootstrap` and `tkinter` for a modern interface.
@@ -59,11 +62,13 @@
 * Configurable API model, temperature, history depth, and more.
 * Real-time logging, subprocess output streaming, and fallback behavior.
 
+
 ### 🛡️ QA Scanning
 
 * Scan translated HTML files for duplicates, non-English fragments, spacing issues, and repetitive sentences.
 * Generate JSON, CSV, and HTML reports for QA review.
 * Trigger via GUI **QA Scan** button or CLI `scan_html_folder.py`.
+
 
 ### 📚 EPUB Export
 
@@ -72,10 +77,12 @@
 * Accessible via GUI **EPUB Converter** or CLI `epub_converter.py`.
 * Preserves cover art, images & metadata  
 * Smart chapter extraction & robust XHTML parsing
+
   
 ### 🔍 Quality Assurance Tools
 * Automated HTML scans for duplicates, non-English fragments & spacing issues  
 * Reports in JSON, CSV & HTML
+
    
 ### 🔧 Helper Tools
 
@@ -132,6 +139,7 @@ To use translation features, provide an API key in the GUI:
 
 ---
 
+
 ## 🧠 System Prompt Customization
 
 Customize your translation style:
@@ -144,6 +152,7 @@ Customize your translation style:
 All settings are saved in `config.json`.
 
 ---
+
 
 ## 🧪 Example Workflow
 
