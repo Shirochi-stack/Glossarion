@@ -2407,10 +2407,11 @@ def translate_terms_batch(term_list, profile_name, batch_size=50):
 def save_glossary(output_dir, chapters, instructions, language="korean"):
     """
     Targeted glossary generator - Focuses on titles and CJK names with honorifics
+    Fixed version that properly extracts complete names instead of individual syllables
     """
     
-    print("📑 Targeted Glossary Generator v3.0")
-    print("📑 Extracting titles and names with honorifics only")
+    print("📑 Targeted Glossary Generator v3.1 (Fixed)")
+    print("📑 Extracting complete names with honorifics and titles")
     
     # Check for existing manual glossary first
     manual_glossary_path = os.getenv("MANUAL_GLOSSARY")
@@ -2486,7 +2487,17 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
         'korean': ['님', '씨', '선배', '형', '누나', '언니', '오빠', '선생님', '교수님', '사장님', '회장님'],
         'japanese': ['さん', 'ちゃん', '君', 'くん', '様', 'さま', '先生', 'せんせい', '殿', 'どの', '先輩', 'せんぱい'],
         'chinese': ['先生', '小姐', '夫人', '公子', '大人', '老师', '师父', '师傅', '同志', '同学'],
-        'english': ['-san', '-chan', '-kun', '-sama', '-sensei', '-senpai', '-dono']  # For romanized content
+        'english': [
+            # Japanese romanized (typically written with space, not hyphen)
+            ' san', ' chan', ' kun', ' sama', ' sensei', ' senpai', ' dono', ' shi', ' tan', ' chin',
+            # Korean romanized (typically written with hyphen)
+            '-ssi', '-nim', '-ah', '-ya', '-hyung', '-hyungnim', '-oppa', '-unnie', '-noona', 
+            '-sunbae', '-sunbaenim', '-hubae', '-seonsaeng', '-seonsaengnim', '-gun', '-yang',
+            # Chinese romanized (typically written with hyphen)
+            '-xiong', '-di', '-ge', '-gege', '-didi', '-jie', '-jiejie', '-meimei', '-shixiong',
+            '-shidi', '-shijie', '-shimei', '-gongzi', '-guniang', '-xiaojie', '-daren', '-qianbei',
+            '-daoyou', '-zhanglao', '-shibo', '-shishu', '-shifu', '-laoshi', '-xiansheng'
+        ]  # For romanized content
     }
     
     # Title patterns for various languages
@@ -2509,27 +2520,34 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
         ]
     }
     
-    # Enhanced exclusions - more strict
+    # Enhanced exclusions - more comprehensive
     COMMON_WORDS = {
-        # Korean particles and common words that might appear with honorifics
+        # Korean particles and common words
         '이', '그', '저', '우리', '너희', '자기', '당신', '여기', '거기', '저기',
         '오늘', '내일', '어제', '지금', '아까', '나중', '먼저', '다음', '마지막',
         '모든', '어떤', '무슨', '이런', '그런', '저런', '같은', '다른', '새로운',
+        '하다', '있다', '없다', '되다', '하는', '있는', '없는', '되는',
+        '것', '수', '때', '년', '월', '일', '시', '분', '초',
+        
+        # Korean particles
+        '은', '는', '이', '가', '을', '를', '에', '의', '와', '과', '도', '만',
+        '에서', '으로', '로', '까지', '부터', '에게', '한테', '께', '께서',
         
         # Japanese particles and common words
         'この', 'その', 'あの', 'どの', 'これ', 'それ', 'あれ', 'どれ',
         'わたし', 'あなた', 'かれ', 'かのじょ', 'わたしたち', 'あなたたち',
         'きょう', 'あした', 'きのう', 'いま', 'あとで', 'まえ', 'つぎ',
+        'の', 'は', 'が', 'を', 'に', 'で', 'と', 'も', 'や', 'から', 'まで',
         
         # Chinese common words
         '这', '那', '哪', '这个', '那个', '哪个', '这里', '那里', '哪里',
         '我', '你', '他', '她', '它', '我们', '你们', '他们', '她们',
         '今天', '明天', '昨天', '现在', '刚才', '以后', '以前', '后来',
+        '的', '了', '在', '是', '有', '和', '与', '或', '但', '因为', '所以',
         
-        # Single characters that are definitely not names
+        # Numbers
         '一', '二', '三', '四', '五', '六', '七', '八', '九', '十',
-        'a', 'i', 'u', 'e', 'o', 'の', 'は', 'が', 'を', 'に', 'で', 'と', 'も',
-        '은', '는', '이', '가', '을', '를', '에', '의', '와', '과', '도', '만'
+        '1', '2', '3', '4', '5', '6', '7', '8', '9', '0',
     }
     
     def is_valid_name(name, language_hint='unknown'):
@@ -2539,7 +2557,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
             
         name = name.strip()
         
-        # Exclude common words
+        # Exclude common words and particles
         if name.lower() in COMMON_WORDS or name in COMMON_WORDS:
             return False
         
@@ -2550,6 +2568,9 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
                 return False
             # Should be all Hangul
             if not all(0xAC00 <= ord(char) <= 0xD7AF for char in name):
+                return False
+            # Additional check: should not be all the same character
+            if len(set(name)) == 1:
                 return False
                 
         elif language_hint == 'japanese':
@@ -2621,47 +2642,244 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
     
     print("📑 Scanning for names with honorifics...")
     
-    # Process each honorific
+    # FIXED: Better patterns for extracting complete names with honorifics
     for honorific in honorifics_to_use:
-        # Use regex to find name + honorific patterns
-        if honorific.startswith('-'):
-            # English style suffix
-            pattern = r'(\b[A-Z][a-zA-Z]+)' + re.escape(honorific) + r'\b'
-        else:
-            # CJK style suffix - need to handle no word boundaries
-            if language_hint == 'japanese':
-                # Japanese names can be 1-6 chars before honorific
-                pattern = r'([\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]{1,6})' + re.escape(honorific)
-            elif language_hint == 'korean':
-                # Korean names are typically 2-4 chars
-                pattern = r'([\uac00-\ud7af]{2,4})' + re.escape(honorific)
-            elif language_hint == 'chinese':
-                # Chinese names are typically 2-4 chars
-                pattern = r'([\u4e00-\u9fff]{2,4})' + re.escape(honorific)
-            else:
-                # Generic pattern
-                pattern = r'(\S+)' + re.escape(honorific) + r'(?:\s|$|[。、.,!?])'
-        
-        matches = re.finditer(pattern, all_text)
-        
-        for match in matches:
-            potential_name = match.group(1)
+        if language_hint == 'korean' and not honorific.startswith('-'):
+            # Enhanced pattern for Korean - capture complete names before honorifics
+            # Look for 2-4 character Korean names followed by honorific
+            pattern = r'([\uac00-\ud7af]{2,4})(?=' + re.escape(honorific) + r'(?:\s|[,.\!?]|$))'
             
-            if is_valid_name(potential_name, language_hint):
-                full_form = potential_name + honorific
+            for match in re.finditer(pattern, all_text):
+                potential_name = match.group(1)
                 
-                # Count occurrences
-                count = len(re.findall(re.escape(full_form), all_text))
+                # Validate the name
+                if is_valid_name(potential_name, 'korean'):
+                    full_form = potential_name + honorific
+                    
+                    # Count exact occurrences of the full form
+                    count = len(re.findall(re.escape(full_form) + r'(?=\s|[,.\!?]|$)', all_text))
+                    
+                    if count >= min_frequency:
+                        # Additional validation: check context
+                        # Look for the name in various contexts to ensure it's actually a name
+                        context_patterns = [
+                            full_form + r'[은는이가]',  # Followed by subject markers
+                            full_form + r'[을를]',      # Followed by object markers
+                            full_form + r'[에게한테]',   # Followed by indirect object markers
+                            r'["]' + full_form,         # After quotation mark
+                            full_form + r'[,]',         # Before comma
+                        ]
+                        
+                        context_count = 0
+                        for ctx_pattern in context_patterns:
+                            context_count += len(re.findall(ctx_pattern, all_text))
+                        
+                        # Only add if it appears in proper contexts
+                        if context_count > 0:
+                            names_with_honorifics[full_form] = count
+                            standalone_names[potential_name] = count
+                            
+        elif language_hint == 'japanese' and not honorific.startswith('-'):
+            # Pattern for Japanese names with honorifics
+            pattern = r'([\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]{2,5})(?=' + re.escape(honorific) + r'(?:\s|[、。！？]|$))'
+            
+            for match in re.finditer(pattern, all_text):
+                potential_name = match.group(1)
+                
+                if is_valid_name(potential_name, 'japanese'):
+                    full_form = potential_name + honorific
+                    count = len(re.findall(re.escape(full_form) + r'(?=\s|[、。！？]|$)', all_text))
+                    
+                    if count >= min_frequency:
+                        names_with_honorifics[full_form] = count
+                        standalone_names[potential_name] = count
+                        
+        elif language_hint == 'chinese' and not honorific.startswith('-'):
+            # Pattern for Chinese names with honorifics
+            pattern = r'([\u4e00-\u9fff]{2,4})(?=' + re.escape(honorific) + r'(?:\s|[，。！？]|$))'
+            
+            for match in re.finditer(pattern, all_text):
+                potential_name = match.group(1)
+                
+                if is_valid_name(potential_name, 'chinese'):
+                    full_form = potential_name + honorific
+                    count = len(re.findall(re.escape(full_form) + r'(?=\s|[，。！？]|$)', all_text))
+                    
+                    if count >= min_frequency:
+                        names_with_honorifics[full_form] = count
+                        standalone_names[potential_name] = count
+                        
+        elif honorific.startswith('-') or honorific.startswith(' '):
+            # Romanized honorifics - need to handle both English and romanized Asian names
+            # Japanese uses space, Korean/Chinese use hyphen
+            
+            is_space_separated = honorific.startswith(' ')
+            
+            # Pattern 1: English-style capitalized names (John-san or John san)
+            if is_space_separated:
+                pattern_english = r'\b([A-Z][a-zA-Z]+)' + re.escape(honorific) + r'(?=\s|[,.\!?]|$)'
+            else:
+                pattern_english = r'\b([A-Z][a-zA-Z]+)' + re.escape(honorific) + r'\b'
+            
+            matches = re.finditer(pattern_english, all_text)
+            
+            for match in matches:
+                potential_name = match.group(1)
+                
+                if is_valid_name(potential_name, 'english'):
+                    full_form = potential_name + honorific
+                    if is_space_separated:
+                        count = len(re.findall(re.escape(full_form) + r'(?=\s|[,.\!?]|$)', all_text))
+                    else:
+                        count = len(re.findall(re.escape(full_form) + r'\b', all_text))
+                    
+                    if count >= min_frequency:
+                        names_with_honorifics[full_form] = count
+                        standalone_names[potential_name] = count
+            
+            # Pattern 2: Romanized Korean names (e.g., Kim Cheol-su-nim, Park-ssi, Lee Jun-ho-sunbae)
+            # Korean romanized names can be: 
+            # - Single syllable family names: Kim, Lee, Park, Choi, Jung, etc.
+            # - Multi-syllable given names: Cheol-su, Jun-ho, Min-jung, etc.
+            # - Full names: Kim Cheol-su, Park Young-hee, etc.
+            
+            # Common Korean family names in romanization
+            korean_family_names = r'(?:Kim|Lee|Park|Choi|Jung|Jeong|Kang|Cho|Jo|Yoon|Yun|Jang|Chang|Lim|Im|Han|Oh|Seo|Shin|Kwon|Hwang|Ahn|An|Song|Hong|Yoo|Yu|Ko|Go|Moon|Mun|Yang|Bae|Baek|Paek|Nam|Noh|No|Roh|Ha|Heo|Hur|Koo|Ku|Gu|Min|Sim|Shim)'
+            
+            # Pattern for Korean romanized names with honorifics
+            if is_space_separated:
+                # For Japanese-style space-separated honorifics on Korean names
+                pattern_korean = r'\b(' + korean_family_names + r'(?:\s+[A-Z][a-z]+(?:-[A-Z][a-z]+)?)?|[A-Z][a-z]+(?:-[A-Z][a-z]+)+)' + re.escape(honorific) + r'(?=\s|[,.\!?]|$)'
+            else:
+                # For Korean-style hyphenated honorifics
+                pattern_korean = r'\b(' + korean_family_names + r'(?:\s+[A-Z][a-z]+(?:-[A-Z][a-z]+)?)?|[A-Z][a-z]+(?:-[A-Z][a-z]+)+)' + re.escape(honorific) + r'\b'
+            
+            matches = re.finditer(pattern_korean, all_text, re.IGNORECASE)
+            
+            for match in matches:
+                potential_name = match.group(1)
+                # Capitalize properly
+                potential_name = potential_name.strip()
+                
+                # Validate length and format
+                if 2 <= len(potential_name) <= 30:  # Reasonable length for romanized names
+                    full_form = potential_name + honorific
+                    if is_space_separated:
+                        count = len(re.findall(re.escape(full_form) + r'(?=\s|[,.\!?]|$)', all_text, re.IGNORECASE))
+                    else:
+                        count = len(re.findall(re.escape(full_form) + r'\b', all_text, re.IGNORECASE))
+                    
+                    if count >= min_frequency:
+                        names_with_honorifics[full_form] = count
+                        standalone_names[potential_name] = count
+            
+            # Pattern 3: Romanized Chinese names (e.g., Wei Wuxian-gongzi, Lan Wangji-xiong)
+            # Chinese romanized names typically follow: Family Given-given pattern
+            
+            # Common Chinese family names in romanization (Pinyin)
+            chinese_family_names = r'(?:Wang|Li|Zhang|Liu|Chen|Yang|Huang|Zhao|Zhou|Wu|Xu|Sun|Ma|Zhu|Hu|Guo|He|Gao|Lin|Luo|Zheng|Liang|Xie|Song|Tang|Xu|Deng|Feng|Han|Cao|Peng|Zeng|Xiao|Tian|Dong|Yuan|Pan|Yu|Jiang|Cai|Yu|Du|Ye|Cheng|Wei|Su|Lu|Ding|Ren|Shen|Yao|Lu|Jiang|Cui|Qian|Tan|Xiang|Lan|Wen|Bai|Meng|Qin|Yin|Xue|Hou|Long)'
+            
+            # Pattern for Chinese romanized names with honorifics
+            if is_space_separated:
+                # For Japanese-style space-separated honorifics on Chinese names
+                pattern_chinese = r'\b(' + chinese_family_names + r'(?:\s+[A-Z][a-z]+(?:[A-Z][a-z]+)?)?|[A-Z][a-z]+\s+[A-Z][a-z]+(?:[a-z]+)?)' + re.escape(honorific) + r'(?=\s|[,.\!?]|$)'
+            else:
+                # For Chinese-style hyphenated honorifics
+                pattern_chinese = r'\b(' + chinese_family_names + r'(?:\s+[A-Z][a-z]+(?:[A-Z][a-z]+)?)?|[A-Z][a-z]+\s+[A-Z][a-z]+(?:[a-z]+)?)' + re.escape(honorific) + r'\b'
+            
+            matches = re.finditer(pattern_chinese, all_text, re.IGNORECASE)
+            
+            for match in matches:
+                potential_name = match.group(1)
+                potential_name = potential_name.strip()
+                
+                # Validate length and format
+                if 2 <= len(potential_name) <= 30:
+                    full_form = potential_name + honorific
+                    if is_space_separated:
+                        count = len(re.findall(re.escape(full_form) + r'(?=\s|[,.\!?]|$)', all_text, re.IGNORECASE))
+                    else:
+                        count = len(re.findall(re.escape(full_form) + r'\b', all_text, re.IGNORECASE))
+                    
+                    if count >= min_frequency:
+                        names_with_honorifics[full_form] = count
+                        standalone_names[potential_name] = count
+            
+            # Pattern 4: For Japanese romanized names specifically (when using space-separated honorifics)
+            if is_space_separated:
+                # Common Japanese family names
+                japanese_family_names = r'(?:Yamamoto|Tanaka|Suzuki|Takahashi|Sato|Watanabe|Ito|Nakamura|Kobayashi|Yamada|Sasaki|Yamaguchi|Matsumoto|Inoue|Kimura|Shimizu|Hayashi|Saito|Sakai|Mori|Fujiwara|Ogawa|Okamoto|Goto|Hasegawa|Murakami|Kondo|Ishikawa|Sakamoto|Endo|Aoki|Fujita|Nishimura|Fukuda|Ota|Miura|Okada|Matsuda|Nakajima|Nakano|Harada|Ono)'
+                
+                # Pattern for Japanese names (can be just family name or full name)
+                pattern_japanese = r'\b(' + japanese_family_names + r'(?:\s+[A-Z][a-z]+)?|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)' + re.escape(honorific) + r'(?=\s|[,.\!?]|$)'
+                
+                matches = re.finditer(pattern_japanese, all_text, re.IGNORECASE)
+                
+                for match in matches:
+                    potential_name = match.group(1)
+                    potential_name = potential_name.strip()
+                    
+                    if 2 <= len(potential_name) <= 30:
+                        full_form = potential_name + honorific
+                        count = len(re.findall(re.escape(full_form) + r'(?=\s|[,.\!?]|$)', all_text, re.IGNORECASE))
+                        
+                        if count >= min_frequency:
+                            names_with_honorifics[full_form] = count
+                            standalone_names[potential_name] = count
+            
+            # Pattern 5: Generic pattern for any name-like word before romanized honorific
+            # This catches names we might have missed
+            if is_space_separated:
+                pattern_generic = r'\b([A-Z][a-z]+(?:[-\s][A-Z]?[a-z]+)*)' + re.escape(honorific) + r'(?=\s|[,.\!?]|$)'
+            else:
+                pattern_generic = r'\b([A-Z][a-z]+(?:[-\s][A-Z]?[a-z]+)*)' + re.escape(honorific) + r'\b'
+                
+            matches = re.finditer(pattern_generic, all_text)
+            
+            for match in matches:
+                potential_name = match.group(1)
+                potential_name = potential_name.strip()
+                
+                # Skip if already found or if it's a common English word
+                if potential_name in standalone_names:
+                    continue
+                
+                # Basic validation
+                if 2 <= len(potential_name) <= 30 and not potential_name.lower() in COMMON_WORDS:
+                    full_form = potential_name + honorific
+                    if is_space_separated:
+                        count = len(re.findall(re.escape(full_form) + r'(?=\s|[,.\!?]|$)', all_text))
+                    else:
+                        count = len(re.findall(re.escape(full_form) + r'\b', all_text))
+                    
+                    if count >= min_frequency:
+                        names_with_honorifics[full_form] = count
+                        standalone_names[potential_name] = count
+    
+    # Also look for titles with honorifics (especially for Korean)
+    if language_hint == 'korean':
+        # Common Korean titles that often appear with 님
+        korean_titles = [
+            '사장', '회장', '부장', '과장', '대리', '팀장', '실장', '본부장',
+            '선생', '교수', '박사', '의사', '변호사', '검사', '판사',
+            '대통령', '총리', '장관', '시장', '지사', '의원',
+            '왕', '여왕', '왕자', '공주', '황제', '황후',
+            '장군', '대장', '원수', '제독', '함장',
+            '어머니', '아버지', '할머니', '할아버지',
+            '사모', '선배', '후배', '동료'
+        ]
+        
+        for title in korean_titles:
+            for honorific in ['님']:
+                full_title = title + honorific
+                count = len(re.findall(re.escape(full_title) + r'(?=\s|[,.\!?]|$)', all_text))
                 
                 if count >= min_frequency:
-                    if full_form not in names_with_honorifics:
-                        names_with_honorifics[full_form] = count
-                    if potential_name not in standalone_names:
-                        standalone_names[potential_name] = count
+                    names_with_honorifics[full_title] = count
     
     print(f"📑 Found {len(standalone_names)} unique names with honorifics")
     
-    # Find titles
+    # Find titles (without duplicating the ones already found with honorifics)
     print("📑 Scanning for titles...")
     found_titles = {}
     
@@ -2677,7 +2895,12 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
         
         for match in matches:
             title = match.group(0)
-            count = len(re.findall(re.escape(title), all_text, re.IGNORECASE if 'english' in pattern else 0))
+            
+            # Skip if this title is already in names_with_honorifics
+            if title in names_with_honorifics:
+                continue
+                
+            count = len(re.findall(re.escape(title) + r'(?=\s|[,.\!?、。，]|$)', all_text, re.IGNORECASE if 'english' in pattern else 0))
             
             if count >= min_frequency:
                 # Normalize case for English titles
