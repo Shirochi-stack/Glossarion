@@ -121,6 +121,64 @@ except AttributeError:
 # Global stop flag for GUI integration
 _stop_requested = False
 
+def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
+    """
+    Translate the book title using the same translation settings
+    
+    Args:
+        title: Original title to translate
+        client: UnifiedClient instance
+        system_prompt: System prompt for translation
+        user_prompt: User's custom prompt (used if hardcoded prompts disabled)
+        temperature: Temperature for translation
+        
+    Returns:
+        Translated title string
+    """
+    if not title or not title.strip():
+        return title
+        
+    print(f"📚 Translating book title: {title}")
+    
+    try:
+        # Check if hardcoded prompts are disabled
+        if os.getenv("DISABLE_SYSTEM_PROMPT", "0") == "1":
+            # Use only user prompt if provided
+            if user_prompt:
+                messages = [
+                    {"role": "system", "content": user_prompt},
+                    {"role": "user", "content": title}
+                ]
+            else:
+                # No system prompt at all
+                messages = [
+                    {"role": "user", "content": title}
+                ]
+        else:
+            # Normal flow with system prompt
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Translate this book title to English while retaining any acronyms:\n\n{title}"}
+            ]
+        
+        # Make API call
+        translated_title, _ = client.send(messages, temperature=temperature, max_tokens=256)
+        
+        # Clean up the response
+        translated_title = translated_title.strip()
+        
+        # Remove quotes if they wrap the entire title
+        if ((translated_title.startswith('"') and translated_title.endswith('"')) or 
+            (translated_title.startswith("'") and translated_title.endswith("'"))):
+            translated_title = translated_title[1:-1].strip()
+        
+        print(f"✅ Translated title: {translated_title}")
+        return translated_title
+        
+    except Exception as e:
+        print(f"⚠️ Failed to translate title: {e}")
+        return title
+        
 def set_stop_flag(value):
     """Set the global stop flag"""
     global _stop_requested
@@ -3078,17 +3136,84 @@ def main(log_callback=None, stop_callback=None):
     validate_epub_structure(out)
     print("="*50 + "\n")
 
+    # Check for stop before starting
+    if check_stop():
+        return
+
+    # Extract EPUB contents WITH CONSOLIDATED EXTRACTION
+    print("🚀 Using comprehensive chapter extraction with resource handling...")
+    with zipfile.ZipFile(epub_path, 'r') as zf:
+        metadata = extract_epub_metadata(zf)
+        chapters = extract_chapters(zf, out)  # ONE FUNCTION, ALL FUNCTIONALITY!
+        
+        # Validate chapters
+        validate_chapter_continuity(chapters)
+
+    # FIXED: Add validation after extraction
+    print("\n" + "="*50)
+    validate_epub_structure(out)
+    print("="*50 + "\n")
+
     # Check for stop after file processing
     if check_stop():
         return
 
     # Write metadata with chapter info (enhanced metadata is already saved by extract_chapters)
     # Just ensure we have the basic metadata.json for backward compatibility
-    if not os.path.exists(os.path.join(out, "metadata.json")):
-        metadata["chapter_count"] = len(chapters)
-        metadata["chapter_titles"] = {str(c["num"]): c["title"] for c in chapters}
-        with open(os.path.join(out, "metadata.json"), 'w', encoding='utf-8') as mf:
-            json.dump(metadata, mf, ensure_ascii=False, indent=2)
+    # Load existing metadata if it exists
+    metadata_path = os.path.join(out, "metadata.json")
+    if os.path.exists(metadata_path):
+        with open(metadata_path, 'r', encoding='utf-8') as mf:
+            metadata = json.load(mf)
+
+    # Ensure we have chapter info
+    metadata["chapter_count"] = len(chapters)
+    metadata["chapter_titles"] = {str(c["num"]): c["title"] for c in chapters}
+
+    # Save metadata first (we'll update it with translated title later)
+    with open(metadata_path, 'w', encoding='utf-8') as mf:
+        json.dump(metadata, mf, ensure_ascii=False, indent=2)
+        
+    # Handle glossary - ENSURE IT COMPLETES BEFORE TRANSLATION
+    manual_gloss = os.getenv("MANUAL_GLOSSARY")
+    disable_auto_glossary = os.getenv("DISABLE_AUTO_GLOSSARY", "0") == "1"
+
+    print("\n" + "="*50)
+    print("📑 GLOSSARY GENERATION PHASE")
+    print("="*50)
+
+    # ... (glossary generation code) ...
+
+    # AFTER GLOSSARY GENERATION, TRANSLATE THE TITLE
+    # (Move the title translation here, after the glossary is ready)
+    glossary_path = os.path.join(out, "glossary.json")
+
+    # Translate the title if it exists and hasn't been translated yet
+    if "title" in metadata and not metadata.get("title_translated", False):
+        original_title = metadata["title"]
+        
+        # Check for stop before translating title
+        if not check_stop():
+            # Build system prompt for title translation (now glossary_path exists)
+            title_system_prompt = build_system_prompt(SYSTEM_PROMPT, glossary_path, instructions)
+            
+            # Translate the title
+            translated_title = translate_title(original_title, client, title_system_prompt, SYSTEM_PROMPT, TEMP)
+            
+            # Store both original and translated titles
+            metadata["original_title"] = original_title
+            metadata["title"] = translated_title
+            metadata["title_translated"] = True
+            
+            # Save updated metadata immediately
+            with open(metadata_path, 'w', encoding='utf-8') as mf:
+                json.dump(metadata, mf, ensure_ascii=False, indent=2)
+            
+            print(f"💾 Updated metadata with translated title")
+
+    print("="*50)
+    print("🚀 STARTING MAIN TRANSLATION PHASE")
+    print("="*50 + "\n")
         
     # Handle glossary - ENSURE IT COMPLETES BEFORE TRANSLATION
     manual_gloss = os.getenv("MANUAL_GLOSSARY")
