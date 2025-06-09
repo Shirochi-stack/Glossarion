@@ -28,8 +28,9 @@
     ### 🖼️ OCR Translation
   
   * Extract & translate embedded images’ text  
-  * Auto-split tall images (>2000 px) for reliable OCR  
-  * OpenAI, Gemini API support & configurable chunk sizing  
+  * Auto-split tall images (>2000 px) for reliable OCR
+  * Configurable chunk sizing
+  * OpenAI & Gemini API support
   * Header detection, retry logic & toggle controls  
 
 
