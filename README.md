@@ -16,7 +16,7 @@
 
 ## ✨ Features
 
-### 🔁 Contextual Translation Pipeline
+### 📖 Core Translation Engine
 
 * Translate EPUB chapters using OpenAI or Gemini chat models.
 * Customizable system prompts that allow you to adjust your preferences.
@@ -35,6 +35,12 @@
   * Locations (with original script in brackets)
 * Output in `.json` and Markdown `.md` formats.
 * Intelligent merging of duplicate entries.
+
+### 🖼️ OCR Translation
+* Extract & translate embedded images’ text  
+* Auto-split tall images (>2000 px) for reliable OCR  
+* Model-agnostic support & configurable chunk sizing  
+* Header detection, retry logic & toggle controls  
 
 ### ✂️ Glossary Management
 
@@ -62,7 +68,13 @@
 * Rebuild an EPUB from translated HTML and images, preserving cover art and metadata.
 * Image gallery support.
 * Accessible via GUI **EPUB Converter** or CLI `epub_converter.py`.
-
+* Preserves cover art, images & metadata  
+* Smart chapter extraction & robust XHTML parsing
+  
+### 🔍 Quality Assurance Tools
+* Automated HTML scans for duplicates, non-English fragments & spacing issues  
+* Reports in JSON, CSV & HTML
+   
 ### 🔧 Helper Tools
 
 * Unified API client (`unified_api_client.py`): supports OpenAI, Gemini, DeepSeek Chat, and Anthropic/Sonetta models with automatic retries and detailed payload logging.
@@ -154,6 +166,7 @@ All settings are saved in `config.json`.
 │   ├── launch_Glossarion.bat
 │   └── launch_Glossarion.vbs
 │   └── scan_html_folder.py
+│   └── image_translator.py
 ├── docs/
 │   └── UserGuide.md
 ├── Glossary/
@@ -164,8 +177,7 @@ All settings are saved in `config.json`.
 ├── README.md
 ├── LICENSE
 ├── requirements.txt
-├── install_requirements.bat
-└── install_requirements.ps1
+└── install_requirements.bat
 ```
 
 ---
