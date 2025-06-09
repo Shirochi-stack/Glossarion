@@ -24,6 +24,12 @@
 * Manual glossary override supported.
 * Configurable context-memory window per chapter.
 * Rate-limit handling with delay configuration and retry logic.
+  
+    ### 🖼️ OCR Translation
+  * Extract & translate embedded images’ text  
+  * Auto-split tall images (>2000 px) for reliable OCR  
+  * Model-agnostic support & configurable chunk sizing  
+  * Header detection, retry logic & toggle controls  
 
 ### 📓 Glossary Extraction
 
@@ -35,12 +41,6 @@
   * Locations (with original script in brackets)
 * Output in `.json` and Markdown `.md` formats.
 * Intelligent merging of duplicate entries.
-
-### 🖼️ OCR Translation
-* Extract & translate embedded images’ text  
-* Auto-split tall images (>2000 px) for reliable OCR  
-* Model-agnostic support & configurable chunk sizing  
-* Header detection, retry logic & toggle controls  
 
 ### ✂️ Glossary Management
 
