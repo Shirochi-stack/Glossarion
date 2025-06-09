@@ -29,7 +29,7 @@
   
   * Extract & translate embedded images’ text  
   * Auto-split tall images (>2000 px) for reliable OCR  
-  * Model-agnostic support & configurable chunk sizing  
+  * OpenAI, Gemini API support & configurable chunk sizing  
   * Header detection, retry logic & toggle controls  
 
 
