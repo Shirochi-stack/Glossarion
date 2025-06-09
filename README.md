@@ -132,8 +132,8 @@ tqdm
 
 To use translation features, provide an API key in the GUI:
 
-* **OpenAI**: Models like `gpt-4.1-nano`, `gpt-4.1-mini`
-* **Gemini**: Any `gemini-pro-*` model supported by Google
+* **OpenAI**: Models like `gpt-4.1-*`, `o4-*`
+* **Gemini**: Any `gemini-flash-*`, `gemini-pro-*` model supported by Google
 * **DeepSeek Chat**: Your DeepSeek Chat API key
 * **Sonetta (Anthropic)**: Your Sonetta/Anthropic API key
 
