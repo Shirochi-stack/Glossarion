@@ -1,308 +1,248 @@
-import time
-import atexit
+# -*- mode: python ; coding: utf-8 -*-
 
-class SplashManager:
-    """Simple splash screen manager that works with main thread"""
-    
-    def __init__(self):
-        self.splash_window = None
-        self._status_text = "Initializing..."
-        self.progress_value = 0  # Track actual progress 0-100
-        self.canvas_width = 320  # Progress bar dimensions (increased from 300)
-        self.canvas_height = 36  # Increased from 30
-        self._after_id = None
-        
-    def start_splash(self):
-        """Create splash window on main thread"""
-        try:
-            import tkinter as tk
-            
-            print("🎨 Starting splash screen...")
-            
-            # Create splash window on main thread
-            self.splash_window = tk.Tk()
-            self.splash_window.title("Loading Glossarion...")
-            self.splash_window.geometry("450x350")
-            self.splash_window.configure(bg='#2b2b2b')
-            self.splash_window.resizable(False, False)
-            self.splash_window.overrideredirect(True)
-            
-            # Center the window
-            self.splash_window.update_idletasks()
-            x = (self.splash_window.winfo_screenwidth() // 2) - 225
-            y = (self.splash_window.winfo_screenheight() // 2) - 175
-            self.splash_window.geometry(f"450x350+{x}+{y}")
-            
-            # Add content
-            main_frame = tk.Frame(self.splash_window, bg='#2b2b2b', relief='raised', bd=2)
-            main_frame.pack(fill='both', expand=True, padx=2, pady=2)
-            
-            # Load the actual Halgakos.ico icon
-            self._load_icon(main_frame)
-            
-            # Title
-            title_label = tk.Label(main_frame, text="Glossarion v1.9.2", 
-                                  bg='#2b2b2b', fg='#4a9eff', font=('Arial', 20, 'bold'))
-            title_label.pack(pady=(10, 5))
-            
-            # Subtitle
-            subtitle_label = tk.Label(main_frame, text="Advanced EPUB Translation Suite", 
-                                     bg='#2b2b2b', fg='#cccccc', font=('Arial', 12))
-            subtitle_label.pack(pady=(0, 15))
-            
-            # Status
-            self.status_label = tk.Label(main_frame, text=self._status_text, 
-                                        bg='#2b2b2b', fg='#ffffff', font=('Arial', 11))
-            self.status_label.pack(pady=(10, 10))
-            
-            # Progress bar container
-            progress_frame = tk.Frame(main_frame, bg='#2b2b2b')
-            progress_frame.pack(pady=(5, 15))  # Adjusted padding for larger bar
-            
-            # Progress bar background
-            self.progress_bg = tk.Canvas(progress_frame, width=self.canvas_width, height=self.canvas_height, 
-                                        bg='#2b2b2b', highlightthickness=0)
-            self.progress_bg.pack()
-            
-            # Create border
-            self.progress_bg.create_rectangle(1, 1, self.canvas_width-1, self.canvas_height-1, 
-                                            outline='#666666', width=2)
-            
-            # Create background
-            self.progress_bg.create_rectangle(3, 3, self.canvas_width-3, self.canvas_height-3, 
-                                            fill='#1a1a1a', outline='')
-            
-            # Progress bar fill (will be updated)
-            self.progress_fill = None
-            
-            # Progress percentage text - moved up and with better font
-            text_x = self.canvas_width // 2  # 160 for 320px width
-            text_y = 13.5  # Positioned slightly above center for visual balance
-            
-            # Use a cleaner, more modern font
-            progress_font = ('Montserrat', 12, 'bold')  # Increased size to 12
-            
-            # Create outline for better readability
-            for dx in [-1, 0, 1]:
-                for dy in [-1, 0, 1]:
-                    if dx != 0 or dy != 0:
-                        self.progress_bg.create_text(text_x + dx, text_y + dy, text="0%", 
-                                                   fill='#000000', font=progress_font,
-                                                   tags="outline", anchor='center')
-            
-            # Main text on top (white)
-            self.progress_text = self.progress_bg.create_text(text_x, text_y, text="0%", 
-                                                             fill='#ffffff', font=progress_font,
-                                                             anchor='center')
-            
-            # Version info
-            version_label = tk.Label(main_frame, text="Starting up...", 
-                                   bg='#2b2b2b', fg='#888888', font=('Arial', 9))
-            version_label.pack(side='bottom', pady=(0, 15))
-            
-            # Start progress animation
-            self._animate_progress()
-            
-            # Update the display
-            self.splash_window.update()
-            
-            # Register cleanup
-            atexit.register(self.close_splash)
-            return True
-            
-        except Exception as e:
-            print(f"⚠️ Could not start splash: {e}")
-            return False
-    
-    def _load_icon(self, parent):
-        """Load the Halgakos.ico icon"""
-        try:
-            # Get icon path - handle both development and packaged modes
-            import os
-            import sys
-            import tkinter as tk
-            
-            if getattr(sys, 'frozen', False):
-                # Running as .exe
-                base_dir = sys._MEIPASS
-            else:
-                # Running as .py files
-                base_dir = os.path.dirname(os.path.abspath(__file__))
-            
-            ico_path = os.path.join(base_dir, 'Halgakos.ico')
-            
-            if os.path.isfile(ico_path):
-                try:
-                    # Try PIL first for better quality
-                    from PIL import Image, ImageTk
-                    pil_image = Image.open(ico_path)
-                    pil_image = pil_image.resize((128, 128), Image.Resampling.LANCZOS)
-                    icon_photo = ImageTk.PhotoImage(pil_image, master=self.splash_window)
-                    icon_label = tk.Label(parent, image=icon_photo, bg='#2b2b2b')
-                    icon_label.image = icon_photo  # Keep reference
-                    icon_label.pack(pady=(20, 10))
-                    return
-                except ImportError:
-                    # Fallback to basic tkinter
-                    try:
-                        icon_image = tk.PhotoImage(file=ico_path)
-                        icon_label = tk.Label(parent, image=icon_image, bg='#2b2b2b')
-                        icon_label.image = icon_image
-                        icon_label.pack(pady=(20, 10))
-                        return
-                    except tk.TclError:
-                        pass
-        except Exception:
-            pass
-        
-        # Fallback emoji if icon loading fails
-        import tkinter as tk
-        icon_frame = tk.Frame(parent, bg='#4a9eff', width=128, height=128)
-        icon_frame.pack(pady=(20, 10))
-        icon_frame.pack_propagate(False)
-        
-        icon_label = tk.Label(icon_frame, text="📚", font=('Arial', 64), 
-                             bg='#4a9eff', fg='white')
-        icon_label.pack(expand=True)
+block_cipher = None
 
-    def _animate_progress(self):
-        """Animate progress bar filling up"""
-        # Cancel any existing after callback first
-        if self._after_id:
-            try:
-                self.splash_window.after_cancel(self._after_id)
-            except:
-                pass
-            self._after_id = None
-            
-        if self.splash_window and self.splash_window.winfo_exists():
-            try:
-                # Auto-increment progress for visual effect during startup
-                if self.progress_value < 100:
-                    # Increment at different rates for different phases
-                    if self.progress_value < 30:
-                        self.progress_value += 8  # Fast initial progress
-                    elif self.progress_value < 70:
-                        self.progress_value += 4  # Medium progress
-                    elif self.progress_value < 90:
-                        self.progress_value += 2  # Slow progress
-                    else:
-                        self.progress_value += 1  # Very slow final progress
-                    
-                    # Cap at 99% until explicitly set to 100%
-                    if self.progress_value >= 99:
-                        self.progress_value = 99
-                
-                # Update progress bar fill
-                if self.progress_fill:
-                    self.progress_bg.delete(self.progress_fill)
-                # Also delete old highlight
-                self.progress_bg.delete("highlight")
-                
-                # Calculate fill width (3 to canvas_width-3)
-                fill_width = int((self.progress_value / 100) * (self.canvas_width - 6))  # -6 for borders
-                if fill_width > 0:
-                    # Create gradient effect
-                    self.progress_fill = self.progress_bg.create_rectangle(
-                        3, 3, 3 + fill_width, self.canvas_height - 3, 
-                        fill='#4a9eff', outline=''
-                    )
-                    
-                    # Add a highlight effect (adjusted for new height)
-                    if fill_width > 10:
-                        self.progress_bg.create_rectangle(
-                            3, 3, min(13, 3 + fill_width), 12,
-                            fill='#6bb6ff', outline='', tags="highlight"
-                        )
-                
-                # Update percentage text without changing position
-                percent_text = f"{self.progress_value}%"
-                
-                # Update main text
-                self.progress_bg.itemconfig(self.progress_text, text=percent_text)
-                
-                # Update all outline layers
-                for item in self.progress_bg.find_withtag("outline"):
-                    self.progress_bg.itemconfig(item, text=percent_text)
-                
-                # Ensure text stays on top of progress fill
-                self.progress_bg.tag_raise("outline")
-                self.progress_bg.tag_raise(self.progress_text)
+# Add all your python files here
+added_files = [
+    ('translator_gui.py', '.'),
+    ('splash_utils.py', '.'),          # NEW - Added splash utilities
+    ('TransateKRtoEN.py', '.'),
+    ('extract_glossary_from_epub.py', '.'),
+    ('epub_converter.py', '.'),
+    ('scan_html_folder.py', '.'),
+    ('unified_api_client.py', '.'),
+    ('chapter_splitter.py', '.'),
+    ('history_manager.py', '.'),
+    ('image_translator.py', '.'),      # NEW - Added image translator
+    ('check_epub_directory.py', '.'),  # Added missing file
+    ('direct_imports.py', '.'),        # Added missing file
+    ('Halgakos.ico', '.'),  # Include icon
+]
 
-                # Store the after ID so we can cancel it later
-                self._after_id = self.splash_window.after(100, self._animate_progress)
-                
-            except Exception:
-                self._after_id = None
-                pass
-    
-    def update_status(self, message):
-        """Update splash status and progress"""
-        self._status_text = message
-        try:
-            if self.splash_window and hasattr(self, 'status_label'):
-                self.status_label.config(text=message)
-                
-                # Map status messages to progress values
-                progress_map = {
-                    "Loading theme framework...": 15,
-                    "Loading UI framework...": 30,
-                    "Creating main window...": 60,
-                    "Loading translation modules...": 75,
-                    "Ready!": 100
-                }
-                
-                # Update progress based on status
-                for key, value in progress_map.items():
-                    if key in message:
-                        self.set_progress(value)
-                        break
-                
-                self.splash_window.update()
-        except:
-            pass
-    
-    def set_progress(self, value):
-        """Manually set progress value (0-100)"""
-        self.progress_value = max(0, min(100, value))
-    
-    def close_splash(self):
-        """Close the splash screen"""
-        try:
-            # IMPORTANT: Cancel the animation first
-            if self._after_id and self.splash_window:
-                try:
-                    self.splash_window.after_cancel(self._after_id)
-                except:
-                    pass
-                self._after_id = None
-            
-            if self.splash_window and self.splash_window.winfo_exists():
-                # Set to 100% briefly before closing
-                self.progress_value = 100
-                
-                # Update display one last time without scheduling another callback
-                if self.progress_fill:
-                    self.progress_bg.delete(self.progress_fill)
-                self.progress_bg.delete("highlight")
-                
-                fill_width = int((self.progress_value / 100) * (self.canvas_width - 6))
-                if fill_width > 0:
-                    self.progress_fill = self.progress_bg.create_rectangle(
-                        3, 3, 3 + fill_width, self.canvas_height - 3, 
-                        fill='#4a9eff', outline=''
-                    )
-                
-                self.progress_bg.itemconfig(self.progress_text, text="100%")
-                for item in self.progress_bg.find_withtag("outline"):
-                    self.progress_bg.itemconfig(item, text="100%")
-                
-                self.splash_window.update()
-                time.sleep(0.1)
-                
-                self.splash_window.destroy()
-                self.splash_window = None
-        except:
-            # Ensure cleanup even on error
-            self._after_id = None
-            self.splash_window = None
+a = Analysis(
+    ['translator_gui.py'],
+    pathex=[],
+    binaries=[],
+    datas=added_files,
+    hiddenimports=[
+        # Core modules
+        'TransateKRtoEN',
+        'extract_glossary_from_epub',
+        'epub_converter',
+        'scan_html_folder',
+        'unified_api_client',
+        'chapter_splitter',
+        'history_manager',
+        'image_translator',      # NEW - Added image translator
+        'check_epub_directory',  # Added
+        'direct_imports',        # Added
+        'splash_utils',          # NEW - Added splash utilities
+        
+        # EPUB processing
+        'ebooklib',
+        'ebooklib.epub',
+        'ebooklib.utils',  # Added for completeness
+        'bs4',
+        'BeautifulSoup',
+        'soupsieve',  # ADDED - BeautifulSoup4 dependency
+        'lxml',
+        'lxml.etree',
+        'lxml._elementpath',
+        'lxml.html',  # Added
+        'lxml.html.clean',  # Added
+        'html5lib',
+        'html',  # Added for html.escape
+        'html.parser',  # Added
+        'cgi',  # ADDED - Used in epub_converter.py for HTML escaping fallback
+        
+        # GUI
+        'ttkbootstrap',
+        'ttkbootstrap.constants',  # Added
+        'tkinter',
+        'tkinter.filedialog',
+        'tkinter.messagebox',
+        'tkinter.scrolledtext',
+        'tkinter.simpledialog',
+        'tkinter.ttk',
+        '_tkinter',  # Added for tkinter backend
+        
+        # PIL/Pillow - EXPANDED FOR IMAGE PROCESSING
+        'PIL',
+        'PIL.Image',
+        'PIL.ImageTk',
+        'PIL.ImageDraw',         # NEW - Used by image_translator
+        'PIL.ImageFont',         # NEW - Used by image_translator
+        'PIL.ImageEnhance',      # NEW - Used by image_translator
+        'PIL.ImageFilter',       # NEW - Used by image_translator
+        'PIL.ImageOps',          # ADDED - Common image operations
+        'PIL.ImageChops',        # ADDED - Image channel operations
+        'PIL.ImageStat',         # ADDED - Image statistics
+        'PIL.ImagePalette',      # ADDED - For palette-based images
+        'PIL._binary',
+        'PIL._imaging',
+        'PIL._imagingft',
+        'PIL._imagingmath',
+        'PIL._imagingtk',
+        'PIL.BmpImagePlugin',
+        'PIL.GifImagePlugin',
+        'PIL.JpegImagePlugin',
+        'PIL.PngImagePlugin',
+        'PIL.PpmImagePlugin',
+        'PIL.TiffImagePlugin',
+        'PIL.WebPImagePlugin',
+        'PIL.IcoImagePlugin',
+        'PIL.MicImagePlugin',
+        'olefile',  # FIXES THE ERROR - this is what MicImagePlugin needs
+        
+        # AI/API clients
+        'google',  # Added base google module
+        'google.generativeai',
+        'google.ai',
+        'google.ai.generativelanguage',
+        'google.auth',  # Added for authentication
+        'google.auth.transport',  # Added
+        'google.auth.transport.requests',  # Added
+        'openai',
+        'tiktoken',
+        'tiktoken_ext',
+        'tiktoken_ext.openai_public',
+        'regex',  # Added - tiktoken dependency
+		
+		# Time/Date handling - ADDED
+        'tzdata',  # FIXES THE WARNING
+        'zoneinfo',  # Python 3.9+ timezone support
+        '_zoneinfo',  # Internal zoneinfo module
+        'pytz',  # Alternative timezone library (if used)
+        
+        # Text processing
+        'langdetect',
+        'langdetect.detector',  # Added
+        'langdetect.lang_detect_exception',  # Added
+        'difflib',
+        'unicodedata',
+        
+        # Progress/UI
+        'tqdm',
+        'tqdm.auto',  # Added
+        'tqdm.std',   # Added
+        
+        # Network
+        'requests',
+        'requests.adapters',  # Added
+        'requests.models',    # Added
+        'requests.sessions',  # Added
+        'chardet',
+        'certifi',
+        'urllib3',
+        'urllib',     # Added
+        'urllib.parse',  # Added
+        'urllib.request',  # Added
+        'idna',
+        'ssl',  # Added
+        'socket',  # Added
+        'six',  # ADDED - Common compatibility library
+        
+        # Additional commonly missed modules
+        'pkg_resources',
+        'pkg_resources._vendor',  # Added
+        'encodings',
+        'encodings.utf_8',
+        'encodings.ascii',
+        'encodings.latin_1',
+        'encodings.cp1252',  # Added for Windows
+        'encodings.utf_16',  # Added
+        'encodings.utf_32',  # Added
+        'codecs',
+        
+        # Standard library modules that might be missed
+        'json',
+        'csv',
+        'hashlib',
+        'tempfile',
+        'shutil',
+        'threading',
+        'queue',
+        're',
+        'zipfile',
+        'mimetypes',
+        'collections',
+        'collections.abc',  # Added
+        'io',
+        'logging',
+        'logging.handlers',  # Added
+        'time',
+        'datetime',  # Added
+        'os',
+        'os.path',  # Added
+        'sys',
+        'dataclasses',  # ADDED - Used in unified_api_client.py
+        'typing',
+        'typing_extensions',  # Added - often needed
+        'argparse',
+        'subprocess',
+        'platform',
+        'pathlib',  # Added
+        'contextlib',  # Added - used by history_manager
+        'functools',  # Added
+        'itertools',  # Added
+        'warnings',  # Added
+        'copy',  # Added
+        'weakref',  # Added
+        'locale',  # Added
+        'struct',  # Added
+        'base64',  # Added - might be used by APIs and image processing
+        'hmac',  # Added - might be used by APIs
+        'secrets',  # Added - might be used by APIs
+        'uuid',  # Added - might be used by APIs
+        'email',  # Added - might be used by requests
+        'email.utils',  # Added
+        'http',  # Added
+        'http.client',  # Added
+        'xml',  # Added - used by BeautifulSoup
+        'xml.etree',  # Added
+        'xml.etree.ElementTree',  # Added
+        'atexit',  # ADDED - Used in splash_utils.py
+        'multiprocessing',  # ADDED - Used in translator_gui.py
+        'multiprocessing.freeze_support',  # ADDED - Specifically for freeze_support()
+        'gc',  # ADDED - Garbage collection (might be implicitly used)
+    ],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[
+        'matplotlib',  # Exclude if not used
+        'numpy',       # Exclude if not used
+        'pandas',      # Exclude if not used
+        'scipy',       # Exclude if not used
+        'pytest',      # Exclude test frameworks
+        'nose',        # Exclude test frameworks
+    ],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    [],
+    name='Glossarion v1.9.2',  # Updated version
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=False,  # Set to True if you want to see console output for debugging
+    disable_windowed_traceback=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon='Halgakos.ico'  # Icon path
+)
