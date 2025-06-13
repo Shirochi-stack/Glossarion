@@ -5,6 +5,8 @@ import zipfile
 import time
 import sys
 import tiktoken
+import threading
+import queue
 
 # Fix for PyInstaller - handle stdout reconfigure more carefully
 if sys.platform.startswith("win"):
@@ -191,28 +193,7 @@ def trim_context_history(history: List[Dict], limit: int) -> List[Dict]:
         trimmed.append({"role": "user", "content": entry["user"]})
         trimmed.append({"role": "assistant", "content": entry["assistant"]})
     return trimmed
-    
-def build_prompt(chapter_text: str) -> str:
-    return f"""
-Output exactly a JSON array of objects and nothing else.
-You are a glossary extractor for Korean, Japanese, or Chinese novels.
-- Extract character information (e.g., name, traits), locations (countries, regions, cities), and translate them into English (romanization or equivalent).
-- Romanize all untranslated honorifics and suffixes (e.g., 님 to '-nim', さん to '-san').
-- all output must be in english, unless specified otherwise
-For each character, provide JSON fields:
-- original_name: name in the original script
-- name: English/romanized name
-- gender
-- title (with romanized suffix)
-- group_affiliation
-- traits
-- how_they_refer_to_others (mapping with romanized suffix)
-- locations: list of place names mentioned (inlude the original language in brackets)
-Sort by appearance order; respond with a JSON array only.
 
-Text:
-{chapter_text}
-"""
 
 def load_progress() -> Dict:
     if os.path.exists(PROGRESS_FILE):
@@ -232,46 +213,294 @@ def dedupe_keep_order(old, new):
                 out.append(lx)
     return out
 
+
+# Add validation for extracted data with custom fields:
+def validate_extracted_entry(entry):
+    """Validate that extracted entry has required fields"""
+    # original_name is always required
+    if 'original_name' not in entry or not entry['original_name']:
+        return False
+    
+    # Get enabled fields
+    enabled_fields = []
+    
+    if os.getenv('GLOSSARY_EXTRACT_NAME', '1') == '1':
+        enabled_fields.append('name')
+    if os.getenv('GLOSSARY_EXTRACT_GENDER', '1') == '1':
+        enabled_fields.append('gender')
+    if os.getenv('GLOSSARY_EXTRACT_TITLE', '1') == '1':
+        enabled_fields.append('title')
+    if os.getenv('GLOSSARY_EXTRACT_GROUP_AFFILIATION', '1') == '1':
+        enabled_fields.append('group_affiliation')
+    if os.getenv('GLOSSARY_EXTRACT_TRAITS', '1') == '1':
+        enabled_fields.append('traits')
+    if os.getenv('GLOSSARY_EXTRACT_HOW_THEY_REFER_TO_OTHERS', '1') == '1':
+        enabled_fields.append('how_they_refer_to_others')
+    if os.getenv('GLOSSARY_EXTRACT_LOCATIONS', '1') == '1':
+        enabled_fields.append('locations')
+    
+    # Add custom fields
+    custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
+    try:
+        custom_fields = json.loads(custom_fields_json)
+        enabled_fields.extend(custom_fields)
+    except:
+        pass
+    
+    # Entry should have at least one other field besides original_name
+    has_content = False
+    for field in enabled_fields:
+        if field in entry and entry[field]:
+            has_content = True
+            break
+    
+    return has_content
+
+# Updates for extract_glossary_from_epub.py
+
+# Updated build_prompt function to handle custom prompts and fields:
+
+def build_prompt(chapter_text: str) -> str:
+    """
+    Build the extraction prompt based on enabled fields and custom settings.
+    Supports both custom prompts with placeholders and default prompts.
+    """
+    # Get custom prompt from environment or use default
+    custom_prompt = os.getenv('GLOSSARY_SYSTEM_PROMPT', '').strip()
+    
+    # Check which fields are enabled via environment variables
+    field_settings = {
+        'original_name': os.getenv('GLOSSARY_EXTRACT_ORIGINAL_NAME', '1') == '1',
+        'name': os.getenv('GLOSSARY_EXTRACT_NAME', '1') == '1',
+        'gender': os.getenv('GLOSSARY_EXTRACT_GENDER', '1') == '1',
+        'title': os.getenv('GLOSSARY_EXTRACT_TITLE', '1') == '1',
+        'group_affiliation': os.getenv('GLOSSARY_EXTRACT_GROUP_AFFILIATION', '1') == '1',
+        'traits': os.getenv('GLOSSARY_EXTRACT_TRAITS', '1') == '1',
+        'how_they_refer_to_others': os.getenv('GLOSSARY_EXTRACT_HOW_THEY_REFER_TO_OTHERS', '1') == '1',
+        'locations': os.getenv('GLOSSARY_EXTRACT_LOCATIONS', '1') == '1'
+    }
+    
+    # Field descriptions for the prompt
+    field_descriptions = {
+        'original_name': "- original_name: name in the original script",
+        'name': "- name: English/romanized name",
+        'gender': "- gender",
+        'title': "- title (with romanized suffix)",
+        'group_affiliation': "- group_affiliation",
+        'traits': "- traits",
+        'how_they_refer_to_others': "- how_they_refer_to_others (mapping with romanized suffix)",
+        'locations': "- locations: list of place names mentioned (include the original language in brackets)"
+    }
+    
+    # Build field list based on enabled fields
+    fields = []
+    enabled_fields = []
+    
+    for field_name, is_enabled in field_settings.items():
+        if is_enabled:
+            fields.append(field_descriptions[field_name])
+            enabled_fields.append(field_name)
+    
+    # Add custom fields
+    custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
+    try:
+        custom_fields = json.loads(custom_fields_json)
+        for field in custom_fields:
+            fields.append(f"- {field}")
+            enabled_fields.append(field)
+    except Exception as e:
+        print(f"[Warning] Failed to parse custom fields: {e}")
+    
+    # Ensure we have at least one field to extract
+    if not fields:
+        # Fallback logic: try to enable at least one identifier field
+        fallback_fields = ['name', 'original_name', 'title']
+        for fallback in fallback_fields:
+            if fallback in field_descriptions:
+                fields.append(field_descriptions[fallback])
+                enabled_fields.append(fallback)
+                print(f"[Warning] No fields selected, defaulting to {fallback}")
+                break
+        
+        # If still no fields, force original_name as absolute fallback
+        if not fields:
+            fields.append(field_descriptions['original_name'])
+            enabled_fields.append('original_name')
+            print("[Warning] No fields selected, forcing original_name as fallback")
+    
+    # Log which fields are enabled for debugging
+    print(f"[DEBUG] Enabled extraction fields: {', '.join(enabled_fields)}")
+    
+    # Build the prompt
+    if custom_prompt:
+        # Use custom prompt with placeholders
+        fields_str = '\n'.join(fields)
+        prompt = custom_prompt
+        
+        # Replace placeholders (case-insensitive)
+        prompt = prompt.replace('{fields}', fields_str)
+        prompt = prompt.replace('{chapter_text}', chapter_text)
+        
+        # Also support alternative placeholder formats
+        prompt = prompt.replace('{{fields}}', fields_str)
+        prompt = prompt.replace('{{chapter_text}}', chapter_text)
+        prompt = prompt.replace('{text}', chapter_text)
+        prompt = prompt.replace('{{text}}', chapter_text)
+        
+        # Validate that placeholders were replaced
+        if '{' in prompt and '}' in prompt:
+            print("[Warning] Custom prompt may contain unreplaced placeholders")
+        
+        return prompt
+    else:
+        # Use default prompt structure
+        fields_str = chr(10).join(fields)  # Using chr(10) for newline as in original
+        
+        prompt = f"""Output exactly a JSON array of objects and nothing else.
+You are a glossary extractor for Korean, Japanese, or Chinese novels.
+- Extract character information (e.g., name, traits), locations (countries, regions, cities), and translate them into English (romanization or equivalent).
+- Romanize all untranslated honorifics and suffixes (e.g., 님 to '-nim', さん to '-san').
+- all output must be in english, unless specified otherwise
+For each character, provide JSON fields:
+{fields_str}
+Sort by appearance order; respond with a JSON array only.
+
+Text:
+{chapter_text}"""
+        
+        return prompt
+
+# Updated merge_glossary_entries to handle custom fields:
+
 def merge_glossary_entries(glossary):
     merged = {}
+    
+    # Get list of custom fields
+    custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
+    try:
+        custom_fields_list = json.loads(custom_fields_json)
+    except:
+        custom_fields_list = []
+    
+    # Standard fields that use list merging
+    list_fields = ['locations', 'traits', 'group_affiliation'] + custom_fields_list
+    
     for entry in glossary:
-        key = entry['original_name']
+        # Check if original_name field is enabled
+        extract_original_name = os.getenv('GLOSSARY_EXTRACT_ORIGINAL_NAME', '1') == '1'
+        
+        # Determine the key to use for merging
+        key = None
+        if extract_original_name and 'original_name' in entry:
+            key = entry['original_name']
+        elif not extract_original_name and 'name' in entry:
+            key = entry['name']  # Use name as key if original_name is disabled
+        elif 'original_name' in entry:  # Fallback to original_name if it exists
+            key = entry['original_name']
+        elif 'name' in entry:  # Fallback to name
+            key = entry['name']
+        else:
+            # Skip entries without any identifier
+            continue
+            
         if key not in merged:
             merged[key] = entry.copy()
-            # initial normalize locations in appearance order
-            merged[key]['locations'] = dedupe_keep_order(
-                entry.get('locations') or [], []
-            )
+            # Initial normalize all list fields
+            for field in list_fields:
+                if field in merged[key]:
+                    merged[key][field] = dedupe_keep_order(
+                        entry.get(field) or [], []
+                    )
         else:
-            for field in ['locations', 'traits', 'group_affiliation']:
+            # Merge list fields
+            for field in list_fields:
                 old = merged[key].get(field) or []
                 new = entry.get(field) or []
                 merged[key][field] = dedupe_keep_order(old, new)
-
-            # how_they_refer_to_others stays the same…
+            
+            # Merge how_they_refer_to_others
             old_map = merged[key].get('how_they_refer_to_others', {}) or {}
             new_map = entry.get('how_they_refer_to_others', {}) or {}
             for k, v in new_map.items():
                 if v is not None and k not in old_map:
                     old_map[k] = v
             merged[key]['how_they_refer_to_others'] = old_map
-
-    # strip out any None fields exactly as before…
+            
+            # Merge single-value fields (keep first non-None value)
+            single_value_fields = ['name', 'gender', 'title']
+            if extract_original_name:
+                single_value_fields.insert(0, 'original_name')
+            
+            for field in single_value_fields:
+                if field not in merged[key] or merged[key].get(field) is None:
+                    if field in entry and entry[field] is not None:
+                        merged[key][field] = entry[field]
+    
+    # Strip out any None fields
     for entry in merged.values():
-        for field in ['title','group_affiliation','traits','locations','gender']:
+        # Remove None values from all fields
+        for field in list(entry.keys()):
             if entry.get(field) is None:
                 entry.pop(field, None)
-        # only sanitize how_they_refer_to_others if it's actually a dict
+        
+        # Sanitize how_they_refer_to_others
         htr = entry.get('how_they_refer_to_others')
         if isinstance(htr, dict):
             entry['how_they_refer_to_others'] = {
                 k: v for k, v in htr.items() if v is not None
             }
+            # Remove empty dict
+            if not entry['how_they_refer_to_others']:
+                entry.pop('how_they_refer_to_others', None)
         else:
-            # drop it entirely if it was null or something else
             entry.pop('how_they_refer_to_others', None)
-
+    
     return list(merged.values())
+
+# Add validation for extracted data with custom fields:
+
+def validate_extracted_entry(entry):
+    """Validate that extracted entry has required fields"""
+    # original_name is always required
+    if 'original_name' not in entry or not entry['original_name']:
+        return False
+    
+    # Get enabled fields
+    enabled_fields = []
+    
+    if os.getenv('GLOSSARY_EXTRACT_NAME', '1') == '1':
+        enabled_fields.append('name')
+    if os.getenv('GLOSSARY_EXTRACT_GENDER', '1') == '1':
+        enabled_fields.append('gender')
+    if os.getenv('GLOSSARY_EXTRACT_TITLE', '1') == '1':
+        enabled_fields.append('title')
+    if os.getenv('GLOSSARY_EXTRACT_GROUP_AFFILIATION', '1') == '1':
+        enabled_fields.append('group_affiliation')
+    if os.getenv('GLOSSARY_EXTRACT_TRAITS', '1') == '1':
+        enabled_fields.append('traits')
+    if os.getenv('GLOSSARY_EXTRACT_HOW_THEY_REFER_TO_OTHERS', '1') == '1':
+        enabled_fields.append('how_they_refer_to_others')
+    if os.getenv('GLOSSARY_EXTRACT_LOCATIONS', '1') == '1':
+        enabled_fields.append('locations')
+    
+    # Add custom fields
+    custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
+    try:
+        custom_fields = json.loads(custom_fields_json)
+        enabled_fields.extend(custom_fields)
+    except:
+        pass
+    
+    # Entry should have at least one other field besides original_name
+    has_content = False
+    for field in enabled_fields:
+        if field in entry and entry[field]:
+            has_content = True
+            break
+    
+    return has_content
+
+# Update main function to log custom fields:
 
 def main(log_callback=None, stop_callback=None):
     """Modified main function that can accept a logging callback and stop callback"""
@@ -321,7 +550,10 @@ def main(log_callback=None, stop_callback=None):
                config.get('api_key'))
 
     client = UnifiedClient(model=model, api_key=api_key)
-    temp = config.get('temperature', 0.3)
+    
+    # Get temperature from environment or config
+    temp = float(os.getenv("GLOSSARY_TEMPERATURE") or config.get('temperature', 0.3))
+    
     env_max_output = os.getenv("MAX_OUTPUT_TOKENS")
     if env_max_output and env_max_output.isdigit():
         mtoks = int(env_max_output)
@@ -329,8 +561,37 @@ def main(log_callback=None, stop_callback=None):
     else:
         mtoks = config.get('max_tokens', 4196)
         print(f"[DEBUG] Output Token Limit: {mtoks} (from config)")
+    
     sys_prompt = config.get('system_prompt', 'You are a helpful assistant.')
-    ctx_limit = config.get('context_limit_chapters', 3)
+    
+    # Get context limit from environment or config
+    ctx_limit = int(os.getenv("GLOSSARY_CONTEXT_LIMIT") or config.get('context_limit_chapters', 3))
+
+    # Log enabled fields
+    print("📑 Extraction Fields Configuration:")
+    print(f"   • Original Name: ✅ (always enabled)")
+    print(f"   • Name: {'✅' if os.getenv('GLOSSARY_EXTRACT_NAME', '1') == '1' else '❌'}")
+    print(f"   • Gender: {'✅' if os.getenv('GLOSSARY_EXTRACT_GENDER', '1') == '1' else '❌'}")
+    print(f"   • Title: {'✅' if os.getenv('GLOSSARY_EXTRACT_TITLE', '1') == '1' else '❌'}")
+    print(f"   • Group: {'✅' if os.getenv('GLOSSARY_EXTRACT_GROUP_AFFILIATION', '1') == '1' else '❌'}")
+    print(f"   • Traits: {'✅' if os.getenv('GLOSSARY_EXTRACT_TRAITS', '1') == '1' else '❌'}")
+    print(f"   • References: {'✅' if os.getenv('GLOSSARY_EXTRACT_HOW_THEY_REFER_TO_OTHERS', '1') == '1' else '❌'}")
+    print(f"   • Locations: {'✅' if os.getenv('GLOSSARY_EXTRACT_LOCATIONS', '1') == '1' else '❌'}")
+    
+    # Log custom fields
+    custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
+    try:
+        custom_fields = json.loads(custom_fields_json)
+        if custom_fields:
+            print(f"   • Custom Fields: {', '.join(custom_fields)}")
+    except:
+        pass
+    
+    # Check if custom prompt is being used
+    if os.getenv('GLOSSARY_SYSTEM_PROMPT'):
+        print("📑 Using custom extraction prompt")
+    else:
+        print("📑 Using default extraction prompt")
 
     chapters = extract_chapters_from_epub(args.epub)
     if not chapters:
@@ -358,7 +619,7 @@ def main(log_callback=None, stop_callback=None):
             continue
                 
         print(f"🔄 Processing Chapter {idx+1}/{total_chapters}")
-        # NEW: Check if history will reset on this chapter
+        # Check if history will reset on this chapter
         if len(history) >= ctx_limit and ctx_limit > 0:
             print(f"  📌 Glossary context will reset after this chapter (current: {len(history)}/{ctx_limit} chapters)")        
         try:
@@ -368,7 +629,7 @@ def main(log_callback=None, stop_callback=None):
 
             total_tokens = sum(count_tokens(m["content"]) for m in msgs)
             
-            # READ THE TOKEN LIMIT RIGHT HERE, RIGHT NOW
+            # READ THE TOKEN LIMIT
             env_value = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
             if not env_value or env_value == "":
                 token_limit = None
@@ -395,10 +656,7 @@ def main(log_callback=None, stop_callback=None):
                 print(f"❌ Glossary extraction stopped before API call for chapter {idx+1}")
                 return
             
-            # Run API call in a separate thread with timeout checking
-            import threading
-            import queue
-            
+            # API call with stop checking
             result_queue = queue.Queue()
             api_error = None
             
@@ -413,7 +671,7 @@ def main(log_callback=None, stop_callback=None):
             api_thread.daemon = True
             api_thread.start()
             
-            # Check for stop every 0.5 seconds while waiting for API
+            # Check for stop while waiting for API
             timeout = 300  # 5 minute total timeout
             check_interval = 0.5
             elapsed = 0
@@ -437,42 +695,44 @@ def main(log_callback=None, stop_callback=None):
                 print(f"⚠️ API call timed out after {timeout} seconds")
                 continue
                 
-            # if send() returned (text, finish_reason), pull out the text
+            # Process response (rest of the code remains the same)
             resp = raw[0] if isinstance(raw, tuple) else raw
 
-            # Save the raw response in case you need to inspect it
+            # Save the raw response
             os.makedirs("Payloads", exist_ok=True)
-            # after
             with open(f"Payloads/failed_response_chap{idx+1}.txt", "w", encoding="utf-8", errors="replace") as f:
                 f.write(resp)
 
-            # Extract the JSON array itself (strip any leading/trailing prose)
+            # Extract JSON
             m = re.search(r"\[.*\]", resp, re.DOTALL)
             if not m:
                 print(f"[Warning] Couldn't find JSON array in chapter {idx+1}, saving raw…")
                 continue
 
-            try:
-                data = json.loads(m.group(0))
-            except json.JSONDecodeError as e:
-                print(f"[Error] Invalid JSON format in chapter {idx+1}: {e}")
-                continue
-            
             json_str = m.group(0) if m else resp
 
-            # Parse *only* the cleaned-up JSON
+            # Parse JSON and validate entries
             try:
                 data = json.loads(json_str)
+                
+                # Filter out invalid entries
+                valid_data = []
+                for entry in data:
+                    if validate_extracted_entry(entry):
+                        valid_data.append(entry)
+                    else:
+                        print(f"[Debug] Skipped invalid entry: {entry.get('original_name', 'unknown')}")
+                
+                data = valid_data
                 total_ent = len(data)
-                # log each entry _with_ chapter number
+                
+                # Log entries
                 for eidx, entry in enumerate(data, start=1):
-                    # Check for stop during entry processing
                     if check_stop():
                         print(f"❌ Glossary extraction stopped during entry processing for chapter {idx+1}")
                         return
                         
                     elapsed = time.time() - start
-                    # Fixed the calculation to avoid division by zero
                     if idx == 0 and eidx == 1:
                         eta = 0
                     else:
@@ -484,7 +744,7 @@ def main(log_callback=None, stop_callback=None):
                 print(f"[Warning] JSON decode error chap {idx+1}: {e}")
                 continue    
                 
-            #merge entries as before
+            # Merge and save
             glossary.extend(data)
             glossary[:] = merge_glossary_entries(glossary)
             completed.append(idx)
