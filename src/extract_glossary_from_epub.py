@@ -239,11 +239,22 @@ def dedupe_keep_order(old, new):
 # Add validation for extracted data with custom fields:
 def validate_extracted_entry(entry):
     """Validate that extracted entry has required fields"""
-    # original_name is always required
-    if 'original_name' not in entry or not entry['original_name']:
-        return False
+    # Check if original_name field is enabled
+    extract_original_name = os.getenv('GLOSSARY_EXTRACT_ORIGINAL_NAME', '1') == '1'
     
-    # Get enabled fields
+    # Validation rule 1: Must have an identifier
+    # - If original_name is enabled, it must be present (original behavior)
+    # - If original_name is disabled, must have 'name' field instead
+    if extract_original_name:
+        if 'original_name' not in entry or not entry['original_name']:
+            return False
+    else:
+        # When original_name is disabled, 'name' becomes the required identifier
+        if 'name' not in entry or not entry['name']:
+            return False
+    
+    # Validation rule 2: Must have at least one content field
+    # Build list of enabled content fields (exactly as original)
     enabled_fields = []
     
     if os.getenv('GLOSSARY_EXTRACT_NAME', '1') == '1':
@@ -261,7 +272,7 @@ def validate_extracted_entry(entry):
     if os.getenv('GLOSSARY_EXTRACT_LOCATIONS', '1') == '1':
         enabled_fields.append('locations')
     
-    # Add custom fields
+    # Add custom fields (exactly as original)
     custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
     try:
         custom_fields = json.loads(custom_fields_json)
@@ -269,7 +280,7 @@ def validate_extracted_entry(entry):
     except:
         pass
     
-    # Entry should have at least one other field besides original_name
+    # Check for at least one content field (exactly as original)
     has_content = False
     for field in enabled_fields:
         if field in entry and entry[field]:
@@ -277,8 +288,6 @@ def validate_extracted_entry(entry):
             break
     
     return has_content
-
-# Updates for extract_glossary_from_epub.py
 
 # Updated build_prompt function to handle custom prompts and fields:
 
@@ -479,48 +488,7 @@ def merge_glossary_entries(glossary):
     
     return list(merged.values())
 
-# Add validation for extracted data with custom fields:
 
-def validate_extracted_entry(entry):
-    """Validate that extracted entry has required fields"""
-    # original_name is always required
-    if 'original_name' not in entry or not entry['original_name']:
-        return False
-    
-    # Get enabled fields
-    enabled_fields = []
-    
-    if os.getenv('GLOSSARY_EXTRACT_NAME', '1') == '1':
-        enabled_fields.append('name')
-    if os.getenv('GLOSSARY_EXTRACT_GENDER', '1') == '1':
-        enabled_fields.append('gender')
-    if os.getenv('GLOSSARY_EXTRACT_TITLE', '1') == '1':
-        enabled_fields.append('title')
-    if os.getenv('GLOSSARY_EXTRACT_GROUP_AFFILIATION', '1') == '1':
-        enabled_fields.append('group_affiliation')
-    if os.getenv('GLOSSARY_EXTRACT_TRAITS', '1') == '1':
-        enabled_fields.append('traits')
-    if os.getenv('GLOSSARY_EXTRACT_HOW_THEY_REFER_TO_OTHERS', '1') == '1':
-        enabled_fields.append('how_they_refer_to_others')
-    if os.getenv('GLOSSARY_EXTRACT_LOCATIONS', '1') == '1':
-        enabled_fields.append('locations')
-    
-    # Add custom fields
-    custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
-    try:
-        custom_fields = json.loads(custom_fields_json)
-        enabled_fields.extend(custom_fields)
-    except:
-        pass
-    
-    # Entry should have at least one other field besides original_name
-    has_content = False
-    for field in enabled_fields:
-        if field in entry and entry[field]:
-            has_content = True
-            break
-    
-    return has_content
 
 # Update main function to log custom fields:
 
