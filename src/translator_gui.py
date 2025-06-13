@@ -86,7 +86,7 @@ class TranslatorGUI:
         self.glossary_proc = None       
         master.title("Glossarion v2.0.0")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
-        master.minsize(1550, 1000)
+        master.minsize(1600, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
         master.bind('<Escape>', lambda e: master.attributes('-fullscreen', False))
         self.payloads_dir = os.path.join(os.getcwd(), "Payloads") 
@@ -109,7 +109,8 @@ class TranslatorGUI:
         # Base directory for resources
         self.base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
         ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
-
+        
+        
         # Load and set window icon
         if os.path.isfile(ico_path):
             try:
@@ -136,9 +137,38 @@ class TranslatorGUI:
         except Exception as e:
             print(f"[DEBUG] Config load failed: {e}")  # Debug logging
             self.config = {}
-        
+ 
         # Set max_output_tokens from config
         self.max_output_tokens = self.config.get('max_output_tokens', self.max_output_tokens)
+        
+        self.default_manual_glossary_prompt = """Output exactly a JSON array of objects and nothing else.
+        You are a glossary extractor for Korean, Japanese, or Chinese novels.
+        - Extract character information (e.g., name, traits), locations (countries, regions, cities), and translate them into English (romanization or equivalent).
+        - Romanize all untranslated honorifics and suffixes (e.g., 님 to '-nim', さん to '-san').
+        - all output must be in english, unless specified otherwise
+        For each character, provide JSON fields:
+        {fields}
+        Sort by appearance order; respond with a JSON array only.
+
+        Text:
+        {chapter_text}"""
+
+        self.default_auto_glossary_prompt = """You are extracting a targeted glossary from a {language} novel.
+        Focus on identifying:
+        1. Character names with their honorifics/suffixes
+        2. Important titles and ranks
+        3. Frequently mentioned terms (min frequency: {min_frequency})
+
+        Extract up to {max_names} character names and {max_titles} titles.
+        Prioritize names that appear with honorifics or in important contexts.
+        Return the glossary in a simple key-value format."""
+
+        # Load saved prompts from config
+        self.manual_glossary_prompt = self.config.get('manual_glossary_prompt', self.default_manual_glossary_prompt)
+        self.auto_glossary_prompt = self.config.get('auto_glossary_prompt', self.default_auto_glossary_prompt)
+
+        # Add custom glossary fields configuration
+        self.custom_glossary_fields = self.config.get('custom_glossary_fields', [])
         
         # Load token limit disabled state from config
         self.token_limit_disabled = self.config.get('token_limit_disabled', False)
@@ -240,7 +270,12 @@ class TranslatorGUI:
         self.retry_timeout_var = tk.BooleanVar(
             value=self.config.get('retry_timeout', False)
         )
-        
+        self.batch_translation_var = tk.BooleanVar(
+            value=self.config.get('batch_translation', False)  # Default to False
+        )
+        self.batch_size_var = tk.StringVar(
+            value=str(self.config.get('batch_size', '3'))  # Default to 3
+)
         # Default prompts
         self.default_prompts = {
             "korean": "You are a professional Korean to English novel translator, you must strictly output only English/HTML text while following these rules:\n- Use a context rich and natural translation style.\n- Retain honorifics, and suffixes like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
@@ -256,8 +291,87 @@ class TranslatorGUI:
 
         # Initialize GUI components
         self._setup_gui()
+        
+    def _setup_text_undo_redo(self, text_widget):
+        """Set up undo/redo bindings for a text widget with error handling"""
+        def handle_undo(event):
+            try:
+                text_widget.edit_undo()
+            except tk.TclError:
+                pass  # Nothing to undo
+            return "break"
+            
+        def handle_redo(event):
+            try:
+                text_widget.edit_redo()
+            except tk.TclError:
+                pass  # Nothing to redo
+            return "break"
+        
+        # Windows/Linux bindings
+        text_widget.bind('<Control-z>', handle_undo)
+        text_widget.bind('<Control-y>', handle_redo)
+        
+        # macOS bindings
+        text_widget.bind('<Command-z>', handle_undo)
+        text_widget.bind('<Command-Shift-z>', handle_redo)
 
-
+    def on_resize(self, event):
+        if event.widget is self.master:
+            sx = event.width / BASE_WIDTH
+            sy = event.height / BASE_HEIGHT
+            s = min(sx, sy)
+            new_w = int(self.run_base_w * s)
+            new_h = int(self.run_base_h * s)
+            ipadx = max(0, (new_w - self.run_base_w)//2)
+            ipady = max(0, (new_h - self.run_base_h)//2)
+            self.run_button.grid_configure(ipadx=ipadx, ipady=ipady)
+            
+            
+    def _auto_resize_dialog(self, dialog, canvas, max_width_ratio=0.9, max_height_ratio=0.95):
+        """Auto-resize dialog WIDTH ONLY - preserves existing height"""
+        # Force all widgets to calculate their sizes
+        dialog.update()
+        canvas.update()
+        
+        # Get the current geometry to preserve height
+        current_geometry = dialog.geometry()
+        current_height = int(current_geometry.split('x')[1].split('+')[0])
+        
+        # Get the frame inside the canvas
+        scrollable_frame = None
+        for child in canvas.winfo_children():
+            if isinstance(child, ttk.Frame):
+                scrollable_frame = child
+                break
+        
+        if not scrollable_frame:
+            return
+        
+        # Force the frame to calculate its natural size
+        scrollable_frame.update_idletasks()
+        
+        # Calculate WIDTH based on content
+        window_width = scrollable_frame.winfo_reqwidth()+ 20
+        
+        # Get screen dimensions
+        screen_width = dialog.winfo_screenwidth()
+        screen_height = dialog.winfo_screenheight()
+        
+        # Calculate width limit
+        max_width = int(screen_width * max_width_ratio)
+        
+        # Apply width limit
+        final_width = min(window_width, max_width)
+        
+        # KEEP THE EXISTING HEIGHT
+        final_height = current_height
+        
+        # Set size and center
+        x = (screen_width - final_width) // 2
+        y = max(20, (screen_height - final_height) // 2)
+        dialog.geometry(f"{final_width}x{final_height}+{x}+{y}")
+        
     def _lazy_load_modules(self, splash_callback=None):
         """Load heavy modules only when needed - optimized version"""
         if self._modules_loaded:
@@ -391,7 +505,7 @@ class TranslatorGUI:
         print(f"[DEBUG] Setting model to: {default_model}")  # Debug logging
         self.model_var = tk.StringVar(value=default_model)
         tb.Combobox(self.frame, textvariable=self.model_var,
-                    values=["gpt-4o","gpt-4o-mini","gpt-4-turbo","gpt-4.1-nano","gpt-4.1-mini","gpt-4.1","gpt-3.5-turbo","o4-mini","gemini-1.5-pro","gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-exp","deepseek-chat","claude-3-5-sonnet-20241022","claude-3-7-sonnet-20250219"], state="normal").grid(
+                    values=["gpt-4o","gpt-4o-mini","gpt-4-turbo","gpt-4.1-nano","gpt-4.1-mini","gpt-4.1","gpt-3.5-turbo","o4-mini","gemini-1.5-pro","gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-exp","gemini-2.5-flash-preview-05-20","gemini-2.5-pro-preview-06-05","deepseek-chat","claude-3-5-sonnet-20241022","claude-3-7-sonnet-20250219"], state="normal").grid(
             row=1, column=1, columnspan=2, sticky=tk.EW, padx=5, pady=5)
 
         # Language
@@ -450,16 +564,27 @@ class TranslatorGUI:
         self.trans_history.insert(0,str(self.config.get('translation_history_limit',3)))
         self.trans_history.grid(row=5, column=3, sticky=tk.W, padx=5, pady=5)
 
-        # Glossary settings
-        tb.Label(self.frame, text="Glossary Temp:").grid(row=6, column=2, sticky=tk.W, padx=5, pady=5)
-        self.glossary_temp = tb.Entry(self.frame, width=6)
-        self.glossary_temp.insert(0,str(self.config.get('glossary_temperature',0.3)))
-        self.glossary_temp.grid(row=6, column=3, sticky=tk.W, padx=5, pady=5)
-        tb.Label(self.frame, text="Glossary Hist. Limit:").grid(row=7, column=2, sticky=tk.W, padx=5, pady=5)
-        self.glossary_history = tb.Entry(self.frame, width=6)
-        self.glossary_history.insert(0,str(self.config.get('glossary_history_limit',3)))
-        self.glossary_history.grid(row=7, column=3, sticky=tk.W, padx=5, pady=5)
+        #Batch Translation
+        tb.Checkbutton(self.frame, text="Batch Translation", 
+                       variable=self.batch_translation_var,
+                       bootstyle="round-toggle").grid(row=6, column=2, sticky=tk.W, padx=5, pady=5)
+
+        self.batch_size_entry = tb.Entry(self.frame, width=6, textvariable=self.batch_size_var)
+        self.batch_size_entry.grid(row=6, column=3, sticky=tk.W, padx=5, pady=5)
         
+        # Update the toggle state on checkbox change
+        def toggle_batch_entry():
+            if self.batch_translation_var.get():
+                self.batch_size_entry.config(state=tk.NORMAL)
+            else:
+                self.batch_size_entry.config(state=tk.DISABLED)
+
+        # Set initial state first
+        toggle_batch_entry()
+
+        # Then bind the toggle function
+        self.batch_translation_var.trace('w', lambda *args: toggle_batch_entry())
+                
         # Trim controls (hidden but present for compatibility)
         self.title_trim = tb.Entry(self.frame, width=6)
         self.title_trim.insert(0, str(self.config.get('title_trim_count', 1)))
@@ -515,8 +640,7 @@ class TranslatorGUI:
             autoseparators=True,
             maxundo=-1
         )
-        self.prompt_text.bind('<Control-z>', lambda e: self.prompt_text.edit_undo())
-        self.prompt_text.bind('<Control-y>', lambda e: self.prompt_text.edit_redo())
+        self._setup_text_undo_redo(self.prompt_text)
         self.prompt_text.grid(row=9, column=1, columnspan=3, sticky=tk.NSEW, padx=5, pady=5)
         
         # Output Token Limit button
@@ -687,7 +811,697 @@ class TranslatorGUI:
                   command=retranslate_selected, bg="#ff6b6b", fg="white").pack(side=tk.LEFT, padx=5)
         tk.Button(button_frame, text="Cancel", 
                   command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+    
 
+
+    def _setup_dialog_scrolling(self, dialog_window, canvas):
+        """Setup mouse wheel scrolling for any dialog with a canvas
+        
+        Args:
+            dialog_window: The toplevel window
+            canvas: The canvas widget to scroll
+        """
+        def _on_mousewheel(event):
+            try:
+                canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            except:
+                pass
+
+        def _on_mousewheel_linux(event, direction):
+            """Handle mouse wheel scrolling on Linux"""
+            try:
+                if canvas.winfo_exists():
+                    canvas.yview_scroll(direction, "units")
+            except tk.TclError:
+                pass
+
+        # Create event handler references for cleanup
+        wheel_handler = lambda e: _on_mousewheel(e)
+        wheel_up_handler = lambda e: _on_mousewheel_linux(e, -1)
+        wheel_down_handler = lambda e: _on_mousewheel_linux(e, 1)
+        
+        # Bind mouse wheel events
+        dialog_window.bind_all("<MouseWheel>", wheel_handler)
+        dialog_window.bind_all("<Button-4>", wheel_up_handler)  # Linux
+        dialog_window.bind_all("<Button-5>", wheel_down_handler)  # Linux
+        
+        # Clean up bindings when window is destroyed
+        def cleanup_bindings():
+            try:
+                dialog_window.unbind_all("<MouseWheel>")
+                dialog_window.unbind_all("<Button-4>")
+                dialog_window.unbind_all("<Button-5>")
+            except:
+                pass
+        
+        # Return the cleanup function so it can be used in buttons/close handlers
+        return cleanup_bindings
+    
+    def glossary_manager(self):
+        """Open comprehensive glossary management dialog"""
+        manager = tk.Toplevel(self.master)
+        manager.title("Glossary Manager")
+        manager.geometry("1200x1470")
+        manager.transient(self.master)
+        
+        
+        # Main container
+        main_container = tk.Frame(manager)
+        main_container.pack(fill=tk.BOTH, expand=True)
+        
+        # Create canvas and scrollbar for scrollable content
+        canvas = tk.Canvas(main_container, bg='white')
+        scrollbar = ttk.Scrollbar(main_container, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        # Pack canvas and scrollbar
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Set up mouse wheel scrolling
+        cleanup_scrolling = self._setup_dialog_scrolling(manager, canvas)
+        
+        # Create notebook for tabs
+        notebook = ttk.Notebook(scrollable_frame)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Tab 1: Manual Glossary Settings
+        manual_frame = ttk.Frame(notebook)
+        notebook.add(manual_frame, text="Manual Glossary Extraction")
+        
+        # Tab 2: Automatic Glossary Settings
+        auto_frame = ttk.Frame(notebook)
+        notebook.add(auto_frame, text="Automatic Glossary Generation")
+        
+        # Tab 3: Glossary Editor/Trimmer
+        editor_frame = ttk.Frame(notebook)
+        notebook.add(editor_frame, text="Glossary Editor")
+        
+        # ===== MANUAL GLOSSARY TAB =====
+        manual_container = tk.Frame(manual_frame)
+        manual_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Field selection section
+        fields_frame = tk.LabelFrame(manual_container, text="Extraction Fields", padx=10, pady=10)
+        fields_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Create field variables if not exists
+        if not hasattr(self, 'manual_field_vars'):
+            self.manual_field_vars = {
+                'original_name': tk.BooleanVar(value=self.config.get('manual_extract_original_name', True)), 
+                'name': tk.BooleanVar(value=self.config.get('manual_extract_name', True)),
+                'gender': tk.BooleanVar(value=self.config.get('manual_extract_gender', True)),
+                'title': tk.BooleanVar(value=self.config.get('manual_extract_title', True)),
+                'group_affiliation': tk.BooleanVar(value=self.config.get('manual_extract_group', True)),
+                'traits': tk.BooleanVar(value=self.config.get('manual_extract_traits', True)),
+                'how_they_refer_to_others': tk.BooleanVar(value=self.config.get('manual_extract_refer', True)),
+                'locations': tk.BooleanVar(value=self.config.get('manual_extract_locations', True))
+            }
+        
+        # Field descriptions
+        field_info = {
+            'original_name': "Original name in source language",
+            'name': "English/romanized name translation",
+            'gender': "Character gender",
+            'title': "Title or rank (with romanized suffix)",
+            'group_affiliation': "Organization/group membership",
+            'traits': "Character traits and descriptions",
+            'how_they_refer_to_others': "How they address other characters",
+            'locations': "Place names mentioned"
+        }
+        
+        # Create checkboxes in grid
+        fields_grid = tk.Frame(fields_frame)
+        fields_grid.pack(fill=tk.X)
+
+        row = 0
+        for field, var in self.manual_field_vars.items():
+            cb = tb.Checkbutton(fields_grid, text=field.replace('_', ' ').title(), 
+                                variable=var, bootstyle="round-toggle")
+            cb.grid(row=row, column=0, sticky=tk.W, padx=5, pady=2)
+            
+            desc = tk.Label(fields_grid, text=field_info[field], 
+                           font=('TkDefaultFont', 9), fg='gray')
+            desc.grid(row=row, column=1, sticky=tk.W, padx=20, pady=2)
+            
+            row += 1
+        
+        # Custom fields section
+        custom_frame = tk.LabelFrame(manual_container, text="Custom Fields", padx=10, pady=10)
+        custom_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Custom fields list
+        custom_list_frame = tk.Frame(custom_frame)
+        custom_list_frame.pack(fill=tk.X)
+        
+        tk.Label(custom_list_frame, text="Additional fields to extract:").pack(anchor=tk.W)
+        
+        # Scrollable frame for custom fields
+        custom_scroll = ttk.Scrollbar(custom_list_frame)
+        custom_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.custom_fields_listbox = tk.Listbox(custom_list_frame, height=5, 
+                                               yscrollcommand=custom_scroll.set)
+        self.custom_fields_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        custom_scroll.config(command=self.custom_fields_listbox.yview)
+        
+        # Populate with existing custom fields
+        for field in self.custom_glossary_fields:
+            self.custom_fields_listbox.insert(tk.END, field)
+        
+        # Custom field controls
+        custom_controls = tk.Frame(custom_frame)
+        custom_controls.pack(fill=tk.X, pady=(5, 0))
+        
+        self.custom_field_entry = tb.Entry(custom_controls, width=30)
+        self.custom_field_entry.pack(side=tk.LEFT, padx=(0, 5))
+        
+        def add_custom_field():
+            field = self.custom_field_entry.get().strip()
+            if field and field not in self.custom_glossary_fields:
+                self.custom_glossary_fields.append(field)
+                self.custom_fields_listbox.insert(tk.END, field)
+                self.custom_field_entry.delete(0, tk.END)
+        
+        def remove_custom_field():
+            selection = self.custom_fields_listbox.curselection()
+            if selection:
+                idx = selection[0]
+                field = self.custom_fields_listbox.get(idx)
+                self.custom_glossary_fields.remove(field)
+                self.custom_fields_listbox.delete(idx)
+        
+        tb.Button(custom_controls, text="Add", command=add_custom_field, 
+                  width=10).pack(side=tk.LEFT, padx=2)
+        tb.Button(custom_controls, text="Remove", command=remove_custom_field, 
+                  width=10).pack(side=tk.LEFT, padx=2)
+        
+        # System prompt section
+        prompt_frame = tk.LabelFrame(manual_container, text="Extraction Prompt Template", 
+                                    padx=10, pady=10)
+        prompt_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Instructions
+        tk.Label(prompt_frame, 
+                 text="Use {fields} for field list and {chapter_text} for content placeholder",
+                 font=('TkDefaultFont', 9), fg='blue').pack(anchor=tk.W, pady=(0, 5))
+                 
+        
+        # manual prompt text area
+        self.manual_prompt_text = scrolledtext.ScrolledText(prompt_frame, height=12, wrap=tk.WORD)
+
+        self.manual_prompt_text = scrolledtext.ScrolledText(
+            prompt_frame, 
+            height=12, 
+            wrap=tk.WORD,
+            undo=True,
+            autoseparators=True,
+            maxundo=-1
+        )
+        self.manual_prompt_text.pack(fill=tk.BOTH, expand=True)
+        self.manual_prompt_text.insert('1.0', self.manual_glossary_prompt)
+
+        # Add undo/redo bindings
+        self.manual_prompt_text.edit_reset()  # Reset undo stack after initial insert
+        self._setup_text_undo_redo(self.manual_prompt_text)
+        
+        # Prompt controls
+        prompt_controls = tk.Frame(manual_container)
+        prompt_controls.pack(fill=tk.X, pady=(10, 0))
+
+        
+        def reset_manual_prompt():
+            if messagebox.askyesno("Reset Prompt", 
+                                  "Reset manual glossary prompt to default?"):
+                self.manual_prompt_text.delete('1.0', tk.END)
+                self.manual_prompt_text.insert('1.0', self.default_manual_glossary_prompt)
+        
+        tb.Button(prompt_controls, text="Reset to Default", 
+                  command=reset_manual_prompt, bootstyle="warning").pack(side=tk.LEFT, padx=5)
+        
+        # Settings controls
+        settings_frame = tk.LabelFrame(manual_container, text="Extraction Settings", padx=10, pady=10)
+        settings_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        settings_grid = tk.Frame(settings_frame)
+        settings_grid.pack()
+        
+        tk.Label(settings_grid, text="Temperature:").grid(row=0, column=0, sticky=tk.W, padx=5)
+        self.manual_temp_var = tk.StringVar(value=str(self.config.get('manual_glossary_temperature', 0.3)))
+        tb.Entry(settings_grid, textvariable=self.manual_temp_var, width=10).grid(row=0, column=1, padx=5)
+        
+        tk.Label(settings_grid, text="Context Limit:").grid(row=0, column=2, sticky=tk.W, padx=5)
+        self.manual_context_var = tk.StringVar(value=str(self.config.get('manual_context_limit', 3)))
+        tb.Entry(settings_grid, textvariable=self.manual_context_var, width=10).grid(row=0, column=3, padx=5)
+        
+        # ===== AUTOMATIC GLOSSARY TAB =====
+        auto_container = tk.Frame(auto_frame)
+        auto_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Automatic glossary settings
+        auto_settings_frame = tk.LabelFrame(auto_container, text="Extraction Settings", 
+                                           padx=10, pady=10)
+        auto_settings_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        settings_info = tk.Label(auto_settings_frame, 
+                                text="These settings control the automatic glossary extraction during translation",
+                                font=('TkDefaultFont', 9, 'italic'), fg='gray')
+        settings_info.pack(anchor=tk.W, pady=(0, 10))
+        
+        # Settings are already in main GUI, just show current values
+        current_settings = tk.Frame(auto_settings_frame)
+        current_settings.pack(fill=tk.X)
+        
+        tk.Label(current_settings, text=f"Current Settings:", font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W)
+        tk.Label(current_settings, text=f"• Min Frequency: {self.glossary_min_frequency_var.get()}").pack(anchor=tk.W, padx=20)
+        tk.Label(current_settings, text=f"• Max Names: {self.glossary_max_names_var.get()}").pack(anchor=tk.W, padx=20)
+        tk.Label(current_settings, text=f"• Max Titles: {self.glossary_max_titles_var.get()}").pack(anchor=tk.W, padx=20)
+        tk.Label(current_settings, text=f"• Translation Batch Size: {self.glossary_batch_size_var.get()}").pack(anchor=tk.W, padx=20)
+        
+        tk.Label(current_settings, 
+                 text="(Adjust these in 'Other Settings' from the main window)",
+                 font=('TkDefaultFont', 9), fg='blue').pack(anchor=tk.W, pady=(5, 0))
+        
+        # Automatic prompt section
+        auto_prompt_frame = tk.LabelFrame(auto_container, text="Extraction Prompt Template", 
+                                         padx=10, pady=10)
+        auto_prompt_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Instructions
+        tk.Label(auto_prompt_frame, 
+                 text="Available placeholders: {language}, {min_frequency}, {max_names}, {max_titles}",
+                 font=('TkDefaultFont', 9), fg='blue').pack(anchor=tk.W, pady=(0, 5))
+        
+        # Automatic Prompt text area
+        self.auto_prompt_text = scrolledtext.ScrolledText(auto_prompt_frame, height=12, wrap=tk.WORD)
+
+        self.auto_prompt_text = scrolledtext.ScrolledText(
+            auto_prompt_frame, 
+            height=12, 
+            wrap=tk.WORD,
+            undo=True,
+            autoseparators=True,
+            maxundo=-1
+        )
+        self.auto_prompt_text.pack(fill=tk.BOTH, expand=True)
+        self.auto_prompt_text.insert('1.0', self.auto_glossary_prompt)
+
+        # Add undo/redo bindings
+        self.auto_prompt_text.edit_reset()  # Reset undo stack after initial insert
+        self._setup_text_undo_redo(self.auto_prompt_text)
+        
+        # Prompt controls
+        auto_prompt_controls = tk.Frame(auto_container)
+        auto_prompt_controls.pack(fill=tk.X, pady=(10, 0))
+                
+        def reset_auto_prompt():
+            if messagebox.askyesno("Reset Prompt", 
+                                  "Reset automatic glossary prompt to default?"):
+                self.auto_prompt_text.delete('1.0', tk.END)
+                self.auto_prompt_text.insert('1.0', self.default_auto_glossary_prompt)
+        
+        tb.Button(auto_prompt_controls, text="Reset to Default", 
+                  command=reset_auto_prompt, bootstyle="warning").pack(side=tk.LEFT, padx=5)
+        
+        # ===== GLOSSARY EDITOR TAB =====
+        self._setup_glossary_editor_tab(editor_frame)
+        
+        # ===== DIALOG CONTROLS =====
+        control_frame = tk.Frame(manager)
+        control_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        def save_glossary_settings():
+            """Save all glossary settings"""
+            try:
+                # Save manual field selections
+                for field, var in self.manual_field_vars.items():
+                    # Save all fields including original_name
+                    self.config[f'manual_extract_{field}'] = var.get()
+                
+                # Save custom fields
+                self.config['custom_glossary_fields'] = self.custom_glossary_fields
+                
+                # Save prompts
+                self.manual_glossary_prompt = self.manual_prompt_text.get('1.0', tk.END).strip()
+                self.auto_glossary_prompt = self.auto_prompt_text.get('1.0', tk.END).strip()
+                self.config['manual_glossary_prompt'] = self.manual_glossary_prompt
+                self.config['auto_glossary_prompt'] = self.auto_glossary_prompt
+                
+                
+                # Save manual settings
+                try:
+                    self.config['manual_glossary_temperature'] = float(self.manual_temp_var.get())
+                    self.config['manual_context_limit'] = int(self.manual_context_var.get())
+                except ValueError:
+                    messagebox.showwarning("Invalid Input", "Please enter valid numbers for temperature and context limit")
+                    return
+                
+                # Update environment variables for immediate effect
+                os.environ['GLOSSARY_SYSTEM_PROMPT'] = self.manual_glossary_prompt
+                os.environ['AUTO_GLOSSARY_PROMPT'] = self.auto_glossary_prompt
+                
+                # Build fields string for manual glossary
+                enabled_fields = []
+                for field, var in self.manual_field_vars.items():
+                    if var.get():
+                        os.environ[f'GLOSSARY_EXTRACT_{field.upper()}'] = '1'
+                        enabled_fields.append(field)
+                    else:
+                        os.environ[f'GLOSSARY_EXTRACT_{field.upper()}'] = '0'
+                
+                # Set custom fields
+                if self.custom_glossary_fields:
+                    os.environ['GLOSSARY_CUSTOM_FIELDS'] = json.dumps(self.custom_glossary_fields)
+                
+                # Save config to file
+                with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(self.config, f, ensure_ascii=False, indent=2)
+                
+                self.append_log("✅ Glossary settings saved successfully")
+                messagebox.showinfo("Success", "Glossary settings saved!")
+                manager.destroy()
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save settings: {e}")
+                self.append_log(f"❌ Failed to save glossary settings: {e}")
+        
+        def cancel():
+            manager.destroy()
+        
+        # Create a centered button container
+        button_container = tk.Frame(control_frame)
+        button_container.pack(expand=True)  # This centers the container
+
+        tb.Button(button_container, text="Save All Settings", command=save_glossary_settings, 
+                  bootstyle="success", width=20).pack(side=tk.LEFT, padx=5)
+        tb.Button(button_container, text="Cancel", command=lambda: [cleanup_scrolling(), manager.destroy()], 
+                  bootstyle="secondary", width=20).pack(side=tk.LEFT, padx=5)
+        
+        # Auto-resize and center the dialog (up to 85% of screen height)
+        self._auto_resize_dialog(manager, canvas, max_width_ratio=0.8, max_height_ratio=0.85)
+
+
+    def _setup_glossary_editor_tab(self, parent):
+        """Set up the glossary editor/trimmer tab"""
+        container = tk.Frame(parent)
+        container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # File selection
+        file_frame = tk.Frame(container)
+        file_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(file_frame, text="Glossary File:").pack(side=tk.LEFT, padx=(0, 5))
+        self.editor_file_var = tk.StringVar()
+        tb.Entry(file_frame, textvariable=self.editor_file_var, state='readonly').pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        
+        def browse_glossary():
+            path = filedialog.askopenfilename(
+                title="Select glossary.json",
+                filetypes=[("JSON files", "*.json")]
+            )
+            if path:
+                self.editor_file_var.set(path)
+                load_glossary_for_editing()
+        
+        tb.Button(file_frame, text="Browse", command=browse_glossary, width=15).pack(side=tk.LEFT)
+        
+        # Glossary content area
+        content_frame = tk.LabelFrame(container, text="Glossary Entries", padx=10, pady=10)
+        content_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Treeview for glossary entries
+        tree_frame = tk.Frame(content_frame)
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Scrollbars
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical")
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal")
+        
+        # Create treeview
+        self.glossary_tree = ttk.Treeview(tree_frame, 
+                                         columns=('original', 'translated', 'type', 'frequency'),
+                                         show='tree headings',
+                                         yscrollcommand=vsb.set,
+                                         xscrollcommand=hsb.set)
+        
+        vsb.config(command=self.glossary_tree.yview)
+        hsb.config(command=self.glossary_tree.xview)
+        
+        # Configure columns
+        self.glossary_tree.heading('#0', text='Index')
+        self.glossary_tree.heading('original', text='Original')
+        self.glossary_tree.heading('translated', text='Translation')
+        self.glossary_tree.heading('type', text='Type')
+        self.glossary_tree.heading('frequency', text='Count')
+        
+        self.glossary_tree.column('#0', width=60)
+        self.glossary_tree.column('original', width=200)
+        self.glossary_tree.column('translated', width=200)
+        self.glossary_tree.column('type', width=100)
+        self.glossary_tree.column('frequency', width=80)
+        
+        # Pack treeview and scrollbars
+        self.glossary_tree.grid(row=0, column=0, sticky='nsew')
+        vsb.grid(row=0, column=1, sticky='ns')
+        hsb.grid(row=1, column=0, sticky='ew')
+        
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+        
+        # Editor controls
+        editor_controls = tk.Frame(container)
+        editor_controls.pack(fill=tk.X, pady=(10, 0))
+        
+        # Keep the current glossary data in memory
+        self.current_glossary_data = None
+        
+        def load_glossary_for_editing():
+            """Load glossary file into the tree view"""
+            path = self.editor_file_var.get()
+            if not path or not os.path.exists(path):
+                messagebox.showerror("Error", "Please select a valid glossary file")
+                return
+            
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                # Clear existing items
+                for item in self.glossary_tree.get_children():
+                    self.glossary_tree.delete(item)
+                
+                # Handle different glossary formats
+                entries = []
+                
+                if isinstance(data, dict):
+                    if 'entries' in data:
+                        # New format with metadata
+                        self.current_glossary_data = data
+                        entries = data['entries'].items()
+                    else:
+                        # Simple dict format
+                        self.current_glossary_data = {'entries': data}
+                        entries = data.items()
+                elif isinstance(data, list):
+                    # Manual glossary format
+                    self.current_glossary_data = data
+                    for idx, char in enumerate(data):
+                        original = char.get('original_name', '')
+                        translated = char.get('name', original)
+                        char_type = 'character'
+                        freq = idx + 1
+                        
+                        if original:
+                            item = self.glossary_tree.insert('', 'end', text=str(idx + 1),
+                                                           values=(original, translated, char_type, freq))
+                    return
+                
+                # Load entries for dict format
+                for idx, (original, translated) in enumerate(entries):
+                    # Detect type
+                    if any(h in original for h in ['님', '씨', 'さん', 'ちゃん', '-san', '-nim']):
+                        entry_type = 'name'
+                    elif any(t in original.lower() for t in ['king', 'queen', '왕', '여왕', '王']):
+                        entry_type = 'title'
+                    else:
+                        entry_type = 'term'
+                    
+                    item = self.glossary_tree.insert('', 'end', text=str(idx + 1),
+                                                   values=(original, translated, entry_type, ''))
+                
+                self.append_log(f"✅ Loaded {len(entries)} entries from glossary")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load glossary: {e}")
+        
+        def apply_trimming():
+            """Apply the classic trimming logic"""
+            if not self.current_glossary_data:
+                messagebox.showerror("Error", "No glossary loaded")
+                return
+            
+            # Create trimming dialog
+            trim_dialog = tk.Toplevel(self.master)
+            trim_dialog.title("Trim Glossary")
+            trim_dialog.geometry("400x500")
+            trim_dialog.transient(self.master)
+            
+            # Get values from the hidden trim entries in main GUI
+            labels = [
+                "Entries to keep (by frequency):",
+                "Traits Trim Count:",
+                "Title Keep (0=remove):",
+                "Group Affiliation Trim Count:",
+                "Refer-to-Others Trim Count:",
+                "Locations Trim Count:"
+            ]
+            
+            defaults = [
+                "100",
+                self.traits_trim.get(),
+                self.title_trim.get(),
+                self.group_trim.get(),
+                self.refer_trim.get(),
+                self.loc_trim.get()
+            ]
+            
+            entries = []
+            for i, (lab, defval) in enumerate(zip(labels, defaults)):
+                tb.Label(trim_dialog, text=lab).grid(row=i, column=0, sticky=tk.W, padx=5, pady=2)
+                e = tb.Entry(trim_dialog, width=10)
+                e.insert(0, defval)
+                e.grid(row=i, column=1, padx=5, pady=2)
+                entries.append(e)
+            
+            def execute_trim():
+                try:
+                    # Get values
+                    top_limit = int(entries[0].get())
+                    traits_lim = int(entries[1].get())
+                    title_lim = int(entries[2].get())
+                    group_lim = int(entries[3].get())
+                    refer_lim = int(entries[4].get())
+                    loc_lim = int(entries[5].get())
+                    
+                    # Apply trimming based on format
+                    if isinstance(self.current_glossary_data, list):
+                        # Manual glossary format
+                        trimmed = self.current_glossary_data[:top_limit]
+                        for char in trimmed:
+                            if title_lim <= 0:
+                                char.pop('title', None)
+                            if traits_lim <= 0:
+                                char.pop('traits', None)
+                            else:
+                                t = char.get('traits', [])
+                                if isinstance(t, list) and len(t) > traits_lim:
+                                    char['traits'] = t[:-traits_lim]
+                            # Apply other trims...
+                        
+                        self.current_glossary_data = trimmed
+                    else:
+                        # Dict format - just keep top N entries
+                        if 'entries' in self.current_glossary_data:
+                            entries_list = list(self.current_glossary_data['entries'].items())
+                            self.current_glossary_data['entries'] = dict(entries_list[:top_limit])
+                    
+                    # Save and reload
+                    path = self.editor_file_var.get()
+                    with open(path, 'w', encoding='utf-8') as f:
+                        json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
+                    
+                    load_glossary_for_editing()
+                    messagebox.showinfo("Success", f"Trimmed glossary to {top_limit} entries")
+                    trim_dialog.destroy()
+                    
+                except Exception as e:
+                    messagebox.showerror("Error", f"Trimming failed: {e}")
+            
+            tb.Button(trim_dialog, text="Apply Trim", command=execute_trim, 
+                     bootstyle="warning").grid(row=len(labels), column=0, columnspan=2, pady=10)
+        
+        def save_edited_glossary():
+            """Save the current glossary"""
+            if not self.current_glossary_data:
+                messagebox.showerror("Error", "No glossary loaded")
+                return
+            
+            path = self.editor_file_var.get()
+            try:
+                with open(path, 'w', encoding='utf-8') as f:
+                    json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
+                
+                messagebox.showinfo("Success", "Glossary saved successfully")
+                self.append_log(f"✅ Saved glossary to: {path}")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save: {e}")
+        
+        # Control buttons
+        tb.Button(editor_controls, text="Reload", command=load_glossary_for_editing,
+                  bootstyle="info", width=15).pack(side=tk.LEFT, padx=5)
+        tb.Button(editor_controls, text="Apply Classic Trim", command=apply_trimming,
+                  bootstyle="warning", width=15).pack(side=tk.LEFT, padx=5)
+        tb.Button(editor_controls, text="Aggregate Locations", 
+                  command=lambda: self._aggregate_locations(load_glossary_for_editing),
+                  bootstyle="info", width=15).pack(side=tk.LEFT, padx=5)
+        tb.Button(editor_controls, text="Save Changes", command=save_edited_glossary,
+                  bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
+
+    def _aggregate_locations(self, reload_callback):
+        """Aggregate all location entries into a single entry"""
+        if not self.current_glossary_data:
+            messagebox.showerror("Error", "No glossary loaded")
+            return
+        
+        if isinstance(self.current_glossary_data, list):
+            # Manual glossary format
+            all_locs = []
+            for char in self.current_glossary_data:
+                locs = char.get('locations', [])
+                if isinstance(locs, list):
+                    all_locs.extend(locs)
+                char.pop('locations', None)
+            
+            # Remove duplicates while preserving order
+            seen = set()
+            unique_locs = []
+            for loc in all_locs:
+                if loc not in seen:
+                    seen.add(loc)
+                    unique_locs.append(loc)
+            
+            # Remove existing location summary
+            self.current_glossary_data = [
+                entry for entry in self.current_glossary_data 
+                if entry.get('original_name') != "📍 Location Summary"
+            ]
+            
+            # Add aggregated entry
+            self.current_glossary_data.append({
+                "original_name": "📍 Location Summary",
+                "name": "Location Summary",
+                "locations": unique_locs
+            })
+            
+            # Save
+            path = self.editor_file_var.get()
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
+            
+            messagebox.showinfo("Success", f"Aggregated {len(unique_locs)} unique locations")
+            reload_callback()
+        else:
+            messagebox.showinfo("Info", "Location aggregation only works with manual glossary format")
+        
     def _make_bottom_toolbar(self):
         """Create the bottom toolbar with all action buttons"""
         btn_frame = tb.Frame(self.frame)
@@ -700,7 +1514,7 @@ class TranslatorGUI:
         toolbar_items = [
             ("EPUB Converter",      self.epub_converter,               "info"),
             ("Extract Glossary",    self.run_glossary_extraction_thread, "warning"),
-            ("Trim Glossary",       self.trim_glossary,               "secondary"),
+            ("Glossary Manager",    self.glossary_manager,            "secondary"),
             ("Retranslate",         self.force_retranslation,         "warning"),
             ("Save Config",         self.save_config,                 "secondary"),
             ("Load Glossary",       self.load_glossary,               "secondary"),
@@ -717,6 +1531,7 @@ class TranslatorGUI:
                 self.epub_button = btn
 
         self.frame.grid_rowconfigure(12, weight=0)
+
 
     # === DIRECT FUNCTION CALLS ===
     
@@ -804,8 +1619,15 @@ class TranslatorGUI:
                 if self.disable_glossary_translation_var.get():
                     self.append_log("⚠️ Glossary translation disabled - terms will remain in original language")
                 else:
-                    self.append_log(f"✅ Glossary translation enabled with {self.glossary_batch_size_var.get()} terms per batch")                    
-                
+                    self.append_log(f"✅ Glossary translation enabled with {self.glossary_batch_size_var.get()} terms per batch")            
+
+                # Log batch translation status
+                if self.batch_translation_var.get():
+                    self.append_log(f"📦 Batch translation ENABLED - processing {self.batch_size_var.get()} chapters per API call")
+                    self.append_log("   💡 This can improve speed but may reduce per-chapter customization")
+                else:
+                    self.append_log("📄 Standard translation mode - processing one chapter at a time")
+                                
                 # Set environment variables - FIXED: Use multiple API key variables
                 os.environ.update({
                     'EPUB_PATH': epub_path,
@@ -851,7 +1673,9 @@ class TranslatorGUI:
                     'IMAGE_CHUNK_HEIGHT': self.image_chunk_height_var.get(),
                     'HIDE_IMAGE_TRANSLATION_LABEL': "1" if self.hide_image_translation_label_var.get() else "0",
                     'RETRY_TIMEOUT': "1" if self.retry_timeout_var.get() else "0",
-                    'CHUNK_TIMEOUT': self.chunk_timeout_var.get()
+                    'CHUNK_TIMEOUT': self.chunk_timeout_var.get(),
+                    'BATCH_TRANSLATION': "1" if self.batch_translation_var.get() else "0",
+                    'BATCH_SIZE': self.batch_size_var.get()
 
                 })
                 
@@ -1000,8 +1824,8 @@ class TranslatorGUI:
             try:
                 # Set up environment for glossary extraction
                 env_updates = {
-                    'GLOSSARY_TEMPERATURE': str(self.glossary_temp.get()),
-                    'GLOSSARY_CONTEXT_LIMIT': str(self.glossary_history.get()),
+                    'GLOSSARY_TEMPERATURE': str(self.config.get('manual_glossary_temperature', 0.3)),
+                    'GLOSSARY_CONTEXT_LIMIT': str(self.config.get('manual_context_limit', 3)),
                     'MODEL': self.model_var.get(),
                     'OPENAI_API_KEY': self.api_key_entry.get(),
                     'OPENAI_OR_Gemini_API_KEY': self.api_key_entry.get(),
@@ -1601,7 +2425,7 @@ class TranslatorGUI:
         """Open the Other Settings dialog with all advanced options in a grid layout"""
         top = tk.Toplevel(self.master)
         top.title("Other Settings")
-        top.geometry("860x1080")
+        top.geometry("900x1460")
         top.transient(self.master)
         top.grab_set()
         
@@ -1620,6 +2444,7 @@ class TranslatorGUI:
         canvas = tk.Canvas(content_area, bg='white')
         scrollbar = ttk.Scrollbar(content_area, orient="vertical", command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas)
+        
         
         scrollable_frame.bind(
             "<Configure>",
@@ -1999,7 +2824,8 @@ class TranslatorGUI:
                     "GLOSSARY_MIN_FREQUENCY": self.glossary_min_frequency_var.get(),
                     "GLOSSARY_MAX_NAMES": self.glossary_max_names_var.get(),
                     "GLOSSARY_MAX_TITLES": self.glossary_max_titles_var.get(),
-                    "GLOSSARY_BATCH_SIZE": self.glossary_batch_size_var.get()
+                    "GLOSSARY_BATCH_SIZE": self.glossary_batch_size_var.get(),
+                    
                 })
                 
                 # Save to config file
@@ -2014,7 +2840,9 @@ class TranslatorGUI:
             except Exception as e:
                 print(f"❌ Failed to save Other Settings: {e}")
                 messagebox.showerror("Error", f"Failed to save settings: {e}")
-        
+                
+        # Auto-resize and center the dialog (up to 80% of screen height)
+        self._auto_resize_dialog(top, canvas, max_width_ratio=0.7, max_height_ratio=0.8)
         # =================================================================
         # SAVE & CLOSE BUTTONS (Right side of row 3, next to Image Translation)
         # =================================================================
@@ -2035,46 +2863,12 @@ class TranslatorGUI:
                         
         # =================================================================
         # MOUSE WHEEL SCROLLING SUPPORT
-        # =================================================================
-        # Mouse wheel scrolling with proper cleanup
-        def _on_mousewheel(event):
-            try:
-                canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-            except:
-                pass
-
-        # Bind to canvas only, not all widgets
-        canvas.bind("<MouseWheel>", _on_mousewheel)
-        canvas.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))  # Linux
-        canvas.bind("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))   # Linux
-
-        def _on_mousewheel_linux(event, direction):
-            """Handle mouse wheel scrolling on Linux"""
-            try:
-                if canvas.winfo_exists():
-                    canvas.yview_scroll(direction, "units")
-            except tk.TclError:
-                pass
-
-        # Create event handler references for cleanup
-        wheel_handler = lambda e: _on_mousewheel(e)
-        wheel_up_handler = lambda e: _on_mousewheel_linux(e, -1)
-        wheel_down_handler = lambda e: _on_mousewheel_linux(e, 1)
+        # ================================================================
         
-        # Bind mouse wheel events
-        top.bind_all("<MouseWheel>", wheel_handler)
-        top.bind_all("<Button-4>", wheel_up_handler)  # Linux
-        top.bind_all("<Button-5>", wheel_down_handler)  # Linux
-        
-        # Clean up bindings when window is destroyed
-        def cleanup_bindings():
-            try:
-                top.unbind_all("<MouseWheel>")
-                top.unbind_all("<Button-4>")
-                top.unbind_all("<Button-5>")
-            except:
-                pass
-        
+        # Replace the existing mouse wheel scrolling section with:
+        cleanup_bindings = self._setup_dialog_scrolling(top, canvas)
+
+        # Update the existing protocol and button handlers to use cleanup_bindings
         top.protocol("WM_DELETE_WINDOW", lambda: [cleanup_bindings(), top.destroy()])
         
 
@@ -2225,132 +3019,7 @@ class TranslatorGUI:
         self.manual_glossary_path = path
         self.append_log(f"📑 Loaded manual glossary: {path}")
 
-    def trim_glossary(self):
-        path = filedialog.askopenfilename(
-            title="Select glossary.json to trim",
-            filetypes=[("JSON files","*.json")]
-        )
-        if not path:
-            return
 
-        with open(path, 'r', encoding='utf-8') as f:
-            glossary = json.load(f)
-
-        dlg = tk.Toplevel(self.master)
-        dlg.title("Glossary Trimmer")
-        dlg.geometry("420x480")
-        dlg.transient(self.master)
-        dlg.grab_set()
-
-        labels = [
-            "Entries (appearance order):",
-            "Traits Trim Count:",
-            "Title Keep (0=remove):",
-            "GroupAffil Trim Count:",
-            "Ref-To-Others Trim Count:",
-            "Locations Trim Count:"
-        ]
-        defaults = [
-            "100",
-            self.traits_trim.get(),
-            self.title_trim.get(),
-            self.group_trim.get(),
-            self.refer_trim.get(),
-            self.loc_trim.get()
-        ]
-        entries = []
-        for i,(lab,defval) in enumerate(zip(labels,defaults)):
-            tb.Label(dlg, text=lab).grid(row=i, column=0, sticky=tk.W, padx=5, pady=2)
-            e = tb.Entry(dlg, width=6)
-            e.insert(0, defval)
-            e.grid(row=i, column=1, padx=5, pady=2)
-            entries.append(e)
-
-        def aggregate_locations():
-            all_locs = []
-            for char in glossary:
-                locs = char.get('locations', [])
-                if isinstance(locs, list):
-                    all_locs.extend(locs)
-                char.pop('locations', None)
-
-            seen = set()
-            unique_locs = []
-            for loc in all_locs:
-                if loc not in seen:
-                    seen.add(loc)
-                    unique_locs.append(loc)
-
-            glossary[:] = [entry for entry in glossary if entry.get('original_name') != "📍 Location Summary"]
-            glossary.append({
-                "original_name": "📍 Location Summary",
-                "name": "Location Summary",
-                "locations": unique_locs
-            })
-
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump(glossary, f, ensure_ascii=False, indent=2)
-            messagebox.showinfo("Aggregated", f"{len(unique_locs)} unique locations added to glossary.")
-            dlg.lift()
-
-        def apply_trim():
-            top_limit, traits_lim, title_lim, group_lim, refer_lim, loc_lim = (
-                int(e.get()) for e in entries
-            )
-            trimmed = glossary[:top_limit]
-            for char in trimmed:
-                if title_lim <= 0:
-                    char.pop('title', None)
-                if traits_lim <= 0:
-                    char.pop('traits', None)
-                else:
-                    t = char.get('traits', [])
-                    char['traits'] = t[:-traits_lim] if len(t)>traits_lim else []
-                if group_lim <= 0:
-                    char.pop('group_affiliation', None)
-                else:
-                    g = char.get('group_affiliation', [])
-                    char['group_affiliation'] = g[:-group_lim] if len(g)>group_lim else []
-                if refer_lim <= 0:
-                    char.pop('how_they_refer_to_others', None)
-                else:
-                    items = list(char.get('how_they_refer_to_others',{}).items())
-                    keep = items[:-refer_lim] if len(items)>refer_lim else []
-                    char['how_they_refer_to_others'] = dict(keep)
-                if loc_lim <= 0:
-                    char.pop('locations', None)
-                else:
-                    l = char.get('locations', [])
-                    char['locations'] = l[:-loc_lim] if len(l)>loc_lim else []
-
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump(trimmed, f, ensure_ascii=False, indent=2)
-            messagebox.showinfo("Trimmed", f"Glossary written with {top_limit} entries.")
-            dlg.destroy()
-
-        def delete_empty_fields():
-            for char in glossary:
-                for key in list(char.keys()):
-                    val = char[key]
-                    if val in (None, [], {}, ""):
-                        char.pop(key, None)
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump(glossary, f, ensure_ascii=False, indent=2)
-            messagebox.showinfo("Deleted", "Empty fields removed.")
-            dlg.lift()
-
-        tb.Button(dlg, text="Apply", command=apply_trim, bootstyle="success") \
-          .grid(row=len(labels), column=0, columnspan=2, pady=10)
-        tb.Button(dlg, text="➕ Aggregate Unique Locations",
-                  command=aggregate_locations, bootstyle="info") \
-          .grid(row=len(labels)+1, column=0, columnspan=2, pady=5)
-        tb.Button(
-            dlg,
-            text="Delete Empty Fields",
-            command=delete_empty_fields,
-            bootstyle="warning"
-        ).grid(row=len(labels)+2, column=0, columnspan=2, pady=5)
-        dlg.wait_window()
 
     def save_config(self):
         """Persist all settings to config.json."""
@@ -2362,8 +3031,6 @@ class TranslatorGUI:
             self.config['delay'] = int(self.delay_entry.get())
             self.config['translation_temperature'] = float(self.trans_temp.get())
             self.config['translation_history_limit'] = int(self.trans_history.get())
-            self.config['glossary_temperature'] = float(self.glossary_temp.get())
-            self.config['glossary_history_limit'] = int(self.glossary_history.get())
             self.config['api_key'] = self.api_key_entry.get()
             self.config['REMOVE_AI_ARTIFACTS'] = self.REMOVE_AI_ARTIFACTS_var.get()
             self.config['chapter_range'] = self.chapter_range_entry.get().strip()
@@ -2389,6 +3056,8 @@ class TranslatorGUI:
             self.config['webnovel_min_height'] = int(self.webnovel_min_height_var.get())
             self.config['image_max_tokens'] = int(self.image_max_tokens_var.get())
             self.config['max_images_per_chapter'] = int(self.max_images_per_chapter_var.get())
+            self.config['batch_translation'] = self.batch_translation_var.get()
+            self.config['batch_size'] = int(self.batch_size_var.get())
 
             
             _tl = self.token_limit_entry.get().strip()
@@ -2403,20 +3072,10 @@ class TranslatorGUI:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save config: {e}")
 
-    def on_resize(self, event):
-        if event.widget is self.master:
-            sx = event.width / BASE_WIDTH
-            sy = event.height / BASE_HEIGHT
-            s = min(sx, sy)
-            new_w = int(self.run_base_w * s)
-            new_h = int(self.run_base_h * s)
-            ipadx = max(0, (new_w - self.run_base_w)//2)
-            ipady = max(0, (new_h - self.run_base_h)//2)
-            self.run_button.grid_configure(ipadx=ipadx, ipady=ipady)
+
 
     def log_debug(self, message):
         self.append_log(f"[DEBUG] {message}")
-
 
 if __name__ == "__main__":
     import time  # Add this import
