@@ -1829,8 +1829,26 @@ class TranslatorGUI:
                     'MODEL': self.model_var.get(),
                     'OPENAI_API_KEY': self.api_key_entry.get(),
                     'OPENAI_OR_Gemini_API_KEY': self.api_key_entry.get(),
-                    'API_KEY': self.api_key_entry.get()
+                    'API_KEY': self.api_key_entry.get(),
+                    'MAX_OUTPUT_TOKENS': str(self.max_output_tokens),
+                    'GLOSSARY_SYSTEM_PROMPT': self.manual_glossary_prompt,
+                    
+                    # FIELD-SPECIFIC SETTINGS (ADD THESE):
+                    'GLOSSARY_EXTRACT_ORIGINAL_NAME': '1' if self.config.get('manual_extract_original_name', True) else '0',
+                    'GLOSSARY_EXTRACT_NAME': '1' if self.config.get('manual_extract_name', True) else '0',
+                    'GLOSSARY_EXTRACT_GENDER': '1' if self.config.get('manual_extract_gender', True) else '0',
+                    'GLOSSARY_EXTRACT_TITLE': '1' if self.config.get('manual_extract_title', True) else '0',
+                    'GLOSSARY_EXTRACT_GROUP_AFFILIATION': '1' if self.config.get('manual_extract_group_affiliation', True) else '0',
+                    'GLOSSARY_EXTRACT_TRAITS': '1' if self.config.get('manual_extract_traits', True) else '0',
+                    'GLOSSARY_EXTRACT_HOW_THEY_REFER_TO_OTHERS': '1' if self.config.get('manual_extract_how_they_refer_to_others', True) else '0',
+                    'GLOSSARY_EXTRACT_LOCATIONS': '1' if self.config.get('manual_extract_locations', True) else '0',
                 }
+
+                # Also add custom fields if any
+                if self.custom_glossary_fields:
+                    env_updates['GLOSSARY_CUSTOM_FIELDS'] = json.dumps(self.custom_glossary_fields)
+
+                os.environ.update(env_updates)
                 
                 # Use the same token limit logic as translation
                 # The complete section should look like:
