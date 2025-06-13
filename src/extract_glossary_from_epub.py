@@ -7,6 +7,9 @@ import sys
 import tiktoken
 import threading
 import queue
+import ebooklib
+from ebooklib import epub
+
 
 # Fix for PyInstaller - handle stdout reconfigure more carefully
 if sys.platform.startswith("win"):
@@ -143,9 +146,27 @@ def save_glossary_md(glossary: List[Dict], output_path: str):
 def extract_chapters_from_epub(epub_path: str) -> List[str]:
     chapters = []
     items = []
+    
+    # Add this helper function
+    def is_html_document(item):
+        """Check if an EPUB item is an HTML document"""
+        if hasattr(item, 'media_type'):
+            return item.media_type in [
+                'application/xhtml+xml',
+                'text/html',
+                'application/html+xml',
+                'text/xml'
+            ]
+        # Fallback for items that don't have media_type
+        if hasattr(item, 'get_name'):
+            name = item.get_name()
+            return name.lower().endswith(('.html', '.xhtml', '.htm'))
+        return False
+    
     try:
         book = epub.read_epub(epub_path)
-        items = [item for item in book.get_items() if item.get_type() == epub.ITEM_DOCUMENT]
+        # Replace the problematic line with media type checking
+        items = [item for item in book.get_items() if is_html_document(item)]
     except Exception as e:
         print(f"[Warning] Manifest load failed, falling back to raw EPUB scan: {e}")
         try:
@@ -157,14 +178,14 @@ def extract_chapters_from_epub(epub_path: str) -> List[str]:
                         items.append(type('X', (), {
                             'get_content': lambda self, data=data: data,
                             'get_name': lambda self, name=name: name,
-                            'get_type': lambda self: epub.ITEM_DOCUMENT
+                            'media_type': 'text/html'  # Add media_type for consistency
                         })())
                     except Exception:
                         print(f"[Warning] Could not read zip file entry: {name}")
         except Exception as ze:
             print(f"[Fatal] Cannot open EPUB as zip: {ze}")
             return chapters
-
+            
     for item in items:
         try:
             raw = item.get_content()
@@ -175,6 +196,7 @@ def extract_chapters_from_epub(epub_path: str) -> List[str]:
         except Exception as e:
             name = item.get_name() if hasattr(item, 'get_name') else repr(item)
             print(f"[Warning] Skipped corrupted chapter {name}: {e}")
+            
     return chapters
 
 def trim_context_history(history: List[Dict], limit: int) -> List[Dict]:
@@ -569,7 +591,9 @@ def main(log_callback=None, stop_callback=None):
 
     # Log enabled fields
     print("📑 Extraction Fields Configuration:")
-    print(f"   • Original Name: ✅ (always enabled)")
+    original_name_enabled = os.environ.get('GLOSSARY_EXTRACT_ORIGINAL_NAME', '1') == '1'
+    status = "✅" if original_name_enabled else "❌"
+    print(f"   • Original Name: {status}")
     print(f"   • Name: {'✅' if os.getenv('GLOSSARY_EXTRACT_NAME', '1') == '1' else '❌'}")
     print(f"   • Gender: {'✅' if os.getenv('GLOSSARY_EXTRACT_GENDER', '1') == '1' else '❌'}")
     print(f"   • Title: {'✅' if os.getenv('GLOSSARY_EXTRACT_TITLE', '1') == '1' else '❌'}")
