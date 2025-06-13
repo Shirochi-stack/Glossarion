@@ -533,7 +533,7 @@ class ImageTranslator:
                 
                 print(f"   🔄 Calling vision API...")
                 print(f"   📊 Using temperature: {current_temp}")
-                print(f"   📊 Max tokens: {current_max_tokens}")
+                print(f"   📊 Output Token Limit: {current_max_tokens}")
                 
                 if chunk_timeout:
                     print(f"   ⏱️ Timeout enabled: {chunk_timeout} seconds")
