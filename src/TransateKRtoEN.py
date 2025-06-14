@@ -4659,24 +4659,39 @@ def main(log_callback=None, stop_callback=None):
                             
                             # Get current history before it's cleared
                             current_history = history_manager.load_history()
+                            
+                            # Get configuration
+                            exchanges_to_summarize = int(os.getenv("ROLLING_SUMMARY_EXCHANGES", "5"))
+                            summary_mode = os.getenv("ROLLING_SUMMARY_MODE", "append")
+                            
+                            # Calculate how many messages to include (2 messages per exchange)
+                            messages_to_include = exchanges_to_summarize * 2
+                            
                             if len(current_history) >= 4:  # At least 2 exchanges
                                 # Extract recent assistant responses
                                 assistant_responses = []
-                                for h in current_history[-8:]:  # Last 4 exchanges
+                                recent_messages = current_history[-messages_to_include:] if messages_to_include > 0 else current_history
+                                
+                                for h in recent_messages:
                                     if h.get("role") == "assistant":
                                         assistant_responses.append(h["content"])
                                 
                                 if assistant_responses:
-                                    # Generate summary
-                                    summary_prompt = (
-                                        "Summarize the key events, characters, tone, and important details from these translations. "
-                                        "Focus on: character names/relationships, plot developments, and any special terminology used.\n\n"
-                                        + "\n---\n".join(assistant_responses[-3:])  # Last 3 responses
-                                    )
+                                    # Get custom prompts or use defaults
+                                    system_prompt = os.getenv("ROLLING_SUMMARY_SYSTEM_PROMPT", 
+                                                            "Create a concise summary for context continuity.")
+                                    user_prompt_template = os.getenv("ROLLING_SUMMARY_USER_PROMPT",
+                                                                    "Summarize the key events, characters, tone, and important details from these translations. "
+                                                                    "Focus on: character names/relationships, plot developments, and any special terminology used.\n\n"
+                                                                    "{translations}")
+                                    
+                                    # Format the translations
+                                    translations_text = "\n---\n".join(assistant_responses)
+                                    user_prompt = user_prompt_template.replace("{translations}", translations_text)
                                     
                                     summary_msgs = [
-                                        {"role": "system", "content": "Create a concise summary for context continuity."},
-                                        {"role": "user", "content": summary_prompt}
+                                        {"role": "system", "content": system_prompt},
+                                        {"role": "user", "content": user_prompt}
                                     ]
                                     
                                     try:
@@ -4686,20 +4701,32 @@ def main(log_callback=None, stop_callback=None):
                                         
                                         # Save summary to file
                                         summary_file = os.path.join(out, "rolling_summary.txt")
-                                        with open(summary_file, "a", encoding="utf-8") as sf:  # Append mode
-                                            sf.write(f"\n\n=== Summary before chapter {idx+1}, chunk {chunk_idx} ===\n")
-                                            sf.write(summary_resp.strip())
+                                        
+                                        # Handle append vs replace mode
+                                        if summary_mode == "append":
+                                            mode = "a"
+                                            with open(summary_file, mode, encoding="utf-8") as sf:
+                                                sf.write(f"\n\n=== Summary before chapter {idx+1}, chunk {chunk_idx} ===\n")
+                                                sf.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n")
+                                                sf.write(summary_resp.strip())
+                                        else:  # replace mode
+                                            mode = "w"
+                                            with open(summary_file, mode, encoding="utf-8") as sf:
+                                                sf.write(f"=== Latest Summary (Chapter {idx+1}, chunk {chunk_idx}) ===\n")
+                                                sf.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n")
+                                                sf.write(summary_resp.strip())
                                         
                                         # Update base_msg to include summary
                                         # First, remove any existing summary message
-                                        base_msg[:] = [msg for msg in base_msg if "summary of the previous" not in msg.get("content", "")]
+                                        base_msg[:] = [msg for msg in base_msg if "[MEMORY]" not in msg.get("content", "")]
                                         
-                                        # Add new summary
+                                        # Add new summary with clear labeling
                                         summary_msg = {
                                             "role": os.getenv("SUMMARY_ROLE", "user"),
                                             "content": (
-                                                "Here is a summary of the previous context to maintain continuity:\n\n"
-                                                f"{summary_resp.strip()}"
+                                                "[MEMORY] Previous context summary:\n\n"
+                                                f"{summary_resp.strip()}\n\n"
+                                                "[END MEMORY]"
                                             )
                                         }
                                         
@@ -4709,7 +4736,17 @@ def main(log_callback=None, stop_callback=None):
                                         else:
                                             base_msg.insert(0, summary_msg)
                                         
-                                        print(f"📝 Generated rolling summary before history reset")
+                                        print(f"📝 Generated rolling summary ({summary_mode} mode, {exchanges_to_summarize} exchanges)")
+                                        
+                                        # In append mode, also show total summaries
+                                        if summary_mode == "append" and os.path.exists(summary_file):
+                                            try:
+                                                with open(summary_file, 'r', encoding='utf-8') as sf:
+                                                    content = sf.read()
+                                                summary_count = content.count("=== Summary")
+                                                print(f"   📚 Total summaries in memory: {summary_count}")
+                                            except:
+                                                pass
                                         
                                     except Exception as e:
                                         print(f"⚠️ Failed to generate rolling summary: {e}")
