@@ -19,7 +19,7 @@
 
 ## Introduction
 
-The Enhanced Rolling Summary system, also called the "Memory" system, is an advanced feature in Glossarion v2.0 that maintains translation context across long documents. It works similarly to how AI assistants maintain conversation memory, creating intelligent summaries of previous translations before the conversation history is cleared.
+The Enhanced Rolling Summary system, also called the "Memory" system, is an advanced feature in Glossarion v2.1 that maintains translation context across long documents. It works similarly to how AI assistants maintain conversation memory, creating intelligent summaries of previous translations before the conversation history is cleared.
 
 ### Key Benefits
 - **Consistency**: Maintains character names, terminology, and relationships throughout the translation
