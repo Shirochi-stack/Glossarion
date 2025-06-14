@@ -84,7 +84,7 @@ class TranslatorGUI:
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
-        master.title("Glossarion v2.0.0")
+        master.title("Glossarion v2.1.0")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1600, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
@@ -163,9 +163,33 @@ class TranslatorGUI:
         Prioritize names that appear with honorifics or in important contexts.
         Return the glossary in a simple key-value format."""
 
+        # In __init__ method, after default_auto_glossary_prompt
+        self.default_rolling_summary_system_prompt = """You are a context summarization assistant. Create concise, informative summaries that preserve key story elements for translation continuity."""
+
+        self.default_rolling_summary_user_prompt = """Analyze the recent translation exchanges and create a structured summary for context continuity.
+
+        Focus on extracting and preserving:
+        1. **Character Information**: Names (with original forms), relationships, roles, and important character developments
+        2. **Plot Points**: Key events, conflicts, and story progression
+        3. **Locations**: Important places and settings
+        4. **Terminology**: Special terms, abilities, items, or concepts (with original forms)
+        5. **Tone & Style**: Writing style, mood, and any notable patterns
+        6. **Unresolved Elements**: Questions, mysteries, or ongoing situations
+
+        Format the summary clearly with sections. Be concise but comprehensive.
+
+        Recent translations to summarize:
+        {translations}"""
+
+        # Load saved prompts from config
+        self.rolling_summary_system_prompt = self.config.get('rolling_summary_system_prompt', self.default_rolling_summary_system_prompt)
+        self.rolling_summary_user_prompt = self.config.get('rolling_summary_user_prompt', self.default_rolling_summary_user_prompt)
+        
         # Load saved prompts from config
         self.manual_glossary_prompt = self.config.get('manual_glossary_prompt', self.default_manual_glossary_prompt)
         self.auto_glossary_prompt = self.config.get('auto_glossary_prompt', self.default_auto_glossary_prompt)
+        
+        
 
         # Add custom glossary fields configuration
         self.custom_glossary_fields = self.config.get('custom_glossary_fields', [])
@@ -179,6 +203,19 @@ class TranslatorGUI:
         )
         self.summary_role_var = tk.StringVar(
             value=self.config.get('summary_role', 'user')
+        )
+        
+         # ADD THESE NEW LINES HERE:
+        self.rolling_summary_exchanges_var = tk.StringVar(
+            value=str(self.config.get('rolling_summary_exchanges', '5'))  # How many exchanges to summarize
+        )
+        self.rolling_summary_mode_var = tk.StringVar(
+            value=self.config.get('rolling_summary_mode', 'append')  # append or replace
+        )
+        
+        # ─── NEW: Add variables for new toggles ───
+        self.disable_system_prompt_var = tk.BooleanVar(
+            value=self.config.get('disable_system_prompt', False)
         )
         
         # ─── NEW: Add variables for new toggles ───
@@ -278,9 +315,9 @@ class TranslatorGUI:
 )
         # Default prompts
         self.default_prompts = {
-            "korean": "You are a professional Korean to English novel translator, you must strictly output only English/HTML text while following these rules:\n- Use a context rich and natural translation style.\n- Retain honorifics, and suffixes like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
-            "japanese": "You are a professional Japanese to English novel translator, you must strictly output only English/HTML text while following these rules:\n- Use a context rich and natural translation style.\n- Retain honorifics, and suffixes like -san, -sama, -chan, -kun.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
-            "chinese": "You are a professional Chinese to English novel translator, you must strictly output only English/HTML text while following these rules:\n- Use a context rich and natural translation style.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji."
+            "korean": "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics, and suffixes like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
+            "japanese": "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags text while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics, and suffixes like -san, -sama, -chan, -kun.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
+            "chinese": "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji."
         }
 
         # Profiles - FIXED: Load from config properly
@@ -692,7 +729,7 @@ class TranslatorGUI:
         print("[DEBUG] GUI setup completed with config values loaded")  # Debug logging
         
         # Add initial log message
-        self.append_log("🚀 Glossarion v2.0.0 - Ready to use!")
+        self.append_log("🚀 Glossarion v2.1.0 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
 
     def force_retranslation(self):
@@ -1643,6 +1680,10 @@ class TranslatorGUI:
                     'REMOVE_AI_ARTIFACTS': "1" if self.REMOVE_AI_ARTIFACTS_var.get() else "0",
                     'USE_ROLLING_SUMMARY': "1" if self.config.get('use_rolling_summary') else "0",
                     'SUMMARY_ROLE': self.config.get('summary_role', 'user'),
+                    'ROLLING_SUMMARY_EXCHANGES': self.rolling_summary_exchanges_var.get(),
+                    'ROLLING_SUMMARY_MODE': self.rolling_summary_mode_var.get(),
+                    'ROLLING_SUMMARY_SYSTEM_PROMPT': self.rolling_summary_system_prompt,
+                    'ROLLING_SUMMARY_USER_PROMPT': self.rolling_summary_user_prompt,
                     'PROFILE_NAME': self.lang_var.get().lower(),
                     'TRANSLATION_TEMPERATURE': str(self.trans_temp.get()),
                     'TRANSLATION_HISTORY_LIMIT': str(self.trans_history.get()),
@@ -2203,13 +2244,23 @@ class TranslatorGUI:
             sys.exit(0)
 
     def append_log(self, message):
-        """Append message to log"""
+        """Append message to log with special formatting for memory"""
         def _append():
             # Get current scroll position
             at_bottom = self.log_text.yview()[1] >= 0.98
             
+            # Check if this is a memory-related message
+            is_memory = any(keyword in message for keyword in ['[MEMORY]', '📝', 'rolling summary', 'memory'])
+            
             # Add the message
-            self.log_text.insert(tk.END, message + "\n")
+            if is_memory:
+                # Add with special formatting
+                self.log_text.insert(tk.END, message + "\n", "memory")
+                # Configure the tag if not already done
+                if "memory" not in self.log_text.tag_names():
+                    self.log_text.tag_config("memory", foreground="#4CAF50", font=('TkDefaultFont', 10, 'italic'))
+            else:
+                self.log_text.insert(tk.END, message + "\n")
             
             # Auto-scroll only if we were at the bottom
             if at_bottom:
@@ -2437,7 +2488,89 @@ class TranslatorGUI:
             self.output_btn.config(text=f"Output Token Limit: {val}")
             self.append_log(f"✅ Output token limit set to {val}")
 
-
+    def configure_rolling_summary_prompts(self):
+        """Configure rolling summary prompts"""
+        dialog = tk.Toplevel(self.master)
+        dialog.title("Configure Memory System Prompts")
+        dialog.geometry("800x1050")
+        dialog.transient(self.master)
+        
+        # Main container with padding
+        main_frame = tk.Frame(dialog, padx=20, pady=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Title and description
+        tk.Label(main_frame, text="Memory System Configuration", 
+                 font=('TkDefaultFont', 14, 'bold')).pack(anchor=tk.W, pady=(0, 5))
+        
+        tk.Label(main_frame, 
+                 text="Configure how the AI creates and maintains translation memory/context summaries.",
+                 font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, pady=(0, 15))
+        
+        # System Prompt Section
+        system_frame = tk.LabelFrame(main_frame, text="System Prompt (Role Definition)", padx=10, pady=10)
+        system_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+        tk.Label(system_frame, 
+                 text="Defines the AI's role and behavior when creating summaries",
+                 font=('TkDefaultFont', 9), fg='blue').pack(anchor=tk.W, pady=(0, 5))
+        
+        self.summary_system_text = scrolledtext.ScrolledText(
+            system_frame, height=5, wrap=tk.WORD,
+            undo=True, autoseparators=True, maxundo=-1
+        )
+        self.summary_system_text.pack(fill=tk.BOTH, expand=True)
+        self.summary_system_text.insert('1.0', self.rolling_summary_system_prompt)
+        self._setup_text_undo_redo(self.summary_system_text)
+        
+        # User Prompt Section
+        user_frame = tk.LabelFrame(main_frame, text="User Prompt Template", padx=10, pady=10)
+        user_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+        tk.Label(user_frame, 
+                 text="Template for summary requests. Use {translations} for content placeholder",
+                 font=('TkDefaultFont', 9), fg='blue').pack(anchor=tk.W, pady=(0, 5))
+        
+        self.summary_user_text = scrolledtext.ScrolledText(
+            user_frame, height=12, wrap=tk.WORD,
+            undo=True, autoseparators=True, maxundo=-1
+        )
+        self.summary_user_text.pack(fill=tk.BOTH, expand=True)
+        self.summary_user_text.insert('1.0', self.rolling_summary_user_prompt)
+        self._setup_text_undo_redo(self.summary_user_text)
+        
+        # Buttons
+        button_frame = tk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        def save_prompts():
+            self.rolling_summary_system_prompt = self.summary_system_text.get('1.0', tk.END).strip()
+            self.rolling_summary_user_prompt = self.summary_user_text.get('1.0', tk.END).strip()
+            
+            # Save to config
+            self.config['rolling_summary_system_prompt'] = self.rolling_summary_system_prompt
+            self.config['rolling_summary_user_prompt'] = self.rolling_summary_user_prompt
+            
+            # Update environment variables
+            os.environ['ROLLING_SUMMARY_SYSTEM_PROMPT'] = self.rolling_summary_system_prompt
+            os.environ['ROLLING_SUMMARY_USER_PROMPT'] = self.rolling_summary_user_prompt
+            
+            messagebox.showinfo("Success", "Memory prompts saved!")
+            dialog.destroy()
+        
+        def reset_prompts():
+            if messagebox.askyesno("Reset Prompts", "Reset memory prompts to defaults?"):
+                self.summary_system_text.delete('1.0', tk.END)
+                self.summary_system_text.insert('1.0', self.default_rolling_summary_system_prompt)
+                self.summary_user_text.delete('1.0', tk.END)
+                self.summary_user_text.insert('1.0', self.default_rolling_summary_user_prompt)
+        
+        tb.Button(button_frame, text="Save", command=save_prompts, 
+                  bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
+        tb.Button(button_frame, text="Reset to Defaults", command=reset_prompts, 
+                  bootstyle="warning", width=15).pack(side=tk.LEFT, padx=5)
+        tb.Button(button_frame, text="Cancel", command=dialog.destroy, 
+                  bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
 
     def open_other_settings(self):
         """Open the Other Settings dialog with all advanced options in a grid layout"""
@@ -2445,7 +2578,7 @@ class TranslatorGUI:
         top.title("Other Settings")
         top.geometry("900x1460")
         top.transient(self.master)
-        top.grab_set()
+        #top.grab_set()
         
         # Store reference to prevent garbage collection issues
         self._settings_window = top
@@ -2481,37 +2614,62 @@ class TranslatorGUI:
         scrollable_frame.grid_columnconfigure(1, weight=1, uniform="column")
         
         # =================================================================
-        # SECTION 1: CONTEXT MANAGEMENT (Top Left) - COMPACT VERSION
+        # SECTION 1: CONTEXT MANAGEMENT (Top Left) - ENHANCED VERSION
         # =================================================================
-        section1_frame = tk.LabelFrame(scrollable_frame, text="Context Management", padx=10, pady=10)
+        section1_frame = tk.LabelFrame(scrollable_frame, text="Context Management & Memory", padx=10, pady=10)
         section1_frame.grid(row=0, column=0, sticky="nsew", padx=(10, 5), pady=(10, 5))
-        
+
         # Create inner frame to control content placement
         content_frame = tk.Frame(section1_frame)
-        content_frame.pack(anchor=tk.NW, fill=tk.X)
-        
-        # Rolling Summary
-        tb.Checkbutton(content_frame, text="Use Rolling Summary", 
+        content_frame.pack(anchor=tk.NW, fill=tk.BOTH, expand=True)
+
+        # Rolling Summary Enable
+        tb.Checkbutton(content_frame, text="Use Rolling Summary (Memory)", 
                        variable=self.rolling_summary_var,
                        bootstyle="round-toggle").pack(anchor=tk.W)
-        
+
         tk.Label(content_frame, 
-                 text="Generates context summaries to maintain\ncontinuity when history is cleared",
-                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
-        
-        # Summary Role in same row
-        summary_frame = tk.Frame(content_frame)
-        summary_frame.pack(anchor=tk.W, padx=20, pady=(0, 5))
-        tk.Label(summary_frame, text="Summary Role:").pack(side=tk.LEFT)
-        ttk.Combobox(summary_frame, textvariable=self.summary_role_var,
-                     values=["user", "system"], state="readonly", width=10).pack(side=tk.LEFT, padx=5)
-        
-        # Add a separator line and note about context management
-        ttk.Separator(section1_frame, orient='horizontal').pack(fill=tk.X, pady=(15, 10))
-        
+                 text="AI-powered memory system that maintains story context",
+                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))  # Increased bottom padding
+
+        # Summary Settings Frame
+        settings_frame = tk.Frame(content_frame)
+        settings_frame.pack(anchor=tk.W, padx=20, fill=tk.X, pady=(5, 10))  # Increased padding
+
+        # Row 1: Role and Mode - WITH PROPER SPACING
+        row1 = tk.Frame(settings_frame)
+        row1.pack(fill=tk.X, pady=(0, 10))  # Added bottom padding
+
+        tk.Label(row1, text="Role:").pack(side=tk.LEFT, padx=(0, 5))  # Added right padding
+        ttk.Combobox(row1, textvariable=self.summary_role_var,
+                     values=["user", "system"], state="readonly", width=10).pack(side=tk.LEFT, padx=(0, 30))  # Added significant right padding
+
+        tk.Label(row1, text="Mode:").pack(side=tk.LEFT, padx=(0, 5))  # Added right padding
+        ttk.Combobox(row1, textvariable=self.rolling_summary_mode_var,
+                     values=["append", "replace"], state="readonly", width=10).pack(side=tk.LEFT, padx=(0, 10))
+
+        # Row 2: Exchanges to summarize - WITH BETTER SPACING
+        row2 = tk.Frame(settings_frame)
+        row2.pack(fill=tk.X, pady=(0, 10))  # Added bottom padding
+
+        tk.Label(row2, text="Summarize last").pack(side=tk.LEFT, padx=(0, 5))
+        tb.Entry(row2, width=5, textvariable=self.rolling_summary_exchanges_var).pack(side=tk.LEFT, padx=(0, 5))
+        tk.Label(row2, text="exchanges").pack(side=tk.LEFT)
+
+        # Configure Prompts Button with more spacing
+        tb.Button(content_frame, text="⚙️ Configure Memory Prompts", 
+                  command=self.configure_rolling_summary_prompts,
+                  bootstyle="info-outline", width=30).pack(anchor=tk.W, padx=20, pady=(10, 10))  # Increased vertical padding
+
+        # Add a separator line
+        ttk.Separator(section1_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))  # Increased padding
+
+        # Help text
         tk.Label(section1_frame, 
-                 text="💡 Tip: Rolling summaries help maintain story\ncontinuity across long translations by preserving\nkey context when conversation history is cleared.",
-                 font=('TkDefaultFont', 9), fg='#666', justify=tk.LEFT).pack(anchor=tk.W, padx=5)
+                 text="💡 Memory Mode:\n"
+                 "• Append: Keeps adding summaries (longer context)\n"
+                 "• Replace: Only keeps latest summary (concise)",
+                 font=('TkDefaultFont', 11), fg='#666', justify=tk.LEFT).pack(anchor=tk.W, padx=5, pady=(0, 5))
         
         # =================================================================
         # SECTION 2: RESPONSE HANDLING (Top Right)
@@ -2813,10 +2971,19 @@ class TranslatorGUI:
                 self.config['max_images_per_chapter'] = int(self.max_images_per_chapter_var.get())
                 self.config['image_chunk_height'] = int(self.image_chunk_height_var.get())
                 self.config['hide_image_translation_label'] = self.hide_image_translation_label_var.get()
+                self.config['use_rolling_summary'] = self.rolling_summary_var.get()
+                self.config['summary_role'] = self.summary_role_var.get()
+                self.config['rolling_summary_exchanges'] = int(self.rolling_summary_exchanges_var.get())
+                self.config['rolling_summary_mode'] = self.rolling_summary_mode_var.get()
                 
                 # Set environment variables for immediate effect
                 os.environ.update({
                     "USE_ROLLING_SUMMARY": "1" if self.rolling_summary_var.get() else "0",
+                    "SUMMARY_ROLE": self.summary_role_var.get(),
+                    "ROLLING_SUMMARY_EXCHANGES": self.rolling_summary_exchanges_var.get(),
+                    "ROLLING_SUMMARY_MODE": self.rolling_summary_mode_var.get(),
+                    "ROLLING_SUMMARY_SYSTEM_PROMPT": self.rolling_summary_system_prompt,
+                    "ROLLING_SUMMARY_USER_PROMPT": self.rolling_summary_user_prompt,
                     "SUMMARY_ROLE": self.summary_role_var.get(),
                     "RETRY_TRUNCATED": "1" if self.retry_truncated_var.get() else "0",
                     "MAX_RETRY_TOKENS": self.max_retry_tokens_var.get(),
@@ -2842,7 +3009,8 @@ class TranslatorGUI:
                     "GLOSSARY_MIN_FREQUENCY": self.glossary_min_frequency_var.get(),
                     "GLOSSARY_MAX_NAMES": self.glossary_max_names_var.get(),
                     "GLOSSARY_MAX_TITLES": self.glossary_max_titles_var.get(),
-                    "GLOSSARY_BATCH_SIZE": self.glossary_batch_size_var.get(),
+                    "GLOSSARY_BATCH_SIZE": self.glossary_batch_size_var.get()
+
                     
                 })
                 
@@ -3098,7 +3266,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time  # Add this import
     
-    print("🚀 Starting Glossarion v2.0.0...")
+    print("🚀 Starting Glossarion v2.1.0...")
     
     # Initialize splash screen (main thread only)
     splash_manager = None
