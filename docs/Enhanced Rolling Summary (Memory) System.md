@@ -332,6 +332,3 @@ Start with the default settings, monitor the results, and adjust based on your s
 For support or questions about this feature, please refer to the Glossarion GitHub repository or community forums.
 
 ---
-
-*Last updated for Glossarion v2.1.0*
-This document is formatted to be easily added to your user guide. You can save it as a Markdown file (.md) or convert it to PDF/HTML for your documentation. The structure includes everything users need to understand and effectively use the rolling summary feature.
