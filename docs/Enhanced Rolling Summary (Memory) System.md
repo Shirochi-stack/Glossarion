@@ -333,5 +333,5 @@ For support or questions about this feature, please refer to the Glossarion GitH
 
 ---
 
-*Last updated for Glossarion v2.0.0*
+*Last updated for Glossarion v2.1.0*
 This document is formatted to be easily added to your user guide. You can save it as a Markdown file (.md) or convert it to PDF/HTML for your documentation. The structure includes everything users need to understand and effectively use the rolling summary feature.
