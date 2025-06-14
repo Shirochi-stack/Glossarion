@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="../assets/Halgakos.png" width="220" alt="Glossarion Logo" />
+</p>
+
 # Enhanced Rolling Summary (Memory) System
 
 ## Table of Contents
