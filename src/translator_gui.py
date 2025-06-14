@@ -153,7 +153,7 @@ class TranslatorGUI:
         Text:
         {chapter_text}"""
 
-        self.default_auto_glossary_prompt = """You are extracting a targeted glossary from a {language} novel.
+        self.default_auto_glossary_prompt = """You are extracting a targeted glossary from a Korean/Japanese/Chinese novel.
         Focus on identifying:
         1. Character names with their honorifics/suffixes
         2. Important titles and ranks
