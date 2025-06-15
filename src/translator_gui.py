@@ -84,7 +84,7 @@ class TranslatorGUI:
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
-        master.title("Glossarion v2.3.1")
+        master.title("Glossarion v2.3.2")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1600, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
