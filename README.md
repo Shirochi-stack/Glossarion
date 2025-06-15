@@ -15,8 +15,6 @@
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
 ![Python application](https://github.com/Shirochi-stack/Glossarion/workflows/Python%20application/badge.svg)
 [![GitHub release](https://img.shields.io/github/release/Shirochi-stack/Glossarion.svg)](https://GitHub.com/Shirochi-stack/Glossarion/releases/)
-[![Dependencies](https://img.shields.io/librariesio/github/Shirochi-stack/Glossarion)](https://libraries.io/github/Shirochi-stack/Glossarion)
-
 
 ## ✨ Features
 
