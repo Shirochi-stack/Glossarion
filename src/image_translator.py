@@ -100,6 +100,11 @@ class ImageTranslator:
         self.webnovel_min_height = int(os.getenv("WEBNOVEL_MIN_HEIGHT", "1000"))
         self.image_max_tokens = int(os.getenv("IMAGE_MAX_TOKENS", "8192"))
         self.chunk_height = int(os.getenv("IMAGE_CHUNK_HEIGHT", "2000"))
+        
+        # Add context tracking for image chunks
+        self.image_chunk_context = []
+        self.contextual_enabled = os.getenv("CONTEXTUAL", "1") == "1"
+        self.context_limit = 2  # Keep last 2 chunks as context
 
 
         
@@ -370,11 +375,14 @@ class ImageTranslator:
             return None
 
     def _process_image_chunks(self, img, width, height, context, check_stop_fn):
-        """Process a tall image by splitting it into chunks"""
+        """Process a tall image by splitting it into chunks with contextual support"""
         num_chunks = (height + self.chunk_height - 1) // self.chunk_height
         overlap = 100  # Pixels of overlap between chunks
         
         print(f"   ✂️ Image too tall ({height}px), splitting into {num_chunks} chunks of {self.chunk_height}px...")
+        
+        # Clear context for new image
+        self.image_chunk_context = []
         
         # Add retry info if enabled
         if os.getenv("RETRY_TIMEOUT", "1") == "1":
@@ -443,13 +451,21 @@ class ImageTranslator:
             # Build context for this chunk
             chunk_context = f"This is part {i+1} of {num_chunks} of a longer image. {context}"
             
-            # Translate chunk
+            # Translate chunk WITH CONTEXT
             translation = self._call_vision_api(chunk_bytes, chunk_context, check_stop_fn)
             
             if translation:
                 # Clean AI artifacts from chunk
                 chunk_text = self._clean_translation_response(translation)
                 all_translations.append(chunk_text)
+                
+                # ===== NEW CODE: Store context for next chunks =====
+                if self.contextual_enabled:
+                    self.image_chunk_context.append({
+                        "user": chunk_context,  # The "This is part X of Y" message
+                        "assistant": chunk_text  # The translation result
+                    })
+                # ===== END NEW CODE =====
                 
                 # Save chunk progress
                 prog["image_chunks"][image_key]["completed"].append(i)
@@ -480,6 +496,10 @@ class ImageTranslator:
 
     def _process_single_image(self, img, context, check_stop_fn):
         """Process a single image that doesn't need chunking"""
+        
+        # Clear any previous context
+        self.image_chunk_context = []
+        
         print(f"   👍 Image height OK ({img.height}px), processing as single image...")
         
         # Check for stop before processing
@@ -510,11 +530,33 @@ class ImageTranslator:
         """Make the actual API call for vision translation with retry support"""
         # Build messages - NO HARDCODED PROMPT
         messages = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": context if context else ""}
+            {"role": "system", "content": self.system_prompt}
         ]
         
-        # Get retry settings
+        # ===== ADD THIS NEW CODE =====
+        # Add context from previous chunks if contextual is enabled
+        if hasattr(self, 'contextual_enabled') and self.contextual_enabled:
+            if hasattr(self, 'image_chunk_context') and self.image_chunk_context:
+                # Include last 2 chunks as context
+                context_chunks = self.image_chunk_context[-2:]
+                
+                if context_chunks:
+                    print(f"   📚 Including {len(context_chunks)} previous chunks as context")
+                    
+                for ctx in context_chunks:
+                    messages.extend([
+                        {"role": "user", "content": ctx["user"]},
+                        {"role": "assistant", "content": ctx["assistant"]}
+                    ])
+        # ===== END NEW CODE =====
+        
+        # Add current chunk (this already exists)
+        messages.append({
+            "role": "user", 
+            "content": context if context else ""
+        })
+        
+        # Rest of the method stays EXACTLY the same...
         retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "1") == "1"
         chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "180")) if retry_timeout_enabled else None
         max_timeout_retries = 2
