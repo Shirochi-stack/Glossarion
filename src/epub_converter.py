@@ -973,24 +973,89 @@ class EPUBCompiler:
         return chapter_info
     
     def _find_html_files(self) -> List[str]:
-        """Find translated HTML files"""
+        """Find HTML files with multiple pattern support"""
         self.log(f"\n[DEBUG] Scanning directory: {self.output_dir}")
         
         all_files = os.listdir(self.output_dir)
-        html_files = [f for f in all_files if f.startswith("response_") and f.endswith(".html")]
+        html_extensions = ['.html', '.htm', '.xhtml']
         
-        self.log(f"[DEBUG] Found {len(html_files)} translated HTML files")
+        # Find all HTML-like files
+        all_html_files = [f for f in all_files 
+                          if any(f.endswith(ext) for ext in html_extensions)]
         
-        if not html_files:
-            self.log("❌ No translated HTML files found")
-            # Show alternatives for debugging
-            alt_patterns = [("chapter_", ".html"), ("Chapter", ".html")]
-            for prefix, suffix in alt_patterns:
-                alt_files = [f for f in all_files if f.startswith(prefix) and f.endswith(suffix)]
-                if alt_files:
-                    self.log(f"[INFO] Found {len(alt_files)} files with pattern '{prefix}*{suffix}'")
+        # First, try the expected response_ pattern
+        response_files = [f for f in all_html_files if f.startswith("response_")]
         
-        return html_files
+        if response_files:
+            self.log(f"[DEBUG] Found {len(response_files)} translated files (response_*.html)")
+            # Sort numerically by chapter number
+            response_files.sort(key=lambda f: int(re.search(r'response_(\d+)_', f).group(1)) 
+                               if re.search(r'response_(\d+)_', f) else 999999)
+            return response_files
+        
+        # If no response_ files, look for other patterns
+        self.log("[WARNING] No 'response_' files found. Looking for alternative patterns...")
+        
+        # Pattern 1: hash-h-number.htm.xhtml (like your files)
+        hash_pattern_files = []
+        for f in all_html_files:
+            match = re.search(r'-h-(\d+)\.htm\.xhtml$', f)
+            if match:
+                chapter_num = int(match.group(1))
+                hash_pattern_files.append((chapter_num, f))
+        
+        if hash_pattern_files:
+            # Sort by chapter number and return just filenames
+            hash_pattern_files.sort(key=lambda x: x[0])
+            files = [f for _, f in hash_pattern_files]
+            self.log(f"[DEBUG] Found {len(files)} files with hash-h-number pattern")
+            return files
+        
+        # Pattern 2: split_XXX pattern (Calibre)
+        split_files = []
+        for f in all_html_files:
+            match = re.search(r'split_(\d+)', f)
+            if match:
+                num = int(match.group(1))
+                split_files.append((num, f))
+        
+        if split_files:
+            split_files.sort(key=lambda x: x[0])
+            files = [f for _, f in split_files]
+            self.log(f"[DEBUG] Found {len(files)} files with split_XXX pattern")
+            return files
+        
+        # Pattern 3: chapter_X or ch_X or similar
+        chapter_files = []
+        for f in all_html_files:
+            # Try multiple chapter patterns
+            patterns = [
+                r'chapter[_\s-]?(\d+)',
+                r'ch[_\s-]?(\d+)',
+                r'c(\d+)',
+                r'^(\d+)[_\s-]',  # Files starting with numbers
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, f, re.IGNORECASE)
+                if match:
+                    num = int(match.group(1))
+                    chapter_files.append((num, f))
+                    break
+        
+        if chapter_files:
+            # Remove duplicates and sort
+            seen = set()
+            unique_files = []
+            for num, f in sorted(chapter_files, key=lambda x: x[0]):
+                if f not in seen:
+                    seen.add(f)
+                    unique_files.append(f)
+            self.log(f"[DEBUG] Found {len(unique_files)} files with chapter patterns")
+            return unique_files
+        
+        # Last resort: return all HTML files in alphabetical order
+        self.log("[WARNING] No recognizable chapter pattern found. Using all HTML files.")
+        return sorted(all_html_files)
     
     def _load_metadata(self) -> dict:
         """Load metadata from JSON file"""
@@ -1304,6 +1369,7 @@ img {
             self.log(f"[WARNING] Failed to add cover: {e}")
             return None
     
+
     def _process_chapters(self, book: epub.EpubBook, html_files: List[str],
                          chapter_titles_info: Dict[int, Tuple[str, float, str]],
                          css_items: List[epub.EpubItem], processed_images: Dict[str, str],
@@ -1315,17 +1381,63 @@ img {
         chapter_tuples = []
         chapter_seen = set()
         
-        for fn in sorted(html_files, key=lambda f: int(re.search(r'response_(\d+)_', f).group(1)) if re.search(r'response_(\d+)_', f) else 999999):
-            match = re.match(r"response_(\d+)_", fn)
-            if match:
-                num = int(match.group(1))
-                if num not in chapter_seen:
-                    chapter_tuples.append((num, fn))
-                    chapter_seen.add(num)
+        # Check if these are response_ files
+        if html_files and html_files[0].startswith("response_"):
+            # Original logic for response_ files with NUMERIC SORTING FIX
+            for fn in sorted(html_files, key=lambda f: int(re.search(r'response_(\d+)_', f).group(1)) if re.search(r'response_(\d+)_', f) else 999999):
+                match = re.match(r"response_(\d+)_", fn)
+                if match:
+                    num = int(match.group(1))
+                    if num not in chapter_seen:
+                        chapter_tuples.append((num, fn))
+                        chapter_seen.add(num)
+        else:
+            # For non-response files (hash pattern, calibre, etc.)
+            self.log(f"\n[INFO] Processing non-standard chapter filenames...")
+            
+            for idx, fn in enumerate(html_files):
+                chapter_num = idx + 1  # Default to sequential numbering
+                
+                # Try to extract chapter number from filename
+                patterns = [
+                    (r'-h-(\d+)\.', "hash-h-number"),       # Your pattern: 526649821846337087676261-h-0.htm.xhtml
+                    (r'split_(\d+)', "calibre split"),       # Calibre: split_001.html
+                    (r'chapter[_\s-]?(\d+)', "chapter"),     # chapter1.html, chapter_1.html
+                    (r'ch[_\s-]?(\d+)', "ch"),              # ch1.html, ch_1.html
+                    (r'^(\d+)[_\s-]', "number prefix"),     # 01_chapter.html
+                ]
+                
+                for pattern, pattern_name in patterns:
+                    match = re.search(pattern, fn, re.IGNORECASE)
+                    if match:
+                        extracted_num = int(match.group(1))
+                        # Handle 0-based numbering (like -h-0, -h-1, -h-2)
+                        if pattern_name == "hash-h-number" and extracted_num == 0:
+                            chapter_num = 1  # Start from 1 for 0-based files
+                        elif pattern_name == "hash-h-number":
+                            chapter_num = extracted_num + 1  # Convert 0-based to 1-based
+                        else:
+                            chapter_num = extracted_num if extracted_num > 0 else idx + 1
+                        
+                        self.log(f"  Detected {pattern_name} pattern: {fn} → Chapter {chapter_num}")
+                        break
+                
+                if chapter_num not in chapter_seen:
+                    chapter_tuples.append((chapter_num, fn))
+                    chapter_seen.add(chapter_num)
         
+        # Sort by chapter number
         chapter_tuples.sort(key=lambda x: x[0])
+        
         self.log(f"\n📚 Processing {len(chapter_tuples)} chapters...")
         
+        # Log the processing order for debugging
+        if len(chapter_tuples) <= 20:  # Only show for reasonable number of chapters
+            self.log("Processing order:")
+            for num, fn in chapter_tuples:
+                self.log(f"  Chapter {num}: {fn}")
+        
+        # Process each chapter
         for num, fn in chapter_tuples:
             if self._process_single_chapter(
                 book, num, fn, chapter_titles_info, css_items, 
