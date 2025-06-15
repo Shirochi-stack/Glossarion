@@ -13,6 +13,8 @@
 ![Build](https://img.shields.io/github/actions/workflow/status/Shirochi-stack/Glossarion/python-app.yml?branch=main)
 ![License](https://img.shields.io/github/license/Shirochi-stack/Glossarion)
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
+![Python application](https://github.com/Shirochi-stack/Glossarion/workflows/Python%20application/badge.svg)
+
 
 ## ✨ Features
 
