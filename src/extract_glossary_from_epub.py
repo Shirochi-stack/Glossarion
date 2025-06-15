@@ -8,8 +8,8 @@ import tiktoken
 import threading
 import queue
 import ebooklib
+import re
 from ebooklib import epub
-
 
 # Fix for PyInstaller - handle stdout reconfigure more carefully
 if sys.platform.startswith("win"):
@@ -199,15 +199,29 @@ def extract_chapters_from_epub(epub_path: str) -> List[str]:
             
     return chapters
 
-def trim_context_history(history: List[Dict], limit: int) -> List[Dict]:
-    """Reset history when limit is reached instead of trimming"""
+def trim_context_history(history: List[Dict], limit: int, rolling_window: bool = False) -> List[Dict]:
+    """
+    Handle context history with either reset or rolling window mode
+    
+    Args:
+        history: List of conversation history
+        limit: Maximum number of exchanges to keep
+        rolling_window: Whether to use rolling window mode
+    """
     # Count current exchanges
     current_exchanges = len(history)
     
-    # Reset when limit is reached
+    # Handle based on mode
     if limit > 0 and current_exchanges >= limit:
-        print(f"🔄 Reset glossary context after {limit} chapters")
-        return []  # Return empty to reset context
+        if rolling_window:
+            # Rolling window: keep the most recent exchanges
+            print(f"🔄 Rolling glossary context window: keeping last {limit} chapters")
+            # Keep only the most recent exchanges
+            history = history[-(limit-1):] if limit > 1 else []
+        else:
+            # Reset mode (original behavior)
+            print(f"🔄 Reset glossary context after {limit} chapters")
+            return []  # Return empty to reset context
     
     # Convert to message format
     trimmed = []
@@ -557,6 +571,16 @@ def main(log_callback=None, stop_callback=None):
     # Get context limit from environment or config
     ctx_limit = int(os.getenv("GLOSSARY_CONTEXT_LIMIT") or config.get('context_limit_chapters', 3))
 
+    # Parse chapter range from environment
+    chapter_range = os.getenv("CHAPTER_RANGE", "").strip()
+    range_start = None
+    range_end = None
+    if chapter_range and re.match(r"^\d+\s*-\s*\d+$", chapter_range):
+        range_start, range_end = map(int, chapter_range.split("-", 1))
+        print(f"📊 Chapter Range Filter: {range_start} to {range_end}")
+    elif chapter_range:
+        print(f"⚠️ Invalid chapter range format: {chapter_range} (use format: 5-10)")
+
     # Log enabled fields
     print("📑 Extraction Fields Configuration:")
     original_name_enabled = os.environ.get('GLOSSARY_EXTRACT_ORIGINAL_NAME', '1') == '1'
@@ -600,11 +624,32 @@ def main(log_callback=None, stop_callback=None):
     history = prog['context_history']
     total_chapters = len(chapters) 
     
+    # Count chapters that will be processed with range filter
+    chapters_to_process = 0
+    for idx, chap in enumerate(chapters):
+        # Skip if chapter is outside the range
+        if range_start is not None and range_end is not None:
+            # Get chapter number - assuming chapters have a 'num' field or use idx+1
+            chapter_num = idx + 1  # 1-based chapter numbering
+            if not (range_start <= chapter_num <= range_end):
+                continue
+        chapters_to_process += 1
+    
+    if chapters_to_process < total_chapters:
+        print(f"📊 Processing {chapters_to_process} out of {total_chapters} chapters due to range filter")
+    
     for idx, chap in enumerate(chapters):
         # Check for stop at the beginning of each chapter
         if check_stop():
             print(f"❌ Glossary extraction stopped at chapter {idx+1}")
             return
+        
+        # Apply chapter range filter
+        if range_start is not None and range_end is not None:
+            chapter_num = idx + 1  # 1-based chapter numbering
+            if not (range_start <= chapter_num <= range_end):
+                print(f"[SKIP] Chapter {chapter_num} - outside range filter")
+                continue
             
         if idx in completed:
             print(f"Skipping chapter {idx+1} (already processed)")
@@ -615,8 +660,9 @@ def main(log_callback=None, stop_callback=None):
         if len(history) >= ctx_limit and ctx_limit > 0:
             print(f"  📌 Glossary context will reset after this chapter (current: {len(history)}/{ctx_limit} chapters)")        
         try:
+            rolling_window = os.getenv('GLOSSARY_HISTORY_ROLLING', '0') == '1'
             msgs = [{"role":"system","content":sys_prompt}] \
-                 + trim_context_history(history, ctx_limit) \
+                 + trim_context_history(history, ctx_limit, rolling_window) \
                  + [{"role":"user","content":build_prompt(chap)}]
 
             total_tokens = sum(count_tokens(m["content"]) for m in msgs)
