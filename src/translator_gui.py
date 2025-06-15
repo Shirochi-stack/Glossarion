@@ -84,7 +84,7 @@ class TranslatorGUI:
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
-        master.title("Glossarion v2.1.0")
+        master.title("Glossarion v2.3.1")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1600, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
@@ -144,7 +144,7 @@ class TranslatorGUI:
         self.default_manual_glossary_prompt = """Output exactly a JSON array of objects and nothing else.
         You are a glossary extractor for Korean, Japanese, or Chinese novels.
         - Extract character information (e.g., name, traits), locations (countries, regions, cities), and translate them into English (romanization or equivalent).
-        - Romanize all untranslated honorifics and suffixes (e.g., 님 to '-nim', さん to '-san').
+        - Romanize all untranslated honorifics (e.g., 님 to '-nim', さん to '-san').
         - all output must be in english, unless specified otherwise
         For each character, provide JSON fields:
         {fields}
@@ -155,7 +155,7 @@ class TranslatorGUI:
 
         self.default_auto_glossary_prompt = """You are extracting a targeted glossary from a {language} novel.
         Focus on identifying:
-        1. Character names with their honorifics/suffixes
+        1. Character names with their honorifics
         2. Important titles and ranks
         3. Frequently mentioned terms (min frequency: {min_frequency})
 
@@ -205,7 +205,6 @@ class TranslatorGUI:
             value=self.config.get('summary_role', 'user')
         )
         
-         # ADD THESE NEW LINES HERE:
         self.rolling_summary_exchanges_var = tk.StringVar(
             value=str(self.config.get('rolling_summary_exchanges', '5'))  # How many exchanges to summarize
         )
@@ -213,27 +212,31 @@ class TranslatorGUI:
             value=self.config.get('rolling_summary_mode', 'append')  # append or replace
         )
         
-        # ─── NEW: Add variables for new toggles ───
+        # Translation history rolling window
+        self.translation_history_rolling_var = tk.BooleanVar(
+            value=self.config.get('translation_history_rolling', False)
+        )
+
+        # Glossary history rolling window  
+        self.glossary_history_rolling_var = tk.BooleanVar(
+            value=self.config.get('glossary_history_rolling', False)
+        )
+        
         self.disable_system_prompt_var = tk.BooleanVar(
             value=self.config.get('disable_system_prompt', False)
         )
         
-        # ─── NEW: Add variables for new toggles ───
         self.disable_system_prompt_var = tk.BooleanVar(
             value=self.config.get('disable_system_prompt', False)
         )
-        self.disable_auto_glossary_var = tk.BooleanVar(
-            value=self.config.get('disable_auto_glossary', False)
-        )
-        
-        self.disable_glossary_translation_var = tk.BooleanVar(
-            value=self.config.get('disable_glossary_translation', False)  # Default to False (translation enabled)
+        self.enable_auto_glossary_var = tk.BooleanVar(
+            value=self.config.get('enable_auto_glossary', False)  # Default to False (disabled)
         )
 
         # Append Glossary:
         self.append_glossary_var = tk.BooleanVar(
-            value=self.config.get('append_glossary', True)  # Default to True
-        )   
+            value=self.config.get('append_glossary', False)  # Default to False
+        )  
         
         # Add after the other variable initializations
         self.reinforcement_freq_var = tk.StringVar(
@@ -290,13 +293,13 @@ class TranslatorGUI:
         )
         
         self.max_images_per_chapter_var = tk.StringVar(
-            value=str(self.config.get('max_images_per_chapter', '10'))
+            value=str(self.config.get('max_images_per_chapter', '1'))
         )
         self.comprehensive_extraction_var = tk.BooleanVar(
             value=self.config.get('comprehensive_extraction', False)  # Default to False (smart mode)
         )
         self.image_chunk_height_var = tk.StringVar(
-            value=str(self.config.get('image_chunk_height', '2000'))
+            value=str(self.config.get('image_chunk_height', '1500'))
         )        
         self.hide_image_translation_label_var = tk.BooleanVar(
             value=self.config.get('hide_image_translation_label', True)
@@ -315,9 +318,12 @@ class TranslatorGUI:
 )
         # Default prompts
         self.default_prompts = {
-            "korean": "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics, and suffixes like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
-            "japanese": "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags text while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics, and suffixes like -san, -sama, -chan, -kun.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
-            "chinese": "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji."
+            "korean": "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
+            "japanese": "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags text while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics like -san, -sama, -chan, -kun.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
+            "chinese": "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
+            "korean_OCR": "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- Add HTML tags for proper formatting as expected of a novel.",
+            "japanese_OCR": "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags text while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics like -san, -sama, -chan, -kun.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- Add HTML tags for proper formatting as expected of a novel.",
+            "chinese_OCR": "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- Add HTML tags for proper formatting as expected of a novel."
         }
 
         # Profiles - FIXED: Load from config properly
@@ -538,7 +544,7 @@ class TranslatorGUI:
 
         # Model - FIXED: Load from config properly
         tb.Label(self.frame, text="Model:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
-        default_model = self.config.get('model', 'gemini-1.5-flash')  # Changed default
+        default_model = self.config.get('model', 'gemini-2.0-flash')  # Changed default
         print(f"[DEBUG] Setting model to: {default_model}")  # Debug logging
         self.model_var = tk.StringVar(value=default_model)
         tb.Combobox(self.frame, textvariable=self.model_var,
@@ -621,6 +627,14 @@ class TranslatorGUI:
 
         # Then bind the toggle function
         self.batch_translation_var.trace('w', lambda *args: toggle_batch_entry())
+        
+        # Translation History Rolling Window
+        tb.Checkbutton(self.frame, text="Rolling History Window", 
+                       variable=self.translation_history_rolling_var,
+                       bootstyle="round-toggle").grid(row=7, column=2, sticky=tk.W, padx=5, pady=5)
+
+        tk.Label(self.frame, text="(Keep recent history instead of purging)",
+                 font=('TkDefaultFont', 11), fg='gray').grid(row=7, column=3, sticky=tk.W, padx=5, pady=5)
                 
         # Trim controls (hidden but present for compatibility)
         self.title_trim = tb.Entry(self.frame, width=6)
@@ -729,7 +743,7 @@ class TranslatorGUI:
         print("[DEBUG] GUI setup completed with config values loaded")  # Debug logging
         
         # Add initial log message
-        self.append_log("🚀 Glossarion v2.1.0 - Ready to use!")
+        self.append_log("🚀 Glossarion v2.3.1 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
 
     def force_retranslation(self):
@@ -898,7 +912,7 @@ class TranslatorGUI:
         """Open comprehensive glossary management dialog"""
         manager = tk.Toplevel(self.master)
         manager.title("Glossary Manager")
-        manager.geometry("1200x1470")
+        manager.geometry("1200x1550")
         manager.transient(self.master)
         
         
@@ -1099,47 +1113,107 @@ class TranslatorGUI:
         self.manual_context_var = tk.StringVar(value=str(self.config.get('manual_context_limit', 3)))
         tb.Entry(settings_grid, textvariable=self.manual_context_var, width=10).grid(row=0, column=3, padx=5)
         
+        tk.Label(settings_grid, text="Rolling Window:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=(10, 0))
+        tb.Checkbutton(settings_grid, text="Keep recent context instead of reset", 
+                       variable=self.glossary_history_rolling_var,
+                       bootstyle="round-toggle").grid(row=1, column=1, columnspan=3, sticky=tk.W, padx=5, pady=(10, 0))
+
+        tk.Label(settings_grid, text="When context limit is reached, keep recent chapters instead of clearing all history",
+                 font=('TkDefaultFont', 11), fg='gray').grid(row=2, column=0, columnspan=4, sticky=tk.W, padx=20, pady=(0, 5))
+        
         # ===== AUTOMATIC GLOSSARY TAB =====
         auto_container = tk.Frame(auto_frame)
         auto_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # Automatic glossary settings
-        auto_settings_frame = tk.LabelFrame(auto_container, text="Extraction Settings", 
-                                           padx=10, pady=10)
-        auto_settings_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        settings_info = tk.Label(auto_settings_frame, 
-                                text="These settings control the automatic glossary extraction during translation",
-                                font=('TkDefaultFont', 9, 'italic'), fg='gray')
-        settings_info.pack(anchor=tk.W, pady=(0, 10))
-        
-        # Settings are already in main GUI, just show current values
-        current_settings = tk.Frame(auto_settings_frame)
-        current_settings.pack(fill=tk.X)
-        
-        tk.Label(current_settings, text=f"Current Settings:", font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W)
-        tk.Label(current_settings, text=f"• Min Frequency: {self.glossary_min_frequency_var.get()}").pack(anchor=tk.W, padx=20)
-        tk.Label(current_settings, text=f"• Max Names: {self.glossary_max_names_var.get()}").pack(anchor=tk.W, padx=20)
-        tk.Label(current_settings, text=f"• Max Titles: {self.glossary_max_titles_var.get()}").pack(anchor=tk.W, padx=20)
-        tk.Label(current_settings, text=f"• Translation Batch Size: {self.glossary_batch_size_var.get()}").pack(anchor=tk.W, padx=20)
-        
-        tk.Label(current_settings, 
-                 text="(Adjust these in 'Other Settings' from the main window)",
-                 font=('TkDefaultFont', 9), fg='blue').pack(anchor=tk.W, pady=(5, 0))
-        
+
+        # Master toggle for automatic glossary
+        master_toggle_frame = tk.Frame(auto_container)
+        master_toggle_frame.pack(fill=tk.X, pady=(0, 15))
+
+        tb.Checkbutton(master_toggle_frame, text="Enable Automatic Glossary Generation", 
+                       variable=self.enable_auto_glossary_var,
+                       bootstyle="round-toggle").pack(side=tk.LEFT)
+
+        tk.Label(master_toggle_frame, 
+                 text="(Automatically extracts and translates character names/terms during translation)",
+                 font=('TkDefaultFont', 10), fg='gray').pack(side=tk.LEFT, padx=(10, 0))
+                 
+        append_frame = tk.Frame(auto_container)
+        append_frame.pack(fill=tk.X, pady=(0, 15))
+
+        tb.Checkbutton(append_frame, text="Append Glossary to System Prompt", 
+                       variable=self.append_glossary_var,
+                       bootstyle="round-toggle").pack(side=tk.LEFT)
+
+        tk.Label(append_frame, 
+                 text="(Applies to ALL glossaries - manual and automatic)",
+                 font=('TkDefaultFont', 10, 'italic'), fg='blue').pack(side=tk.LEFT, padx=(10, 0))
+
+        tk.Label(auto_container, 
+                 text="When enabled: Glossary entries are automatically added to your system prompt\n"
+                 "When disabled: Glossary is loaded but not injected into prompts\n"
+                 "This affects both translation and image processing",
+                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 15))
+        # Settings frame that can be disabled
+        settings_container = tk.Frame(auto_container)
+        settings_container.pack(fill=tk.BOTH, expand=True)
+
+        # Targeted extraction settings
+        extraction_frame = tk.LabelFrame(settings_container, text="Targeted Extraction Settings", 
+                                       padx=10, pady=10)
+        extraction_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # Configure grid for settings
+        extraction_grid = tk.Frame(extraction_frame)
+        extraction_grid.pack(fill=tk.X)
+        extraction_grid.grid_columnconfigure(0, weight=0)
+        extraction_grid.grid_columnconfigure(1, weight=1)
+        extraction_grid.grid_columnconfigure(2, weight=0)
+        extraction_grid.grid_columnconfigure(3, weight=1)
+
+        # Row 1: Min Frequency and Max Names
+        tk.Label(extraction_grid, text="Min frequency:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        tb.Entry(extraction_grid, textvariable=self.glossary_min_frequency_var, 
+                 width=8).grid(row=0, column=1, sticky=tk.W, padx=5, pady=5)
+
+        tk.Label(extraction_grid, text="Max names:").grid(row=0, column=2, sticky=tk.W, padx=5, pady=5)
+        tb.Entry(extraction_grid, textvariable=self.glossary_max_names_var, 
+                 width=8).grid(row=0, column=3, sticky=tk.W, padx=5, pady=5)
+
+        # Row 2: Max Titles and Batch Size
+        tk.Label(extraction_grid, text="Max titles:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
+        tb.Entry(extraction_grid, textvariable=self.glossary_max_titles_var, 
+                 width=8).grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
+
+        tk.Label(extraction_grid, text="Translation batch:").grid(row=1, column=2, sticky=tk.W, padx=5, pady=5)
+        tb.Entry(extraction_grid, textvariable=self.glossary_batch_size_var, 
+                 width=8).grid(row=1, column=3, sticky=tk.W, padx=5, pady=5)
+
+        # Help text
+        help_frame = tk.Frame(extraction_frame)
+        help_frame.pack(fill=tk.X, pady=(10, 0))
+
+        tk.Label(help_frame, text="💡 Settings Guide:", font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W)
+        tk.Label(help_frame, 
+                 text="• Min frequency: How many times a name must appear (lower = more terms)",
+                 font=('TkDefaultFont', 11), fg='gray').pack(anchor=tk.W, padx=20)
+        tk.Label(help_frame, 
+                 text="• Max names/titles: Limits to prevent huge glossaries",
+                 font=('TkDefaultFont', 11), fg='gray').pack(anchor=tk.W, padx=20)
+        tk.Label(help_frame, 
+                 text="• Translation batch: Terms per API call (larger = faster but may reduce quality)",
+                 font=('TkDefaultFont', 11), fg='gray').pack(anchor=tk.W, padx=20)
+
         # Automatic prompt section
-        auto_prompt_frame = tk.LabelFrame(auto_container, text="Extraction Prompt Template", 
+        auto_prompt_frame = tk.LabelFrame(settings_container, text="Extraction Prompt Template", 
                                          padx=10, pady=10)
         auto_prompt_frame.pack(fill=tk.BOTH, expand=True)
-        
+
         # Instructions
         tk.Label(auto_prompt_frame, 
                  text="Available placeholders: {language}, {min_frequency}, {max_names}, {max_titles}",
                  font=('TkDefaultFont', 9), fg='blue').pack(anchor=tk.W, pady=(0, 5))
-        
-        # Automatic Prompt text area
-        self.auto_prompt_text = scrolledtext.ScrolledText(auto_prompt_frame, height=12, wrap=tk.WORD)
 
+        # Automatic Prompt text area
         self.auto_prompt_text = scrolledtext.ScrolledText(
             auto_prompt_frame, 
             height=12, 
@@ -1150,23 +1224,43 @@ class TranslatorGUI:
         )
         self.auto_prompt_text.pack(fill=tk.BOTH, expand=True)
         self.auto_prompt_text.insert('1.0', self.auto_glossary_prompt)
-
-        # Add undo/redo bindings
-        self.auto_prompt_text.edit_reset()  # Reset undo stack after initial insert
+        self.auto_prompt_text.edit_reset()
         self._setup_text_undo_redo(self.auto_prompt_text)
-        
+
         # Prompt controls
-        auto_prompt_controls = tk.Frame(auto_container)
+        auto_prompt_controls = tk.Frame(settings_container)
         auto_prompt_controls.pack(fill=tk.X, pady=(10, 0))
-                
+
         def reset_auto_prompt():
             if messagebox.askyesno("Reset Prompt", 
                                   "Reset automatic glossary prompt to default?"):
                 self.auto_prompt_text.delete('1.0', tk.END)
                 self.auto_prompt_text.insert('1.0', self.default_auto_glossary_prompt)
-        
+
         tb.Button(auto_prompt_controls, text="Reset to Default", 
                   command=reset_auto_prompt, bootstyle="warning").pack(side=tk.LEFT, padx=5)
+
+        # Function to enable/disable settings based on master toggle
+        def update_auto_glossary_state():
+            state = tk.NORMAL if self.enable_auto_glossary_var.get() else tk.DISABLED
+            
+            # Update all child widgets in settings_container
+            for widget in extraction_grid.winfo_children():
+                if isinstance(widget, (tb.Entry, ttk.Entry)):
+                    widget.config(state=state)
+            
+            self.auto_prompt_text.config(state=state)
+            
+            # Update button states
+            for widget in auto_prompt_controls.winfo_children():
+                if isinstance(widget, (tb.Button, ttk.Button)):
+                    widget.config(state=state)
+
+        # Set initial state
+        update_auto_glossary_state()
+
+        # Bind toggle to update function
+        self.enable_auto_glossary_var.trace('w', lambda *args: update_auto_glossary_state())
         
         # ===== GLOSSARY EDITOR TAB =====
         self._setup_glossary_editor_tab(editor_frame)
@@ -1190,7 +1284,8 @@ class TranslatorGUI:
                 self.manual_glossary_prompt = self.manual_prompt_text.get('1.0', tk.END).strip()
                 self.auto_glossary_prompt = self.auto_prompt_text.get('1.0', tk.END).strip()
                 self.config['manual_glossary_prompt'] = self.manual_glossary_prompt
-                self.config['auto_glossary_prompt'] = self.auto_glossary_prompt
+                self.config['enable_auto_glossary'] = self.enable_auto_glossary_var.get()
+                self.config['append_glossary'] = self.append_glossary_var.get()
                 
                 
                 # Save manual settings
@@ -1247,7 +1342,7 @@ class TranslatorGUI:
 
 
     def _setup_glossary_editor_tab(self, parent):
-        """Set up the glossary editor/trimmer tab"""
+        """Set up the glossary editor/trimmer tab with improved functionality"""
         container = tk.Frame(parent)
         container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
@@ -1259,16 +1354,11 @@ class TranslatorGUI:
         self.editor_file_var = tk.StringVar()
         tb.Entry(file_frame, textvariable=self.editor_file_var, state='readonly').pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         
-        def browse_glossary():
-            path = filedialog.askopenfilename(
-                title="Select glossary.json",
-                filetypes=[("JSON files", "*.json")]
-            )
-            if path:
-                self.editor_file_var.set(path)
-                load_glossary_for_editing()
-        
-        tb.Button(file_frame, text="Browse", command=browse_glossary, width=15).pack(side=tk.LEFT)
+        # Stats frame
+        stats_frame = tk.Frame(container)
+        stats_frame.pack(fill=tk.X, pady=(0, 5))
+        self.stats_label = tk.Label(stats_frame, text="No glossary loaded", font=('TkDefaultFont', 10, 'italic'))
+        self.stats_label.pack(side=tk.LEFT)
         
         # Glossary content area
         content_frame = tk.LabelFrame(container, text="Glossary Entries", padx=10, pady=10)
@@ -1282,28 +1372,14 @@ class TranslatorGUI:
         vsb = ttk.Scrollbar(tree_frame, orient="vertical")
         hsb = ttk.Scrollbar(tree_frame, orient="horizontal")
         
-        # Create treeview
+        # Create treeview - we'll configure columns dynamically
         self.glossary_tree = ttk.Treeview(tree_frame, 
-                                         columns=('original', 'translated', 'type', 'frequency'),
                                          show='tree headings',
                                          yscrollcommand=vsb.set,
                                          xscrollcommand=hsb.set)
         
         vsb.config(command=self.glossary_tree.yview)
         hsb.config(command=self.glossary_tree.xview)
-        
-        # Configure columns
-        self.glossary_tree.heading('#0', text='Index')
-        self.glossary_tree.heading('original', text='Original')
-        self.glossary_tree.heading('translated', text='Translation')
-        self.glossary_tree.heading('type', text='Type')
-        self.glossary_tree.heading('frequency', text='Count')
-        
-        self.glossary_tree.column('#0', width=60)
-        self.glossary_tree.column('original', width=200)
-        self.glossary_tree.column('translated', width=200)
-        self.glossary_tree.column('type', width=100)
-        self.glossary_tree.column('frequency', width=80)
         
         # Pack treeview and scrollbars
         self.glossary_tree.grid(row=0, column=0, sticky='nsew')
@@ -1313,15 +1389,17 @@ class TranslatorGUI:
         tree_frame.grid_rowconfigure(0, weight=1)
         tree_frame.grid_columnconfigure(0, weight=1)
         
-        # Editor controls
-        editor_controls = tk.Frame(container)
-        editor_controls.pack(fill=tk.X, pady=(10, 0))
+        # Enable double-click editing
+        self.glossary_tree.bind('<Double-Button-1>', self._on_tree_double_click)
         
         # Keep the current glossary data in memory
         self.current_glossary_data = None
+        self.current_glossary_format = None  # 'list' or 'dict'
+        
+        # ===== DEFINE ALL FUNCTIONS FIRST =====
         
         def load_glossary_for_editing():
-            """Load glossary file into the tree view"""
+            """Load glossary file into the tree view with dynamic columns"""
             path = self.editor_file_var.get()
             if not path or not os.path.exists(path):
                 messagebox.showerror("Error", "Please select a valid glossary file")
@@ -1331,139 +1409,476 @@ class TranslatorGUI:
                 with open(path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 
-                # Clear existing items
-                for item in self.glossary_tree.get_children():
-                    self.glossary_tree.delete(item)
-                
-                # Handle different glossary formats
+                # Determine format and extract entries
                 entries = []
+                all_fields = set()
                 
                 if isinstance(data, dict):
                     if 'entries' in data:
                         # New format with metadata
                         self.current_glossary_data = data
-                        entries = data['entries'].items()
+                        self.current_glossary_format = 'dict'
+                        for original, translated in data['entries'].items():
+                            entry = {'original': original, 'translated': translated}
+                            entries.append(entry)
+                            all_fields.update(entry.keys())
                     else:
                         # Simple dict format
                         self.current_glossary_data = {'entries': data}
-                        entries = data.items()
+                        self.current_glossary_format = 'dict'
+                        for original, translated in data.items():
+                            entry = {'original': original, 'translated': translated}
+                            entries.append(entry)
+                            all_fields.update(entry.keys())
+                            
                 elif isinstance(data, list):
                     # Manual glossary format
                     self.current_glossary_data = data
-                    for idx, char in enumerate(data):
-                        original = char.get('original_name', '')
-                        translated = char.get('name', original)
-                        char_type = 'character'
-                        freq = idx + 1
-                        
-                        if original:
-                            item = self.glossary_tree.insert('', 'end', text=str(idx + 1),
-                                                           values=(original, translated, char_type, freq))
-                    return
+                    self.current_glossary_format = 'list'
+                    for item in data:
+                        # Collect all fields from all entries
+                        all_fields.update(item.keys())
+                        entries.append(item)
                 
-                # Load entries for dict format
-                for idx, (original, translated) in enumerate(entries):
-                    # Detect type
-                    if any(h in original for h in ['님', '씨', 'さん', 'ちゃん', '-san', '-nim']):
-                        entry_type = 'name'
-                    elif any(t in original.lower() for t in ['king', 'queen', '왕', '여왕', '王']):
-                        entry_type = 'title'
-                    else:
-                        entry_type = 'term'
+                # Configure columns dynamically based on found fields
+                # Standard field order
+                standard_fields = ['original_name', 'name', 'original', 'translated', 'gender', 
+                                 'title', 'group_affiliation', 'traits', 'how_they_refer_to_others', 
+                                 'locations']
+                
+                # Sort fields: standard fields first in order, then custom fields alphabetically
+                column_fields = []
+                for field in standard_fields:
+                    if field in all_fields:
+                        column_fields.append(field)
+                
+                # Add any remaining fields (custom fields)
+                custom_fields = sorted(all_fields - set(standard_fields))
+                column_fields.extend(custom_fields)
+                
+                # Clear existing columns
+                self.glossary_tree.delete(*self.glossary_tree.get_children())
+                self.glossary_tree['columns'] = column_fields
+                
+                # Configure column headings and widths
+                self.glossary_tree.heading('#0', text='#')
+                self.glossary_tree.column('#0', width=40, stretch=False)
+                
+                for field in column_fields:
+                    # Make field names more readable
+                    display_name = field.replace('_', ' ').title()
+                    self.glossary_tree.heading(field, text=display_name)
                     
-                    item = self.glossary_tree.insert('', 'end', text=str(idx + 1),
-                                                   values=(original, translated, entry_type, ''))
+                    # Set column widths based on field type
+                    if field in ['original_name', 'name', 'original', 'translated']:
+                        width = 150
+                    elif field in ['traits', 'locations', 'how_they_refer_to_others']:
+                        width = 200
+                    else:
+                        width = 100
+                    
+                    self.glossary_tree.column(field, width=width)
                 
+                # Load entries
+                for idx, entry in enumerate(entries):
+                    values = []
+                    for field in column_fields:
+                        value = entry.get(field, '')
+                        # Format complex values
+                        if isinstance(value, list):
+                            value = ', '.join(str(v) for v in value)
+                        elif isinstance(value, dict):
+                            value = ', '.join(f"{k}: {v}" for k, v in value.items())
+                        elif value is None:
+                            value = ''
+                        values.append(value)
+                    
+                    self.glossary_tree.insert('', 'end', text=str(idx + 1), values=values)
+                
+                # Update stats
+                stats = []
+                stats.append(f"Total entries: {len(entries)}")
+                if self.current_glossary_format == 'list':
+                    # Count entries by type
+                    chars = sum(1 for e in entries if 'original_name' in e or 'name' in e)
+                    locs = sum(1 for e in entries if 'locations' in e and e['locations'])
+                    stats.append(f"Characters: {chars}, Locations: {locs}")
+                
+                self.stats_label.config(text=" | ".join(stats))
                 self.append_log(f"✅ Loaded {len(entries)} entries from glossary")
                 
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to load glossary: {e}")
+                self.append_log(f"❌ Failed to load glossary: {e}")
         
-        def apply_trimming():
-            """Apply the classic trimming logic"""
+        def browse_glossary():
+            path = filedialog.askopenfilename(
+                title="Select glossary.json",
+                filetypes=[("JSON files", "*.json")]
+            )
+            if path:
+                self.editor_file_var.set(path)
+                load_glossary_for_editing()
+        
+        def clean_empty_fields():
+            """Remove empty fields from all entries"""
             if not self.current_glossary_data:
                 messagebox.showerror("Error", "No glossary loaded")
                 return
             
-            # Create trimming dialog
-            trim_dialog = tk.Toplevel(self.master)
-            trim_dialog.title("Trim Glossary")
-            trim_dialog.geometry("400x500")
-            trim_dialog.transient(self.master)
+            count = 0
             
-            # Get values from the hidden trim entries in main GUI
-            labels = [
-                "Entries to keep (by frequency):",
-                "Traits Trim Count:",
-                "Title Keep (0=remove):",
-                "Group Affiliation Trim Count:",
-                "Refer-to-Others Trim Count:",
-                "Locations Trim Count:"
-            ]
+            if self.current_glossary_format == 'list':
+                for entry in self.current_glossary_data:
+                    # Remove empty fields
+                    fields_to_remove = []
+                    for field, value in entry.items():
+                        if value is None or value == '' or (isinstance(value, list) and not value) or (isinstance(value, dict) and not value):
+                            fields_to_remove.append(field)
+                    
+                    for field in fields_to_remove:
+                        entry.pop(field)
+                        count += 1
             
-            defaults = [
-                "100",
-                self.traits_trim.get(),
-                self.title_trim.get(),
-                self.group_trim.get(),
-                self.refer_trim.get(),
-                self.loc_trim.get()
-            ]
+            elif self.current_glossary_format == 'dict':
+                # For dict format, we can't easily clean the simple entries
+                messagebox.showinfo("Info", "Empty field cleaning is only available for manual glossary format")
+                return
             
-            entries = []
-            for i, (lab, defval) in enumerate(zip(labels, defaults)):
-                tb.Label(trim_dialog, text=lab).grid(row=i, column=0, sticky=tk.W, padx=5, pady=2)
-                e = tb.Entry(trim_dialog, width=10)
-                e.insert(0, defval)
-                e.grid(row=i, column=1, padx=5, pady=2)
-                entries.append(e)
-            
-            def execute_trim():
+            if count > 0:
+                # Save the cleaned data first!
+                path = self.editor_file_var.get()
                 try:
-                    # Get values
-                    top_limit = int(entries[0].get())
-                    traits_lim = int(entries[1].get())
-                    title_lim = int(entries[2].get())
-                    group_lim = int(entries[3].get())
-                    refer_lim = int(entries[4].get())
-                    loc_lim = int(entries[5].get())
+                    with open(path, 'w', encoding='utf-8') as f:
+                        json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
                     
-                    # Apply trimming based on format
-                    if isinstance(self.current_glossary_data, list):
-                        # Manual glossary format
-                        trimmed = self.current_glossary_data[:top_limit]
-                        for char in trimmed:
-                            if title_lim <= 0:
-                                char.pop('title', None)
-                            if traits_lim <= 0:
-                                char.pop('traits', None)
-                            else:
-                                t = char.get('traits', [])
-                                if isinstance(t, list) and len(t) > traits_lim:
-                                    char['traits'] = t[:-traits_lim]
-                            # Apply other trims...
-                        
-                        self.current_glossary_data = trimmed
-                    else:
-                        # Dict format - just keep top N entries
-                        if 'entries' in self.current_glossary_data:
-                            entries_list = list(self.current_glossary_data['entries'].items())
-                            self.current_glossary_data['entries'] = dict(entries_list[:top_limit])
-                    
-                    # Save and reload
-                    path = self.editor_file_var.get()
+                    # Now reload to refresh the display
+                    load_glossary_for_editing()
+                    messagebox.showinfo("Success", f"Removed {count} empty fields and saved")
+                    self.append_log(f"✅ Cleaned {count} empty fields from glossary")
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to save cleaned glossary: {e}")
+        
+        def delete_selected_entries():
+            """Delete selected entries from glossary"""
+            selected = self.glossary_tree.selection()
+            if not selected:
+                messagebox.showwarning("Warning", "No entries selected")
+                return
+            
+            if messagebox.askyesno("Confirm Delete", f"Delete {len(selected)} selected entries?"):
+                # Get indices to delete
+                indices_to_delete = []
+                for item in selected:
+                    idx = int(self.glossary_tree.item(item)['text']) - 1
+                    indices_to_delete.append(idx)
+                
+                # Sort in reverse order to delete from end first
+                indices_to_delete.sort(reverse=True)
+                
+                # Delete based on format
+                if self.current_glossary_format == 'list':
+                    for idx in indices_to_delete:
+                        if 0 <= idx < len(self.current_glossary_data):
+                            del self.current_glossary_data[idx]
+                
+                elif self.current_glossary_format == 'dict':
+                    # For dict format, we need to match by key
+                    entries_list = list(self.current_glossary_data.get('entries', {}).items())
+                    for idx in indices_to_delete:
+                        if 0 <= idx < len(entries_list):
+                            key = entries_list[idx][0]
+                            self.current_glossary_data['entries'].pop(key, None)
+                
+                # Save the changes before reloading!
+                path = self.editor_file_var.get()
+                try:
                     with open(path, 'w', encoding='utf-8') as f:
                         json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
                     
                     load_glossary_for_editing()
-                    messagebox.showinfo("Success", f"Trimmed glossary to {top_limit} entries")
-                    trim_dialog.destroy()
-                    
+                    messagebox.showinfo("Success", f"Deleted {len(indices_to_delete)} entries")
                 except Exception as e:
-                    messagebox.showerror("Error", f"Trimming failed: {e}")
+                    messagebox.showerror("Error", f"Failed to save after deletion: {e}")
+        
+        def remove_duplicates():
+            """Remove duplicate entries based on key field"""
+            if not self.current_glossary_data:
+                messagebox.showerror("Error", "No glossary loaded")
+                return
             
-            tb.Button(trim_dialog, text="Apply Trim", command=execute_trim, 
-                     bootstyle="warning").grid(row=len(labels), column=0, columnspan=2, pady=10)
+            if self.current_glossary_format == 'list':
+                # For list format, check original_name or name
+                seen = {}
+                unique_entries = []
+                duplicates = 0
+                
+                for entry in self.current_glossary_data:
+                    key = entry.get('original_name') or entry.get('name')
+                    if key and key not in seen:
+                        seen[key] = True
+                        unique_entries.append(entry)
+                    else:
+                        duplicates += 1
+                
+                self.current_glossary_data[:] = unique_entries
+                
+                if duplicates > 0:
+                    # Save before reloading!
+                    path = self.editor_file_var.get()
+                    try:
+                        with open(path, 'w', encoding='utf-8') as f:
+                            json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
+                        
+                        load_glossary_for_editing()
+                        messagebox.showinfo("Success", f"Removed {duplicates} duplicate entries")
+                    except Exception as e:
+                        messagebox.showerror("Error", f"Failed to save after removing duplicates: {e}")
+                else:
+                    messagebox.showinfo("Info", "No duplicates found")
+        
+        def smart_trim_dialog():
+            """Show smart trimming dialog with intuitive options"""
+            if not self.current_glossary_data:
+                messagebox.showerror("Error", "No glossary loaded")
+                return
+            
+            dialog = tk.Toplevel(self.master)
+            dialog.title("Smart Trim Glossary")
+            dialog.geometry("500x700")
+            dialog.transient(self.master)
+            
+            # Main frame with padding
+            main_frame = tk.Frame(dialog, padx=20, pady=20)
+            main_frame.pack(fill=tk.BOTH, expand=True)
+            
+            tk.Label(main_frame, text="Smart Glossary Trimming", 
+                     font=('TkDefaultFont', 12, 'bold')).pack(pady=(0, 10))
+            
+            # Options frame
+            options_frame = tk.LabelFrame(main_frame, text="Trimming Options", padx=10, pady=10)
+            options_frame.pack(fill=tk.X, pady=(0, 10))
+            
+            # Keep top N entries
+            top_frame = tk.Frame(options_frame)
+            top_frame.pack(fill=tk.X, pady=5)
+            tk.Label(top_frame, text="Keep top").pack(side=tk.LEFT)
+            top_var = tk.StringVar(value="100")
+            tb.Entry(top_frame, textvariable=top_var, width=10).pack(side=tk.LEFT, padx=5)
+            tk.Label(top_frame, text="entries").pack(side=tk.LEFT)
+            
+            # Field-specific limits
+            tk.Label(options_frame, text="Field-specific limits:", 
+                     font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(10, 5))
+            
+            field_vars = {}
+            fields_to_limit = [
+                ('traits', "Max traits per character:", "5"),
+                ('locations', "Max locations per entry:", "10"),
+                ('group_affiliation', "Max groups per character:", "3")
+            ]
+            
+            for field, label, default in fields_to_limit:
+                frame = tk.Frame(options_frame)
+                frame.pack(fill=tk.X, pady=2)
+                tk.Label(frame, text=label).pack(side=tk.LEFT)
+                var = tk.StringVar(value=default)
+                tb.Entry(frame, textvariable=var, width=10).pack(side=tk.LEFT, padx=5)
+                field_vars[field] = var
+            
+            # Remove fields option
+            tk.Label(options_frame, text="Remove fields:", 
+                     font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(10, 5))
+            
+            remove_vars = {}
+            fields_to_remove = ['title', 'how_they_refer_to_others', 'gender']
+            
+            for field in fields_to_remove:
+                var = tk.BooleanVar(value=False)
+                tb.Checkbutton(options_frame, text=f"Remove {field.replace('_', ' ')}", 
+                              variable=var).pack(anchor=tk.W, padx=20)
+                remove_vars[field] = var
+            
+            def apply_smart_trim():
+                try:
+                    # Get top N limit
+                    top_n = int(top_var.get())
+                    
+                    if self.current_glossary_format == 'list':
+                        # Trim to top N entries
+                        if top_n < len(self.current_glossary_data):
+                            self.current_glossary_data = self.current_glossary_data[:top_n]
+                        
+                        # Apply field-specific limits
+                        for entry in self.current_glossary_data:
+                            # Trim list fields
+                            for field, var in field_vars.items():
+                                if field in entry and isinstance(entry[field], list):
+                                    limit = int(var.get())
+                                    if len(entry[field]) > limit:
+                                        entry[field] = entry[field][:limit]
+                            
+                            # Remove selected fields
+                            for field, var in remove_vars.items():
+                                if var.get() and field in entry:
+                                    entry.pop(field)
+                    
+                    elif self.current_glossary_format == 'dict':
+                        # For dict format, just trim to top N
+                        entries = list(self.current_glossary_data['entries'].items())
+                        if top_n < len(entries):
+                            self.current_glossary_data['entries'] = dict(entries[:top_n])
+                    
+                    # Save before reloading!
+                    path = self.editor_file_var.get()
+                    try:
+                        with open(path, 'w', encoding='utf-8') as f:
+                            json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
+                        
+                        load_glossary_for_editing()
+                        messagebox.showinfo("Success", "Smart trim applied successfully")
+                        dialog.destroy()
+                    except Exception as save_e:
+                        messagebox.showerror("Error", f"Failed to save after trimming: {save_e}")
+                        
+                except ValueError as e:
+                    messagebox.showerror("Error", "Please enter valid numbers")
+            
+            # Buttons
+            button_frame = tk.Frame(main_frame)
+            button_frame.pack(fill=tk.X, pady=(10, 0))
+            
+            tb.Button(button_frame, text="Apply Trim", command=apply_smart_trim,
+                      bootstyle="primary", width=15).pack(side=tk.LEFT, padx=5)
+            tb.Button(button_frame, text="Cancel", command=dialog.destroy,
+                      bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
+        
+        def filter_entries_dialog():
+            """Show filtering dialog"""
+            if not self.current_glossary_data:
+                messagebox.showerror("Error", "No glossary loaded")
+                return
+            
+            dialog = tk.Toplevel(self.master)
+            dialog.title("Filter Entries")
+            dialog.geometry("400x300")
+            dialog.transient(self.master)
+            
+            main_frame = tk.Frame(dialog, padx=20, pady=20)
+            main_frame.pack(fill=tk.BOTH, expand=True)
+            
+            tk.Label(main_frame, text="Filter Glossary Entries", 
+                     font=('TkDefaultFont', 12, 'bold')).pack(pady=(0, 10))
+            
+            # Filter options
+            filter_frame = tk.LabelFrame(main_frame, text="Keep only entries that:", padx=10, pady=10)
+            filter_frame.pack(fill=tk.X, pady=(0, 10))
+            
+            # Have specific fields
+            has_name_var = tk.BooleanVar(value=True)
+            tb.Checkbutton(filter_frame, text="Have name/original_name", 
+                          variable=has_name_var).pack(anchor=tk.W)
+            
+            has_translation_var = tk.BooleanVar(value=False)
+            tb.Checkbutton(filter_frame, text="Have English translation", 
+                          variable=has_translation_var).pack(anchor=tk.W)
+            
+            has_traits_var = tk.BooleanVar(value=False)
+            tb.Checkbutton(filter_frame, text="Have traits", 
+                          variable=has_traits_var).pack(anchor=tk.W)
+            
+            has_locations_var = tk.BooleanVar(value=False)
+            tb.Checkbutton(filter_frame, text="Have locations", 
+                          variable=has_locations_var).pack(anchor=tk.W)
+            
+            def apply_filter():
+                if self.current_glossary_format == 'list':
+                    filtered = []
+                    for entry in self.current_glossary_data:
+                        keep = True
+                        
+                        if has_name_var.get():
+                            if not (entry.get('name') or entry.get('original_name')):
+                                keep = False
+                        
+                        if has_translation_var.get():
+                            if not entry.get('name'):
+                                keep = False
+                        
+                        if has_traits_var.get():
+                            if not entry.get('traits'):
+                                keep = False
+                        
+                        if has_locations_var.get():
+                            if not entry.get('locations'):
+                                keep = False
+                        
+                        if keep:
+                            filtered.append(entry)
+                    
+                    removed = len(self.current_glossary_data) - len(filtered)
+                    self.current_glossary_data[:] = filtered
+                    
+                    # Save before reloading!
+                    path = self.editor_file_var.get()
+                    try:
+                        with open(path, 'w', encoding='utf-8') as f:
+                            json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
+                        
+                        load_glossary_for_editing()
+                        messagebox.showinfo("Success", f"Filtered out {removed} entries")
+                        dialog.destroy()
+                    except Exception as e:
+                        messagebox.showerror("Error", f"Failed to save after filtering: {e}")
+                else:
+                    messagebox.showinfo("Info", "Filtering is only available for manual glossary format")
+                    dialog.destroy()
+        
+        def export_selection():
+            """Export selected entries to a new file"""
+            selected = self.glossary_tree.selection()
+            if not selected:
+                messagebox.showwarning("Warning", "No entries selected")
+                return
+            
+            path = filedialog.asksaveasfilename(
+                title="Export Selected Entries",
+                defaultextension=".json",
+                filetypes=[("JSON files", "*.json")]
+            )
+            
+            if not path:
+                return
+            
+            try:
+                # Get selected entries
+                if self.current_glossary_format == 'list':
+                    exported = []
+                    for item in selected:
+                        idx = int(self.glossary_tree.item(item)['text']) - 1
+                        if 0 <= idx < len(self.current_glossary_data):
+                            exported.append(self.current_glossary_data[idx])
+                    
+                    with open(path, 'w', encoding='utf-8') as f:
+                        json.dump(exported, f, ensure_ascii=False, indent=2)
+                
+                else:
+                    # Dict format
+                    exported = {}
+                    entries_list = list(self.current_glossary_data.get('entries', {}).items())
+                    for item in selected:
+                        idx = int(self.glossary_tree.item(item)['text']) - 1
+                        if 0 <= idx < len(entries_list):
+                            key, value = entries_list[idx]
+                            exported[key] = value
+                    
+                    with open(path, 'w', encoding='utf-8') as f:
+                        json.dump(exported, f, ensure_ascii=False, indent=2)
+                
+                messagebox.showinfo("Success", f"Exported {len(selected)} entries to {os.path.basename(path)}")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to export: {e}")
         
         def save_edited_glossary():
             """Save the current glossary"""
@@ -1482,16 +1897,181 @@ class TranslatorGUI:
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to save: {e}")
         
-        # Control buttons
-        tb.Button(editor_controls, text="Reload", command=load_glossary_for_editing,
-                  bootstyle="info", width=15).pack(side=tk.LEFT, padx=5)
-        tb.Button(editor_controls, text="Apply Classic Trim", command=apply_trimming,
-                  bootstyle="warning", width=15).pack(side=tk.LEFT, padx=5)
-        tb.Button(editor_controls, text="Aggregate Locations", 
+        def save_as_glossary():
+            """Save glossary to a new file"""
+            if not self.current_glossary_data:
+                messagebox.showerror("Error", "No glossary loaded")
+                return
+            
+            path = filedialog.asksaveasfilename(
+                title="Save Glossary As",
+                defaultextension=".json",
+                filetypes=[("JSON files", "*.json")]
+            )
+            
+            if not path:
+                return
+            
+            try:
+                with open(path, 'w', encoding='utf-8') as f:
+                    json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
+                
+                self.editor_file_var.set(path)
+                messagebox.showinfo("Success", f"Glossary saved to {os.path.basename(path)}")
+                self.append_log(f"✅ Saved glossary as: {path}")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save: {e}")
+        
+        # ===== NOW CREATE THE BUTTONS AND UI ELEMENTS =====
+        
+        tb.Button(file_frame, text="Browse", command=browse_glossary, width=15).pack(side=tk.LEFT)
+        
+        # Editor controls in multiple rows for better organization
+        editor_controls = tk.Frame(container)
+        editor_controls.pack(fill=tk.X, pady=(10, 0))
+        
+        # Row 1: Basic operations
+        row1 = tk.Frame(editor_controls)
+        row1.pack(fill=tk.X, pady=2)
+        
+        tb.Button(row1, text="Reload", command=load_glossary_for_editing,
+                  bootstyle="info", width=15).pack(side=tk.LEFT, padx=2)
+        tb.Button(row1, text="Delete Selected", command=delete_selected_entries,
+                  bootstyle="danger", width=15).pack(side=tk.LEFT, padx=2)
+        tb.Button(row1, text="Clean Empty Fields", command=clean_empty_fields,
+                  bootstyle="warning", width=15).pack(side=tk.LEFT, padx=2)
+        tb.Button(row1, text="Remove Duplicates", command=remove_duplicates,
+                  bootstyle="warning", width=15).pack(side=tk.LEFT, padx=2)
+        
+        # Row 2: Advanced operations
+        row2 = tk.Frame(editor_controls)
+        row2.pack(fill=tk.X, pady=2)
+        
+        tb.Button(row2, text="Smart Trim", command=smart_trim_dialog,
+                  bootstyle="primary", width=15).pack(side=tk.LEFT, padx=2)
+        tb.Button(row2, text="Filter Entries", command=filter_entries_dialog,
+                  bootstyle="primary", width=15).pack(side=tk.LEFT, padx=2)
+        tb.Button(row2, text="Aggregate Locations", 
                   command=lambda: self._aggregate_locations(load_glossary_for_editing),
-                  bootstyle="info", width=15).pack(side=tk.LEFT, padx=5)
-        tb.Button(editor_controls, text="Save Changes", command=save_edited_glossary,
-                  bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
+                  bootstyle="info", width=15).pack(side=tk.LEFT, padx=2)
+        tb.Button(row2, text="Export Selection", command=export_selection,
+                  bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=2)
+        
+        # Row 3: Save operations
+        row3 = tk.Frame(editor_controls)
+        row3.pack(fill=tk.X, pady=2)
+        
+        tb.Button(row3, text="Save Changes", command=save_edited_glossary,
+                  bootstyle="success", width=20).pack(side=tk.LEFT, padx=2)
+        tb.Button(row3, text="Save As...", command=save_as_glossary,
+                  bootstyle="success-outline", width=20).pack(side=tk.LEFT, padx=2)
+
+    def _on_tree_double_click(self, event):
+        """Handle double-click on treeview item for inline editing"""
+        region = self.glossary_tree.identify_region(event.x, event.y)
+        if region != 'cell':
+            return
+        
+        # Get the item and column
+        item = self.glossary_tree.identify_row(event.y)
+        column = self.glossary_tree.identify_column(event.x)
+        
+        if not item or column == '#0':
+            return
+        
+        # Get column index
+        col_idx = int(column.replace('#', '')) - 1
+        columns = self.glossary_tree['columns']
+        if col_idx >= len(columns):
+            return
+        
+        col_name = columns[col_idx]
+        
+        # Get current value
+        values = self.glossary_tree.item(item)['values']
+        current_value = values[col_idx] if col_idx < len(values) else ''
+        
+        # Create edit dialog
+        dialog = tk.Toplevel(self.master)
+        dialog.title(f"Edit {col_name.replace('_', ' ').title()}")
+        dialog.geometry("400x150")
+        dialog.transient(self.master)
+        
+        # Center the dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
+        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f"+{x}+{y}")
+        
+        # Edit frame
+        frame = tk.Frame(dialog, padx=20, pady=20)
+        frame.pack(fill=tk.BOTH, expand=True)
+        
+        tk.Label(frame, text=f"Edit {col_name.replace('_', ' ').title()}:").pack(anchor=tk.W)
+        
+        # Determine input type based on field
+        if col_name in ['traits', 'locations', 'group_affiliation'] or ',' in str(current_value):
+            # Multi-line for list fields
+            text_widget = tk.Text(frame, height=4, width=50)
+            text_widget.pack(fill=tk.BOTH, expand=True, pady=5)
+            text_widget.insert('1.0', current_value)
+            
+            def get_value():
+                return text_widget.get('1.0', tk.END).strip()
+        else:
+            # Single line for simple fields
+            var = tk.StringVar(value=current_value)
+            entry = tb.Entry(frame, textvariable=var, width=50)
+            entry.pack(fill=tk.X, pady=5)
+            entry.focus()
+            entry.select_range(0, tk.END)
+            
+            def get_value():
+                return var.get()
+        
+        def save_edit():
+            new_value = get_value()
+            
+            # Update the tree
+            new_values = list(values)
+            new_values[col_idx] = new_value
+            self.glossary_tree.item(item, values=new_values)
+            
+            # Update the underlying data
+            row_idx = int(self.glossary_tree.item(item)['text']) - 1
+            
+            if self.current_glossary_format == 'list':
+                if 0 <= row_idx < len(self.current_glossary_data):
+                    entry = self.current_glossary_data[row_idx]
+                    
+                    # Handle list fields
+                    if col_name in ['traits', 'locations', 'group_affiliation']:
+                        # Convert comma-separated string back to list
+                        if new_value:
+                            entry[col_name] = [v.strip() for v in new_value.split(',') if v.strip()]
+                        else:
+                            entry.pop(col_name, None)
+                    else:
+                        if new_value:
+                            entry[col_name] = new_value
+                        else:
+                            entry.pop(col_name, None)
+            
+            dialog.destroy()
+        
+        # Buttons
+        button_frame = tk.Frame(frame)
+        button_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        tb.Button(button_frame, text="Save", command=save_edit,
+                  bootstyle="success", width=10).pack(side=tk.LEFT, padx=5)
+        tb.Button(button_frame, text="Cancel", command=dialog.destroy,
+                  bootstyle="secondary", width=10).pack(side=tk.LEFT, padx=5)
+        
+        # Bind Enter key to save
+        dialog.bind('<Return>', lambda e: save_edit())
+        dialog.bind('<Escape>', lambda e: dialog.destroy())
 
     def _aggregate_locations(self, reload_callback):
         """Aggregate all location entries into a single entry"""
@@ -1636,27 +2216,18 @@ class TranslatorGUI:
                 # ─── NEW: Log the state of new toggles ───
                 if self.disable_system_prompt_var.get():
                     self.append_log("⚠️ Hardcoded prompts disabled")
-                if self.disable_auto_glossary_var.get():
-                    self.append_log("⚠️ Automatic glossary disabled")
                     
                 # Log glossary status
-                if self.append_glossary_var.get():
-                    self.append_log("✅ Glossary will be appended to prompts")
+                if self.enable_auto_glossary_var.get():
+                    self.append_log("✅ Automatic glossary generation ENABLED")
+                    self.append_log(f"📑 Targeted Glossary Settings:")
+                    self.append_log(f"   • Min frequency: {self.glossary_min_frequency_var.get()} occurrences")
+                    self.append_log(f"   • Max character names: {self.glossary_max_names_var.get()}")
+                    self.append_log(f"   • Max titles/ranks: {self.glossary_max_titles_var.get()}")
+                    self.append_log(f"   • Translation batch size: {self.glossary_batch_size_var.get()}")
                 else:
-                    self.append_log("⚠️ Glossary appending is disabled")
-                    
-                # ─── NEW: Log glossary extraction settings ───
-                self.append_log(f"📑 Targeted Glossary Settings:")
-                self.append_log(f"   • Min frequency: {self.glossary_min_frequency_var.get()} occurrences")
-                self.append_log(f"   • Max character names: {self.glossary_max_names_var.get()}")
-                self.append_log(f"   • Max titles/ranks: {self.glossary_max_titles_var.get()}")
-                self.append_log(f"   • Translation batch size: {self.glossary_batch_size_var.get()}")
-                
-                # Log glossary translation status
-                if self.disable_glossary_translation_var.get():
-                    self.append_log("⚠️ Glossary translation disabled - terms will remain in original language")
-                else:
-                    self.append_log(f"✅ Glossary translation enabled with {self.glossary_batch_size_var.get()} terms per batch")            
+                    self.append_log("⚠️ Automatic glossary generation DISABLED")
+                            
 
                 # Log batch translation status
                 if self.batch_translation_var.get():
@@ -1689,8 +2260,8 @@ class TranslatorGUI:
                     'TRANSLATION_HISTORY_LIMIT': str(self.trans_history.get()),
                     'EPUB_OUTPUT_DIR': os.getcwd(),
                     # ─── NEW: Add environment variables for new toggles ───
-                    'DISABLE_SYSTEM_PROMPT': "1" if self.disable_system_prompt_var.get() else "0",
-                    'DISABLE_AUTO_GLOSSARY': "1" if self.disable_auto_glossary_var.get() else "0",
+                    'DISABLE_AUTO_GLOSSARY': "0" if self.enable_auto_glossary_var.get() else "1",
+                    'DISABLE_GLOSSARY_TRANSLATION': "0" if self.enable_auto_glossary_var.get() else "1",
                     'APPEND_GLOSSARY': "1" if self.append_glossary_var.get() else "0",
                     'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var.get() else "0",
                     'REINFORCEMENT_FREQUENCY': self.reinforcement_freq_var.get(),
@@ -1716,7 +2287,8 @@ class TranslatorGUI:
                     'RETRY_TIMEOUT': "1" if self.retry_timeout_var.get() else "0",
                     'CHUNK_TIMEOUT': self.chunk_timeout_var.get(),
                     'BATCH_TRANSLATION': "1" if self.batch_translation_var.get() else "0",
-                    'BATCH_SIZE': self.batch_size_var.get()
+                    'BATCH_SIZE': self.batch_size_var.get(),
+                    'TRANSLATION_HISTORY_ROLLING': "1" if self.translation_history_rolling_var.get() else "0"
 
                 })
                 
@@ -1873,6 +2445,7 @@ class TranslatorGUI:
                     'API_KEY': self.api_key_entry.get(),
                     'MAX_OUTPUT_TOKENS': str(self.max_output_tokens),
                     'GLOSSARY_SYSTEM_PROMPT': self.manual_glossary_prompt,
+                    'CHAPTER_RANGE': self.chapter_range_entry.get().strip(),
                     
                     # FIELD-SPECIFIC SETTINGS (ADD THESE):
                     'GLOSSARY_EXTRACT_ORIGINAL_NAME': '1' if self.config.get('manual_extract_original_name', True) else '0',
@@ -1883,6 +2456,7 @@ class TranslatorGUI:
                     'GLOSSARY_EXTRACT_TRAITS': '1' if self.config.get('manual_extract_traits', True) else '0',
                     'GLOSSARY_EXTRACT_HOW_THEY_REFER_TO_OTHERS': '1' if self.config.get('manual_extract_how_they_refer_to_others', True) else '0',
                     'GLOSSARY_EXTRACT_LOCATIONS': '1' if self.config.get('manual_extract_locations', True) else '0',
+                    'GLOSSARY_HISTORY_ROLLING': "1" if self.glossary_history_rolling_var.get() else "0"
                 }
 
                 # Also add custom fields if any
@@ -1890,6 +2464,11 @@ class TranslatorGUI:
                     env_updates['GLOSSARY_CUSTOM_FIELDS'] = json.dumps(self.custom_glossary_fields)
 
                 os.environ.update(env_updates)
+                
+               # Log chapter range if specified
+                chap_range = self.chapter_range_entry.get().strip()
+                if chap_range:
+                    self.append_log(f"📊 Chapter Range: {chap_range} (glossary extraction will only process these chapters)")
                 
                 # Use the same token limit logic as translation
                 # The complete section should look like:
@@ -2576,7 +3155,7 @@ class TranslatorGUI:
         """Open the Other Settings dialog with all advanced options in a grid layout"""
         top = tk.Toplevel(self.master)
         top.title("Other Settings")
-        top.geometry("900x1460")
+        top.geometry("900x1320")
         top.transient(self.master)
         #top.grab_set()
         
@@ -2726,214 +3305,161 @@ class TranslatorGUI:
         # =================================================================
         section3_frame = tk.LabelFrame(scrollable_frame, text="Prompt Management", padx=10, pady=10)
         section3_frame.grid(row=1, column=0, sticky="nsew", padx=(10, 5), pady=5)
-        
+
         # Reinforcement Frequency
         reinforce_frame = tk.Frame(section3_frame)
         reinforce_frame.pack(anchor=tk.W, pady=(0, 5))
         tk.Label(reinforce_frame, text="Reinforce every").pack(side=tk.LEFT)
         tb.Entry(reinforce_frame, width=6, textvariable=self.reinforcement_freq_var).pack(side=tk.LEFT, padx=5)
         tk.Label(reinforce_frame, text="messages").pack(side=tk.LEFT)
-        
+
         tk.Label(section3_frame, 
                  text="Periodically reminds the AI of your\nsystem prompt (0 = disabled)",
                  font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 10))
-        
-        # Disable System Prompts
-        tb.Checkbutton(section3_frame, text="Disable Hardcoded Prompts", 
+
+        # Disable System Prompts - Make it clearer
+        tb.Checkbutton(section3_frame, text="Disable Built-in Language Prompts", 
                        variable=self.disable_system_prompt_var,
                        bootstyle="round-toggle").pack(anchor=tk.W)
-        
+
         tk.Label(section3_frame, 
-                 text="Uses only your custom system prompt,\nignoring built-in language prompts",
+                 text="When enabled:\n"
+                 "• Built-in Korean/Japanese/Chinese prompts are NEVER used\n"
+                 "• Only uses what's in your System Prompt box (even if empty)\n"
+                 "• If System Prompt box is empty, NO prompt is sent\n"
+                 "• Glossary still appends if 'Append Glossary' is ON\n\n"
+                 "When disabled (default):\n"
+                 "• Uses your System Prompt box if it has text\n"
+                 "• Falls back to built-in language prompts if box is empty\n"
+                 "• Glossary still appends if 'Append Glossary' is ON",
                  font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
-        
+
         # =================================================================
-        # SECTION 4: GLOSSARY SETTINGS (Middle Right)
+        # SECTION 4: PROCESSING OPTIONS (Middle Right) - MOVED UP
         # =================================================================
-        section4_frame = tk.LabelFrame(scrollable_frame, text="Glossary Settings", padx=10, pady=10)
+        section4_frame = tk.LabelFrame(scrollable_frame, text="Processing Options", padx=10, pady=10)
         section4_frame.grid(row=1, column=1, sticky="nsew", padx=(5, 10), pady=5)
-        
-        # Disable Auto Glossary
-        tb.Checkbutton(section4_frame, text="Disable Auto Glossary Generation", 
-                       variable=self.disable_auto_glossary_var,
-                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
-        
-        # Disable Glossary Translation
-        tb.Checkbutton(section4_frame, text="Disable Glossary Translation", 
-                       variable=self.disable_glossary_translation_var,
-                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
 
-        tk.Label(section4_frame, 
-                 text="Keeps foreign terms in original language\nwithout English translations",
-                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
-        
-        # Append Glossary
-        tb.Checkbutton(section4_frame, text="Append Glossary to Prompt", 
-                       variable=self.append_glossary_var,
-                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
-        
-        tk.Label(section4_frame, 
-                 text="Automatically includes glossary terms\nin translation prompts",
-                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 8))
-        
-        # =================================================================
-        # SECTION 5: AUTOMATIC GLOSSARY EXTRACTION CONTROLS (Bottom Left)
-        # =================================================================
-        section5_frame = tk.LabelFrame(scrollable_frame, text="Targeted Automatic Glossary Extraction", padx=10, pady=10)
-        section5_frame.grid(row=2, column=0, sticky="nsew", padx=(10, 5), pady=5)
-
-        # Configure grid for consistent alignment
-        section5_frame.grid_columnconfigure(0, weight=0)  # Label column
-        section5_frame.grid_columnconfigure(1, weight=1)  # Entry column
-
-        # Add description
-        tk.Label(section5_frame, 
-                 text="Extracts only character names with honorifics and titles",
-                 font=('TkDefaultFont', 10, 'italic'), fg='gray', justify=tk.LEFT).grid(
-                 row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
-
-        # Min Frequency
-        tk.Label(section5_frame, text="Min frequency:").grid(row=1, column=0, sticky=tk.W, pady=2)
-        tb.Entry(section5_frame, width=8, textvariable=self.glossary_min_frequency_var).grid(row=1, column=1, sticky=tk.W, padx=(5,0), pady=2)
-
-        tk.Label(section5_frame, 
-                 text="Minimum appearances required (lower = more terms)",
-                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
-
-        # Max Names
-        tk.Label(section5_frame, text="Max names:").grid(row=3, column=0, sticky=tk.W, pady=2)
-        tb.Entry(section5_frame, width=8, textvariable=self.glossary_max_names_var).grid(row=3, column=1, sticky=tk.W, padx=(5,0), pady=2)
-
-        tk.Label(section5_frame, 
-                 text="Maximum character names to extract",
-                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
-
-        # Max Titles
-        tk.Label(section5_frame, text="Max titles:").grid(row=5, column=0, sticky=tk.W, pady=2)
-        tb.Entry(section5_frame, width=8, textvariable=self.glossary_max_titles_var).grid(row=5, column=1, sticky=tk.W, padx=(5,0), pady=2)
-
-        tk.Label(section5_frame, 
-                 text="Maximum titles/ranks to extract",
-                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
-
-        # Batch Size
-        tk.Label(section5_frame, text="Translation batch:").grid(row=7, column=0, sticky=tk.W, pady=2)
-        tb.Entry(section5_frame, width=8, textvariable=self.glossary_batch_size_var).grid(row=7, column=1, sticky=tk.W, padx=(5,0), pady=2)
-
-        tk.Label(section5_frame, 
-                 text="Terms per API call for translation",
-                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=(0, 5))
-        
-        # =================================================================
-        # SECTION 6: PROCESSING OPTIONS (Bottom Right)
-        # =================================================================
-        section6_frame = tk.LabelFrame(scrollable_frame, text="Processing Options", padx=10, pady=10)
-        section6_frame.grid(row=2, column=1, sticky="nsew", padx=(5, 10), pady=5)
-        
         # Emergency Paragraph Restoration
-        tb.Checkbutton(section6_frame, text="Emergency Paragraph Restoration", 
+        tb.Checkbutton(section4_frame, text="Emergency Paragraph Restoration", 
                        variable=self.emergency_restore_var,
                        bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
-        
-        tk.Label(section6_frame, 
+
+        tk.Label(section4_frame, 
                  text="Fixes AI responses that lose paragraph\nstructure (wall of text)",
                  font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
-        
+
         # Reset Failed Chapters
-        tb.Checkbutton(section6_frame, text="Reset Failed Chapters on Start", 
+        tb.Checkbutton(section4_frame, text="Reset Failed Chapters on Start", 
                        variable=self.reset_failed_chapters_var,
                        bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
-        
-        tk.Label(section6_frame, 
+
+        tk.Label(section4_frame, 
                  text="Automatically retry failed/deleted chapters\non each translation run",
                  font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
-        
+
         # EPUB Utilities
-        tk.Label(section6_frame, text="EPUB Utilities:", font=('TkDefaultFont', 11, 'bold')).pack(anchor=tk.W, pady=(5, 5))
-        
+        tk.Label(section4_frame, text="EPUB Utilities:", font=('TkDefaultFont', 11, 'bold')).pack(anchor=tk.W, pady=(5, 5))
+
         # Validation Button
-        tb.Button(section6_frame, text="🔍 Validate EPUB Structure", 
+        tb.Button(section4_frame, text="🔍 Validate EPUB Structure", 
                   command=self.validate_epub_structure_gui, 
                   bootstyle="success-outline",
                   width=25).pack(anchor=tk.W, pady=2)
-        
-        tk.Label(section6_frame, 
+
+        tk.Label(section4_frame, 
                  text="Check if all required EPUB files are\npresent for compilation",
                  font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 5))
 
         # Comprehensive Chapter Extraction
-        tb.Checkbutton(section6_frame, text="Comprehensive Chapter Extraction", 
+        tb.Checkbutton(section4_frame, text="Comprehensive Chapter Extraction", 
                        variable=self.comprehensive_extraction_var,
                        bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
 
-        tk.Label(section6_frame, 
+        tk.Label(section4_frame, 
                  text="Extract ALL files (disable smart filtering)",
                  font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
-        
+
         # =================================================================
-        # SECTION 7: IMAGE TRANSLATION
+        # SECTION 5: IMAGE TRANSLATION (Bottom - Spanning Both Columns)
         # =================================================================
-        section7_frame = tk.LabelFrame(scrollable_frame, text="Image Translation", padx=10, pady=8)
-        section7_frame.grid(row=3, column=0, sticky="nsew", padx=(10, 5), pady=5)
-        
-        # Enable checkbox with description on same line
-        enable_frame = tk.Frame(section7_frame)
-        enable_frame.pack(fill=tk.X, pady=(0, 5))
-        
+        section5_frame = tk.LabelFrame(scrollable_frame, text="Image Translation", padx=10, pady=8)
+        section5_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=10, pady=(5, 10))
+
+        # Create two-column layout inside the frame
+        left_column = tk.Frame(section5_frame)
+        left_column.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 20))
+
+        right_column = tk.Frame(section5_frame)
+        right_column.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Left column content
+        # Enable checkbox with description
+        enable_frame = tk.Frame(left_column)
+        enable_frame.pack(fill=tk.X, pady=(0, 10))
+
         tb.Checkbutton(enable_frame, text="Enable Image Translation", 
                        variable=self.enable_image_translation_var,
-                       bootstyle="round-toggle").pack(side=tk.LEFT)
-        
-        # Web novel option on same line
-        tb.Checkbutton(enable_frame, text="Include Long Images", 
+                       bootstyle="round-toggle").pack(anchor=tk.W)
+
+        tk.Label(left_column, 
+                 text="Extracts and translates text from images using vision models",
+                 font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, pady=(0, 10))
+
+        # Web novel option
+        tb.Checkbutton(left_column, text="Process Long Images (Web Novel Style)", 
                        variable=self.process_webnovel_images_var,
-                       bootstyle="round-toggle").pack(side=tk.LEFT, padx=(20, 0))
-        
-        # Compact grid for numeric settings
-        grid_frame = tk.Frame(section7_frame)
-        grid_frame.pack(fill=tk.X, pady=5)
+                       bootstyle="round-toggle").pack(anchor=tk.W)
 
-        # Configure columns for alignment
-        grid_frame.columnconfigure(1, minsize=60)
-        grid_frame.columnconfigure(3, minsize=60)
+        tk.Label(left_column, 
+                 text="Include tall images often used in web novels",
+                 font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, padx=20, pady=(0, 10))
 
-        # Row 1: Min height and Image Output Token Limit
-        tk.Label(grid_frame, text="Min height:", font=('TkDefaultFont', 9)).grid(row=0, column=0, sticky=tk.W)
-        tb.Entry(grid_frame, width=7, textvariable=self.webnovel_min_height_var).grid(row=0, column=1, padx=(2, 5))
-
-        tk.Label(grid_frame, text="Image Output Token Limit:", font=('TkDefaultFont', 9)).grid(row=0, column=2, sticky=tk.W)
-        tb.Entry(grid_frame, width=7, textvariable=self.image_max_tokens_var).grid(row=0, column=3, padx=2)
-
-        # Row 2: Max per chapter and Chunk height
-        tk.Label(grid_frame, text="Max/chapter:", font=('TkDefaultFont', 9)).grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
-        tb.Entry(grid_frame, width=7, textvariable=self.max_images_per_chapter_var).grid(row=1, column=1, padx=(2, 5), pady=(5, 0))
-
-        tk.Label(grid_frame, text="Chunk height:", font=('TkDefaultFont', 9)).grid(row=1, column=2, sticky=tk.W, pady=(5, 0))
-        tb.Entry(grid_frame, width=7, textvariable=self.image_chunk_height_var).grid(row=1, column=3, padx=2, pady=(5, 0))
-
-        # Help text
-        tk.Label(section7_frame, 
-                 text="Vision models: Gemini 1.5-pro/flash, GPT-4V/4o",
-                 font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(2, 0))
-
-        tk.Label(section7_frame, 
-                 text="Chunk height: Pixels per chunk for tall images",
-                 font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(2, 0))        
-
-        tb.Checkbutton(section7_frame, text="Hide labels and remove OCR images", 
+        # Hide labels option
+        tb.Checkbutton(left_column, text="Hide labels and remove OCR images", 
                        variable=self.hide_image_translation_label_var,
-                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
-        
-        # =================================================================
-        # SAVE & CLOSE FUNCTIONALITY (Bottom spanning both columns)
-        # =================================================================
+                       bootstyle="round-toggle").pack(anchor=tk.W)
 
+        tk.Label(left_column, 
+                 text="Clean mode: removes image and shows only translated text",
+                 font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, padx=20)
+
+        # Right column - numeric settings
+        settings_frame = tk.Frame(right_column)
+        settings_frame.pack(fill=tk.X)
+
+        # Grid for settings
+        settings_frame.grid_columnconfigure(1, minsize=80)
+
+        tk.Label(settings_frame, text="Min Image height (px):").grid(row=0, column=0, sticky=tk.W, pady=3)
+        tb.Entry(settings_frame, width=10, textvariable=self.webnovel_min_height_var).grid(row=0, column=1, sticky=tk.W, pady=3)
+
+        tk.Label(settings_frame, text="Max Images per chapter:").grid(row=1, column=0, sticky=tk.W, pady=3)
+        tb.Entry(settings_frame, width=10, textvariable=self.max_images_per_chapter_var).grid(row=1, column=1, sticky=tk.W, pady=3)
+
+        tk.Label(settings_frame, text="Output token Limit:").grid(row=2, column=0, sticky=tk.W, pady=3)
+        tb.Entry(settings_frame, width=10, textvariable=self.image_max_tokens_var).grid(row=2, column=1, sticky=tk.W, pady=3)
+
+        tk.Label(settings_frame, text="Chunk height:").grid(row=3, column=0, sticky=tk.W, pady=3)
+        tb.Entry(settings_frame, width=10, textvariable=self.image_chunk_height_var).grid(row=3, column=1, sticky=tk.W, pady=3)
+
+        # Help text at bottom
+        tk.Label(right_column, 
+                 text="💡 Supported models:\n"
+                 "• Gemini 1.5 Pro/Flash, 2.0 Flash\n"
+                 "• GPT-4V, GPT-4o, o4-mini",
+                 font=('TkDefaultFont', 10), fg='#666', justify=tk.LEFT).pack(anchor=tk.W, pady=(10, 0))
+
+
+        # Update the save_and_close function to handle the removed variables
         def save_and_close():
             """Save all settings and close the dialog"""
             try:
                 # Context Management
                 self.config['use_rolling_summary'] = self.rolling_summary_var.get()
                 self.config['summary_role'] = self.summary_role_var.get()
+                self.config['rolling_summary_exchanges'] = int(self.rolling_summary_exchanges_var.get())
+                self.config['rolling_summary_mode'] = self.rolling_summary_mode_var.get()
                 
                 # Response Handling
                 self.config['retry_truncated'] = self.retry_truncated_var.get()
@@ -2946,17 +3472,6 @@ class TranslatorGUI:
                 # Prompt Management
                 self.config['reinforcement_frequency'] = int(self.reinforcement_freq_var.get())
                 self.config['disable_system_prompt'] = self.disable_system_prompt_var.get()
-                
-                # Glossary Settings
-                self.config['disable_auto_glossary'] = self.disable_auto_glossary_var.get()
-                self.config['disable_glossary_translation'] = self.disable_glossary_translation_var.get()
-                self.config['append_glossary'] = self.append_glossary_var.get()
-                
-                # Glossary Extraction Controls
-                self.config['glossary_min_frequency'] = int(self.glossary_min_frequency_var.get())
-                self.config['glossary_max_names'] = int(self.glossary_max_names_var.get())
-                self.config['glossary_max_titles'] = int(self.glossary_max_titles_var.get()) 
-                self.config['glossary_batch_size'] = int(self.glossary_batch_size_var.get())
                 
                 # Processing Options
                 self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()
@@ -2971,10 +3486,6 @@ class TranslatorGUI:
                 self.config['max_images_per_chapter'] = int(self.max_images_per_chapter_var.get())
                 self.config['image_chunk_height'] = int(self.image_chunk_height_var.get())
                 self.config['hide_image_translation_label'] = self.hide_image_translation_label_var.get()
-                self.config['use_rolling_summary'] = self.rolling_summary_var.get()
-                self.config['summary_role'] = self.summary_role_var.get()
-                self.config['rolling_summary_exchanges'] = int(self.rolling_summary_exchanges_var.get())
-                self.config['rolling_summary_mode'] = self.rolling_summary_mode_var.get()
                 
                 # Set environment variables for immediate effect
                 os.environ.update({
@@ -2984,7 +3495,6 @@ class TranslatorGUI:
                     "ROLLING_SUMMARY_MODE": self.rolling_summary_mode_var.get(),
                     "ROLLING_SUMMARY_SYSTEM_PROMPT": self.rolling_summary_system_prompt,
                     "ROLLING_SUMMARY_USER_PROMPT": self.rolling_summary_user_prompt,
-                    "SUMMARY_ROLE": self.summary_role_var.get(),
                     "RETRY_TRUNCATED": "1" if self.retry_truncated_var.get() else "0",
                     "MAX_RETRY_TOKENS": self.max_retry_tokens_var.get(),
                     "RETRY_DUPLICATE_BODIES": "1" if self.retry_duplicate_var.get() else "0",
@@ -2993,9 +3503,6 @@ class TranslatorGUI:
                     "CHUNK_TIMEOUT": self.chunk_timeout_var.get(),
                     "REINFORCEMENT_FREQUENCY": self.reinforcement_freq_var.get(),
                     "DISABLE_SYSTEM_PROMPT": "1" if self.disable_system_prompt_var.get() else "0",
-                    "DISABLE_AUTO_GLOSSARY": "1" if self.disable_auto_glossary_var.get() else "0",
-                    "DISABLE_GLOSSARY_TRANSLATION": "1" if self.disable_glossary_translation_var.get() else "0",
-                    "APPEND_GLOSSARY": "1" if self.append_glossary_var.get() else "0",
                     "EMERGENCY_PARAGRAPH_RESTORE": "1" if self.emergency_restore_var.get() else "0",
                     "RESET_FAILED_CHAPTERS": "1" if self.reset_failed_chapters_var.get() else "0",
                     "COMPREHENSIVE_EXTRACTION": "1" if self.comprehensive_extraction_var.get() else "0",
@@ -3005,13 +3512,7 @@ class TranslatorGUI:
                     "IMAGE_MAX_TOKENS": self.image_max_tokens_var.get(),
                     "MAX_IMAGES_PER_CHAPTER": self.max_images_per_chapter_var.get(),
                     "IMAGE_CHUNK_HEIGHT": self.image_chunk_height_var.get(),
-                    "HIDE_IMAGE_TRANSLATION_LABEL": "1" if self.hide_image_translation_label_var.get() else "0",
-                    "GLOSSARY_MIN_FREQUENCY": self.glossary_min_frequency_var.get(),
-                    "GLOSSARY_MAX_NAMES": self.glossary_max_names_var.get(),
-                    "GLOSSARY_MAX_TITLES": self.glossary_max_titles_var.get(),
-                    "GLOSSARY_BATCH_SIZE": self.glossary_batch_size_var.get()
-
-                    
+                    "HIDE_IMAGE_TRANSLATION_LABEL": "1" if self.hide_image_translation_label_var.get() else "0"
                 })
                 
                 # Save to config file
@@ -3026,27 +3527,22 @@ class TranslatorGUI:
             except Exception as e:
                 print(f"❌ Failed to save Other Settings: {e}")
                 messagebox.showerror("Error", f"Failed to save settings: {e}")
-                
-        # Auto-resize and center the dialog (up to 80% of screen height)
-        self._auto_resize_dialog(top, canvas, max_width_ratio=0.7, max_height_ratio=0.8)
-        # =================================================================
-        # SAVE & CLOSE BUTTONS (Right side of row 3, next to Image Translation)
-        # =================================================================
-        
-        # Save button frame in the empty space next to Image Translation
-        button_frame = tk.LabelFrame(scrollable_frame, text="Actions", padx=10, pady=10)
-        button_frame.grid(row=3, column=1, sticky="nsew", padx=(5, 10), pady=5)
-        
-        # Center buttons vertically
-        button_container = tk.Frame(button_frame)
-        button_container.pack(expand=True, fill='both')
-        
-        tb.Button(button_container, text="💾 Save Settings", command=save_and_close, 
-                  bootstyle="success", width=20).pack(pady=5)
-        
-        tb.Button(button_container, text="❌ Cancel", command=lambda: [cleanup_bindings(), top.destroy()], 
-                  bootstyle="secondary", width=20).pack(pady=5)
                         
+        # =================================================================
+        # SAVE & CLOSE BUTTONS (Bottom)
+        # =================================================================
+        button_frame = tk.Frame(scrollable_frame)
+        button_frame.grid(row=3, column=0, columnspan=2, pady=(10, 10))
+
+        button_container = tk.Frame(button_frame)
+        button_container.pack(expand=True)
+
+        tb.Button(button_container, text="💾 Save Settings", command=save_and_close, 
+                  bootstyle="success", width=20).pack(side=tk.LEFT, padx=5)
+
+        tb.Button(button_container, text="❌ Cancel", command=lambda: [cleanup_bindings(), top.destroy()], 
+                  bootstyle="secondary", width=20).pack(side=tk.LEFT, padx=5)
+                  
         # =================================================================
         # MOUSE WHEEL SCROLLING SUPPORT
         # ================================================================
@@ -3057,6 +3553,8 @@ class TranslatorGUI:
         # Update the existing protocol and button handlers to use cleanup_bindings
         top.protocol("WM_DELETE_WINDOW", lambda: [cleanup_bindings(), top.destroy()])
         
+        # Auto-resize and center the dialog (up to 70% width, 80% height)
+        self._auto_resize_dialog(top, canvas, max_width_ratio=0.7, max_height_ratio=0.8)
 
 
 
@@ -3204,6 +3702,10 @@ class TranslatorGUI:
             return
         self.manual_glossary_path = path
         self.append_log(f"📑 Loaded manual glossary: {path}")
+        
+        # Auto-enable append glossary when a glossary is loaded
+        self.append_glossary_var.set(True)
+        self.append_log("✅ Automatically enabled 'Append Glossary to System Prompt'")
 
 
 
@@ -3224,7 +3726,6 @@ class TranslatorGUI:
             self.config['summary_role'] = self.summary_role_var.get()
             self.config['max_output_tokens'] = self.max_output_tokens
             self.config['disable_system_prompt'] = self.disable_system_prompt_var.get()
-            self.config['disable_auto_glossary'] = self.disable_auto_glossary_var.get()
             self.config['append_glossary'] = self.append_glossary_var.get()
             self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()
             self.config['reinforcement_frequency'] = int(self.reinforcement_freq_var.get())
@@ -3232,7 +3733,6 @@ class TranslatorGUI:
             self.config['retry_duplicate_bodies'] = self.retry_duplicate_var.get()
             self.config['duplicate_lookback_chapters'] = int(self.duplicate_lookback_var.get())
             self.config['token_limit_disabled'] = self.token_limit_disabled
-            self.config['disable_glossary_translation'] = self.disable_glossary_translation_var.get()
             self.config['glossary_min_frequency'] = int(self.glossary_min_frequency_var.get())
             self.config['glossary_max_names'] = int(self.glossary_max_names_var.get())
             self.config['glossary_max_titles'] = int(self.glossary_max_titles_var.get())
@@ -3244,6 +3744,8 @@ class TranslatorGUI:
             self.config['max_images_per_chapter'] = int(self.max_images_per_chapter_var.get())
             self.config['batch_translation'] = self.batch_translation_var.get()
             self.config['batch_size'] = int(self.batch_size_var.get())
+            self.config['translation_history_rolling'] = self.translation_history_rolling_var.get()
+            self.config['glossary_history_rolling'] = self.glossary_history_rolling_var.get()
 
             
             _tl = self.token_limit_entry.get().strip()
@@ -3266,7 +3768,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time  # Add this import
     
-    print("🚀 Starting Glossarion v2.1.0...")
+    print("🚀 Starting Glossarion v2.3.1...")
     
     # Initialize splash screen (main thread only)
     splash_manager = None
