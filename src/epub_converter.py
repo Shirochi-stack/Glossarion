@@ -852,12 +852,19 @@ class EPUBCompiler:
             if chapters_added == 0:
                 raise Exception("No chapters could be added to the EPUB")
             
-            # Add optional gallery
-            gallery_images = [img for img in processed_images.values() if img != cover_file]
-            if gallery_images:
-                gallery_page = self._create_gallery_page(book, gallery_images, css_items, metadata)
-                spine.append(gallery_page)
-                toc.append(gallery_page)
+            # Add optional gallery (unless disabled)
+            disable_gallery = os.environ.get('DISABLE_EPUB_GALLERY', '0') == '1'
+            if disable_gallery:
+                self.log("📷 Image gallery disabled by user preference")
+            else:
+                gallery_images = [img for img in processed_images.values() if img != cover_file]
+                if gallery_images:
+                    self.log(f"📷 Creating image gallery with {len(gallery_images)} images...")
+                    gallery_page = self._create_gallery_page(book, gallery_images, css_items, metadata)
+                    spine.append(gallery_page)
+                    toc.append(gallery_page)
+                else:
+                    self.log("📷 No images found for gallery")
             
             # Finalize book
             self._finalize_book(book, spine, toc, cover_file)
@@ -1308,7 +1315,7 @@ img {
         chapter_tuples = []
         chapter_seen = set()
         
-        for fn in sorted(html_files):
+        for fn in sorted(html_files, key=lambda f: int(re.search(r'response_(\d+)_', f).group(1)) if re.search(r'response_(\d+)_', f) else 999999):
             match = re.match(r"response_(\d+)_", fn)
             if match:
                 num = int(match.group(1))
@@ -1634,6 +1641,9 @@ img {
         
         if css_items:
             self.log(f"\n✅ Successfully embedded {len(css_items)} CSS files")
+        # Gallery status
+        if os.environ.get('DISABLE_EPUB_GALLERY', '0') == '1':
+            self.log("\n📷 Image Gallery: Disabled by user preference")
         
         self.log("\n📱 Compatibility Notes:")
         self.log("   • XHTML 1.1 compliant")
