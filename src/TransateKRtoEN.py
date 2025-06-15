@@ -23,6 +23,93 @@ from chapter_splitter import ChapterSplitter
 from image_translator import ImageTranslator
 from typing import Dict, List, Tuple 
 
+# =====================================================
+# NEW: Chunk Context Manager
+# =====================================================
+class ChunkContextManager:
+    """Manage context within a chapter separate from history"""
+    def __init__(self):
+        self.current_chunks = []
+        self.chapter_num = None
+        self.chapter_title = None
+        
+    def start_chapter(self, chapter_num, chapter_title):
+        """Start a new chapter context"""
+        self.current_chunks = []
+        self.chapter_num = chapter_num
+        self.chapter_title = chapter_title
+        
+    def add_chunk(self, user_content, assistant_content, chunk_idx, total_chunks):
+        """Add a chunk to the current chapter context"""
+        self.current_chunks.append({
+            "user": user_content,
+            "assistant": assistant_content,
+            "chunk_idx": chunk_idx,
+            "total_chunks": total_chunks
+        })
+    
+    def get_context_messages(self, limit=3):
+        """Get last N chunks as messages for API context"""
+        context = []
+        # Get the last 'limit' chunks
+        for chunk in self.current_chunks[-limit:]:
+            context.extend([
+                {"role": "user", "content": chunk["user"]},
+                {"role": "assistant", "content": chunk["assistant"]}
+            ])
+        return context
+    
+    def get_summary_for_history(self):
+        """Create a summary representation for the history"""
+        if not self.current_chunks:
+            return None, None
+            
+        # Create a combined representation
+        total_chunks = len(self.current_chunks)
+        
+        # For user content: Include chapter info and first chunk sample
+        user_summary = f"[Chapter {self.chapter_num}: {self.chapter_title}]\n"
+        user_summary += f"[{total_chunks} chunks processed]\n"
+        if self.current_chunks:
+            first_chunk = self.current_chunks[0]['user']
+            # Take first 500 chars of first chunk
+            if len(first_chunk) > 500:
+                user_summary += first_chunk[:500] + "..."
+            else:
+                user_summary += first_chunk
+        
+        # For assistant content: Include translation summary
+        assistant_summary = f"[Chapter {self.chapter_num} Translation Complete]\n"
+        assistant_summary += f"[Translated in {total_chunks} chunks]\n"
+        if self.current_chunks:
+            # Include samples from beginning, middle, and end
+            samples = []
+            
+            # First chunk
+            first_trans = self.current_chunks[0]['assistant']
+            samples.append(f"Beginning: {first_trans[:200]}..." if len(first_trans) > 200 else f"Beginning: {first_trans}")
+            
+            # Middle chunk (if exists)
+            if total_chunks > 2:
+                mid_idx = total_chunks // 2
+                mid_trans = self.current_chunks[mid_idx]['assistant']
+                samples.append(f"Middle: {mid_trans[:200]}..." if len(mid_trans) > 200 else f"Middle: {mid_trans}")
+            
+            # Last chunk (if different from first)
+            if total_chunks > 1:
+                last_trans = self.current_chunks[-1]['assistant']
+                samples.append(f"End: {last_trans[:200]}..." if len(last_trans) > 200 else f"End: {last_trans}")
+            
+            assistant_summary += "\n".join(samples)
+        
+        return user_summary, assistant_summary
+    
+    def clear(self):
+        """Clear the current chapter context"""
+        self.current_chunks = []
+        self.chapter_num = None
+        self.chapter_title = None
+
 def is_meaningful_text_content(html_content):
     """Check if chapter has meaningful text beyond just structure"""
     try:
@@ -2731,7 +2818,6 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
                     
                     # Try to parse as JSON first
                     try:
-                        import json
                         ai_data = json.loads(response)
                         if isinstance(ai_data, dict):
                             ai_extracted_terms = ai_data
@@ -3122,6 +3208,9 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
                         names_with_honorifics[full_title] = count
         
         print(f"📑 Found {len(standalone_names)} unique names with honorifics")
+        print(f"[DEBUG] Sample text (first 500 chars): {all_text[:500]}")
+        print(f"[DEBUG] Text length: {len(all_text)}")
+        print(f"[DEBUG] Honorifics being used: {honorifics_to_use[:5]}")  # Show first 5
         
         # Find titles (without duplicating the ones already found with honorifics)
         print("📑 Scanning for titles...")
@@ -3323,38 +3412,46 @@ def build_system_prompt(user_prompt, glossary_path, instructions):
         """Convert various glossary formats into a unified prompt format"""
         formatted_entries = {}
         
-        # Handle manual glossary format (array of character objects)
-        if isinstance(glossary_data, list):
-            for char in glossary_data:
-                # Extract original and translated names
-                original = char.get('original_name', '')
-                translated = char.get('name', original)
-                if original and translated:
-                    formatted_entries[original] = translated
-                
-                # Also add title with original name if present
-                title = char.get('title')
-                if title and original:
-                    formatted_entries[f"{original} ({title})"] = f"{translated} ({title})"
-                
-                # Add any how_they_refer_to_others entries
-                refer_map = char.get('how_they_refer_to_others', {})
-                if isinstance(refer_map, dict):
-                    for other_name, reference in refer_map.items():
-                        if other_name and reference:
-                            # This helps with consistency in dialogue
-                            formatted_entries[f"{original} → {other_name}"] = f"{translated} → {reference}"
-        
-        # Handle automatic glossary format (dict with entries)
-        elif isinstance(glossary_data, dict):
-            if "entries" in glossary_data:
-                # New automatic format with metadata
-                formatted_entries = glossary_data["entries"]
-            else:
-                # Simple dict format
-                formatted_entries = glossary_data
-        
-        return formatted_entries
+        try:
+            # Handle manual glossary format (array of character objects)
+            if isinstance(glossary_data, list):
+                for char in glossary_data:
+                    if not isinstance(char, dict):
+                        continue
+                        
+                    # Extract original and translated names
+                    original = char.get('original_name', '')
+                    translated = char.get('name', original)
+                    if original and translated:
+                        formatted_entries[original] = translated
+                    
+                    # Also add title with original name if present
+                    title = char.get('title')
+                    if title and original:
+                        formatted_entries[f"{original} ({title})"] = f"{translated} ({title})"
+                    
+                    # Add any how_they_refer_to_others entries
+                    refer_map = char.get('how_they_refer_to_others', {})
+                    if isinstance(refer_map, dict):
+                        for other_name, reference in refer_map.items():
+                            if other_name and reference:
+                                # This helps with consistency in dialogue
+                                formatted_entries[f"{original} → {other_name}"] = f"{translated} → {reference}"
+            
+            # Handle automatic glossary format (dict with entries)
+            elif isinstance(glossary_data, dict):
+                if "entries" in glossary_data and isinstance(glossary_data["entries"], dict):
+                    # New automatic format with metadata
+                    formatted_entries = glossary_data["entries"]
+                elif all(isinstance(k, str) and isinstance(v, str) for k, v in glossary_data.items() if k != "metadata"):
+                    # Simple dict format
+                    formatted_entries = {k: v for k, v in glossary_data.items() if k != "metadata"}
+            
+            return formatted_entries
+            
+        except Exception as e:
+            print(f"Warning: Error formatting glossary: {e}")
+            return {}
     
     # Check if system prompt is disabled
     if os.getenv("DISABLE_SYSTEM_PROMPT", "0") == "1":
@@ -3362,7 +3459,7 @@ def build_system_prompt(user_prompt, glossary_path, instructions):
         system = user_prompt if user_prompt else ""
         
         # Append glossary if the toggle is on
-        if append_glossary and os.path.exists(glossary_path):
+        if append_glossary and glossary_path and os.path.exists(glossary_path):
             try:
                 with open(glossary_path, "r", encoding="utf-8") as gf:
                     glossary_data = json.load(gf)
@@ -3370,17 +3467,63 @@ def build_system_prompt(user_prompt, glossary_path, instructions):
                 formatted_entries = format_glossary_for_prompt(glossary_data)
                 
                 if formatted_entries:
-                    glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
-                    if system:
-                        system += "\n\n"
-                    system += (
-                        "Character/Term Glossary (use these translations consistently):\n"
-                        f"{glossary_block}"
-                    )
+                    # Ensure formatted_entries is a dict before using json.dumps
+                    if isinstance(formatted_entries, dict):
+                        glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
+                        if system:
+                            system += "\n\n"
+                        system += (
+                            "Character/Term Glossary (use these translations consistently):\n"
+                            f"{glossary_block}"
+                        )
             except Exception as e:
                 print(f"Warning: Could not load glossary: {e}")
         
         return system
+    
+    # Normal flow when hardcoded prompts are enabled
+    if user_prompt:
+        system = user_prompt
+        # Append glossary if the toggle is on
+        if append_glossary and glossary_path and os.path.exists(glossary_path):
+            try:
+                with open(glossary_path, "r", encoding="utf-8") as gf:
+                    glossary_data = json.load(gf)
+                
+                formatted_entries = format_glossary_for_prompt(glossary_data)
+                
+                if formatted_entries and isinstance(formatted_entries, dict):
+                    glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
+                    system += (
+                        "\n\nCharacter/Term Glossary (use these translations consistently):\n"
+                        f"{glossary_block}"
+                    )
+            except Exception as e:
+                print(f"Warning: Could not load glossary: {e}")
+            
+    elif glossary_path and os.path.exists(glossary_path) and append_glossary:
+        try:
+            with open(glossary_path, "r", encoding="utf-8") as gf:
+                glossary_data = json.load(gf)
+            
+            formatted_entries = format_glossary_for_prompt(glossary_data)
+            
+            if formatted_entries and isinstance(formatted_entries, dict):
+                glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
+                system = (
+                    instructions + "\n\n"
+                    "Character/Term Glossary (use these translations consistently):\n"
+                    f"{glossary_block}"
+                )
+            else:
+                system = instructions
+        except Exception as e:
+            print(f"Warning: Could not load glossary: {e}")
+            system = instructions
+    else:
+        system = instructions
+
+    return system
     
     # Normal flow when hardcoded prompts are enabled
     if user_prompt:
@@ -3432,6 +3575,19 @@ def build_system_prompt(user_prompt, glossary_path, instructions):
 
 def main(log_callback=None, stop_callback=None):
     """Main translation function with enhanced duplicate detection and progress tracking"""
+    # DEBUG: Override the json.load to add debugging
+    import json as _json
+    _original_load = _json.load
+    
+    def debug_json_load(fp, *args, **kwargs):
+        result = _original_load(fp, *args, **kwargs)
+        if isinstance(result, list) and len(result) > 0:
+            if isinstance(result[0], dict) and 'original_name' in result[0]:
+                print(f"[DEBUG] Loaded glossary list with {len(result)} items from {fp.name if hasattr(fp, 'name') else 'unknown'}")
+        return result
+    
+    _json.load = debug_json_load
+    
     if log_callback:
         set_output_redirect(log_callback)
     
@@ -3521,6 +3677,8 @@ def main(log_callback=None, stop_callback=None):
     # Initialize HistoryManager and ChapterSplitter
     history_manager = HistoryManager(payloads_dir)
     chapter_splitter = ChapterSplitter(model_name=MODEL)
+    chunk_context_manager = ChunkContextManager()
+
     
     # Purge old translation history on startup
     history_file = os.path.join(payloads_dir, "translation_history.json")
@@ -3717,14 +3875,34 @@ def main(log_callback=None, stop_callback=None):
         try:
             with open(glossary_path, 'r', encoding='utf-8') as f:
                 glossary_data = json.load(f)
-            print(f"📑 Glossary ready with {len(glossary_data)} entries")
             
-            # Show sample entries
-            if glossary_data:
-                sample_items = list(glossary_data.items())[:3]
+            # Handle different glossary formats
+            if isinstance(glossary_data, dict):
+                # Automatic glossary format
+                if 'entries' in glossary_data and isinstance(glossary_data['entries'], dict):
+                    entry_count = len(glossary_data['entries'])
+                    sample_items = list(glossary_data['entries'].items())[:3]
+                else:
+                    entry_count = len(glossary_data)
+                    sample_items = list(glossary_data.items())[:3]
+                
+                print(f"📑 Glossary ready with {entry_count} entries")
                 print("📑 Sample glossary entries:")
                 for key, value in sample_items:
                     print(f"   • {key} → {value}")
+                    
+            elif isinstance(glossary_data, list):
+                # Manual glossary format
+                print(f"📑 Glossary ready with {len(glossary_data)} entries")
+                print("📑 Sample glossary entries:")
+                for i, entry in enumerate(glossary_data[:3]):
+                    if isinstance(entry, dict):
+                        original = entry.get('original_name', '?')
+                        translated = entry.get('name', original)
+                        print(f"   • {original} → {translated}")
+            else:
+                print(f"⚠️ Unexpected glossary format: {type(glossary_data)}")
+                
         except Exception as e:
             print(f"⚠️ Glossary file exists but is corrupted: {e}")
             # Create empty glossary as fallback
@@ -3739,6 +3917,18 @@ def main(log_callback=None, stop_callback=None):
     print("🚀 STARTING MAIN TRANSLATION PHASE")
     print("="*50 + "\n")
 
+    # DEBUG
+    glossary_path = os.path.join(out, "glossary.json")
+    if os.path.exists(glossary_path):
+        try:
+            with open(glossary_path, 'r', encoding='utf-8') as f:
+                g_data = json.load(f)
+            print(f"[DEBUG] Glossary type before translation: {type(g_data)}")
+            if isinstance(g_data, list):
+                print(f"[DEBUG] Glossary is a list")
+        except Exception as e:
+            print(f"[DEBUG] Error checking glossary: {e}")
+            
     # Build system prompt (this will now use the completed glossary)
     system = build_system_prompt(SYSTEM_PROMPT, glossary_path, instructions)
     base_msg = [{"role": "system", "content": system}]
@@ -4098,6 +4288,9 @@ def main(log_callback=None, stop_callback=None):
             
             print(f"\n🔄 Processing Chapter {idx+1}/{total_chapters} ({chapter_position} to translate): {c['title']}")
             
+            # Start new chapter context
+            chunk_context_manager.start_chapter(chap_num, c['title'])
+            
             # Enhanced chapter type detection
             has_images = c.get('has_images', False)
             has_meaningful_text = is_meaningful_text_content(c["body"])
@@ -4330,21 +4523,29 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Build messages with context
                 if CONTEXTUAL:
+                    # Get both history and chunk context
                     trimmed = history[-HIST_LIMIT*2:]
+                    
+                    # Add recent chunk context (last 2-3 chunks from current chapter)
+                    chunk_context = chunk_context_manager.get_context_messages(limit=2)
+                    
+                    # Combine: base + chunk context + history + current
+                    # This gives the model immediate context from the current chapter
                 else:
                     trimmed = []
+                    chunk_context = []
 
                 # Build messages - FILTER OUT OLD SUMMARIES
                 if base_msg:
-                    # Remove any existing summary messages if rolling summary is disabled
                     if os.getenv("USE_ROLLING_SUMMARY", "0") == "0":
                         filtered_base = [msg for msg in base_msg if "summary of the previous" not in msg.get("content", "")]
-                        msgs = filtered_base + trimmed + [{"role": "user", "content": user_prompt}]
+                        # Include chunk context between base and history
+                        msgs = filtered_base + chunk_context + trimmed + [{"role": "user", "content": user_prompt}]
                     else:
-                        msgs = base_msg + trimmed + [{"role": "user", "content": user_prompt}]
+                        msgs = base_msg + chunk_context + trimmed + [{"role": "user", "content": user_prompt}]
                 else:
-                    if trimmed:
-                        msgs = trimmed + [{"role": "user", "content": user_prompt}]
+                    if trimmed or chunk_context:
+                        msgs = chunk_context + trimmed + [{"role": "user", "content": user_prompt}]
                     else:
                         msgs = [{"role": "user", "content": user_prompt}]
 
@@ -4639,6 +4840,9 @@ def main(log_callback=None, stop_callback=None):
 
                         # Save chunk result
                         translated_chunks.append((result, chunk_idx, total_chunks))
+                        
+                        # Add to chunk context for better continuity
+                        chunk_context_manager.add_chunk(user_prompt, result, chunk_idx, total_chunks)
 
                         # Update progress for this chunk
                         prog["chapter_chunks"][chapter_key_str]["completed"].append(chunk_idx)
@@ -4649,7 +4853,8 @@ def main(log_callback=None, stop_callback=None):
                         chunks_completed += 1
                             
                         # Check if we're about to reset history BEFORE appending
-                        will_reset = history_manager.will_reset_on_next_append(HIST_LIMIT if CONTEXTUAL else 0)
+                        rolling_window = os.getenv('TRANSLATION_HISTORY_ROLLING', '0') == '1'
+                        will_reset = history_manager.will_reset_on_next_append(HIST_LIMIT if CONTEXTUAL else 0, rolling_window)
 
                         # Generate rolling summary BEFORE history reset
                         if will_reset and os.getenv("USE_ROLLING_SUMMARY", "0") == "1" and CONTEXTUAL:
@@ -4751,12 +4956,14 @@ def main(log_callback=None, stop_callback=None):
                                     except Exception as e:
                                         print(f"⚠️ Failed to generate rolling summary: {e}")
 
-                        # NOW append to history (which may reset it)
+                        # append to history (which may reset it)
+                        rolling_window = os.getenv('TRANSLATION_HISTORY_ROLLING', '0') == '1'
                         history = history_manager.append_to_history(
                             user_prompt, 
                             result, 
                             HIST_LIMIT if CONTEXTUAL else 0,
-                            reset_on_limit=True
+                            reset_on_limit=True,
+                            rolling_window=rolling_window
                         )
 
                         # Delay between chunks/API calls
@@ -4816,6 +5023,25 @@ def main(log_callback=None, stop_callback=None):
                 merged_result = chapter_splitter.merge_translated_chunks(translated_chunks)
             else:
                 merged_result = translated_chunks[0][0] if translated_chunks else ""
+
+            # Create chapter summary for history if we have multiple chunks
+            if CONTEXTUAL and len(translated_chunks) > 1:
+                user_summary, assistant_summary = chunk_context_manager.get_summary_for_history()
+                
+                if user_summary and assistant_summary:
+                    # Add the chapter summary to history as a single exchange
+                    # This preserves chapter context without flooding history with all chunks
+                    history_manager.append_to_history(
+                        user_summary,
+                        assistant_summary,
+                        HIST_LIMIT,
+                        reset_on_limit=False,  # Don't reset on this append
+                        rolling_window=os.getenv('TRANSLATION_HISTORY_ROLLING', '0') == '1'
+                    )
+                    print(f"  📝 Added chapter summary to history")
+
+            # Clear chunk context for next chapter
+            chunk_context_manager.clear()
 
             # Save translated chapter
             safe_title = make_safe_filename(c['title'], c['num'])   
