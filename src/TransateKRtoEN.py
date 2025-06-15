@@ -3852,8 +3852,13 @@ def main(log_callback=None, stop_callback=None):
     print("="*50)
 
     if manual_gloss and os.path.isfile(manual_gloss):
-        shutil.copy(manual_gloss, os.path.join(out, "glossary.json"))
-        print("📑 Using manual glossary from:", manual_gloss)
+        target_path = os.path.join(out, "glossary.json")
+        # Check if source and destination are the same file
+        if os.path.abspath(manual_gloss) != os.path.abspath(target_path):
+            shutil.copy(manual_gloss, target_path)
+            print("📑 Using manual glossary from:", manual_gloss)
+        else:
+            print("📑 Using existing glossary:", manual_gloss)
     elif not disable_auto_glossary:
         print("📑 Starting automatic glossary generation...")
         
