@@ -83,17 +83,37 @@ class HistoryManager:
                         os.remove(temp_path)
                     raise e
     
-    def append_to_history(self, user_content, assistant_content, hist_limit, reset_on_limit=True):
-        """Append to history with automatic reset when limit is reached"""
+    def append_to_history(self, user_content, assistant_content, hist_limit, reset_on_limit=True, rolling_window=False):
+        """
+        Append to history with automatic reset or rolling window when limit is reached
+        
+        Args:
+            user_content: User message content
+            assistant_content: Assistant message content
+            hist_limit: Maximum number of exchanges to keep
+            reset_on_limit: Whether to reset when limit is reached (old behavior)
+            rolling_window: Whether to use rolling window mode (new behavior)
+        """
         history = self.load_history()
         
         # Count current exchanges (each exchange = 2 messages: user + assistant)
         current_exchanges = len(history) // 2
         
-        # Reset completely when limit is reached
-        if reset_on_limit and hist_limit > 0 and current_exchanges >= hist_limit:
-            history = []  # Complete reset
-            print(f"🔄 Reset history after reaching limit of {hist_limit} exchanges")
+        # Handle limit reached
+        if hist_limit > 0 and current_exchanges >= hist_limit:
+            if rolling_window:
+                # Rolling window mode: keep only the most recent (limit-1) exchanges
+                # We keep limit-1 to make room for the new exchange
+                messages_to_keep = (hist_limit - 1) * 2
+                if messages_to_keep > 0:
+                    history = history[-messages_to_keep:]
+                    print(f"🔄 Rolling history window: keeping last {hist_limit-1} exchanges")
+                else:
+                    history = []
+            elif reset_on_limit:
+                # Old behavior: complete reset
+                history = []
+                print(f"🔄 Reset history after reaching limit of {hist_limit} exchanges")
         
         # Append new entries
         history.append({"role": "user", "content": user_content})
@@ -101,9 +121,9 @@ class HistoryManager:
         
         self.save_history(history)
         return history
-        
-    def will_reset_on_next_append(self, hist_limit):
-        """Check if the next append will trigger a reset"""
+
+    def will_reset_on_next_append(self, hist_limit, rolling_window=False):
+        """Check if the next append will trigger a reset or rolling window"""
         if hist_limit <= 0:
             return False
         history = self.load_history()
