@@ -3043,12 +3043,48 @@ class TranslatorGUI:
         self.log_text.see(tk.INSERT)
 
 
+    def auto_load_glossary_for_epub(self, epub_path):
+        """Automatically load glossary if it exists in the output folder"""
+        if not epub_path or not os.path.isfile(epub_path):
+            return
+        
+        # Get the output directory for this EPUB
+        epub_base = os.path.splitext(os.path.basename(epub_path))[0]
+        output_dir = epub_base
+        
+        # Priority order for glossary files to check
+        glossary_candidates = [
+            os.path.join(output_dir, "glossary.json"),
+            os.path.join(output_dir, f"{epub_base}_glossary.json"),
+            os.path.join(output_dir, "Glossary", f"{epub_base}_glossary.json")
+        ]
+        
+        for glossary_path in glossary_candidates:
+            if os.path.exists(glossary_path):
+                try:
+                    # Verify it's a valid glossary file
+                    with open(glossary_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    
+                    # Check if it has content
+                    if data:
+                        self.manual_glossary_path = glossary_path
+                        self.append_log(f"📑 Auto-loaded glossary: {os.path.basename(glossary_path)}")
+                        return True
+                        
+                except Exception as e:
+                    continue
+        
+        return False
     
     def browse_file(self):
         path = filedialog.askopenfilename(filetypes=[("EPUB files","*.epub")])
         if path:
             self.entry_epub.delete(0, tk.END)
             self.entry_epub.insert(0, path)
+            
+            # Auto-load glossary for this EPUB
+            self.auto_load_glossary_for_epub(path)
 
     def toggle_fullscreen(self, event=None):
         is_full = self.master.attributes('-fullscreen')
