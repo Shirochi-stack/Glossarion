@@ -315,7 +315,10 @@ class TranslatorGUI:
         )
         self.batch_size_var = tk.StringVar(
             value=str(self.config.get('batch_size', '3'))  # Default to 3
-)
+        )
+        self.disable_epub_gallery_var = tk.BooleanVar(
+            value=self.config.get('disable_epub_gallery', False)  # Default to False (gallery enabled)
+        )
         # Default prompts
         self.default_prompts = {
             "korean": "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.",
@@ -2572,7 +2575,7 @@ class TranslatorGUI:
         try:
             folder = self.epub_folder
             self.append_log("📦 Starting EPUB Converter...")
-            
+            os.environ['DISABLE_EPUB_GALLERY'] = "1" if self.disable_epub_gallery_var.get() else "0"
             # Call the EPUB converter function directly with callbacks
             fallback_compile_epub(
                 folder, 
@@ -3155,7 +3158,7 @@ class TranslatorGUI:
         """Open the Other Settings dialog with all advanced options in a grid layout"""
         top = tk.Toplevel(self.master)
         top.title("Other Settings")
-        top.geometry("900x1320")
+        top.geometry("900x1380")
         top.transient(self.master)
         #top.grab_set()
         
@@ -3379,6 +3382,15 @@ class TranslatorGUI:
         tk.Label(section4_frame, 
                  text="Extract ALL files (disable smart filtering)",
                  font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+                 
+        # Disable EPUB Gallery
+        tb.Checkbutton(section4_frame, text="Disable Image Gallery in EPUB", 
+                       variable=self.disable_epub_gallery_var,
+                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+
+        tk.Label(section4_frame, 
+                 text="Skip creating image gallery page in EPUB",
+                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
 
         # =================================================================
         # SECTION 5: IMAGE TRANSLATION (Bottom - Spanning Both Columns)
@@ -3477,6 +3489,7 @@ class TranslatorGUI:
                 self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()
                 self.config['reset_failed_chapters'] = self.reset_failed_chapters_var.get()
                 self.config['comprehensive_extraction'] = self.comprehensive_extraction_var.get()
+                self.config['disable_epub_gallery'] = self.disable_epub_gallery_var.get()
                 
                 # Image Translation Settings
                 self.config['enable_image_translation'] = self.enable_image_translation_var.get()
@@ -3512,7 +3525,9 @@ class TranslatorGUI:
                     "IMAGE_MAX_TOKENS": self.image_max_tokens_var.get(),
                     "MAX_IMAGES_PER_CHAPTER": self.max_images_per_chapter_var.get(),
                     "IMAGE_CHUNK_HEIGHT": self.image_chunk_height_var.get(),
-                    "HIDE_IMAGE_TRANSLATION_LABEL": "1" if self.hide_image_translation_label_var.get() else "0"
+                    "HIDE_IMAGE_TRANSLATION_LABEL": "1" if self.hide_image_translation_label_var.get() else "0",
+                    "DISABLE_EPUB_GALLERY": "1" if self.disable_epub_gallery_var.get() else "0"
+
                 })
                 
                 # Save to config file
@@ -3746,6 +3761,8 @@ class TranslatorGUI:
             self.config['batch_size'] = int(self.batch_size_var.get())
             self.config['translation_history_rolling'] = self.translation_history_rolling_var.get()
             self.config['glossary_history_rolling'] = self.glossary_history_rolling_var.get()
+            self.config['disable_epub_gallery'] = self.disable_epub_gallery_var.get()
+
 
             
             _tl = self.token_limit_entry.get().strip()
@@ -3768,7 +3785,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time  # Add this import
     
-    print("🚀 Starting Glossarion v2.3.1...")
+    print("🚀 Starting Glossarion v2.3.2...")
     
     # Initialize splash screen (main thread only)
     splash_manager = None
