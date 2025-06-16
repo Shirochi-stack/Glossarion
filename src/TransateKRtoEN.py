@@ -22,6 +22,8 @@ from history_manager import HistoryManager
 from chapter_splitter import ChapterSplitter
 from image_translator import ImageTranslator
 from typing import Dict, List, Tuple 
+from txt_processor import TextFileProcessor
+
 
 # =====================================================
 # NEW: Chunk Context Manager
@@ -1385,10 +1387,10 @@ def _cleanup_old_resources(output_dir):
     # Remove EPUB structure files
     epub_structure_files = ['container.xml', 'content.opf', 'toc.ncx']
     for epub_file in epub_structure_files:
-        epub_path = os.path.join(output_dir, epub_file)
-        if os.path.exists(epub_path):
+        input_path = os.path.join(output_dir, epub_file)
+        if os.path.exists(input_path):
             try:
-                os.remove(epub_path)
+                os.remove(input_path)
                 print(f"   🗑️ Removed old {epub_file}")
             except PermissionError:
                 print(f"   ⚠️ Cannot remove {epub_file} (permission denied) - will use existing file")
@@ -2160,6 +2162,7 @@ def _create_extraction_report(output_dir, metadata, chapters, extracted_resource
 def validate_chapter_continuity(chapters):
     """Validate chapter continuity and warn about issues"""
     if not chapters:
+        print("No chapters to translate")
         return
     
     issues = []
@@ -3619,9 +3622,24 @@ def build_system_prompt(user_prompt, glossary_path):
 
 def main(log_callback=None, stop_callback=None):
     """Main translation function with enhanced duplicate detection and progress tracking"""
+    
+    # Handle the case where we're called from GUI (no args object)
+    args = None
+    
+    
+    
+    # Get the input path (EPUB or text file)
+    input_path = os.getenv("input_path", "")  # Still reading from input_path env var for backward compatibility
+    if not input_path and len(sys.argv) > 1:
+        input_path = sys.argv[1]
+    
+    # Define is_text_file early
+    is_text_file = input_path.lower().endswith('.txt')
+    
     # DEBUG: Override the json.load to add debugging
     import json as _json
     _original_load = _json.load
+      
     
     def debug_json_load(fp, *args, **kwargs):
         result = _original_load(fp, *args, **kwargs)
@@ -3644,7 +3662,7 @@ def main(log_callback=None, stop_callback=None):
     
     # Parse all environment variables
     MODEL = os.getenv("MODEL", "gemini-1.5-flash")
-    EPUB_PATH = os.getenv("EPUB_PATH", "default.epub")
+    input_path = os.getenv("input_path", "default.epub")
     PROFILE_NAME = os.getenv("PROFILE_NAME", "korean").lower()
     CONTEXTUAL = os.getenv("CONTEXTUAL", "1") == "1"
     DELAY = int(os.getenv("SEND_INTERVAL_SECONDS", "2"))
@@ -3657,6 +3675,51 @@ def main(log_callback=None, stop_callback=None):
     BATCH_TRANSLATION = os.getenv("BATCH_TRANSLATION", "0") == "1"  
     BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
 
+
+
+    # Check if we need to parse command line arguments
+    if '--epub' in sys.argv or (len(sys.argv) > 1 and sys.argv[1].endswith(('.epub', '.txt'))):
+        # Command line mode - parse arguments
+        import argparse
+        parser = argparse.ArgumentParser()
+        parser.add_argument('epub', help='Input EPUB or text file')
+        # Add any other arguments that were in the original parser
+        args = parser.parse_args()
+        input_path = args.epub
+    else:
+        # GUI mode - already set input_path at beginning of function
+        pass  # input_path already defined
+
+
+    # Check if input is text file
+    is_text_file = input_path.lower().endswith('.txt')
+    
+    if is_text_file:
+        # Import text processor
+        from extract_glossary_from_txt import extract_chapters_from_txt
+        chapters = extract_chapters_from_txt(input_path)
+        file_base = os.path.splitext(os.path.basename(input_path))[0]
+    else:
+        # Existing EPUB code
+        if is_text_file:
+            # Import and use text processor
+            
+            from extract_glossary_from_txt import extract_chapters_from_txt
+            chapters = extract_chapters_from_txt(input_path)
+        else:
+            # For EPUB files, use the extract_chapters function (check the actual function name)
+            # Create output directory name based on input file
+            file_base = os.path.splitext(os.path.basename(input_path))[0]
+            output_dir = file_base
+            os.makedirs(output_dir, exist_ok=True)
+ 
+
+            # Extract chapters with both arguments
+            with zipfile.ZipFile(input_path, 'r') as zf:
+                chapters = extract_chapters(zf, output_dir) 
+        epub_base = os.path.splitext(os.path.basename(input_path))[0]
+        file_base = epub_base
+        
     # Log the setting
     if EMERGENCY_RESTORE:
         print("✅ Emergency paragraph restoration is ENABLED")
@@ -3703,8 +3766,42 @@ def main(log_callback=None, stop_callback=None):
     client = UnifiedClient(model=MODEL, api_key=API_KEY)
         
     # Set up paths
-    epub_path = sys.argv[1] if len(sys.argv) > 1 else EPUB_PATH
-    epub_base = os.path.splitext(os.path.basename(epub_path))[0]
+    input_path = sys.argv[1] if len(sys.argv) > 1 else input_path
+    
+    # Check if it's a text file
+    is_text_file = input_path.lower().endswith('.txt')
+    
+    if is_text_file:
+        # Handle text file
+        epub_base = os.path.splitext(os.path.basename(input_path))[0]
+        out = epub_base
+        os.makedirs(out, exist_ok=True)
+        print(f"[DEBUG] Processing text file → {out}")
+        
+        # Process text file
+        txt_processor = TextFileProcessor(input_path, out)
+        chapters = txt_processor.extract_chapters()
+        txt_processor.save_original_structure()
+        
+        # Create a simple metadata
+        metadata = {
+            "title": epub_base,
+            "type": "text",
+            "chapter_count": len(chapters)
+        }
+    else:
+        # Existing EPUB handling code
+        epub_base = os.path.splitext(os.path.basename(input_path))[0]
+        out = epub_base
+        os.makedirs(out, exist_ok=True)
+        print(f"[DEBUG] Created output folder → {out}")
+        
+        if is_text_file:
+            print(f"[DEBUG] Processing text file → {out}")
+        else:
+            print(f"[DEBUG] Processing EPUB → {out}")      
+        
+    epub_base = os.path.splitext(os.path.basename(input_path))[0]
     out = epub_base
     os.makedirs(out, exist_ok=True)
     print(f"[DEBUG] Created output folder → {out}")
@@ -3792,37 +3889,44 @@ def main(log_callback=None, stop_callback=None):
     if check_stop():
         return
 
-    # Extract EPUB contents WITH CONSOLIDATED EXTRACTION
-    print("🚀 Using comprehensive chapter extraction with resource handling...")
-    with zipfile.ZipFile(epub_path, 'r') as zf:
-        metadata = extract_epub_metadata(zf)
-        chapters = extract_chapters(zf, out)  # ONE FUNCTION, ALL FUNCTIONALITY!
+    # Extract contents based on file type
+    if is_text_file:
+        print("📄 Processing text file...")
+        try:
+            txt_processor = TextFileProcessor(input_path, out)
+            chapters = txt_processor.extract_chapters()
+            txt_processor.save_original_structure()
+            
+            # Create simple metadata for text files
+            metadata = {
+                "title": os.path.splitext(os.path.basename(input_path))[0],
+                "type": "text",
+                "chapter_count": len(chapters)
+            }
+        except ImportError as e:
+            print(f"❌ Error: Text file processor not available: {e}")
+            if log_callback:
+                log_callback(f"❌ Error: Text file processor not available: {e}")
+            return
+        except Exception as e:
+            print(f"❌ Error processing text file: {e}")
+            if log_callback:
+                log_callback(f"❌ Error processing text file: {e}")
+            return
+    else:
+        # Extract EPUB contents WITH CONSOLIDATED EXTRACTION
+        print("🚀 Using comprehensive chapter extraction with resource handling...")
+        with zipfile.ZipFile(input_path, 'r') as zf:
+            metadata = extract_epub_metadata(zf)
+            chapters = extract_chapters(zf, out)  # ONE FUNCTION, ALL FUNCTIONALITY!
+            
+            # Validate chapters
+            validate_chapter_continuity(chapters)
         
-        # Validate chapters
-        validate_chapter_continuity(chapters)
-
-    # FIXED: Add validation after extraction
-    print("\n" + "="*50)
-    validate_epub_structure(out)
-    print("="*50 + "\n")
-
-    # Check for stop before starting
-    if check_stop():
-        return
-
-    # Extract EPUB contents WITH CONSOLIDATED EXTRACTION
-    print("🚀 Using comprehensive chapter extraction with resource handling...")
-    with zipfile.ZipFile(epub_path, 'r') as zf:
-        metadata = extract_epub_metadata(zf)
-        chapters = extract_chapters(zf, out)  # ONE FUNCTION, ALL FUNCTIONALITY!
-        
-        # Validate chapters
-        validate_chapter_continuity(chapters)
-
-    # FIXED: Add validation after extraction
-    print("\n" + "="*50)
-    validate_epub_structure(out)
-    print("="*50 + "\n")
+        # FIXED: Add validation after extraction
+        print("\n" + "="*50)
+        validate_epub_structure(out)
+        print("="*50 + "\n")
 
     # Check for stop after file processing
     if check_stop():
@@ -4120,9 +4224,15 @@ def main(log_callback=None, stop_callback=None):
             # Skip empty chapters in batch mode
             if is_empty_chapter:
                 print(f"📄 Empty chapter {chap_num} - will process individually")
+                
                 # Process empty chapter immediately
                 safe_title = make_safe_filename(c['title'], c['num'])
-                fname = f"response_{c['num']:03d}_{safe_title}.html"
+                
+                # Handle both integer and float chapter numbers (for chunks)            
+                if isinstance(c['num'], float):
+                    fname = f"response_{c['num']:06.1f}_{safe_title}.html"  # Format: response_001.0_title.html
+                else:
+                    fname = f"response_{c['num']:03d}_{safe_title}.html"    # Format: response_001_title.html
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
                     f.write(c["body"])
                 update_progress(prog, idx, chap_num, content_hash, fname, status="completed_empty")
@@ -4199,7 +4309,10 @@ def main(log_callback=None, stop_callback=None):
                 else:
                     # Fallback to the current naming scheme
                     safe_title = make_safe_filename(chapter['title'], chap_num)   
-                    fname = f"response_{chap_num:03d}_{safe_title}.html"
+                    if isinstance(chap_num, float):
+                        fname = f"response_{chap_num:06.1f}_{safe_title}.html"
+                    else:
+                        fname = f"response_{chap_num:03d}_{safe_title}.html"
                 
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
                     f.write(cleaned)
@@ -4361,7 +4474,11 @@ def main(log_callback=None, stop_callback=None):
             if is_empty_chapter:
                 print(f"📄 Copying empty chapter as-is")
                 safe_title = make_safe_filename(c['title'], c['num'])
-                fname = f"response_{c['num']:03d}_{safe_title}.html"
+                # Handle both integer and float chapter numbers (for chunks)
+                if isinstance(c['num'], float):
+                    fname = f"response_{c['num']:06.1f}_{safe_title}.html"  # Format: response_001.0_title.html
+                else:
+                    fname = f"response_{c['num']:03d}_{safe_title}.html"    # Format: response_001_title.html
                 
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
                     f.write(c["body"])
@@ -4397,7 +4514,11 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Save the result
                 safe_title = make_safe_filename(c['title'], c['num'])
-                fname = f"response_{c['num']:03d}_{safe_title}.html"
+                # Handle both integer and float chapter numbers (for chunks)
+                if isinstance(c['num'], float):
+                    fname = f"response_{c['num']:06.1f}_{safe_title}.html"  # Format: response_001.0_title.html
+                else:
+                    fname = f"response_{c['num']:03d}_{safe_title}.html"    # Format: response_001_title.html
                 
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
                     f.write(translated_html)
@@ -5097,7 +5218,10 @@ def main(log_callback=None, stop_callback=None):
             else:
                 # Fallback to the current naming scheme
                 safe_title = make_safe_filename(c['title'], c['num'])   
-                fname = f"response_{c['num']:03d}_{safe_title}.html"
+                if isinstance(c['num'], float):
+                    fname = f"response_{c['num']:06.1f}_{safe_title}.html"  # Format: response_001.0_title.html
+                else:
+                    fname = f"response_{c['num']:03d}_{safe_title}.html"    # Format: response_001_title.html
 
             # Clean up code fences only
             cleaned = re.sub(r"^```(?:html)?\s*\n?", "", merged_result, count=1, flags=re.MULTILINE)
@@ -5121,10 +5245,45 @@ def main(log_callback=None, stop_callback=None):
             chapters_completed += 1
 
     # Check for stop before building EPUB
-    if check_stop():
-        print("❌ Translation stopped before building EPUB")
-        return
-        
+    if is_text_file:
+        # Build text file output
+        print("📄 Building final text file…")
+        try:
+            # Collect all translated files
+            translated_files = []
+            for chapter in chapters:
+                fname = f"response_{chapter['num']:03d}_{make_safe_filename(chapter['title'], chapter['num'])}.html"
+                if os.path.exists(os.path.join(out, fname)):
+                    with open(os.path.join(out, fname), 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    translated_files.append((fname, content))
+            
+            # Create output text file
+            output_path = txt_processor.create_output_structure(translated_files)
+            print(f"✅ Translation complete! Output saved to: {output_path}")
+            
+            # Print final statistics
+            total_time = time.time() - translation_start_time
+            hours = int(total_time // 3600)
+            minutes = int((total_time % 3600) // 60)
+            seconds = int(total_time % 60)
+            
+            print(f"\n📊 Translation Statistics:")
+            print(f"   • Total chunks processed: {chunks_completed}")
+            print(f"   • Total time: {hours}h {minutes}m {seconds}s")
+            
+        except Exception as e:
+            print("❌ Text file output build failed:", e)
+    else:
+        # Existing EPUB building code
+        print("📘 Building final EPUB…")
+        try:
+            from epub_converter import fallback_compile_epub
+            fallback_compile_epub(out, log_callback=log_callback)
+            print("✅ All done: your final EPUB is in", out)
+        except Exception as e:
+            print("❌ EPUB build failed:", e)
+            
     # FIX: Ensure we have response_ files for EPUB builder
     print("🔍 Checking for translated chapters...")
     response_files = [f for f in os.listdir(out) if f.startswith('response_') and f.endswith('.html')]
