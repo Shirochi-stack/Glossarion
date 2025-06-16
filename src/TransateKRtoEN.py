@@ -4444,9 +4444,11 @@ def main(log_callback=None, stop_callback=None):
             # Calculate chapter position for progress
             chapter_position = f"{chapters_completed + 1}/{chapters_to_process}"
             
+            default_name = f"Chapter_{c['num']}"
+            basename = c.get('original_basename', default_name)
             print(f"\n🔄 Processing Chapter {idx+1}/{total_chapters} ({chapter_position} to translate): "
-                  f"{c['title']} [File: {c.get('original_basename', f\"Chapter_{c['num']}\")}]")
-            
+                  f"{c['title']} [File: {basename}]")
+                        
             # Start new chapter context
             chunk_context_manager.start_chapter(chap_num, c['title'])
             
