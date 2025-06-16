@@ -3833,74 +3833,49 @@ def main(log_callback=None, stop_callback=None):
     if check_stop():
         return
 
-    # Write metadata with chapter info (enhanced metadata is already saved by extract_chapters)
-    # Just ensure we have the basic metadata.json for backward compatibility
-    # Load existing metadata if it exists
     metadata_path = os.path.join(out, "metadata.json")
     if os.path.exists(metadata_path):
         with open(metadata_path, 'r', encoding='utf-8') as mf:
             metadata = json.load(mf)
-
+    
     # Ensure we have chapter info
     metadata["chapter_count"] = len(chapters)
     metadata["chapter_titles"] = {str(c["num"]): c["title"] for c in chapters}
-
-    # Save metadata first (we'll update it with translated title later)
-    with open(metadata_path, 'w', encoding='utf-8') as mf:
-        json.dump(metadata, mf, ensure_ascii=False, indent=2)
-        
-    # Handle glossary - ENSURE IT COMPLETES BEFORE TRANSLATION
-    manual_gloss = os.getenv("MANUAL_GLOSSARY")
-    disable_auto_glossary = os.getenv("DISABLE_AUTO_GLOSSARY", "0") == "1"
-
-    print("\n" + "="*50)
-    print("📑 GLOSSARY GENERATION PHASE")
-    print("="*50)
-
-
-    # AFTER GLOSSARY GENERATION, TRANSLATE THE TITLE
-    # (Move the title translation here, after the glossary is ready)
-    glossary_path = os.path.join(out, "glossary.json")
-
-    # Translate the title FIRST if toggle is enabled
-    if "title" in metadata and os.getenv("TRANSLATE_BOOK_TITLE", "1") == "1":
+    
+    # Translate the title BEFORE saving metadata if toggle is enabled
+    if "title" in metadata and os.getenv("TRANSLATE_BOOK_TITLE", "1") == "1" and not metadata.get("title_translated", False):
         original_title = metadata["title"]
         print(f"📚 Original title: {original_title}")
         
-        # Initialize client early for title translation
-        client = UnifiedClient(model=MODEL, api_key=API_KEY)
-        
-        # Translate title
-        translated_title = translate_title(
-            original_title, 
-            client, 
-            None,  # No system prompt for title
-            None,  # No user prompt for title
-            TEMP    # Low temperature
-        )
-        
-        # Update metadata
-        metadata["original_title"] = original_title
-        metadata["title"] = translated_title
-        metadata["title_translated"] = True
-        
-        print(f"📚 Translated title: {translated_title}")
-
-    # NOW save metadata with translated title
-    metadata["chapter_count"] = len(chapters)
-    metadata["chapter_titles"] = {str(c["num"]): c["title"] for c in chapters}
-
+        # Check for stop before translating title
+        if not check_stop():
+            # For title translation, we do NOT use the novel translation system prompt
+            translated_title = translate_title(
+                original_title, 
+                client, 
+                None,  # Pass None to make it clear we're not using system prompt
+                None,  # Pass None to make it clear we're not using user prompt
+                TEMP   # Use the configured translation temperature
+            )
+            
+            # Store both original and translated titles
+            metadata["original_title"] = original_title
+            metadata["title"] = translated_title
+            metadata["title_translated"] = True
+            
+            print(f"📚 Translated title: {translated_title}")
+        else:
+            print("❌ Title translation skipped due to stop request")
+    
+    # Save metadata (now includes translated title if applicable)
     with open(metadata_path, 'w', encoding='utf-8') as mf:
         json.dump(metadata, mf, ensure_ascii=False, indent=2)
-
-    print("="*50)
-    print("🚀 STARTING MAIN TRANSLATION PHASE")
-    print("="*50 + "\n")
+    print(f"💾 Saved metadata with {'translated' if metadata.get('title_translated', False) else 'original'} title")
         
     # Handle glossary - ENSURE IT COMPLETES BEFORE TRANSLATION
     manual_gloss = os.getenv("MANUAL_GLOSSARY")
     disable_auto_glossary = os.getenv("DISABLE_AUTO_GLOSSARY", "0") == "1"
-
+    
     print("\n" + "="*50)
     print("📑 GLOSSARY GENERATION PHASE")
     print("="*50)
@@ -3971,7 +3946,7 @@ def main(log_callback=None, stop_callback=None):
         print("⚠️ No glossary file found, creating empty one")
         with open(glossary_path, 'w', encoding='utf-8') as f:
             json.dump({}, f, ensure_ascii=False, indent=2)
-
+    
     print("="*50)
     print("🚀 STARTING MAIN TRANSLATION PHASE")
     print("="*50 + "\n")
