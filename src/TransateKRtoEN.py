@@ -110,6 +110,34 @@ class ChunkContextManager:
         self.chapter_num = None
         self.chapter_title = None
 
+def clean_memory_artifacts(text):
+    """Remove any memory/summary artifacts that leaked into the translation"""
+    
+    # Remove any [MEMORY] blocks
+    text = re.sub(r'\[MEMORY\].*?\[END MEMORY\]', '', text, flags=re.DOTALL)
+    
+    # Remove any lines that start with memory-related markers
+    lines = text.split('\n')
+    cleaned_lines = []
+    skip_next = False
+    
+    for line in lines:
+        # Skip lines that are clearly memory-related
+        if any(marker in line for marker in ['[MEMORY]', '[END MEMORY]', 'Previous context summary:', 
+                                              'memory summary', 'context summary', '[Context]']):
+            skip_next = True
+            continue
+        
+        # Skip empty lines after memory content
+        if skip_next and line.strip() == '':
+            skip_next = False
+            continue
+            
+        skip_next = False
+        cleaned_lines.append(line)
+    
+    return '\n'.join(cleaned_lines)
+    
 def is_meaningful_text_content(html_content):
     """Check if chapter has meaningful text beyond just structure"""
     try:
@@ -210,13 +238,13 @@ _stop_requested = False
 
 def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
     """
-    Translate the book title using the same translation settings
+    Translate the book title using the configured settings
     
     Args:
         title: Original title to translate
         client: UnifiedClient instance
         system_prompt: System prompt for translation
-        user_prompt: User's custom prompt (used if hardcoded prompts disabled)
+        user_prompt: User's custom prompt (used if provided)
         temperature: Temperature for translation
         
     Returns:
@@ -225,28 +253,23 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
     if not title or not title.strip():
         return title
         
-    print(f"📚 Translating book title: {title}")
+    print(f"📚 Processing book title: {title}")
     
     try:
-        # Check if hardcoded prompts are disabled
-        if os.getenv("DISABLE_SYSTEM_PROMPT", "0") == "1":
-            # Use only user prompt if provided
-            if user_prompt:
-                messages = [
-                    {"role": "system", "content": user_prompt},
-                    {"role": "user", "content": title}
-                ]
-            else:
-                # No system prompt at all
-                messages = [
-                    {"role": "user", "content": title}
-                ]
-        else:
-            # Normal flow with system prompt
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Translate this book title to English while retaining any acronyms:\n\n{title}"}
-            ]
+        # Check if title translation is enabled
+        if os.getenv("TRANSLATE_BOOK_TITLE", "1") == "0":
+            print(f"📚 Book title translation disabled - keeping original")
+            return title
+        
+        # Get the configured book title prompt
+        book_title_prompt = os.getenv("BOOK_TITLE_PROMPT", 
+            "Translate this book title to English while retaining any acronyms:")
+        
+        # Build messages
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"{book_title_prompt}\n\n{title}"}
+        ]
         
         # Make API call
         translated_title, _ = client.send(messages, temperature=temperature, max_tokens=256)
@@ -259,11 +282,11 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
             (translated_title.startswith("'") and translated_title.endswith("'"))):
             translated_title = translated_title[1:-1].strip()
         
-        print(f"✅ Translated title: {translated_title}")
+        print(f"✅ Processed title: {translated_title}")
         return translated_title
         
     except Exception as e:
-        print(f"⚠️ Failed to translate title: {e}")
+        print(f"⚠️ Failed to process title: {e}")
         return title
         
 def set_stop_flag(value):
@@ -3403,9 +3426,12 @@ def parse_token_limit(env_value):
     return 1000000, "1000000 (default)"
 
 def build_system_prompt(user_prompt, glossary_path, instructions):
-    """Build the system prompt with glossary - handles multiple formats"""
+    """Build the system prompt with glossary - NO FALLBACK"""
     # Check if we should append glossary (default is True if not set)
     append_glossary = os.getenv("APPEND_GLOSSARY", "1") == "1"
+    
+    # Start with user prompt - if empty, it stays empty
+    system = user_prompt if user_prompt else ""
     
     # Helper function to format glossary for prompt
     def format_glossary_for_prompt(glossary_data):
@@ -3453,33 +3479,29 @@ def build_system_prompt(user_prompt, glossary_path, instructions):
             print(f"Warning: Error formatting glossary: {e}")
             return {}
     
-    # Check if system prompt is disabled
-    if os.getenv("DISABLE_SYSTEM_PROMPT", "0") == "1":
-        # Use only user prompt, but still append glossary if enabled
-        system = user_prompt if user_prompt else ""
-        
-        # Append glossary if the toggle is on
-        if append_glossary and glossary_path and os.path.exists(glossary_path):
-            try:
-                with open(glossary_path, "r", encoding="utf-8") as gf:
-                    glossary_data = json.load(gf)
-                
-                formatted_entries = format_glossary_for_prompt(glossary_data)
-                
-                if formatted_entries:
-                    # Ensure formatted_entries is a dict before using json.dumps
-                    if isinstance(formatted_entries, dict):
-                        glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
-                        if system:
-                            system += "\n\n"
-                        system += (
-                            "Character/Term Glossary (use these translations consistently):\n"
-                            f"{glossary_block}"
-                        )
-            except Exception as e:
-                print(f"Warning: Could not load glossary: {e}")
-        
-        return system
+    # Append glossary if enabled and exists
+    if append_glossary and glossary_path and os.path.exists(glossary_path):
+        try:
+            with open(glossary_path, "r", encoding="utf-8") as gf:
+                glossary_data = json.load(gf)
+            
+            formatted_entries = format_glossary_for_prompt(glossary_data)
+            
+            if formatted_entries:
+                # Ensure formatted_entries is a dict before using json.dumps
+                if isinstance(formatted_entries, dict):
+                    glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
+                    if system:
+                        system += "\n\n"
+                    system += (
+                        "Character/Term Glossary (use these translations consistently):\n"
+                        f"{glossary_block}"
+                    )
+        except Exception as e:
+            print(f"Warning: Could not load glossary: {e}")
+    
+    # Return whatever we have - empty string if nothing
+    return system
     
     # Normal flow when hardcoded prompts are enabled
     if user_prompt:
@@ -3633,9 +3655,7 @@ def main(log_callback=None, stop_callback=None):
         start, end = map(int, rng.split("-", 1))
     else:
         start, end = None, None
-    
-    # Get instructions for the language
-    instructions = get_instructions(PROFILE_NAME)
+
     
     # Set up tokenizer
     try:
@@ -3935,7 +3955,7 @@ def main(log_callback=None, stop_callback=None):
             print(f"[DEBUG] Error checking glossary: {e}")
             
     # Build system prompt (this will now use the completed glossary)
-    system = build_system_prompt(SYSTEM_PROMPT, glossary_path, instructions)
+    system = build_system_prompt(SYSTEM_PROMPT, glossary_path, None)  # No instructions fallback
     base_msg = [{"role": "system", "content": system}]
     
     # Initialize image translator based on toggle only
@@ -4149,6 +4169,10 @@ def main(log_callback=None, stop_callback=None):
                 # Clean up the result
                 if REMOVE_AI_ARTIFACTS:
                     result = clean_ai_artifacts(result)
+                    
+                # ALWAYS clean memory artifacts to prevent leakage
+                result = clean_memory_artifacts(result)
+                
                 if EMERGENCY_RESTORE:
                     result = emergency_restore_paragraphs(result, chapter_body)
                 
@@ -4934,9 +4958,11 @@ def main(log_callback=None, stop_callback=None):
                                         summary_msg = {
                                             "role": os.getenv("SUMMARY_ROLE", "user"),
                                             "content": (
+                                                "CONTEXT ONLY - DO NOT INCLUDE IN TRANSLATION:\n"
                                                 "[MEMORY] Previous context summary:\n\n"
                                                 f"{summary_resp.strip()}\n\n"
-                                                "[END MEMORY]"
+                                                "[END MEMORY]\n"
+                                                "END OF CONTEXT - BEGIN ACTUAL CONTENT TO TRANSLATE:"
                                             )
                                         }
                                         
