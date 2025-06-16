@@ -1248,48 +1248,54 @@ img {
         processed_images = {}
         cover_file = None
         
-        if not os.path.isdir(self.images_dir):
-            return processed_images, cover_file
-        
-        # Process all images
-        for img in sorted(os.listdir(self.images_dir)):
-            path = os.path.join(self.images_dir, img)
-            if not os.path.isfile(path):
-                continue
+        try:
+            if not os.path.isdir(self.images_dir):
+                return processed_images, cover_file
             
-            ctype, _ = mimetypes.guess_type(path)
-            if ctype and ctype.startswith("image"):
-                safe_name = FileUtils.sanitize_filename(img, allow_unicode=False)
+            # Process all images
+            for img in sorted(os.listdir(self.images_dir)):
+                path = os.path.join(self.images_dir, img)
+                if not os.path.isfile(path):
+                    continue
                 
-                # Ensure extension
-                if not os.path.splitext(safe_name)[1]:
-                    ext = os.path.splitext(img)[1]
-                    if ext:
-                        safe_name += ext
-                    elif ctype == 'image/jpeg':
-                        safe_name += '.jpg'
-                    elif ctype == 'image/png':
-                        safe_name += '.png'
-                
-                processed_images[img] = safe_name
-                self.log(f"[DEBUG] Found image: {img} -> {safe_name}")
-        
-
-        # Find cover (case-insensitive search)
-        if processed_images:
-            # Search for images starting with "cover" or "front" (case-insensitive)
-            cover_prefixes = ['cover', 'front']
-            for original_name, safe_name in processed_images.items():
-                name_lower = original_name.lower()
-                if any(name_lower.startswith(prefix) for prefix in cover_prefixes):
-                    cover_file = safe_name
-                    self.log(f"[DEBUG] Found cover image: {original_name} -> {cover_file}")
-                    break
+                ctype, _ = mimetypes.guess_type(path)
+                if ctype and ctype.startswith("image"):
+                    safe_name = FileUtils.sanitize_filename(img, allow_unicode=False)
+                    
+                    # Ensure extension
+                    if not os.path.splitext(safe_name)[1]:
+                        ext = os.path.splitext(img)[1]
+                        if ext:
+                            safe_name += ext
+                        elif ctype == 'image/jpeg':
+                            safe_name += '.jpg'
+                        elif ctype == 'image/png':
+                            safe_name += '.png'
+                    
+                    processed_images[img] = safe_name
+                    self.log(f"[DEBUG] Found image: {img} -> {safe_name}")
             
-            # If no cover-like image found, use first image
-            if not cover_file:
-                cover_file = next(iter(processed_images.values()))
-                self.log(f"[DEBUG] Using first image as cover: {cover_file}")
+            # Find cover (case-insensitive search)
+            if processed_images:
+                # Search for images starting with "cover" or "front" (case-insensitive)
+                cover_prefixes = ['cover', 'front']
+                for original_name, safe_name in processed_images.items():
+                    name_lower = original_name.lower()
+                    if any(name_lower.startswith(prefix) for prefix in cover_prefixes):
+                        cover_file = safe_name
+                        self.log(f"[DEBUG] Found cover image: {original_name} -> {cover_file}")
+                        break
+                
+                # If no cover-like image found, use first image
+                if not cover_file:
+                    cover_file = next(iter(processed_images.values()))
+                    self.log(f"[DEBUG] Using first image as cover: {cover_file}")
+            
+        except Exception as e:
+            self.log(f"[WARNING] Error processing images: {e}")
+            # Return empty results instead of None
+        
+        return processed_images, cover_file
     
     def _add_images_to_book(self, book: epub.EpubBook, processed_images: Dict[str, str], 
                            cover_file: Optional[str]):
