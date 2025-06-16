@@ -1188,6 +1188,23 @@ def extract_chapters(zf, output_dir):
     
     # Step 4: REMOVED - Don't write HTML files during extraction
     # Original HTML content is already stored in chapter['body']
+    # Write HTML files for translation processing
+    print("📝 Writing extracted chapters to disk...")
+    html_files_written = 0
+
+    for c in chapters:
+        safe_title = make_safe_filename(c['title'], c['num'])
+        fname = f"chapter_{c['num']:03d}_{safe_title}.html"
+        html_path = os.path.join(output_dir, fname)
+        
+        try:
+            with open(html_path, 'w', encoding='utf-8') as f:
+                f.write(c.get('body', ''))
+            html_files_written += 1
+        except Exception as e:
+            print(f"❌ Failed to write {fname}: {e}")
+
+    print(f"✅ Wrote {html_files_written} chapter files")
     
     # Step 5: Create detailed chapter info file for debugging
     chapters_info_path = os.path.join(output_dir, 'chapters_info.json')
