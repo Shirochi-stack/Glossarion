@@ -5,17 +5,19 @@ block_cipher = None
 # Add all your python files here
 added_files = [
     ('translator_gui.py', '.'),
-    ('splash_utils.py', '.'),          # NEW - Added splash utilities
+    ('splash_utils.py', '.'),
     ('TransateKRtoEN.py', '.'),
     ('extract_glossary_from_epub.py', '.'),
+    ('extract_glossary_from_txt.py', '.'),     # NEW - Added TXT glossary extraction
     ('epub_converter.py', '.'),
+    ('txt_processor.py', '.'),                  # NEW - Added TXT file processor
     ('scan_html_folder.py', '.'),
     ('unified_api_client.py', '.'),
     ('chapter_splitter.py', '.'),
     ('history_manager.py', '.'),
-    ('image_translator.py', '.'),      # NEW - Added image translator
-    ('check_epub_directory.py', '.'),  # Added missing file
-    ('direct_imports.py', '.'),        # Added missing file
+    ('image_translator.py', '.'),
+    ('check_epub_directory.py', '.'),
+    ('direct_imports.py', '.'),
     ('Halgakos.ico', '.'),  # Include icon
 ]
 
@@ -28,56 +30,58 @@ a = Analysis(
         # Core modules
         'TransateKRtoEN',
         'extract_glossary_from_epub',
+        'extract_glossary_from_txt',     # NEW - Added TXT glossary extraction
         'epub_converter',
+        'txt_processor',                 # NEW - Added TXT file processor
         'scan_html_folder',
         'unified_api_client',
         'chapter_splitter',
         'history_manager',
-        'image_translator',      # NEW - Added image translator
-        'check_epub_directory',  # Added
-        'direct_imports',        # Added
-        'splash_utils',          # NEW - Added splash utilities
+        'image_translator',
+        'check_epub_directory',
+        'direct_imports',
+        'splash_utils',
         
-        # EPUB processing
+        # EPUB/Text processing
         'ebooklib',
         'ebooklib.epub',
-        'ebooklib.utils',  # Added for completeness
+        'ebooklib.utils',
         'bs4',
         'BeautifulSoup',
-        'soupsieve',  # ADDED - BeautifulSoup4 dependency
+        'soupsieve',
         'lxml',
         'lxml.etree',
         'lxml._elementpath',
-        'lxml.html',  # Added
-        'lxml.html.clean',  # Added
+        'lxml.html',
+        'lxml.html.clean',
         'html5lib',
-        'html',  # Added for html.escape
-        'html.parser',  # Added
-        'cgi',  # ADDED - Used in epub_converter.py for HTML escaping fallback
+        'html',
+        'html.parser',
+        'cgi',
         
         # GUI
         'ttkbootstrap',
-        'ttkbootstrap.constants',  # Added
+        'ttkbootstrap.constants',
         'tkinter',
         'tkinter.filedialog',
         'tkinter.messagebox',
         'tkinter.scrolledtext',
         'tkinter.simpledialog',
         'tkinter.ttk',
-        '_tkinter',  # Added for tkinter backend
+        '_tkinter',
         
-        # PIL/Pillow - EXPANDED FOR IMAGE PROCESSING
+        # PIL/Pillow - Image Processing
         'PIL',
         'PIL.Image',
         'PIL.ImageTk',
-        'PIL.ImageDraw',         # NEW - Used by image_translator
-        'PIL.ImageFont',         # NEW - Used by image_translator
-        'PIL.ImageEnhance',      # NEW - Used by image_translator
-        'PIL.ImageFilter',       # NEW - Used by image_translator
-        'PIL.ImageOps',          # ADDED - Common image operations
-        'PIL.ImageChops',        # ADDED - Image channel operations
-        'PIL.ImageStat',         # ADDED - Image statistics
-        'PIL.ImagePalette',      # ADDED - For palette-based images
+        'PIL.ImageDraw',
+        'PIL.ImageFont',
+        'PIL.ImageEnhance',
+        'PIL.ImageFilter',
+        'PIL.ImageOps',
+        'PIL.ImageChops',
+        'PIL.ImageStat',
+        'PIL.ImagePalette',
         'PIL._binary',
         'PIL._imaging',
         'PIL._imagingft',
@@ -92,69 +96,69 @@ a = Analysis(
         'PIL.WebPImagePlugin',
         'PIL.IcoImagePlugin',
         'PIL.MicImagePlugin',
-        'olefile',  # FIXES THE ERROR - this is what MicImagePlugin needs
+        'olefile',
         
         # AI/API clients
-        'google',  # Added base google module
+        'google',
         'google.generativeai',
         'google.ai',
         'google.ai.generativelanguage',
-        'google.auth',  # Added for authentication
-        'google.auth.transport',  # Added
-        'google.auth.transport.requests',  # Added
+        'google.auth',
+        'google.auth.transport',
+        'google.auth.transport.requests',
         'openai',
         'tiktoken',
         'tiktoken_ext',
         'tiktoken_ext.openai_public',
-        'regex',  # Added - tiktoken dependency
+        'regex',
 		
-		# Time/Date handling - ADDED
-        'tzdata',  # FIXES THE WARNING
-        'zoneinfo',  # Python 3.9+ timezone support
-        '_zoneinfo',  # Internal zoneinfo module
-        'pytz',  # Alternative timezone library (if used)
+		# Time/Date handling
+        'tzdata',
+        'zoneinfo',
+        '_zoneinfo',
+        'pytz',
         
         # Text processing
         'langdetect',
-        'langdetect.detector',  # Added
-        'langdetect.lang_detect_exception',  # Added
+        'langdetect.detector',
+        'langdetect.lang_detect_exception',
         'difflib',
         'unicodedata',
         
         # Progress/UI
         'tqdm',
-        'tqdm.auto',  # Added
-        'tqdm.std',   # Added
+        'tqdm.auto',
+        'tqdm.std',
         
         # Network
         'requests',
-        'requests.adapters',  # Added
-        'requests.models',    # Added
-        'requests.sessions',  # Added
+        'requests.adapters',
+        'requests.models',
+        'requests.sessions',
         'chardet',
         'certifi',
         'urllib3',
-        'urllib',     # Added
-        'urllib.parse',  # Added
-        'urllib.request',  # Added
+        'urllib',
+        'urllib.parse',
+        'urllib.request',
         'idna',
-        'ssl',  # Added
-        'socket',  # Added
-        'six',  # ADDED - Common compatibility library
+        'ssl',
+        'socket',
+        'six',
         
         # Additional commonly missed modules
         'pkg_resources',
-        'pkg_resources._vendor',  # Added
+        'pkg_resources._vendor',
         'encodings',
         'encodings.utf_8',
         'encodings.ascii',
         'encodings.latin_1',
-        'encodings.cp1252',  # Added for Windows
-        'encodings.utf_16',  # Added
-        'encodings.utf_32',  # Added
+        'encodings.cp1252',
+        'encodings.utf_16',
+        'encodings.utf_32',
         'codecs',
         
-        # Standard library modules that might be missed
+        # Standard library modules
         'json',
         'csv',
         'hashlib',
@@ -166,56 +170,56 @@ a = Analysis(
         'zipfile',
         'mimetypes',
         'collections',
-        'collections.abc',  # Added
+        'collections.abc',
         'io',
         'logging',
-        'logging.handlers',  # Added
+        'logging.handlers',
         'time',
-        'datetime',  # Added
+        'datetime',
         'os',
-        'os.path',  # Added
+        'os.path',
         'sys',
-        'dataclasses',  # ADDED - Used in unified_api_client.py
+        'dataclasses',
         'typing',
-        'typing_extensions',  # Added - often needed
+        'typing_extensions',
         'argparse',
         'subprocess',
         'platform',
-        'pathlib',  # Added
-        'contextlib',  # Added - used by history_manager
-        'functools',  # Added
-        'itertools',  # Added
-        'warnings',  # Added
-        'copy',  # Added
-        'weakref',  # Added
-        'locale',  # Added
-        'struct',  # Added
-        'base64',  # Added - might be used by APIs and image processing
-        'hmac',  # Added - might be used by APIs
-        'secrets',  # Added - might be used by APIs
-        'uuid',  # Added - might be used by APIs
-        'email',  # Added - might be used by requests
-        'email.utils',  # Added
-        'http',  # Added
-        'http.client',  # Added
-        'xml',  # Added - used by BeautifulSoup
-        'xml.etree',  # Added
-        'xml.etree.ElementTree',  # Added
-        'atexit',  # ADDED - Used in splash_utils.py
-        'multiprocessing',  # ADDED - Used in translator_gui.py
-        'multiprocessing.freeze_support',  # ADDED - Specifically for freeze_support()
-        'gc',  # ADDED - Garbage collection (might be implicitly used)
+        'pathlib',
+        'contextlib',
+        'functools',
+        'itertools',
+        'warnings',
+        'copy',
+        'weakref',
+        'locale',
+        'struct',
+        'base64',
+        'hmac',
+        'secrets',
+        'uuid',
+        'email',
+        'email.utils',
+        'http',
+        'http.client',
+        'xml',
+        'xml.etree',
+        'xml.etree.ElementTree',
+        'atexit',
+        'multiprocessing',
+        'multiprocessing.freeze_support',
+        'gc',
     ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        'matplotlib',  # Exclude if not used
-        'numpy',       # Exclude if not used
-        'pandas',      # Exclude if not used
-        'scipy',       # Exclude if not used
-        'pytest',      # Exclude test frameworks
-        'nose',        # Exclude test frameworks
+        'matplotlib',
+        'numpy',
+        'pandas',
+        'scipy',
+        'pytest',
+        'nose',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -232,17 +236,17 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='Glossarion v2.3.5',  # Updated version
+    name='Glossarion v2.4.0',  # Updated version for TXT support
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,  # Set to True if you want to see console output for debugging
+    console=False,
     disable_windowed_traceback=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='Halgakos.ico'  # Icon path
+    icon='Halgakos.ico'
 )
