@@ -206,10 +206,6 @@ def make_safe_filename(title, chapter_num):
     # Remove leading/trailing underscores and dots
     title = title.strip('_.• \t')
     
-    # Limit length (leave room for response_XXX_ prefix)
-    if len(title) > 40:
-        title = title[:40].rstrip('_.')
-    
     # If title is empty after cleaning, use chapter number
     if not title or title == '_' * len(title):
         title = f"chapter_{chapter_num:03d}"
@@ -1614,6 +1610,7 @@ def _extract_all_chapters_comprehensive(zf):
                 "title": chapter_title or f"Chapter {chapter_num}",
                 "body": content_html,
                 "filename": file_path,
+                "original_basename": os.path.splitext(os.path.basename(file_path))[0],
                 "content_hash": content_hash,
                 "detection_method": "comprehensive_sequential",
                 "file_size": len(content_text),
@@ -1984,8 +1981,6 @@ def _extract_chapters_smart(zf):
             
             # Clean and validate title
             chapter_title = re.sub(r'\s+', ' ', chapter_title).strip()
-            if len(chapter_title) > 150:
-                chapter_title = chapter_title[:147] + "..."
             
             # Store chapter information with image-only flag
             chapter_info = {
@@ -1993,13 +1988,14 @@ def _extract_chapters_smart(zf):
                 "title": chapter_title,
                 "body": content_html,
                 "filename": file_path,
+                "original_basename": os.path.splitext(os.path.basename(file_path))[0],
                 "content_hash": content_hash,
                 "detection_method": detection_method,
                 "file_size": file_size,
                 "has_images": has_images,
                 "image_count": len(images),
                 "is_empty": len(content_text.strip()) == 0,
-                "is_image_only": is_image_only_chapter,  # Add this flag
+                "is_image_only": is_image_only_chapter, 
                 "language_sample": content_text[:500]
             }
             
@@ -5108,9 +5104,14 @@ def main(log_callback=None, stop_callback=None):
             # Clear chunk context for next chapter
             chunk_context_manager.clear()
 
-            # Save translated chapter
-            safe_title = make_safe_filename(c['title'], c['num'])   
-            fname = f"response_{c['num']:03d}_{safe_title}.html"
+            # Save translated chapter - preserve original filename structure
+            if 'original_basename' in c and c['original_basename']:
+                # Use the original filename structure
+                fname = f"response_{c['original_basename']}.html"
+            else:
+                # Fallback to the current naming scheme
+                safe_title = make_safe_filename(c['title'], c['num'])   
+                fname = f"response_{c['num']:03d}_{safe_title}.html"
 
             # Clean up code fences only
             cleaned = re.sub(r"^```(?:html)?\s*\n?", "", merged_result, count=1, flags=re.MULTILINE)
