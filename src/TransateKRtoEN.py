@@ -1139,8 +1139,8 @@ def sanitize_resource_filename(filename):
     filename = ''.join(char for char in filename if ord(char) >= 32)
     
     name, ext = os.path.splitext(filename)
-    if len(name) > 50:
-        name = name[:50]
+    #if len(name) > 50:
+     #   name = name[:50]
     
     if not name:
         name = 'resource'
