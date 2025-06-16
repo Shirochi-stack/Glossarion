@@ -999,16 +999,18 @@ class EPUBCompiler:
         # Pattern 1: hash-h-number.htm.xhtml (like your files)
         hash_pattern_files = []
         for f in all_html_files:
-            match = re.search(r'-h-(\d+)\.htm\.xhtml$', f)
+            # More flexible pattern to catch variations
+            match = re.search(r'-h-(\d+)\.', f)
             if match:
                 chapter_num = int(match.group(1))
                 hash_pattern_files.append((chapter_num, f))
-        
+
         if hash_pattern_files:
-            # Sort by chapter number and return just filenames
+            # Sort by chapter number (numeric sort, not string sort)
             hash_pattern_files.sort(key=lambda x: x[0])
             files = [f for _, f in hash_pattern_files]
             self.log(f"[DEBUG] Found {len(files)} files with hash-h-number pattern")
+            self.log(f"[DEBUG] Chapter order: {[x[0] for x in sorted(hash_pattern_files, key=lambda x: x[0])]}")
             return files
         
         # Pattern 2: split_XXX pattern (Calibre)
@@ -1391,8 +1393,19 @@ img {
                     if num not in chapter_seen:
                         chapter_tuples.append((num, fn))
                         chapter_seen.add(num)
+        # Check if these are hash pattern files
+        elif html_files and re.search(r'-h-(\d+)\.htm\.xhtml$', html_files[0]):
+            # Sort hash pattern files numerically
+            sorted_files = sorted(html_files, key=lambda f: int(re.search(r'-h-(\d+)\.htm\.xhtml$', f).group(1)) if re.search(r'-h-(\d+)\.htm\.xhtml$', f) else 999999)
+            for fn in sorted_files:
+                match = re.search(r'-h-(\d+)\.htm\.xhtml$', fn)
+                if match:
+                    num = int(match.group(1)) + 1  # Convert 0-based to 1-based
+                    if num not in chapter_seen:
+                        chapter_tuples.append((num, fn))
+                        chapter_seen.add(num)
         else:
-            # For non-response files (hash pattern, calibre, etc.)
+            # For other non-response files
             self.log(f"\n[INFO] Processing non-standard chapter filenames...")
             
             for idx, fn in enumerate(html_files):
