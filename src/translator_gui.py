@@ -84,7 +84,7 @@ class TranslatorGUI:
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
-        master.title("Glossarion v2.3.5")
+        master.title("Glossarion v2.4.0")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1600, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
@@ -324,7 +324,7 @@ class TranslatorGUI:
         self.default_prompts = {
             "korean": "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title> ,<h1>, <h2>, <p>, <br>, <div>, etc.",
             "japanese": "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags text while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics like -san, -sama, -chan, -kun.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- retain onomatopoeia in Romaji.\n- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title> ,<h1>, <h2>, <p>, <br>, <div>, etc.",
-            "chinese": "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- retain onomatopoeia in Romaji.\n- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title> ,<h1>, <h2>, <p>, <br>, <div>, etc.",
+            "chinese": "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title> ,<h1>, <h2>, <p>, <br>, <div>, etc.",
             "korean_OCR": "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- Add HTML tags for proper formatting as expected of a novel.",
             "japanese_OCR": "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags text while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics like -san, -sama, -chan, -kun.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- Add HTML tags for proper formatting as expected of a novel.",
             "chinese_OCR": "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- Add HTML tags for proper formatting as expected of a novel.",
@@ -616,7 +616,7 @@ class TranslatorGUI:
         self.frame.grid_rowconfigure(10, weight=1, minsize=150)
 
         # EPUB File
-        tb.Label(self.frame, text="EPUB File:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        tb.Label(self.frame, text="Input File:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
         self.entry_epub = tb.Entry(self.frame, width=50)
         self.entry_epub.grid(row=0, column=1, columnspan=3, sticky=tk.EW, padx=5, pady=5)
         tb.Button(self.frame, text="Browse", command=self.browse_file, width=12).grid(row=0, column=4, sticky=tk.EW, padx=5, pady=5)
@@ -664,7 +664,7 @@ class TranslatorGUI:
         # Token limit controls
         tb.Label(self.frame, text="Input Token limit:").grid(row=6, column=0,sticky=tk.W, padx=5, pady=5)
         self.token_limit_entry = tb.Entry(self.frame, width=8)
-        self.token_limit_entry.insert(0, str(self.config.get('token_limit', 1000000)))
+        self.token_limit_entry.insert(0, str(self.config.get('token_limit', 50000)))
         self.token_limit_entry.grid(row=6, column=1, sticky=tk.W, padx=5, pady=5)
         
         self.toggle_token_btn = tb.Button(
@@ -732,7 +732,7 @@ class TranslatorGUI:
         value=self.config.get('emergency_paragraph_restore', True)  # Default to enabled
 )
         # API Key - FIXED: Load from config properly  
-        tb.Label(self.frame, text="OpenAI / Gemini API Key:").grid(row=8, column=0, sticky=tk.W, padx=5, pady=5)
+        tb.Label(self.frame, text="OpenAI/Gemini/... API Key:").grid(row=8, column=0, sticky=tk.W, padx=5, pady=5)
         self.api_key_entry = tb.Entry(self.frame, show='*')
         self.api_key_entry.grid(row=8, column=1, columnspan=3, sticky=tk.EW, padx=5, pady=5)
         initial_key = self.config.get('api_key', '')
@@ -822,15 +822,16 @@ class TranslatorGUI:
         print("[DEBUG] GUI setup completed with config values loaded")  # Debug logging
         
         # Add initial log message
-        self.append_log("🚀 Glossarion v2.3.5 - Ready to use!")
+        self.append_log("🚀 Glossarion v2.4.0 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
 
     def force_retranslation(self):
         """Force retranslation of specific chapters"""
-        epub_path = self.entry_epub.get()
-        if not epub_path or not os.path.isfile(epub_path):
-            messagebox.showerror("Error", "Please select a valid EPUB file first.")
+        input_path = self.entry_epub.get()
+        if not input_path or not os.path.isfile(input_path):
+            messagebox.showerror("Error", "Please select a valid EPUB or text file first.")
             return
+        epub_path = input_path  # Keep using epub_path for compatibility
         
         # Get the output directory
         epub_base = os.path.splitext(os.path.basename(epub_path))[0]
@@ -2499,10 +2500,11 @@ class TranslatorGUI:
     def run_glossary_extraction_direct(self):
         """Run glossary extraction directly without subprocess"""
         try:
-            epub_path = self.entry_epub.get()
-            if not epub_path or not os.path.isfile(epub_path):
-                self.append_log("❌ Error: Please select a valid EPUB file for glossary extraction.")
+            input_path = self.entry_epub.get()
+            if not input_path or not os.path.isfile(input_path):
+                self.append_log("❌ Error: Please select a valid EPUB or text file for glossary extraction.")
                 return
+            epub_path = input_path  # Keep using epub_path for compatibility
 
             # Check for API key
             api_key = self.api_key_entry.get()
@@ -2561,8 +2563,8 @@ class TranslatorGUI:
                         os.environ['MAX_INPUT_TOKENS'] = token_val  # NOT GLOSSARY_TOKEN_LIMIT
                         self.append_log(f"🎯 Input Token Limit: {token_val}")
                     else:
-                        os.environ['MAX_INPUT_TOKENS'] = '1000000'  # NOT GLOSSARY_TOKEN_LIMIT
-                        self.append_log(f"🎯 Input Token Limit: 1000000 (default)")
+                        os.environ['MAX_INPUT_TOKENS'] = '50000'  # NOT GLOSSARY_TOKEN_LIMIT
+                        self.append_log(f"🎯 Input Token Limit: 50000 (default)")
                 
                 self.append_log(f"[DEBUG] After setting env, MAX_INPUT_TOKENS = {os.environ.get('MAX_INPUT_TOKENS', 'NOT SET')}")
                 
@@ -2849,7 +2851,10 @@ class TranslatorGUI:
             )
 
     def stop_translation(self):
-        """Stop translation only"""
+        """Stop translation while preserving loaded file"""
+        # Save current file path before any operations
+        current_file = self.epub_path_entry.get() if hasattr(self, 'epub_path_entry') else None
+        
         self.stop_requested = True
         if translation_stop_flag:
             translation_stop_flag(True)
@@ -2865,6 +2870,19 @@ class TranslatorGUI:
         self.append_log("❌ Translation stop requested.")
         self.append_log("⏳ Please wait... stopping after current operation completes.")
         self.update_run_button()
+        
+        # Ensure file path is preserved after stop
+        if current_file and hasattr(self, 'epub_path_entry'):
+            # Use after to ensure it happens after any other updates
+            self.root.after(100, lambda: self.preserve_file_path(current_file))
+
+    def preserve_file_path(self, file_path):
+        """Helper to ensure file path stays in the entry field"""
+        if hasattr(self, 'epub_path_entry') and file_path:
+            current = self.epub_path_entry.get()
+            if not current or current != file_path:
+                self.epub_path_entry.delete(0, tk.END)
+                self.epub_path_entry.insert(0, file_path)
 
     def stop_glossary_extraction(self):
         """Stop glossary extraction specifically"""
@@ -3120,20 +3138,24 @@ class TranslatorGUI:
         self.log_text.see(tk.INSERT)
 
 
-    def auto_load_glossary_for_epub(self, epub_path):
+    def auto_load_glossary_for_file(self, file_path):
         """Automatically load glossary if it exists in the output folder"""
-        if not epub_path or not os.path.isfile(epub_path):
+        if not file_path or not os.path.isfile(file_path):
             return
         
-        # Get the output directory for this EPUB
-        epub_base = os.path.splitext(os.path.basename(epub_path))[0]
-        output_dir = epub_base
+        # Only auto-load for EPUB files
+        if not file_path.lower().endswith('.epub'):
+            return
+        
+        # Get the output directory for this file
+        file_base = os.path.splitext(os.path.basename(file_path))[0]  # CHANGED from epub_path
+        output_dir = file_base  # CHANGED from epub_base
         
         # Priority order for glossary files to check
         glossary_candidates = [
             os.path.join(output_dir, "glossary.json"),
-            os.path.join(output_dir, f"{epub_base}_glossary.json"),
-            os.path.join(output_dir, "Glossary", f"{epub_base}_glossary.json")
+            os.path.join(output_dir, f"{file_base}_glossary.json"),  # CHANGED from epub_base
+            os.path.join(output_dir, "Glossary", f"{file_base}_glossary.json")  # CHANGED from epub_base
         ]
         
         for glossary_path in glossary_candidates:
@@ -3155,13 +3177,21 @@ class TranslatorGUI:
         return False
     
     def browse_file(self):
-        path = filedialog.askopenfilename(filetypes=[("EPUB files","*.epub")])
+        path = filedialog.askopenfilename(
+            filetypes=[
+                ("Supported files", "*.epub;*.txt"),
+                ("EPUB files", "*.epub"),
+                ("Text files", "*.txt"),
+                ("All files", "*.*")
+            ]
+        )
         if path:
             self.entry_epub.delete(0, tk.END)
             self.entry_epub.insert(0, path)
             
-            # Auto-load glossary for this EPUB
-            self.auto_load_glossary_for_epub(path)
+            # Auto-load glossary for EPUB files only
+            if path.lower().endswith('.epub'):
+                self.auto_load_glossary_for_file(path)
 
     def toggle_fullscreen(self, event=None):
         is_full = self.master.attributes('-fullscreen')
@@ -3688,10 +3718,17 @@ class TranslatorGUI:
     # Keep the validation function as-is:
     def validate_epub_structure_gui(self):
         """GUI wrapper for EPUB structure validation"""
-        epub_path = self.entry_epub.get()
-        if not epub_path:
-            messagebox.showerror("Error", "Please select an EPUB file first.")
+        input_path = self.entry_epub.get()
+        if not input_path:
+            messagebox.showerror("Error", "Please select a file first.")
             return
+            
+        # Skip validation for text files
+        if input_path.lower().endswith('.txt'):
+            messagebox.showinfo("Info", "Structure validation is only available for EPUB files.")
+            return
+            
+        epub_path = input_path
         
         # Get output directory
         epub_base = os.path.splitext(os.path.basename(epub_path))[0]
@@ -3898,7 +3935,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time  # Add this import
     
-    print("🚀 Starting Glossarion v2.3.5...")
+    print("🚀 Starting Glossarion v2.4.0...")
     
     # Initialize splash screen (main thread only)
     splash_manager = None
