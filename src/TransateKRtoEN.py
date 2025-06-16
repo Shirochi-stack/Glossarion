@@ -3848,7 +3848,7 @@ def main(log_callback=None, stop_callback=None):
         # Check for stop before translating title
         if not check_stop():
             # Build system prompt for title translation (now glossary_path exists)
-            title_system_prompt = build_system_prompt(SYSTEM_PROMPT, glossary_path, instructions)
+            title_system_prompt = build_system_prompt(SYSTEM_PROMPT, glossary_path)
             
             # Translate the title
             translated_title = translate_title(original_title, client, title_system_prompt, SYSTEM_PROMPT, TEMP)
