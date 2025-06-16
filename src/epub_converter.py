@@ -1380,88 +1380,124 @@ img {
                          chapter_titles_info: Dict[int, Tuple[str, float, str]],
                          css_items: List[epub.EpubItem], processed_images: Dict[str, str],
                          spine: List, toc: List, metadata: dict) -> int:
-        """Process all chapters"""
+        """Process all chapters - WITH FALLBACK"""
         chapters_added = 0
         
-        # Find unique chapters
+        # Try the fancy parsing first
         chapter_tuples = []
         chapter_seen = set()
         
-        # Check if these are response_ files
-        if html_files and html_files[0].startswith("response_"):
-            # Original logic for response_ files with NUMERIC SORTING FIX
-            for fn in sorted(html_files, key=lambda f: int(re.search(r'response_(\d+)_', f).group(1)) if re.search(r'response_(\d+)_', f) else 999999):
-                match = re.match(r"response_(\d+)_", fn)
-                if match:
-                    num = int(match.group(1))
-                    if num not in chapter_seen:
-                        chapter_tuples.append((num, fn))
-                        chapter_seen.add(num)
-        # Check if these are hash pattern files
-        elif html_files and re.search(r'-h-(\d+)\.htm\.xhtml$', html_files[0]):
-            # Sort hash pattern files numerically
-            sorted_files = sorted(html_files, key=lambda f: int(re.search(r'-h-(\d+)\.htm\.xhtml$', f).group(1)) if re.search(r'-h-(\d+)\.htm\.xhtml$', f) else 999999)
-            for fn in sorted_files:
-                match = re.search(r'-h-(\d+)\.htm\.xhtml$', fn)
-                if match:
-                    num = int(match.group(1)) + 1  # Convert 0-based to 1-based
-                    if num not in chapter_seen:
-                        chapter_tuples.append((num, fn))
-                        chapter_seen.add(num)
-        else:
-            # For other non-response files
-            self.log(f"\n[INFO] Processing non-standard chapter filenames...")
+        self.log(f"\n[DEBUG] Processing {len(html_files)} HTML files...")
+        
+        # Try to extract chapter numbers
+        for fn in html_files:
+            chapter_num = None
             
-            for idx, fn in enumerate(html_files):
-                chapter_num = idx + 1  # Default to sequential numbering
-                
-                # Try to extract chapter number from filename
-                patterns = [
-                    (r'-h-(\d+)\.', "hash-h-number"),       # Your pattern: 526649821846337087676261-h-0.htm.xhtml
-                    (r'split_(\d+)', "calibre split"),       # Calibre: split_001.html
-                    (r'chapter[_\s-]?(\d+)', "chapter"),     # chapter1.html, chapter_1.html
-                    (r'ch[_\s-]?(\d+)', "ch"),              # ch1.html, ch_1.html
-                    (r'^(\d+)[_\s-]', "number prefix"),     # 01_chapter.html
-                ]
-                
-                for pattern, pattern_name in patterns:
-                    match = re.search(pattern, fn, re.IGNORECASE)
-                    if match:
-                        extracted_num = int(match.group(1))
-                        # Handle 0-based numbering (like -h-0, -h-1, -h-2)
-                        if pattern_name == "hash-h-number" and extracted_num == 0:
-                            chapter_num = 1  # Start from 1 for 0-based files
-                        elif pattern_name == "hash-h-number":
-                            chapter_num = extracted_num + 1  # Convert 0-based to 1-based
-                        else:
-                            chapter_num = extracted_num if extracted_num > 0 else idx + 1
-                        
-                        self.log(f"  Detected {pattern_name} pattern: {fn} → Chapter {chapter_num}")
+            # Try various patterns
+            patterns = [
+                (r"response_(\d+)_", lambda m: int(m.group(1))),
+                (r"response_\d+-h-(\d+)\.htm\.html$", lambda m: int(m.group(1)) + 1),
+                (r"-h-(\d+)\.", lambda m: int(m.group(1)) + 1),
+                (r"_(\d+)\.", lambda m: int(m.group(1))),
+            ]
+            
+            for pattern, extractor in patterns:
+                match = re.search(pattern, fn)
+                if match:
+                    try:
+                        chapter_num = extractor(match)
                         break
-                
-                if chapter_num not in chapter_seen:
-                    chapter_tuples.append((chapter_num, fn))
-                    chapter_seen.add(chapter_num)
+                    except:
+                        pass
+            
+            if chapter_num and chapter_num not in chapter_seen:
+                chapter_tuples.append((chapter_num, fn))
+                chapter_seen.add(chapter_num)
+        
+        # FALLBACK: If we couldn't parse most files, just use sequential numbering
+        if len(chapter_tuples) < len(html_files) * 0.8:  # Less than 80% parsed
+            self.log("[WARNING] Fancy parsing failed, using fallback sequential numbering")
+            chapter_tuples = []
+            for idx, fn in enumerate(sorted(html_files)):
+                chapter_tuples.append((idx + 1, fn))
         
         # Sort by chapter number
         chapter_tuples.sort(key=lambda x: x[0])
         
-        self.log(f"\n📚 Processing {len(chapter_tuples)} chapters...")
-        
-        # Log the processing order for debugging
-        if len(chapter_tuples) <= 20:  # Only show for reasonable number of chapters
-            self.log("Processing order:")
-            for num, fn in chapter_tuples:
-                self.log(f"  Chapter {num}: {fn}")
+        self.log(f"\n📚 Processing {len(chapter_tuples)} chapters")
         
         # Process each chapter
         for num, fn in chapter_tuples:
-            if self._process_single_chapter(
-                book, num, fn, chapter_titles_info, css_items, 
-                processed_images, spine, toc, metadata
-            ):
-                chapters_added += 1
+            try:
+                if self._process_single_chapter(
+                    book, num, fn, chapter_titles_info, css_items, 
+                    processed_images, spine, toc, metadata
+                ):
+                    chapters_added += 1
+            except Exception as e:
+                self.log(f"[ERROR] Failed to process chapter {num}: {e}")
+                
+                # FALLBACK: Add a basic chapter even if processing fails
+                try:
+                    chapter = epub.EpubHtml(
+                        title=f"Chapter {num}",
+                        file_name=f"chapter_{num:03d}.xhtml",
+                        lang=metadata.get("language", "en")
+                    )
+                    chapter.content = f"""<?xml version="1.0" encoding="utf-8"?>
+    <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+    <html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+    <title>Chapter {num}</title>
+    </head>
+    <body>
+    <h1>Chapter {num}</h1>
+    <p>Error loading content from: {fn}</p>
+    </body>
+    </html>""".encode('utf-8')
+                    
+                    book.add_item(chapter)
+                    spine.append(chapter)
+                    toc.append(chapter)
+                    chapters_added += 1
+                    self.log(f"[FALLBACK] Added placeholder for chapter {num}")
+                except:
+                    pass
         
+        # FINAL FALLBACK: If still no chapters, force add all files
+        if chapters_added == 0:
+            self.log("[CRITICAL] No chapters added, forcing all files")
+            for idx, fn in enumerate(html_files):
+                try:
+                    filepath = os.path.join(self.output_dir, fn)
+                    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                    
+                    chapter = epub.EpubHtml(
+                        title=f"Chapter {idx + 1}",
+                        file_name=f"chapter_{idx + 1:03d}.xhtml",
+                        lang="en"
+                    )
+                    chapter.content = f"""<?xml version="1.0" encoding="utf-8"?>
+    <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+    <html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+    <title>Chapter {idx + 1}</title>
+    </head>
+    <body>
+    <h1>Chapter {idx + 1}</h1>
+    <div>{content}</div>
+    </body>
+    </html>""".encode('utf-8')
+                    
+                    book.add_item(chapter)
+                    spine.append(chapter)
+                    toc.append(chapter)
+                    chapters_added += 1
+                except:
+                    pass
+        
+        self.log(f"[FINAL] Added {chapters_added} chapters to EPUB")
         return chapters_added
     
     def _process_single_chapter(self, book: epub.EpubBook, num: int, filename: str,
