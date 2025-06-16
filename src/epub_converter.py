@@ -1274,24 +1274,22 @@ img {
                 processed_images[img] = safe_name
                 self.log(f"[DEBUG] Found image: {img} -> {safe_name}")
         
-        # Find cover
-        cover_patterns = ['cover', 'Cover', 'COVER', 'front', 'Front']
-        for pattern in cover_patterns:
-            for ext in ["jpg", "jpeg", "png"]:
-                candidate = f"{pattern}.{ext}"
-                if candidate in processed_images:
-                    cover_file = processed_images[candidate]
-                    self.log(f"[DEBUG] Found cover: {cover_file}")
+
+        # Find cover (case-insensitive search)
+        if processed_images:
+            # Search for images starting with "cover" or "front" (case-insensitive)
+            cover_prefixes = ['cover', 'front']
+            for original_name, safe_name in processed_images.items():
+                name_lower = original_name.lower()
+                if any(name_lower.startswith(prefix) for prefix in cover_prefixes):
+                    cover_file = safe_name
+                    self.log(f"[DEBUG] Found cover image: {original_name} -> {cover_file}")
                     break
-            if cover_file:
-                break
-        
-        # Use first image as cover if none found
-        if not cover_file and processed_images:
-            cover_file = next(iter(processed_images.values()))
-            self.log(f"[DEBUG] Using first image as cover: {cover_file}")
-        
-        return processed_images, cover_file
+            
+            # If no cover-like image found, use first image
+            if not cover_file:
+                cover_file = next(iter(processed_images.values()))
+                self.log(f"[DEBUG] Using first image as cover: {cover_file}")
     
     def _add_images_to_book(self, book: epub.EpubBook, processed_images: Dict[str, str], 
                            cover_file: Optional[str]):
