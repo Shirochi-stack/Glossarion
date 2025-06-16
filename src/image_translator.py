@@ -433,7 +433,8 @@ class ImageTranslator:
             start_y = max(0, i * self.chunk_height - (overlap if i > 0 else 0))
             end_y = min(height, (i + 1) * self.chunk_height)
             
-            print(f"   📄 Processing chunk {i+1}/{num_chunks} (y: {start_y}-{end_y})")
+            current_filename = os.path.basename(self.current_image_path) if hasattr(self, 'current_image_path') else 'unknown'
+            print(f"   📄 Processing chunk {i+1}/{num_chunks} (y: {start_y}-{end_y}) for {current_filename}")
             if self.log_callback and hasattr(self.log_callback, '__self__') and hasattr(self.log_callback.__self__, 'append_chunk_progress'):
                 self.log_callback.__self__.append_chunk_progress(
                     i + 1, 
