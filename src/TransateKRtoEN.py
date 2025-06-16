@@ -3960,7 +3960,7 @@ def main(log_callback=None, stop_callback=None):
             print(f"[DEBUG] Error checking glossary: {e}")
             
     # Build system prompt (this will now use the completed glossary)
-    system = build_system_prompt(SYSTEM_PROMPT, glossary_path, None)  # No instructions fallback
+    system = build_system_prompt(SYSTEM_PROMPT, glossary_path)  # No instructions fallback
     base_msg = [{"role": "system", "content": system}]
     
     # Initialize image translator based on toggle only
