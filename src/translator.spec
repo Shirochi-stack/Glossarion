@@ -232,7 +232,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='Glossarion v2.3.3',  # Updated version
+    name='Glossarion v2.3.4',  # Updated version
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
