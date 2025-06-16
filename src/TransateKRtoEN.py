@@ -243,8 +243,8 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
     Args:
         title: Original title to translate
         client: UnifiedClient instance
-        system_prompt: System prompt for translation
-        user_prompt: User's custom prompt (used if provided)
+        system_prompt: System prompt for translation (IGNORED - not used for title translation)
+        user_prompt: User's custom prompt (IGNORED - not used for title translation)
         temperature: Temperature for translation
         
     Returns:
@@ -261,18 +261,19 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
             print(f"📚 Book title translation disabled - keeping original")
             return title
         
-        # Get the configured book title prompt
+        # Get the configured book title prompt (from Configure Title Prompt button)
         book_title_prompt = os.getenv("BOOK_TITLE_PROMPT", 
             "Translate this book title to English while retaining any acronyms:")
         
-        # Build messages
+        # Build messages with ONLY a minimal system prompt and the configured title prompt
+        # Completely ignore the novel translation system prompt
         messages = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": "You are a translator. Respond with only the translated text, nothing else. Do not add any explanation or additional content."},
             {"role": "user", "content": f"{book_title_prompt}\n\n{title}"}
         ]
         
-        # Make API call
-        translated_title, _ = client.send(messages, temperature=temperature, max_tokens=256)
+        # Make API call with lower temperature for more consistent results
+        translated_title, _ = client.send(messages, temperature=0.1, max_tokens=256)
         
         # Clean up the response
         translated_title = translated_title.strip()
@@ -281,6 +282,27 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
         if ((translated_title.startswith('"') and translated_title.endswith('"')) or 
             (translated_title.startswith("'") and translated_title.endswith("'"))):
             translated_title = translated_title[1:-1].strip()
+        
+        # Additional validation to ensure we got a simple title back
+        # If response contains newlines, it's probably not just a title
+        if '\n' in translated_title:
+            print(f"⚠️ API returned multi-line content, keeping original title")
+            return title
+            
+        # If response is too long, it's probably not just a title
+        if len(translated_title) > len(title) * 3:  # Arbitrary but reasonable limit
+            print(f"⚠️ API returned overly long response, keeping original title")
+            return title
+            
+        # Check for JSON artifacts
+        if any(char in translated_title for char in ['{', '}', '[', ']', '"role":', '"content":']):
+            print(f"⚠️ API returned structured content, keeping original title")
+            return title
+            
+        # Check for HTML artifacts
+        if any(tag in translated_title.lower() for tag in ['<p>', '</p>', '<h1>', '</h1>', '<html']):
+            print(f"⚠️ API returned HTML content, keeping original title")
+            return title
         
         print(f"✅ Processed title: {translated_title}")
         return translated_title
@@ -3835,7 +3857,6 @@ def main(log_callback=None, stop_callback=None):
     print("📑 GLOSSARY GENERATION PHASE")
     print("="*50)
 
-    # ... (glossary generation code) ...
 
     # AFTER GLOSSARY GENERATION, TRANSLATE THE TITLE
     # (Move the title translation here, after the glossary is ready)
@@ -3847,11 +3868,15 @@ def main(log_callback=None, stop_callback=None):
         
         # Check for stop before translating title
         if not check_stop():
-            # Build system prompt for title translation (now glossary_path exists)
-            title_system_prompt = build_system_prompt(SYSTEM_PROMPT, glossary_path)
-            
-            # Translate the title
-            translated_title = translate_title(original_title, client, title_system_prompt, SYSTEM_PROMPT, TEMP)
+            # For title translation, we do NOT use the novel translation system prompt
+            # The translate_title function will use only the configured book title prompt
+            translated_title = translate_title(
+                original_title, 
+                client, 
+                None,  # Pass None to make it clear we're not using system prompt
+                None,  # Pass None to make it clear we're not using user prompt
+                0.1    # Use low temperature for consistent title translation
+            )
             
             # Store both original and translated titles
             metadata["original_title"] = original_title
