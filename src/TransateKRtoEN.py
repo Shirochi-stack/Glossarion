@@ -273,7 +273,7 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
         ]
         
         # Make API call with lower temperature for more consistent results
-        translated_title, _ = client.send(messages, temperature=0.1, max_tokens=256)
+        translated_title, _ = client.send(messages, temperature=temperature, max_tokens=512)
         
         # Clean up the response
         translated_title = translated_title.strip()
@@ -3862,32 +3862,36 @@ def main(log_callback=None, stop_callback=None):
     # (Move the title translation here, after the glossary is ready)
     glossary_path = os.path.join(out, "glossary.json")
 
-    # Translate the title if it exists and hasn't been translated yet
-    if "title" in metadata and not metadata.get("title_translated", False):
+    # Translate the title FIRST if toggle is enabled
+    if "title" in metadata and os.getenv("TRANSLATE_BOOK_TITLE", "1") == "1":
         original_title = metadata["title"]
+        print(f"📚 Original title: {original_title}")
         
-        # Check for stop before translating title
-        if not check_stop():
-            # For title translation, we do NOT use the novel translation system prompt
-            # The translate_title function will use only the configured book title prompt
-            translated_title = translate_title(
-                original_title, 
-                client, 
-                None,  # Pass None to make it clear we're not using system prompt
-                None,  # Pass None to make it clear we're not using user prompt
-                0.1    # Use low temperature for consistent title translation
-            )
-            
-            # Store both original and translated titles
-            metadata["original_title"] = original_title
-            metadata["title"] = translated_title
-            metadata["title_translated"] = True
-            
-            # Save updated metadata immediately
-            with open(metadata_path, 'w', encoding='utf-8') as mf:
-                json.dump(metadata, mf, ensure_ascii=False, indent=2)
-            
-            print(f"💾 Updated metadata with translated title")
+        # Initialize client early for title translation
+        client = UnifiedClient(model=MODEL, api_key=API_KEY)
+        
+        # Translate title
+        translated_title = translate_title(
+            original_title, 
+            client, 
+            None,  # No system prompt for title
+            None,  # No user prompt for title
+            TEMP    # Low temperature
+        )
+        
+        # Update metadata
+        metadata["original_title"] = original_title
+        metadata["title"] = translated_title
+        metadata["title_translated"] = True
+        
+        print(f"📚 Translated title: {translated_title}")
+
+    # NOW save metadata with translated title
+    metadata["chapter_count"] = len(chapters)
+    metadata["chapter_titles"] = {str(c["num"]): c["title"] for c in chapters}
+
+    with open(metadata_path, 'w', encoding='utf-8') as mf:
+        json.dump(metadata, mf, ensure_ascii=False, indent=2)
 
     print("="*50)
     print("🚀 STARTING MAIN TRANSLATION PHASE")
