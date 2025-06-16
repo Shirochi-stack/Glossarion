@@ -625,7 +625,8 @@ def init_progress_tracking(payloads_dir):
 
 def check_chapter_status(prog, chapter_idx, chapter_num, content_hash, output_dir):
     """Check if a chapter needs translation"""
-    chapter_key = str(chapter_idx)
+    # OLD: chapter_key = str(chapter_idx)
+    chapter_key = content_hash  # NEW: Use content hash as key
     
     # FIRST: Always check if the actual output file exists
     if chapter_key in prog["chapters"]:
@@ -702,6 +703,7 @@ def cleanup_missing_files(prog, output_dir):
     cleaned_count = 0
     
     for chapter_key, chapter_info in list(prog["chapters"].items()):
+        # chapter_key is now content_hash
         output_file = chapter_info.get("output_file")
         
         if output_file:
@@ -728,11 +730,50 @@ def cleanup_missing_files(prog, output_dir):
     
     return prog
 
+def migrate_progress_to_content_hash(prog, chapters):
+    """Migrate old index-based progress to content-hash-based"""
+    if not prog.get("version") or prog["version"] < "3.0":
+        print("🔄 Migrating progress tracking to content-hash-based system...")
+        
+        old_chapters = prog.get("chapters", {})
+        new_chapters = {}
+        old_chunks = prog.get("chapter_chunks", {})
+        new_chunks = {}
+        
+        # Build index to content hash mapping
+        idx_to_hash = {}
+        for idx, chapter in enumerate(chapters):
+            content_hash = chapter.get("content_hash") or get_content_hash(chapter["body"])
+            idx_to_hash[str(idx)] = content_hash
+        
+        # Migrate chapters
+        for old_key, chapter_info in old_chapters.items():
+            if old_key in idx_to_hash:
+                new_key = idx_to_hash[old_key]
+                new_chapters[new_key] = chapter_info
+                chapter_info["chapter_idx"] = int(old_key)  # Preserve original index
+        
+        # Migrate chunks
+        for old_key, chunk_info in old_chunks.items():
+            if old_key in idx_to_hash:
+                new_key = idx_to_hash[old_key]
+                new_chunks[new_key] = chunk_info
+        
+        prog["chapters"] = new_chapters
+        prog["chapter_chunks"] = new_chunks
+        prog["version"] = "3.0"
+        
+        print(f"✅ Migrated {len(new_chapters)} chapters to new system")
+    
+    return prog
+    
 def update_progress(prog, chapter_idx, chapter_num, content_hash, output_filename=None, status="completed"):
     """Update progress tracking after successful translation"""
-    chapter_key = str(chapter_idx)
+    # OLD: chapter_key = str(chapter_idx)
+    chapter_key = content_hash  # NEW: Use content hash as key
     
     prog["chapters"][chapter_key] = {
+        "chapter_idx": chapter_idx,  # Store idx for reference
         "chapter_num": chapter_num,
         "content_hash": content_hash,
         "output_file": output_filename,
@@ -3827,6 +3868,7 @@ def main(log_callback=None, stop_callback=None):
         
     # Initialize improved progress tracking
     prog, PROGRESS_FILE = init_progress_tracking(payloads_dir)
+    
 
     def save_progress():
         try:
@@ -3927,6 +3969,9 @@ def main(log_callback=None, stop_callback=None):
         print("\n" + "="*50)
         validate_epub_structure(out)
         print("="*50 + "\n")
+    
+    prog = migrate_progress_to_content_hash(prog, chapters)
+    save_progress()
 
     # Check for stop after file processing
     if check_stop():
@@ -4115,7 +4160,8 @@ def main(log_callback=None, stop_callback=None):
         content_hash = c.get("content_hash") or get_content_hash(c["body"])
         
         # Apply chapter range filter
-        if start is not None and not (start <= chap_num <= end):
+        # Change to use index instead:
+        if start is not None and not (start <= idx + 1 <= end):
             continue
         
         # Check chapter status
@@ -4152,7 +4198,7 @@ def main(log_callback=None, stop_callback=None):
             chunks = [(c["body"], 1, 1)]
         
         # Count chunks needed for this chapter
-        chapter_key_str = str(idx)
+        chapter_key_str = content_hash  # Use content hash instead of idx
         if chapter_key_str in prog.get("chapter_chunks", {}):
             completed_chunks = len(prog["chapter_chunks"][chapter_key_str].get("completed", []))
             chunks_needed = len(chunks) - completed_chunks
@@ -4200,7 +4246,7 @@ def main(log_callback=None, stop_callback=None):
             content_hash = c.get("content_hash") or get_content_hash(c["body"])
             
             # Apply chapter range filter
-            if start is not None and not (start <= chap_num <= end):
+            if start is not None and not (start <= idx + 1 <= end):
                 continue
             
             # Check chapter status
@@ -4251,7 +4297,8 @@ def main(log_callback=None, stop_callback=None):
             chap_num = chapter["num"]
             
             try:
-                print(f"🔄 Starting Chapter {chap_num} (thread: {threading.current_thread().name})")
+                print(f"🔄 Starting #{idx+1} (Internal: Chapter {chap_num}) (thread: {threading.current_thread().name}) [File: {chapter.get('original_basename', f'Chapter_{chap_num}')}]")
+
                 
                 # Update progress to in-progress
                 content_hash = chapter.get("content_hash") or get_content_hash(chapter["body"])
@@ -4429,7 +4476,7 @@ def main(log_callback=None, stop_callback=None):
             content_hash = c.get("content_hash") or get_content_hash(c["body"])
 
             # Apply chapter range filter
-            if start is not None and not (start <= chap_num <= end):
+            if start is not None and not (start <= idx + 1 <= end):
                 continue
 
             # Check chapter status with improved logic
@@ -4443,11 +4490,8 @@ def main(log_callback=None, stop_callback=None):
 
             # Calculate chapter position for progress
             chapter_position = f"{chapters_completed + 1}/{chapters_to_process}"
-            
-            default_name = f"Chapter_{c['num']}"
-            basename = c.get('original_basename', default_name)
-            print(f"\n🔄 Processing Chapter {idx+1}/{total_chapters} ({chapter_position} to translate): "
-                  f"{c['title']} [File: {basename}]")
+          
+            print(f"\n🔄 Processing #{idx+1}/{total_chapters} (Internal: Chapter {chap_num}) ({chapter_position} to translate): {c['title']} [File: {c.get('original_basename', f'Chapter_{chap_num}')}]")
                         
             # Start new chapter context
             chunk_context_manager.start_chapter(chap_num, c['title'])
@@ -4644,7 +4688,7 @@ def main(log_callback=None, stop_callback=None):
                 # Enhanced logging for all chunks
                 # For the chunk messages:
                 if total_chunks > 1:
-                    print(f"  🔄 Translating chunk {chunk_idx}/{total_chunks} (Overall: {current_chunk_number}/{total_chunks_needed} - {progress_percent:.1f}% - ETA: {eta_str}) [File: {c.get('original_basename', f'Chapter_{chap_num}')}]")
+                    print(f"  🔄 Translating chunk {chunk_idx}/{total_chunks} for #{idx+1} (Overall: {current_chunk_number}/{total_chunks_needed} - {progress_percent:.1f}% - ETA: {eta_str})")
                     print(f"  ⏳ Chunk size: {len(chunk_html):,} characters (~{chapter_splitter.count_tokens(chunk_html):,} tokens)")
                 else:
                     # Single chunk - show more meaningful info
