@@ -973,92 +973,156 @@ class EPUBCompiler:
         return chapter_info
     
     def _find_html_files(self) -> List[str]:
-        """Find HTML files with multiple pattern support"""
+        """Find HTML files with ROBUST sorting for ANY pattern"""
         self.log(f"\n[DEBUG] Scanning directory: {self.output_dir}")
         
         all_files = os.listdir(self.output_dir)
-        html_extensions = ['.html', '.htm', '.xhtml']
         
-        # Find all HTML-like files
-        all_html_files = [f for f in all_files 
-                          if any(f.endswith(ext) for ext in html_extensions)]
+        # Get ALL HTML files, not just response_ ones
+        html_extensions = ('.html', '.htm', '.xhtml')
+        html_files = [f for f in all_files if f.lower().endswith(html_extensions)]
         
-        # First, try the expected response_ pattern
-        response_files = [f for f in all_html_files if f.startswith("response_")]
+        # Filter out common non-chapter files
+        exclude_patterns = [
+            'index', 'toc', 'contents', 'cover', 'title',
+            'copyright', 'about', 'nav', 'style', 'template'
+        ]
         
+        # First, try to find response_ files (your current pattern)
+        response_files = [f for f in html_files if f.startswith('response_')]
+        
+        # If we have response_ files, use those
         if response_files:
-            self.log(f"[DEBUG] Found {len(response_files)} translated files (response_*.html)")
-            # Sort numerically by chapter number
-            response_files.sort(key=lambda f: int(re.search(r'response_(\d+)_', f).group(1)) 
-                               if re.search(r'response_(\d+)_', f) else 999999)
-            return response_files
+            html_files = response_files
+            self.log(f"[DEBUG] Found {len(response_files)} response_ files")
+        else:
+            # Otherwise, filter out obvious non-chapter files
+            html_files = [f for f in html_files 
+                         if not any(exclude in f.lower() for exclude in exclude_patterns)]
+            self.log(f"[DEBUG] Found {len(html_files)} HTML files (no response_ prefix)")
         
-        # If no response_ files, look for other patterns
-        self.log("[WARNING] No 'response_' files found. Looking for alternative patterns...")
+        if not html_files:
+            self.log("[ERROR] No HTML files found!")
+            return []
         
-        # Pattern 1: hash-h-number.htm.xhtml (like your files)
-        hash_pattern_files = []
-        for f in all_html_files:
-            # More flexible pattern to catch variations
-            match = re.search(r'-h-(\d+)\.', f)
+        def get_robust_sort_key(filename):
+            """Extract chapter/sequence number using multiple patterns"""
+            
+            # Pattern 1: -h-NUMBER (your current pattern)
+            match = re.search(r'-h-(\d+)', filename)
             if match:
-                chapter_num = int(match.group(1))
-                hash_pattern_files.append((chapter_num, f))
-
-        if hash_pattern_files:
-            # Sort by chapter number (numeric sort, not string sort)
-            hash_pattern_files.sort(key=lambda x: x[0])
-            files = [f for _, f in hash_pattern_files]
-            self.log(f"[DEBUG] Found {len(files)} files with hash-h-number pattern")
-            self.log(f"[DEBUG] Chapter order: {[x[0] for x in sorted(hash_pattern_files, key=lambda x: x[0])]}")
-            return files
-        
-        # Pattern 2: split_XXX pattern (Calibre)
-        split_files = []
-        for f in all_html_files:
-            match = re.search(r'split_(\d+)', f)
+                return (1, int(match.group(1)))
+            
+            # Pattern 2: chapter-NUMBER or chapter_NUMBER or chapterNUMBER
+            match = re.search(r'chapter[-_\s]?(\d+)', filename, re.IGNORECASE)
             if match:
-                num = int(match.group(1))
-                split_files.append((num, f))
-        
-        if split_files:
-            split_files.sort(key=lambda x: x[0])
-            files = [f for _, f in split_files]
-            self.log(f"[DEBUG] Found {len(files)} files with split_XXX pattern")
-            return files
-        
-        # Pattern 3: chapter_X or ch_X or similar
-        chapter_files = []
-        for f in all_html_files:
-            # Try multiple chapter patterns
-            patterns = [
-                r'chapter[_\s-]?(\d+)',
-                r'ch[_\s-]?(\d+)',
-                r'c(\d+)',
-                r'^(\d+)[_\s-]',  # Files starting with numbers
-            ]
-            for pattern in patterns:
-                match = re.search(pattern, f, re.IGNORECASE)
+                return (2, int(match.group(1)))
+            
+            # Pattern 3: ch-NUMBER or ch_NUMBER or chNUMBER  
+            match = re.search(r'\bch[-_\s]?(\d+)\b', filename, re.IGNORECASE)
+            if match:
+                return (3, int(match.group(1)))
+            
+            # Pattern 4: response_NUMBER_ (if response_ prefix exists)
+            if filename.startswith('response_'):
+                match = re.match(r'response_(\d+)[-_]', filename)
                 if match:
-                    num = int(match.group(1))
-                    chapter_files.append((num, f))
-                    break
+                    return (4, int(match.group(1)))
+            
+            # Pattern 5: book_NUMBER, story_NUMBER, part_NUMBER, section_NUMBER
+            match = re.search(r'(?:book|story|part|section)[-_\s]?(\d+)', filename, re.IGNORECASE)
+            if match:
+                return (5, int(match.group(1)))
+            
+            # Pattern 6: split_NUMBER (Calibre pattern)
+            match = re.search(r'split_(\d+)', filename)
+            if match:
+                return (6, int(match.group(1)))
+            
+            # Pattern 7: Just NUMBER.html (like 1.html, 2.html)
+            match = re.match(r'^(\d+)\.(?:html?|xhtml)$', filename)
+            if match:
+                return (7, int(match.group(1)))
+            
+            # Pattern 8: -NUMBER at end before extension
+            match = re.search(r'-(\d+)\.(?:html?|xhtml)$', filename)
+            if match:
+                return (8, int(match.group(1)))
+            
+            # Pattern 9: _NUMBER at end before extension
+            match = re.search(r'_(\d+)\.(?:html?|xhtml)$', filename)
+            if match:
+                return (9, int(match.group(1)))
+            
+            # Pattern 10: (NUMBER) in parentheses anywhere
+            match = re.search(r'\((\d+)\)', filename)
+            if match:
+                return (10, int(match.group(1)))
+            
+            # Pattern 11: [NUMBER] in brackets anywhere
+            match = re.search(r'\[(\d+)\]', filename)
+            if match:
+                return (11, int(match.group(1)))
+            
+            # Pattern 12: page-NUMBER or p-NUMBER or pg-NUMBER
+            match = re.search(r'(?:page|pg?)[-_\s]?(\d+)', filename, re.IGNORECASE)
+            if match:
+                return (12, int(match.group(1)))
+            
+            # Pattern 13: Any file ending with NUMBER before extension
+            match = re.search(r'(\d+)\.(?:html?|xhtml)$', filename)
+            if match:
+                return (13, int(match.group(1)))
+            
+            # Pattern 14: Roman numerals (I, II, III, IV, etc.)
+            roman_pattern = r'\b(M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3}))\b'
+            match = re.search(roman_pattern, filename)
+            if match:
+                roman = match.group(1)
+                # Convert roman to number
+                roman_dict = {'I':1,'V':5,'X':10,'L':50,'C':100,'D':500,'M':1000}
+                val = 0
+                for i in range(len(roman)):
+                    if i > 0 and roman_dict[roman[i]] > roman_dict[roman[i-1]]:
+                        val += roman_dict[roman[i]] - 2 * roman_dict[roman[i-1]]
+                    else:
+                        val += roman_dict[roman[i]]
+                return (14, val)
+            
+            # Pattern 15: First significant number found
+            numbers = re.findall(r'\d+', filename)
+            if numbers:
+                # Skip common year numbers (1900-2099) unless it's the only number
+                significant_numbers = [int(n) for n in numbers if not (1900 <= int(n) <= 2099)]
+                if significant_numbers:
+                    return (15, significant_numbers[0])
+                elif numbers:
+                    return (15, int(numbers[0]))
+            
+            # Final fallback: alphabetical
+            return (99, filename)
         
-        if chapter_files:
-            # Remove duplicates and sort
-            seen = set()
-            unique_files = []
-            for num, f in sorted(chapter_files, key=lambda x: x[0]):
-                if f not in seen:
-                    seen.add(f)
-                    unique_files.append(f)
-            self.log(f"[DEBUG] Found {len(unique_files)} files with chapter patterns")
-            return unique_files
+        # Sort files
+        html_files.sort(key=get_robust_sort_key)
         
-        # Last resort: return all HTML files in alphabetical order
-        self.log("[WARNING] No recognizable chapter pattern found. Using all HTML files.")
-        return sorted(all_html_files)
-    
+        # Debug output
+        self.log(f"\n[DEBUG] Sorted {len(html_files)} files:")
+        pattern_names = {
+            1: "-h-N", 2: "chapter-N", 3: "ch-N", 4: "response_N_",
+            5: "book/part-N", 6: "split_N", 7: "N.html", 8: "-N.html",
+            9: "_N.html", 10: "(N)", 11: "[N]", 12: "page-N",
+            13: "*N.html", 14: "Roman", 15: "first number", 99: "alphabetical"
+        }
+        
+        for i, f in enumerate(html_files[:10]):
+            key = get_robust_sort_key(f)
+            pattern = pattern_names.get(key[0], "unknown")
+            self.log(f"  {i+1}. {f} [{pattern}: {key[1]}]")
+        if len(html_files) > 10:
+            self.log(f"  ... and {len(html_files)-10} more")
+        
+        return html_files
+        
     def _load_metadata(self) -> dict:
         """Load metadata from JSON file"""
         if os.path.exists(self.metadata_path):
@@ -1380,113 +1444,39 @@ img {
                          chapter_titles_info: Dict[int, Tuple[str, float, str]],
                          css_items: List[epub.EpubItem], processed_images: Dict[str, str],
                          spine: List, toc: List, metadata: dict) -> int:
-        """Process all chapters - WITH FALLBACK"""
+        """Process chapters - NO FANCY PARSING"""
         chapters_added = 0
         
-        # Try the fancy parsing first
-        chapter_tuples = []
-        chapter_seen = set()
+        self.log(f"\n📚 Processing {len(html_files)} chapters...")
         
-        self.log(f"\n[DEBUG] Processing {len(html_files)} HTML files...")
-        
-        # Try to extract chapter numbers
-        for fn in html_files:
-            chapter_num = None
+        # Process in EXACT order - no parsing, no reordering
+        for idx, filename in enumerate(html_files):
+            # Use index + 1 as chapter number
+            chapter_num = idx + 1
             
-            # Try various patterns
-            patterns = [
-                (r"response_(\d+)_", lambda m: int(m.group(1))),
-                (r"response_\d+-h-(\d+)\.htm\.html$", lambda m: int(m.group(1)) + 1),
-                (r"-h-(\d+)\.", lambda m: int(m.group(1)) + 1),
-                (r"_(\d+)\.", lambda m: int(m.group(1))),
-            ]
-            
-            for pattern, extractor in patterns:
-                match = re.search(pattern, fn)
-                if match:
-                    try:
-                        chapter_num = extractor(match)
-                        break
-                    except:
-                        pass
-            
-            if chapter_num and chapter_num not in chapter_seen:
-                chapter_tuples.append((chapter_num, fn))
-                chapter_seen.add(chapter_num)
-        
-        # FALLBACK: If we couldn't parse most files, just use sequential numbering
-        if len(chapter_tuples) < len(html_files) * 0.8:  # Less than 80% parsed
-            self.log("[WARNING] Fancy parsing failed, using fallback sequential numbering")
-            chapter_tuples = []
-            for idx, fn in enumerate(sorted(html_files)):
-                chapter_tuples.append((idx + 1, fn))
-        
-        # Sort by chapter number
-        chapter_tuples.sort(key=lambda x: x[0])
-        
-        self.log(f"\n📚 Processing {len(chapter_tuples)} chapters")
-        
-        # Process each chapter
-        for num, fn in chapter_tuples:
             try:
                 if self._process_single_chapter(
-                    book, num, fn, chapter_titles_info, css_items, 
+                    book, chapter_num, filename, chapter_titles_info, css_items, 
                     processed_images, spine, toc, metadata
                 ):
                     chapters_added += 1
             except Exception as e:
-                self.log(f"[ERROR] Failed to process chapter {num}: {e}")
+                self.log(f"[ERROR] Chapter {chapter_num} failed: {e}")
                 
-                # FALLBACK: Add a basic chapter even if processing fails
+                # Add placeholder
                 try:
                     chapter = epub.EpubHtml(
-                        title=f"Chapter {num}",
-                        file_name=f"chapter_{num:03d}.xhtml",
+                        title=f"Chapter {chapter_num}",
+                        file_name=f"chapter_{chapter_num:03d}.xhtml",
                         lang=metadata.get("language", "en")
                     )
                     chapter.content = f"""<?xml version="1.0" encoding="utf-8"?>
     <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
     <html xmlns="http://www.w3.org/1999/xhtml">
-    <head>
-    <title>Chapter {num}</title>
-    </head>
+    <head><title>Chapter {chapter_num}</title></head>
     <body>
-    <h1>Chapter {num}</h1>
-    <p>Error loading content from: {fn}</p>
-    </body>
-    </html>""".encode('utf-8')
-                    
-                    book.add_item(chapter)
-                    spine.append(chapter)
-                    toc.append(chapter)
-                    chapters_added += 1
-                    self.log(f"[FALLBACK] Added placeholder for chapter {num}")
-                except:
-                    pass
-        
-        # FINAL FALLBACK: If still no chapters, force add all files
-        if chapters_added == 0:
-            self.log("[CRITICAL] No chapters added, forcing all files")
-            for idx, fn in enumerate(html_files):
-                try:
-                    filepath = os.path.join(self.output_dir, fn)
-                    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                        content = f.read()
-                    
-                    chapter = epub.EpubHtml(
-                        title=f"Chapter {idx + 1}",
-                        file_name=f"chapter_{idx + 1:03d}.xhtml",
-                        lang="en"
-                    )
-                    chapter.content = f"""<?xml version="1.0" encoding="utf-8"?>
-    <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
-    <html xmlns="http://www.w3.org/1999/xhtml">
-    <head>
-    <title>Chapter {idx + 1}</title>
-    </head>
-    <body>
-    <h1>Chapter {idx + 1}</h1>
-    <div>{content}</div>
+    <h1>Chapter {chapter_num}</h1>
+    <p>Error loading: {filename}</p>
     </body>
     </html>""".encode('utf-8')
                     
@@ -1497,7 +1487,7 @@ img {
                 except:
                     pass
         
-        self.log(f"[FINAL] Added {chapters_added} chapters to EPUB")
+        self.log(f"Added {chapters_added} chapters")
         return chapters_added
     
     def _process_single_chapter(self, book: epub.EpubBook, num: int, filename: str,
@@ -1754,10 +1744,7 @@ img {
         else:
             book.spine = ['nav'] + spine
             self.log("📖 Reading order: Table of Contents → Chapters")
-        
-        # Add guide for cover
-        if spine and spine[0].title == "Cover":
-            book.guide = [{"type": "cover", "title": "Cover", "href": spine[0].file_name}]
+
     
     def _write_epub(self, book: epub.EpubBook, metadata: dict):
         """Write EPUB file"""
