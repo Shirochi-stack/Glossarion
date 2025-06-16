@@ -4444,7 +4444,7 @@ def main(log_callback=None, stop_callback=None):
             # Calculate chapter position for progress
             chapter_position = f"{chapters_completed + 1}/{chapters_to_process}"
             
-            print(f"\n🔄 Processing Chapter {idx+1}/{total_chapters} ({chapter_position} to translate): {c['title']}")
+            print(f"\n🔄 Processing Chapter {idx+1}/{total_chapters} ({chapter_position} to translate): {c['title']} [File: {c.get('original_basename', f'Chapter_{c['num']}')}]")
             
             # Start new chapter context
             chunk_context_manager.start_chapter(chap_num, c['title'])
@@ -4639,12 +4639,13 @@ def main(log_callback=None, stop_callback=None):
                     eta_str = "calculating..."
                 
                 # Enhanced logging for all chunks
+                # For the chunk messages:
                 if total_chunks > 1:
-                    print(f"  🔄 Translating chunk {chunk_idx}/{total_chunks} (Overall: {current_chunk_number}/{total_chunks_needed} - {progress_percent:.1f}% - ETA: {eta_str})")
+                    print(f"  🔄 Translating chunk {chunk_idx}/{total_chunks} (Overall: {current_chunk_number}/{total_chunks_needed} - {progress_percent:.1f}% - ETA: {eta_str}) [File: {c.get('original_basename', f'Chapter_{chap_num}')}]")
                     print(f"  ⏳ Chunk size: {len(chunk_html):,} characters (~{chapter_splitter.count_tokens(chunk_html):,} tokens)")
                 else:
                     # Single chunk - show more meaningful info
-                    print(f"  📄 Translating chapter content (Overall: {current_chunk_number}/{total_chunks_needed} - {progress_percent:.1f}% - ETA: {eta_str})")
+                    print(f"  📄 Translating chapter content (Overall: {current_chunk_number}/{total_chunks_needed} - {progress_percent:.1f}% - ETA: {eta_str}) [File: {c.get('original_basename', f'Chapter_{chap_num}')}]")
                     print(f"  📊 Chapter {chap_num} size: {len(chunk_html):,} characters (~{chapter_splitter.count_tokens(chunk_html):,} tokens)")
                 
                 print(f"  ℹ️ This may take 30-60 seconds. Stop will take effect after completion.")
@@ -4676,7 +4677,7 @@ def main(log_callback=None, stop_callback=None):
                         if total_chunks == 1:
                             log_callback(f"📄 Processing Chapter {chap_num} ({chapters_completed + 1}/{chapters_to_process}) - {progress_percent:.1f}% complete")
                         else:
-                            log_callback(f"📄 Processing chunk {chunk_idx}/{total_chunks} for Chapter {chap_num} - {progress_percent:.1f}% complete")   
+                            log_callback(f"📄 processing chunk {chunk_idx}/{total_chunks} for chapter {chap_num} - {progress_percent:.1f}% complete")   
                         
                 # Add chunk context to prompt if multi-chunk
                 if total_chunks > 1:
@@ -4724,7 +4725,7 @@ def main(log_callback=None, stop_callback=None):
                     try:
                         # Calculate actual token usage
                         total_tokens = sum(chapter_splitter.count_tokens(m["content"]) for m in msgs)
-                        print(f"    [DEBUG] Chunk {chunk_idx}/{total_chunks} tokens = {total_tokens:,} / {budget_str}")
+                        print(f"    [DEBUG] Chunk {chunk_idx}/{total_chunks} - Current message size: {total_tokens:,} tokens (chunk split threshold: {budget_str})")
                         
                         client.context = 'translation'
                         
@@ -4765,7 +4766,7 @@ def main(log_callback=None, stop_callback=None):
                                 
                                 # Calculate actual token usage
                                 total_tokens = sum(chapter_splitter.count_tokens(m["content"]) for m in msgs)
-                                print(f"    [DEBUG] Chunk {chunk_idx}/{total_chunks} tokens = {total_tokens:,} / {budget_str}")
+                                print(f"    [DEBUG] Chunk {chunk_idx}/{total_chunks} tokens = {total_tokens:,} / {budget_str} [File: {c.get('original_basename', f'Chapter_{chap_num}')}]")
                                 
                                 client.context = 'translation'
                                 
