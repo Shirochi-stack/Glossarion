@@ -10,6 +10,7 @@ import queue
 import ebooklib
 import re
 from ebooklib import epub
+from chapter_splitter import ChapterSplitter
 
 # Fix for PyInstaller - handle stdout reconfigure more carefully
 if sys.platform.startswith("win"):
@@ -519,18 +520,41 @@ def main(log_callback=None, stop_callback=None):
         return is_stop_requested()
         
     start = time.time()
-    parser = argparse.ArgumentParser(description="Extract character glossary from EPUB via ChatGPT")
-    parser.add_argument('--epub',   required=True)
-    parser.add_argument('--output', default='glossary.json',
-                        help="Name of the JSON file to write.  (Defaults to <epub_basename>_glossary.json)")
-    parser.add_argument('--config', default='config.json')
-    args = parser.parse_args()
+    
+    # Handle both command line and GUI calls
+    if '--epub' in sys.argv:
+        # Command line mode
+        parser = argparse.ArgumentParser(description='Extract glossary from EPUB/TXT')
+        parser.add_argument('--epub', required=True, help='Path to EPUB/TXT file')
+        parser.add_argument('--output', required=True, help='Output glossary path')
+        parser.add_argument('--config', help='Config file path')
+        # keep any other add_argument lines you have
+        
+        args = parser.parse_args()
+        epub_path = args.epub
+    else:
+        # GUI mode - get from environment
+        epub_path = os.getenv("EPUB_PATH", "")
+        if not epub_path and len(sys.argv) > 1:
+            epub_path = sys.argv[1]
 
-    epub_base = os.path.splitext(os.path.basename(args.epub))[0]
+
+    is_text_file = epub_path.lower().endswith('.txt')
+    
+    if is_text_file:
+        # Import text processor
+        from extract_glossary_from_txt import extract_chapters_from_txt
+        chapters = extract_chapters_from_txt(epub_path)
+        file_base = os.path.splitext(os.path.basename(epub_path))[0]
+    else:
+        # Existing EPUB code
+        chapters = extract_chapters_from_epub(epub_path)
+        epub_base = os.path.splitext(os.path.basename(epub_path))[0]
+        file_base = epub_base
 
     # If user didn't override --output, derive it from the EPUB filename:
     if args.output == 'glossary.json':
-        args.output = f"{epub_base}_glossary.json"
+        args.output = f"{file_base}_glossary.json" 
 
     # ensure we have a Glossary subfolder next to the JSON/MD outputs
     glossary_dir = os.path.join(os.path.dirname(args.output), "Glossary")
@@ -540,7 +564,7 @@ def main(log_callback=None, stop_callback=None):
     global PROGRESS_FILE
     PROGRESS_FILE = os.path.join(
         glossary_dir,
-        f"{epub_base}_glossary_progress.json"
+        f"{file_base}_glossary_progress.json"  # CHANGED from epub_base
     )
 
     config = load_config(args.config)
@@ -554,6 +578,9 @@ def main(log_callback=None, stop_callback=None):
                config.get('api_key'))
 
     client = UnifiedClient(model=model, api_key=api_key)
+    
+    # Initialize chapter splitter
+    chapter_splitter = ChapterSplitter(model_name=model)
     
     # Get temperature from environment or config
     temp = float(os.getenv("GLOSSARY_TEMPERATURE") or config.get('temperature', 0.3))
@@ -609,7 +636,17 @@ def main(log_callback=None, stop_callback=None):
     else:
         print("📑 Using default extraction prompt")
 
-    chapters = extract_chapters_from_epub(args.epub)
+    if is_text_file:
+        from extract_glossary_from_txt import extract_chapters_from_txt
+        chapters = extract_chapters_from_txt(args.epub)
+    else:
+        chapters = extract_chapters_from_epub(args.epub)
+    
+    # The rest of the function remains exactly the same
+    if not chapters:
+        print("No chapters found. Exiting.")
+        return
+        
     if not chapters:
         print("No chapters found. Exiting.")
         return
@@ -681,13 +718,32 @@ def main(log_callback=None, stop_callback=None):
             
             print(f"[DEBUG] Glossary prompt tokens = {total_tokens} / {limit_str}")
             
-            # Check if we're over the token limit
+            # Check if we're over the token limit and need to split
             if token_limit is not None and total_tokens > token_limit:
                 print(f"⚠️ Chapter {idx+1} exceeds token limit: {total_tokens} > {token_limit}")
-                print(f"⚠️ Skipping chapter {idx+1} due to token limit")
-                completed.append(idx)
-                save_progress(completed, glossary, history)
-                continue
+                print(f"📄 Using ChapterSplitter to split into smaller chunks...")
+                
+                # Calculate available tokens for content
+                system_tokens = chapter_splitter.count_tokens(sys_prompt)
+                context_tokens = sum(chapter_splitter.count_tokens(m["content"]) for m in trim_context_history(history, ctx_limit, rolling_window))
+                safety_margin = 1000
+                available_tokens = token_limit - system_tokens - context_tokens - safety_margin
+                
+                # Since glossary extraction works with plain text, wrap it in a simple HTML structure
+                chapter_html = f"<html><body><p>{chap.replace(chr(10)+chr(10), '</p><p>')}</p></body></html>"
+                
+                # Use ChapterSplitter to split the chapter
+                chunks = chapter_splitter.split_chapter(chapter_html, available_tokens)
+                print(f"📄 Chapter split into {len(chunks)} chunks")
+                
+                # Process each chunk
+                for chunk_html, chunk_idx, total_chunks in chunks:
+                    print(f"🔄 Processing chunk {chunk_idx}/{total_chunks} of Chapter {idx+1}")
+                    
+                    # Extract text from the chunk HTML
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(chunk_html, 'html.parser')
+                    chunk_text = soup.get_text(strip=True)
             
             # Check for stop before API call
             if check_stop():
