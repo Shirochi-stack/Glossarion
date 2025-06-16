@@ -315,10 +315,6 @@ def set_output_redirect(log_callback=None):
                 
         sys.stdout = CallbackWriter(log_callback)
 
-def get_instructions(lang):
-    """Get minimal technical instructions only"""
-    # Only return the technical requirement that applies to all languages
-    return "Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title> ,<h1>, <h2>, <p>, <br>, <div>, etc."
     
 def process_chapter_images(chapter_html: str, chapter_num: int, image_translator: ImageTranslator, 
                          check_stop_fn=None) -> Tuple[str, Dict[str, str]]:
@@ -3425,7 +3421,16 @@ def parse_token_limit(env_value):
     # Default fallback
     return 1000000, "1000000 (default)"
 
-def build_system_prompt(user_prompt, glossary_path, instructions):
+def build_system_prompt(user_prompt, glossary_path):
+    """Build the system prompt with glossary - NO FALLBACK"""
+    # Check if we should append glossary (default is True if not set)
+    append_glossary = os.getenv("APPEND_GLOSSARY", "1") == "1"
+    
+    # Start with user prompt - if empty, it stays empty
+    system = user_prompt if user_prompt else ""
+    
+    # Helper function to format glossary for prompt
+def build_system_prompt(user_prompt, glossary_path):
     """Build the system prompt with glossary - NO FALLBACK"""
     # Check if we should append glossary (default is True if not set)
     append_glossary = os.getenv("APPEND_GLOSSARY", "1") == "1"
