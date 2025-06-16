@@ -84,7 +84,7 @@ class TranslatorGUI:
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
-        master.title("Glossarion v2.3.3")
+        master.title("Glossarion v2.3.4")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1600, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
@@ -216,19 +216,20 @@ class TranslatorGUI:
         self.translation_history_rolling_var = tk.BooleanVar(
             value=self.config.get('translation_history_rolling', False)
         )
+        
+        # Translate Book title
+        self.translate_book_title_var = tk.BooleanVar(
+            value=self.config.get('translate_book_title', True)  # Default to True (translate titles)
+        )
+        
+        self.book_title_prompt = self.config.get('book_title_prompt', 
+            "Translate this book title to English while retaining any acronyms:")        
 
         # Glossary history rolling window  
         self.glossary_history_rolling_var = tk.BooleanVar(
             value=self.config.get('glossary_history_rolling', False)
         )
         
-        self.disable_system_prompt_var = tk.BooleanVar(
-            value=self.config.get('disable_system_prompt', False)
-        )
-        
-        self.disable_system_prompt_var = tk.BooleanVar(
-            value=self.config.get('disable_system_prompt', False)
-        )
         self.enable_auto_glossary_var = tk.BooleanVar(
             value=self.config.get('enable_auto_glossary', False)  # Default to False (disabled)
         )
@@ -338,6 +339,80 @@ class TranslatorGUI:
         # Initialize GUI components
         self._setup_gui()
         
+    def configure_title_prompt(self):
+        """Configure the book title translation prompt"""
+        dialog = tk.Toplevel(self.master)
+        dialog.title("Configure Book Title Translation")
+        dialog.geometry("600x400")
+        dialog.transient(self.master)
+        
+        # Main frame
+        main_frame = tk.Frame(dialog, padx=20, pady=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        tk.Label(main_frame, text="Book Title Translation Prompt", 
+                 font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W, pady=(0, 10))
+        
+        tk.Label(main_frame, 
+                 text="This prompt will be used when translating book titles.\n"
+                 "The book title will be appended after this prompt.",
+                 font=('TkDefaultFont', 11), fg='gray').pack(anchor=tk.W, pady=(0, 10))
+        
+        # Text area for prompt
+        self.title_prompt_text = scrolledtext.ScrolledText(
+            main_frame, height=8, wrap=tk.WORD,
+            undo=True, autoseparators=True, maxundo=-1
+        )
+        self.title_prompt_text.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        self.title_prompt_text.insert('1.0', self.book_title_prompt)
+        self._setup_text_undo_redo(self.title_prompt_text)
+        
+        # Language selection for non-English targets
+        lang_frame = tk.Frame(main_frame)
+        lang_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        tk.Label(lang_frame, text="💡 Tip: Modify the prompt above to translate to other languages",
+                 font=('TkDefaultFont', 10), fg='blue').pack(anchor=tk.W)
+        
+        # Example prompts
+        example_frame = tk.LabelFrame(main_frame, text="Example Prompts", padx=10, pady=10)
+        example_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        examples = [
+            ("Spanish", "Traduce este título de libro al español manteniendo los acrónimos:"),
+            ("French", "Traduisez ce titre de livre en français en conservant les acronymes:"),
+            ("German", "Übersetzen Sie diesen Buchtitel ins Deutsche und behalten Sie Akronyme bei:"),
+            ("Keep Original", "Return the title exactly as provided without any translation:")
+        ]
+        
+        for lang, prompt in examples:
+            btn = tb.Button(example_frame, text=f"Use {lang}", 
+                            command=lambda p=prompt: self.title_prompt_text.replace('1.0', tk.END, p),
+                            bootstyle="secondary-outline", width=15)
+            btn.pack(side=tk.LEFT, padx=2, pady=2)
+        
+        # Buttons
+        button_frame = tk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(20, 0))
+        
+        def save_title_prompt():
+            self.book_title_prompt = self.title_prompt_text.get('1.0', tk.END).strip()
+            self.config['book_title_prompt'] = self.book_title_prompt
+            messagebox.showinfo("Success", "Book title prompt saved!")
+            dialog.destroy()
+        
+        def reset_title_prompt():
+            if messagebox.askyesno("Reset Prompt", "Reset to default English translation prompt?"):
+                default_prompt = "Translate this book title to English while retaining any acronyms:"
+                self.title_prompt_text.delete('1.0', tk.END)
+                self.title_prompt_text.insert('1.0', default_prompt)
+        
+        tb.Button(button_frame, text="Save", command=save_title_prompt, 
+                  bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
+        tb.Button(button_frame, text="Reset to Default", command=reset_title_prompt, 
+                  bootstyle="warning", width=15).pack(side=tk.LEFT, padx=5)
+        tb.Button(button_frame, text="Cancel", command=dialog.destroy, 
+                  bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)        
     def _setup_text_undo_redo(self, text_widget):
         """Set up undo/redo bindings for a text widget with error handling"""
         def handle_undo(event):
@@ -746,7 +821,7 @@ class TranslatorGUI:
         print("[DEBUG] GUI setup completed with config values loaded")  # Debug logging
         
         # Add initial log message
-        self.append_log("🚀 Glossarion v2.3.3 - Ready to use!")
+        self.append_log("🚀 Glossarion v2.3.4 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
 
     def force_retranslation(self):
@@ -2217,8 +2292,7 @@ class TranslatorGUI:
                 self.append_log(f"📤 Output Token Limit: {self.max_output_tokens}")
                 
                 # ─── NEW: Log the state of new toggles ───
-                if self.disable_system_prompt_var.get():
-                    self.append_log("⚠️ Hardcoded prompts disabled")
+
                     
                 # Log glossary status
                 if self.enable_auto_glossary_var.get():
@@ -2251,6 +2325,8 @@ class TranslatorGUI:
                     'OPENAI_OR_Gemini_API_KEY': api_key,   # Fallback name
                     'GEMINI_API_KEY': api_key,             # Gemini
                     'SYSTEM_PROMPT': self.prompt_text.get("1.0", "end").strip(),
+                    'TRANSLATE_BOOK_TITLE': "1" if self.translate_book_title_var.get() else "0",
+                    'BOOK_TITLE_PROMPT': self.book_title_prompt,
                     'REMOVE_AI_ARTIFACTS': "1" if self.REMOVE_AI_ARTIFACTS_var.get() else "0",
                     'USE_ROLLING_SUMMARY': "1" if self.config.get('use_rolling_summary') else "0",
                     'SUMMARY_ROLE': self.config.get('summary_role', 'user'),
@@ -3352,27 +3428,23 @@ class TranslatorGUI:
         tb.Entry(reinforce_frame, width=6, textvariable=self.reinforcement_freq_var).pack(side=tk.LEFT, padx=5)
         tk.Label(reinforce_frame, text="messages").pack(side=tk.LEFT)
 
+
+        # Book Title Translation
+        title_frame = tk.Frame(section3_frame)
+        title_frame.pack(anchor=tk.W, pady=(10, 10))
+
+        tb.Checkbutton(title_frame, text="Translate Book Title", 
+                       variable=self.translate_book_title_var,
+                       bootstyle="round-toggle").pack(side=tk.LEFT)
+
+        tb.Button(title_frame, text="Configure Title Prompt", 
+                  command=self.configure_title_prompt,
+                  bootstyle="info-outline", width=20).pack(side=tk.LEFT, padx=(10, 0))
+
         tk.Label(section3_frame, 
-                 text="Periodically reminds the AI of your\nsystem prompt (0 = disabled)",
-                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 10))
-
-        # Disable System Prompts - Make it clearer
-        tb.Checkbutton(section3_frame, text="Disable Built-in Language Prompts", 
-                       variable=self.disable_system_prompt_var,
-                       bootstyle="round-toggle").pack(anchor=tk.W)
-
-        tk.Label(section3_frame, 
-                 text="When enabled:\n"
-                 "• Built-in Korean/Japanese/Chinese prompts are NEVER used\n"
-                 "• Only uses what's in your System Prompt box (even if empty)\n"
-                 "• If System Prompt box is empty, NO prompt is sent\n"
-                 "• Glossary still appends if 'Append Glossary' is ON\n\n"
-                 "When disabled (default):\n"
-                 "• Uses your System Prompt box if it has text\n"
-                 "• Falls back to built-in language prompts if box is empty\n"
-                 "• Glossary still appends if 'Append Glossary' is ON",
-                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
-
+                 text="When enabled: Book titles will be translated to English\n"
+                 "When disabled: Book titles remain in original language",
+                 font=('TkDefaultFont', 11), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
         # =================================================================
         # SECTION 4: PROCESSING OPTIONS (Middle Right) - MOVED UP
         # =================================================================
@@ -3519,7 +3591,9 @@ class TranslatorGUI:
                 
                 # Prompt Management
                 self.config['reinforcement_frequency'] = int(self.reinforcement_freq_var.get())
-                self.config['disable_system_prompt'] = self.disable_system_prompt_var.get()
+                self.config['translate_book_title'] = self.translate_book_title_var.get()
+                self.config['book_title_prompt'] = getattr(self, 'book_title_prompt', 
+                    "Translate this book title to English while retaining any acronyms:")
                 
                 # Processing Options
                 self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()
@@ -3551,7 +3625,8 @@ class TranslatorGUI:
                     "RETRY_TIMEOUT": "1" if self.retry_timeout_var.get() else "0",
                     "CHUNK_TIMEOUT": self.chunk_timeout_var.get(),
                     "REINFORCEMENT_FREQUENCY": self.reinforcement_freq_var.get(),
-                    "DISABLE_SYSTEM_PROMPT": "1" if self.disable_system_prompt_var.get() else "0",
+                    "TRANSLATE_BOOK_TITLE": "1" if self.translate_book_title_var.get() else "0",
+                    "BOOK_TITLE_PROMPT": self.book_title_prompt,
                     "EMERGENCY_PARAGRAPH_RESTORE": "1" if self.emergency_restore_var.get() else "0",
                     "RESET_FAILED_CHAPTERS": "1" if self.reset_failed_chapters_var.get() else "0",
                     "COMPREHENSIVE_EXTRACTION": "1" if self.comprehensive_extraction_var.get() else "0",
@@ -3776,7 +3851,8 @@ class TranslatorGUI:
             self.config['use_rolling_summary'] = self.rolling_summary_var.get()
             self.config['summary_role'] = self.summary_role_var.get()
             self.config['max_output_tokens'] = self.max_output_tokens
-            self.config['disable_system_prompt'] = self.disable_system_prompt_var.get()
+            self.config['translate_book_title'] = self.translate_book_title_var.get()
+            self.config['book_title_prompt'] = self.book_title_prompt
             self.config['append_glossary'] = self.append_glossary_var.get()
             self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()
             self.config['reinforcement_frequency'] = int(self.reinforcement_freq_var.get())
@@ -3821,7 +3897,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time  # Add this import
     
-    print("🚀 Starting Glossarion v2.3.3...")
+    print("🚀 Starting Glossarion v2.3.4...")
     
     # Initialize splash screen (main thread only)
     splash_manager = None
