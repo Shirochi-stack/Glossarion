@@ -278,7 +278,8 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
         # DEBUG: Log the raw response
         print(f"[DEBUG] Raw API response: '{translated_title}'")
         print(f"[DEBUG] Response length: {len(translated_title)} (original: {len(title)})")
-        print(f"[DEBUG] Has newlines: {repr(translated_title) if '\\n' in translated_title else 'No'}")
+        newline = '\n'
+        print(f"[DEBUG] Has newlines: {repr(translated_title) if newline in translated_title else 'No'}")
         
         # Clean up the response
         translated_title = translated_title.strip()
