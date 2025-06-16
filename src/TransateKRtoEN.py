@@ -275,6 +275,11 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
         # Make API call with lower temperature for more consistent results
         translated_title, _ = client.send(messages, temperature=temperature, max_tokens=512)
         
+        # DEBUG: Log the raw response
+        print(f"[DEBUG] Raw API response: '{translated_title}'")
+        print(f"[DEBUG] Response length: {len(translated_title)} (original: {len(title)})")
+        print(f"[DEBUG] Has newlines: {repr(translated_title) if '\\n' in translated_title else 'No'}")
+        
         # Clean up the response
         translated_title = translated_title.strip()
         
@@ -287,12 +292,7 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
         # If response contains newlines, it's probably not just a title
         if '\n' in translated_title:
             print(f"⚠️ API returned multi-line content, keeping original title")
-            return title
-            
-        # If response is too long, it's probably not just a title
-        if len(translated_title) > len(title) * 3:  # Arbitrary but reasonable limit
-            print(f"⚠️ API returned overly long response, keeping original title")
-            return title
+            return title           
             
         # Check for JSON artifacts
         if any(char in translated_title for char in ['{', '}', '[', ']', '"role":', '"content":']):
@@ -3833,14 +3833,21 @@ def main(log_callback=None, stop_callback=None):
     if check_stop():
         return
 
+    # Write metadata with chapter info (enhanced metadata is already saved by extract_chapters)
+    # Just ensure we have the basic metadata.json for backward compatibility
+    # Load existing metadata if it exists
     metadata_path = os.path.join(out, "metadata.json")
     if os.path.exists(metadata_path):
         with open(metadata_path, 'r', encoding='utf-8') as mf:
             metadata = json.load(mf)
-    
+
     # Ensure we have chapter info
     metadata["chapter_count"] = len(chapters)
     metadata["chapter_titles"] = {str(c["num"]): c["title"] for c in chapters}
+
+    # Initialize client for title translation
+    print(f"[DEBUG] Initializing client with model = {MODEL}")
+    client = UnifiedClient(model=MODEL, api_key=API_KEY)
     
     # Translate the title BEFORE saving metadata if toggle is enabled
     if "title" in metadata and os.getenv("TRANSLATE_BOOK_TITLE", "1") == "1" and not metadata.get("title_translated", False):
@@ -3867,7 +3874,7 @@ def main(log_callback=None, stop_callback=None):
         else:
             print("❌ Title translation skipped due to stop request")
     
-    # Save metadata (now includes translated title if applicable)
+    # Save metadata ONCE with translated title if applicable
     with open(metadata_path, 'w', encoding='utf-8') as mf:
         json.dump(metadata, mf, ensure_ascii=False, indent=2)
     print(f"💾 Saved metadata with {'translated' if metadata.get('title_translated', False) else 'original'} title")
@@ -3875,7 +3882,7 @@ def main(log_callback=None, stop_callback=None):
     # Handle glossary - ENSURE IT COMPLETES BEFORE TRANSLATION
     manual_gloss = os.getenv("MANUAL_GLOSSARY")
     disable_auto_glossary = os.getenv("DISABLE_AUTO_GLOSSARY", "0") == "1"
-    
+
     print("\n" + "="*50)
     print("📑 GLOSSARY GENERATION PHASE")
     print("="*50)
@@ -3946,7 +3953,7 @@ def main(log_callback=None, stop_callback=None):
         print("⚠️ No glossary file found, creating empty one")
         with open(glossary_path, 'w', encoding='utf-8') as f:
             json.dump({}, f, ensure_ascii=False, indent=2)
-    
+
     print("="*50)
     print("🚀 STARTING MAIN TRANSLATION PHASE")
     print("="*50 + "\n")
