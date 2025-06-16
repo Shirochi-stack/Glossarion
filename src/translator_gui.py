@@ -84,7 +84,7 @@ class TranslatorGUI:
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
-        master.title("Glossarion v2.3.4")
+        master.title("Glossarion v2.3.5")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1600, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
@@ -327,7 +327,8 @@ class TranslatorGUI:
             "chinese": "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- retain onomatopoeia in Romaji.\n- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title> ,<h1>, <h2>, <p>, <br>, <div>, etc.",
             "korean_OCR": "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- Add HTML tags for proper formatting as expected of a novel.",
             "japanese_OCR": "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags text while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics like -san, -sama, -chan, -kun.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- Add HTML tags for proper formatting as expected of a novel.",
-            "chinese_OCR": "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- Add HTML tags for proper formatting as expected of a novel."
+            "chinese_OCR": "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- Add HTML tags for proper formatting as expected of a novel.",
+            "Original": "Return text and html tags exactly as they appear on the source."
         }
 
         # Profiles - FIXED: Load from config properly
@@ -343,7 +344,7 @@ class TranslatorGUI:
         """Configure the book title translation prompt"""
         dialog = tk.Toplevel(self.master)
         dialog.title("Configure Book Title Translation")
-        dialog.geometry("600x400")
+        dialog.geometry("950x700")
         dialog.transient(self.master)
         
         # Main frame
@@ -821,7 +822,7 @@ class TranslatorGUI:
         print("[DEBUG] GUI setup completed with config values loaded")  # Debug logging
         
         # Add initial log message
-        self.append_log("🚀 Glossarion v2.3.4 - Ready to use!")
+        self.append_log("🚀 Glossarion v2.3.5 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
 
     def force_retranslation(self):
@@ -3897,7 +3898,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time  # Add this import
     
-    print("🚀 Starting Glossarion v2.3.4...")
+    print("🚀 Starting Glossarion v2.3.5...")
     
     # Initialize splash screen (main thread only)
     splash_manager = None
