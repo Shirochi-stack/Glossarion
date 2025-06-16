@@ -1182,7 +1182,7 @@ def extract_chapters(zf, output_dir):
         print("❌ No chapters could be extracted!")
         return []
     
-    
+
     # Step 5: Create detailed chapter info file for debugging
     chapters_info_path = os.path.join(output_dir, 'chapters_info.json')
     chapters_info = []
@@ -4192,9 +4192,14 @@ def main(log_callback=None, stop_callback=None):
                 cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
                 cleaned = clean_ai_artifacts(cleaned, remove_artifacts=REMOVE_AI_ARTIFACTS)
                 
-                # Save the chapter
-                safe_title = make_safe_filename(chapter['title'], chap_num)
-                fname = f"response_{chap_num:03d}_{safe_title}.html"
+                # Save the chapter - preserve original filename structure
+                if 'original_basename' in chapter and chapter['original_basename']:
+                    # Use the original filename structure
+                    fname = f"response_{chapter['original_basename']}.html"
+                else:
+                    # Fallback to the current naming scheme
+                    safe_title = make_safe_filename(chapter['title'], chap_num)   
+                    fname = f"response_{chap_num:03d}_{safe_title}.html"
                 
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
                     f.write(cleaned)
