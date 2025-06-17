@@ -495,7 +495,7 @@ class TranslatorGUI:
         final_width = min(window_width, max_width)
         
         # KEEP THE EXISTING HEIGHT
-        final_height = current_height
+        final_height = current_height     
         
         # Set size and center
         x = (screen_width - final_width) // 2
@@ -1195,10 +1195,21 @@ class TranslatorGUI:
         """Open comprehensive glossary management dialog"""
         manager = tk.Toplevel(self.master)
         manager.title("Glossary Manager")
-        manager.geometry("1200x1550")
+        
+        # Get screen dimensions
+        screen_width = manager.winfo_screenwidth()
+        screen_height = manager.winfo_screenheight()
+        
+        # Set initial size and position
+        width, height = 0, 1550
+        x = (screen_width - width) // 2
+        y = max(20, (screen_height - height) // 2)
+        
+        manager.geometry(f"{width}x{height}+{x}+{y}")
+        manager.withdraw()
+        
         manager.transient(self.master)
         load_application_icon(manager, self.base_dir)
-        
         
         # Main container
         main_container = tk.Frame(manager)
@@ -1623,7 +1634,7 @@ class TranslatorGUI:
         
         # Auto-resize and center the dialog (up to 85% of screen height)
         self._auto_resize_dialog(manager, canvas, max_width_ratio=0.8, max_height_ratio=0.85)
-
+        manager.deiconify()
 
     def _setup_glossary_editor_tab(self, parent):
         """Set up the glossary editor/trimmer tab with improved functionality"""
@@ -3511,10 +3522,25 @@ class TranslatorGUI:
         """Open the Other Settings dialog with all advanced options in a grid layout"""
         top = tk.Toplevel(self.master)
         top.title("Other Settings")
-        top.geometry("900x1470")
+        
+        # Get screen dimensions
+        screen_width = top.winfo_screenwidth()
+        screen_height = top.winfo_screenheight()
+        
+        # Set initial size and center position BEFORE anything else
+        initial_width = 0
+        initial_height = 1460
+        x = (screen_width - initial_width) // 2
+        y = max(20, (screen_height - initial_height) // 2)
+        
+        # Set geometry with position
+        top.geometry(f"{initial_width}x{initial_height}+{x}+{y}")
+        
+        # Hide immediately after positioning
+        top.withdraw()
+        
         top.transient(self.master)
         load_application_icon(top, self.base_dir)
-        #top.grab_set()
         
         # Store reference to prevent garbage collection issues
         self._settings_window = top
@@ -3923,7 +3949,12 @@ class TranslatorGUI:
 
         tb.Button(button_container, text="❌ Cancel", command=lambda: [cleanup_bindings(), top.destroy()], 
                   bootstyle="secondary", width=20).pack(side=tk.LEFT, padx=5)
-                  
+        
+        # Show the window without calling auto_resize to avoid repositioning
+        top.after(50, lambda: [
+            top.update_idletasks(),
+            top.deiconify()
+        ])        
         # =================================================================
         # MOUSE WHEEL SCROLLING SUPPORT
         # ================================================================
