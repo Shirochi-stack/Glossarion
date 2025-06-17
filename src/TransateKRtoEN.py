@@ -3651,10 +3651,11 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     api_thread.daemon = True
     api_thread.start()
     
-    # Use chunk timeout if provided, otherwise use default
-    timeout = chunk_timeout if chunk_timeout else 300
-    check_interval = 0.5
-    elapsed = 0
+    # Use chunk timeout if provided, otherwise use a very long timeout
+    if chunk_timeout is None:
+        timeout = 3600  # 1 hour - effectively no timeout for retry purposes
+    else:
+        timeout = chunk_timeout
     
     while elapsed < timeout:
         try:
@@ -5095,7 +5096,7 @@ def main(log_callback=None, stop_callback=None):
                         # Get timeout settings
                         chunk_timeout = None
                         if os.getenv("RETRY_TIMEOUT", "1") == "1":
-                            chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "120"))
+                            chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "900"))
 
                         # Initialize result variable
                         result = None
