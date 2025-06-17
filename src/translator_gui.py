@@ -309,7 +309,7 @@ class TranslatorGUI:
             value=self.config.get('hide_image_translation_label', True)
         )
         self.chunk_timeout_var = tk.StringVar(
-            value=str(self.config.get('chunk_timeout', '300'))  # 5 minutes default
+            value=str(self.config.get('chunk_timeout', '900'))  # 15 minutes default
         )
         self.retry_timeout_var = tk.BooleanVar(
             value=self.config.get('retry_timeout', False)
