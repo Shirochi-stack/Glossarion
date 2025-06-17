@@ -3887,13 +3887,27 @@ def main(log_callback=None, stop_callback=None):
     if rng and re.match(r"^\d+\s*-\s*\d+$", rng):
         start, end = map(int, rng.split("-", 1))
         
-        # Log the detection result
-        if uses_zero_based:
-            print(f"📊 0-based novel detected")
-            print(f"📊 User range {start}-{end} will map to files {start-1}-{end-1}")
+        # Check if 0-based detection is disabled
+        disable_zero_detection = os.getenv("DISABLE_ZERO_DETECTION", "0") == "1"
+        
+        if disable_zero_detection:
+            # Use range as specified, no adjustment
+            print(f"📊 0-based detection disabled - using range as specified: {start}-{end}")
+            uses_zero_based = False
         else:
-            print(f"📊 1-based novel detected")
-            print(f"📊 Using range as specified: {start}-{end}")
+            # Existing detection logic
+            if chapters:
+                uses_zero_based = detect_novel_numbering(chapters)
+            else:
+                uses_zero_based = False
+                
+            # Log the detection result
+            if uses_zero_based:
+                print(f"📊 0-based novel detected")
+                print(f"📊 User range {start}-{end} will map to files {start-1}-{end-1}")
+            else:
+                print(f"📊 1-based novel detected")
+                print(f"📊 Using range as specified: {start}-{end}")
     else:
         start, end = None, None
 
@@ -5536,7 +5550,7 @@ def main(log_callback=None, stop_callback=None):
                 f.write(cleaned)
             
             final_title = c['title'] or safe_title
-            print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved Chapter {c['num']}: {final_title}")
+            print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
             
             # Update progress with completed status
             update_progress(prog, idx, actual_num, content_hash, fname, status="completed")
