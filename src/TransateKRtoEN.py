@@ -3651,11 +3651,18 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     api_thread.daemon = True
     api_thread.start()
     
-    # Use chunk timeout if provided, otherwise use a very long timeout
+    # Determine timeout based on whether retry is enabled
     if chunk_timeout is None:
-        timeout = 3600  # 1 hour - effectively no timeout for retry purposes
+        # No retry timeout - use a very long timeout (1 hour)
+        timeout = 3600
+        retry_enabled = False
     else:
+        # Use specified timeout for retry
         timeout = chunk_timeout
+        retry_enabled = True
+    
+    check_interval = 0.5
+    elapsed = 0
     
     while elapsed < timeout:
         try:
@@ -3664,8 +3671,8 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 raise result
             if isinstance(result, tuple):
                 api_result, api_time = result
-                # Check if it took too long
-                if chunk_timeout and api_time > chunk_timeout:
+                # Only check for slow response if retry is enabled
+                if retry_enabled and api_time > chunk_timeout:
                     raise UnifiedClientError(f"API call took {api_time:.1f}s (timeout: {chunk_timeout}s)")
                 return api_result
             return result
