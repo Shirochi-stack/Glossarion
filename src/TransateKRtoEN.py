@@ -70,7 +70,7 @@ class ChunkContextManager:
         total_chunks = len(self.current_chunks)
         
         # For user content: Include chapter info and first chunk sample
-        user_summary = f"[Chapter {self.chapter_num}: {self.chapter_title}]\n"
+        user_summary = f"[Chapter {self.actual_num}: {self.chapter_title}]\n"
         user_summary += f"[{total_chunks} chunks processed]\n"
         if self.current_chunks:
             first_chunk = self.current_chunks[0]['user']
@@ -81,7 +81,7 @@ class ChunkContextManager:
                 user_summary += first_chunk
         
         # For assistant content: Include translation summary
-        assistant_summary = f"[Chapter {self.chapter_num} Translation Complete]\n"
+        assistant_summary = f"[Chapter {self.actual_num} Translation Complete]\n"
         assistant_summary += f"[Translated in {total_chunks} chunks]\n"
         if self.current_chunks:
             # Include samples from beginning, middle, and end
@@ -109,7 +109,7 @@ class ChunkContextManager:
     def clear(self):
         """Clear the current chapter context"""
         self.current_chunks = []
-        self.chapter_num = None
+        self.actual_num = None
         self.chapter_title = None
 
 def clean_memory_artifacts(text):
@@ -179,12 +179,12 @@ def is_meaningful_text_content(html_content):
         print(f"Warning: Error checking text content: {e}")
         return True
         
-def make_safe_filename(title, chapter_num):
+def make_safe_filename(title, actual_num):
     """Create a safe filename that works across different filesystems"""
     
     # First, try to clean the title
     if not title:
-        return f"chapter_{chapter_num:03d}"
+        return f"chapter_{actual_num:03d}"
     
     # Normalize unicode
     title = unicodedata.normalize('NFC', str(title))
@@ -210,7 +210,7 @@ def make_safe_filename(title, chapter_num):
     
     # If title is empty after cleaning, use chapter number
     if not title or title == '_' * len(title):
-        title = f"chapter_{chapter_num:03d}"
+        title = f"chapter_{actual_num:03d}"
     
     return title
 
@@ -361,7 +361,7 @@ def extract_chapter_number_from_filename(filename):
 
     return None, None
     
-def process_chapter_images(chapter_html: str, chapter_num: int, image_translator: ImageTranslator, 
+def process_chapter_images(chapter_html: str, actual_num: int, image_translator: ImageTranslator, 
                          check_stop_fn=None) -> Tuple[str, Dict[str, str]]:
     """
     Process and translate images in a chapter
@@ -381,7 +381,7 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
     if not images:
         return chapter_html, {}
         
-    print(f"🖼️ Found {len(images)} images in chapter {chapter_num}")
+    print(f"🖼️ Found {len(images)} images in chapter {actual_num}")
     
     # Parse the HTML to modify it
     soup = BeautifulSoup(chapter_html, 'html.parser')
@@ -511,7 +511,7 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
                 translated_count += 1
                 
                 # Save individual translation file
-                trans_filename = f"ch{chapter_num:03d}_img{idx:02d}_translation.html"
+                trans_filename = f"ch{actual_num:03d}_img{idx:02d}_translation.html"
                 trans_filepath = os.path.join(image_translator.translated_images_dir, trans_filename)
                 
                 with open(trans_filepath, 'w', encoding='utf-8') as f:
@@ -519,10 +519,10 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
 <html>
 <head>
     <meta charset="utf-8"/>
-    <title>Chapter {chapter_num} - Image {idx} Translation</title>
+    <title>Chapter {actual_num} - Image {idx} Translation</title>
 </head>
 <body>
-    <h2>Chapter {chapter_num} - Image {idx}</h2>
+    <h2>Chapter {actual_num} - Image {idx}</h2>
     <p>Original: {os.path.basename(img_path)}</p>
     <hr/>
     {translation_div}
@@ -554,7 +554,7 @@ def process_chapter_images(chapter_html: str, chapter_num: int, image_translator
                 print(f"   🧹 Cleaned up progress for {len(completed_images)} completed images")
         
         # Save translation log
-        image_translator.save_translation_log(chapter_num, image_translations)
+        image_translator.save_translation_log(actual_num, image_translations)
         
         # Return updated HTML
         return str(soup), image_translations
@@ -647,7 +647,7 @@ def init_progress_tracking(payloads_dir):
     
     return prog, PROGRESS_FILE
 
-def check_chapter_status(prog, chapter_idx, chapter_num, content_hash, output_dir):
+def check_chapter_status(prog, chapter_idx, actual_num, content_hash, output_dir):
     """Check if a chapter needs translation with fallback"""
     # Try content hash first
     chapter_key = content_hash
@@ -659,7 +659,7 @@ def check_chapter_status(prog, chapter_idx, chapter_num, content_hash, output_di
         # FALLBACK: Try old index-based key
         old_key = str(chapter_idx)
         if old_key in prog["chapters"]:
-            print(f"[PROGRESS] Using legacy index-based tracking for chapter {chapter_num}")
+            print(f"[PROGRESS] Using legacy index-based tracking for chapter {actual_num}")
             chapter_info = prog["chapters"][old_key]
             # Migrate this entry to new system
             prog["chapters"][chapter_key] = chapter_info
@@ -676,7 +676,7 @@ def check_chapter_status(prog, chapter_idx, chapter_num, content_hash, output_di
         output_path = os.path.join(output_dir, output_file)
         if not os.path.exists(output_path):
             # File was deleted! Mark chapter as needing retranslation
-            print(f"⚠️ Output file missing for chapter {chapter_num}: {output_file}")
+            print(f"⚠️ Output file missing for chapter {actual_num}: {output_file}")
             print(f"🔄 Chapter {actual_num} will be retranslated")
             
             # ... rest of the function
@@ -687,14 +687,14 @@ def check_chapter_status(prog, chapter_idx, chapter_num, content_hash, output_di
                 with open(output_path, 'r', encoding='utf-8') as f:
                     content = f.read()
                     if len(content.strip()) < 100:
-                        print(f"⚠️ Output file for chapter {chapter_num} seems corrupted/empty")
+                        print(f"⚠️ Output file for chapter {actual_num} seems corrupted/empty")
                         return True, None, None
             except Exception as e:
-                print(f"⚠️ Error reading output file for chapter {chapter_num}: {e}")
+                print(f"⚠️ Error reading output file for chapter {actual_num}: {e}")
                 return True, None, None
             
             # Use the actual chapter number in the message
-            return False, f"Chapter {chapter_num} already translated (file exists: {output_file})", output_file
+            return False, f"Chapter {actual_num} already translated (file exists: {output_file})", output_file
     
     
     elif chapter_info.get("status") in ["in_progress", "file_deleted"]:
@@ -730,7 +730,7 @@ def check_chapter_status(prog, chapter_idx, chapter_num, content_hash, output_di
                     except:
                         return True, None, None
                     
-                    return False, f"Chapter {chapter_num} has same content as chapter {duplicate_info.get('chapter_num')} (already translated)", None
+                    return False, f"Chapter {actual_num} has same content as chapter {duplicate_info.get('actual_num')} (already translated)", None
                 else:
                     return True, None, None
     
@@ -746,7 +746,7 @@ def cleanup_missing_files(prog, output_dir):
         if output_file:
             output_path = os.path.join(output_dir, output_file)
             if not os.path.exists(output_path):
-                print(f"🧹 Found missing file for chapter {chapter_info.get('chapter_num', chapter_key)}: {output_file}")
+                print(f"🧹 Found missing file for chapter {chapter_info.get('actual_num', chapter_key)}: {output_file}")
                 
                 chapter_info["status"] = "file_deleted"
                 chapter_info["output_file"] = None
@@ -806,27 +806,27 @@ def migrate_progress_to_content_hash(prog, chapters):
     
     return prog
     
-def update_progress(prog, chapter_idx, chapter_num, content_hash, output_filename=None, status="completed"):
+def update_progress(prog, chapter_idx, actual_num, content_hash, output_filename=None, status="completed"):
     """Update progress tracking after successful translation"""
     # OLD: chapter_key = str(chapter_idx)
     chapter_key = content_hash  # NEW: Use content hash as key
     
     prog["chapters"][chapter_key] = {
         "chapter_idx": chapter_idx,  # Store idx for reference
-        "chapter_num": chapter_num,
+        "actual_num": actual_num,
         "content_hash": content_hash,
         "output_file": output_filename,
         "status": status,
         "timestamp": time.time(),
         # display info for GUI
-        "display_name": f"Chapter {chapter_num}",  
+        "display_name": f"Chapter {actual_num}",  
         "file_basename": output_filename.replace('response_', '').replace('.html', '') if output_filename else None
     }
     
     if output_filename and status == "completed":
         prog["content_hashes"][content_hash] = {
             "chapter_idx": chapter_idx,
-            "chapter_num": chapter_num,
+            "actual_num": actual_num,
             "output_file": output_filename
         }
     
@@ -842,7 +842,7 @@ def cleanup_progress_tracking(prog, output_dir):
             if not os.path.exists(output_path):
                 chapter_info["status"] = "file_missing"
                 cleaned_count += 1
-                print(f"🧹 Marked chapter {chapter_info.get('chapter_num', chapter_key)} as missing (file not found: {chapter_info['output_file']})")
+                print(f"🧹 Marked chapter {chapter_info.get('actual_num', chapter_key)} as missing (file not found: {chapter_info['output_file']})")
     
     if cleaned_count > 0:
         print(f"🧹 Found {cleaned_count} chapters with missing files")
@@ -1697,6 +1697,7 @@ def _extract_all_chapters_comprehensive(zf):
     
     # Process ALL files
     chapter_num = 0
+    actual_num = 0
     for idx, file_path in enumerate(all_html_files):
         try:
             # Check if we should skip
@@ -1803,8 +1804,8 @@ def _extract_all_chapters_comprehensive(zf):
             
             # Store chapter
             chapter_info = {
-                "num": chapter_num,
-                "title": chapter_title or f"Chapter {chapter_num}",
+                "num": actual_num,
+                "title": chapter_title or f"Chapter {actual_num}",
                 "body": content_html,
                 "filename": file_path,
                 "original_basename": os.path.splitext(os.path.basename(file_path))[0],
@@ -1821,13 +1822,13 @@ def _extract_all_chapters_comprehensive(zf):
             
             # Log what we found
             if is_image_only:
-                print(f"[{chapter_num:04d}] 📸 Image-only chapter: {chapter_title} ({len(images)} images)")
+                print(f"[{actual_num:04d}] 📸 Image-only chapter: {chapter_title} ({len(images)} images)")
             elif len(images) > 0 and len(content_text) >= 500:
-                print(f"[{chapter_num:04d}] 📖📸 Mixed chapter: {chapter_title} ({len(content_text)} chars, {len(images)} images)")
+                print(f"[{actual_num:04d}] 📖📸 Mixed chapter: {chapter_title} ({len(content_text)} chars, {len(images)} images)")
             elif len(content_text) < 50:
-                print(f"[{chapter_num:04d}] 📄 Empty/placeholder: {chapter_title}")
+                print(f"[{actual_num:04d}] 📄 Empty/placeholder: {chapter_title}")
             else:
-                print(f"[{chapter_num:04d}] 📖 Text chapter: {chapter_title} ({len(content_text)} chars)")
+                print(f"[{actual_num:04d}] 📖 Text chapter: {chapter_title} ({len(content_text)} chars)")
                 
         except Exception as e:
             print(f"[ERROR] Failed to process {file_path}: {e}")
@@ -4552,20 +4553,20 @@ def main(log_callback=None, stop_callback=None):
                     fname = f"response_{chapter['original_basename']}.html"
                 else:
                     # Fallback to the current naming scheme
-                    safe_title = make_safe_filename(chapter['title'], chap_num)   
-                    if isinstance(chap_num, float):
-                        fname = f"response_{chap_num:06.1f}_{safe_title}.html"
+                    safe_title = make_safe_filename(chapter['title'], actual_num)   
+                    if isinstance(actual_num, float):
+                        fname = f"response_{actual_num:06.1f}_{safe_title}.html"
                     else:
-                        fname = f"response_{chap_num:03d}_{safe_title}.html"
+                        fname = f"response_{actual_num:03d}_{safe_title}.html"
                 
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
                     f.write(cleaned)
                 
-                print(f"💾 Saved Chapter {chap_num}: {fname} ({len(cleaned)} chars)")
+                print(f"💾 Saved Chapter {actual_num}: {fname} ({len(cleaned)} chars)")
                 
                 # Update progress
                 with progress_lock:
-                    update_progress(prog, idx, chap_num, content_hash, fname, status="completed")
+                    update_progress(prog, idx, actual_num, content_hash, fname, status="completed")
                     save_progress()
                     
                     # Update global counters
@@ -4579,15 +4580,15 @@ def main(log_callback=None, stop_callback=None):
                     # For now, we'll skip history updates in parallel mode
                     pass
                 
-                print(f"✅ Chapter {chap_num} completed successfully")
-                return True, chap_num
+                print(f"✅ Chapter {actual_num} completed successfully")
+                return True, actual_num
                 
             except Exception as e:
-                print(f"❌ Chapter {chap_num} failed: {e}")
+                print(f"❌ Chapter {actual_num} failed: {e}")
                 with progress_lock:
-                    update_progress(prog, idx, chap_num, content_hash, output_filename=None, status="failed")
+                    update_progress(prog, idx, actual_num, content_hash, output_filename=None, status="failed")
                     save_progress()
-                return False, chap_num
+                return False, actual_num
         
         # Process chapters in parallel batches
         total_to_process = len(chapters_to_translate)
