@@ -992,8 +992,10 @@ class TranslatorGUI:
                         
                         # For in_progress chapters, the stored values might already be correct
                         if chapter_info.get("status") == "in_progress":
-                            # Don't adjust for in_progress - the stored values are already chapter numbers
-                            actual_num = extracted_num
+                            # Just use chapter_idx for progress tracking
+                            actual_num = chapter_info.get("chapter_idx", stored_num)
+                            chapters_with_nums.append((chapter_key, chapter_info, actual_num))
+                            continue  # Skip all the extraction logic
                         else:
                             # For completed chapters, apply 0-based adjustment if needed
                             if uses_zero_based:
@@ -1010,20 +1012,27 @@ class TranslatorGUI:
             # For in_progress chapters without output files, use chapter_idx
             if not found:
                 if chapter_info.get("status") == "in_progress":
-                    # For in_progress, chapter_idx is the 0-based index
-                    chapter_idx = chapter_info.get("chapter_idx")
-                    if chapter_idx is not None:
-                        # Always add 1 to convert from 0-based index to chapter number
-                        actual_num = chapter_idx + 1  # 250 → 251
-                    else:
-                        actual_num = stored_num
-                else:
-                    # For completed chapters, the stored_num should be correct
-                    actual_num = stored_num
+                    # Store the correct chapter number immediately
+                    final_num = chapter_info.get("actual_num", 0)
+                    if final_num == 0:
+                        # Use chapter_idx which is already the correct number
+                        chapter_idx = chapter_info.get("chapter_idx")
+                        if chapter_idx is not None:
+                            final_num = chapter_idx
+                        else:
+                            final_num = stored_num
+                    
+                    # Debug output
+                    print(f"[DEBUG] In-progress chapter final_num: {final_num}")
+                    
+                    # Append with the final number
+                    chapters_with_nums.append((chapter_key, chapter_info, final_num))
+                    continue  # Skip the rest of the loop
             
             # Debug output for in_progress chapters
             if chapter_info.get("status") == "in_progress":
-                print(f"[DEBUG] After append, actual_num in tuple: {chapters_with_nums[-1][2]}")
+                if chapters_with_nums:
+                    print(f"[DEBUG] After append, actual_num in tuple: {chapters_with_nums[-1][2]}")
                 print(f"[DEBUG] In-progress chapter:")
                 print(f"  - chapter_key: {chapter_key}")
                 print(f"  - stored_num: {stored_num}")
@@ -1033,6 +1042,27 @@ class TranslatorGUI:
                 print(f"  - uses_zero_based: {uses_zero_based}")
 
             chapters_with_nums.append((chapter_key, chapter_info, actual_num))
+            
+        # After collecting all chapters_with_nums, detect duplicates
+        seen_chapter_indices = {}
+        final_chapters = []
+
+        for chapter_key, chapter_info, actual_num in chapters_with_nums:
+            chapter_idx = chapter_info.get("chapter_idx", None)
+            
+            # Skip entries without chapter_idx or use actual_num as key
+            if chapter_idx is None:
+                chapter_idx = actual_num
+            
+            # Check if we've seen this chapter_idx before
+            if chapter_idx in seen_chapter_indices:
+                # Skip this duplicate
+                continue
+            else:
+                seen_chapter_indices[chapter_idx] = (chapter_key, chapter_info, actual_num)
+                final_chapters.append((chapter_key, chapter_info, actual_num))
+
+        chapters_with_nums = final_chapters 
         
         # Sort by actual number
         chapters_with_nums.sort(key=lambda x: x[2])
