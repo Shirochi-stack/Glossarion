@@ -13,6 +13,7 @@ import threading
 import re
 import unicodedata
 import time
+import html as html_lib
 
 # Global flag to allow stopping the scan externally
 _stop_flag = False
@@ -22,170 +23,242 @@ def stop_scan():
     global _stop_flag
     _stop_flag = True
 
+# Constants
+DASH_CHARS = {
+    '-', '–', '—', '―', '⸺', '⸻', '﹘', '﹣', '－', '⁃', '‐', '‑', '‒',
+    '_', '━', '─', '═', '╌', '╍', '┄', '┅', '┈', '┉', '⎯', '⏤', '＿',
+    '＊', '*', '~', '～', '∼', '〜', 'ㅡ'  # Added Korean dash character
+}
+
+COMMON_WORDS = {
+    'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+    'of', 'with', 'by', 'from', 'up', 'about', 'into', 'through', 'after',
+    'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had',
+    'do', 'does', 'did', 'will', 'would', 'should', 'could', 'may', 'might',
+    'chapter', 'each', 'person', 'persons'
+}
+
+# Korean dash patterns to EXCLUDE from detection
+KOREAN_DASH_PATTERNS = [
+    r'[ㅡ―—–\-]+',  # Korean dashes and similar
+    r'[\u2014\u2015\u2500-\u257F]+',  # Box drawing characters often used in Korean text
+    r'[\u3161\u3163\u3164]+',  # Korean filler characters
+]
+
+# Extended Korean separator characters to exclude from non-English detection
+KOREAN_SEPARATOR_CHARS = {
+    'ㅡ',  # Korean dash/separator (U+3161)
+    '―',   # Horizontal bar (U+2015)
+    '—',   # Em dash (U+2014)
+    '–',   # En dash (U+2013)
+    '［', '］',  # Full-width brackets
+    '【', '】',  # Black lenticular brackets
+    '〔', '〕',  # Tortoise shell brackets
+    '《', '》',  # Double angle brackets
+    '「', '」',  # Corner brackets
+    '『', '』',  # White corner brackets
+}
+
 def extract_text_from_html(file_path):
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
         soup = BeautifulSoup(f, "html.parser")
         return soup.get_text(separator='\n', strip=True)
 
-def is_similar(text1, text2, threshold=0.85):
-    return SequenceMatcher(None, text1, text2).ratio() >= threshold
+def is_dash_separator_line(line):
+    """Check if a line consists only of dash-like punctuation characters"""
+    stripped = line.strip()
+    if not stripped:
+        return False
+    
+    # Check if it's a Korean dash pattern (should NOT be flagged)
+    for pattern in KOREAN_DASH_PATTERNS:
+        if re.match(f'^{pattern}$', stripped):
+            return False
+    
+    # Check if all non-space characters are in our dash set
+    non_space_chars = [c for c in stripped if not c.isspace()]
+    if not non_space_chars:
+        return False
+    
+    # Check various dash patterns
+    if all(c in DASH_CHARS for c in non_space_chars):
+        return True
+    
+    # Check for repeated patterns
+    if re.match(r'^[\s\-–—―_*~ㅡ]+$', stripped):
+        return True
+    
+    # Check for patterns like "---", "***", "___", "~~~" (3 or more)
+    if re.match(r'^(\-{3,}|_{3,}|\*{3,}|~{3,}|–{2,}|—{2,}|―{2,}|ㅡ{2,})$', stripped):
+        return True
+    
+    # Check for spaced patterns like "- - -", "* * *"
+    if re.match(r'^([\-–—―_*~ㅡ]\s*){3,}$', stripped):
+        return True
+    
+    return False
+
+def filter_dash_lines(text):
+    """Filter out dash separator lines from text"""
+    lines = text.split('\n')
+    return '\n'.join(line for line in lines if not is_dash_separator_line(line))
 
 def has_no_spacing_or_linebreaks(text, space_threshold=0.01):
-    space_ratio = text.count(" ") / max(1, len(text))
-    newline_count = text.count("\n")
+    filtered_text = filter_dash_lines(text)
+    space_ratio = filtered_text.count(" ") / max(1, len(filtered_text))
+    newline_count = filtered_text.count("\n")
     return space_ratio < space_threshold or newline_count == 0
 
 def has_repeating_sentences(text, min_repeats=10):
-    # More sophisticated repetition detection
-    sentences = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip() and len(s.strip()) > 20]
+    filtered_text = filter_dash_lines(text)
+    sentences = [s.strip() for s in re.split(r'[.!?]+', filtered_text) 
+                 if s.strip() and len(s.strip()) > 20]
+    
     if len(sentences) < min_repeats:
         return False
     
-    # Count exact repetitions
     counter = Counter(sentences)
     
-    # Check for truly repetitive content (not just common phrases)
     for sent, count in counter.items():
-        # Ignore common dialogue patterns and short sentences
         if count >= min_repeats and len(sent) > 50:
-            # Check if it's not just dialogue attribution
             if not any(pattern in sent.lower() for pattern in ['said', 'asked', 'replied', 'thought']):
                 return True
     return False
 
-def detect_non_english_content(text):
-    """Detect ONLY non-Latin script characters (not romanized text)"""
-    issues = []
+def is_korean_separator_pattern(text):
+    """Check if text is a Korean separator pattern like [ㅡㅡㅡㅡㅡ]"""
+    # Remove brackets and spaces
+    cleaned = text.strip().strip('[]').strip()
     
-    # Define ALL non-Latin script Unicode ranges with friendly names
+    # Check if it's only Korean separator characters
+    if not cleaned:
+        return False
+    
+    # Check if all characters are Korean separators
+    return all(c in KOREAN_SEPARATOR_CHARS or c.isspace() for c in cleaned)
+
+def detect_non_english_content(text):
+    """Detect ONLY non-Latin script characters (not romanized text), excluding Korean separators"""
+    issues = []
+    filtered_text = filter_dash_lines(text)
+    
+    # Define non-Latin script ranges
     non_latin_ranges = [
-        # Korean
-        (0xAC00, 0xD7AF, 'Korean'),
-        (0x1100, 0x11FF, 'Korean'),
-        (0x3130, 0x318F, 'Korean'),
-        (0xA960, 0xA97F, 'Korean'),
-        (0xD7B0, 0xD7FF, 'Korean'),
-        
-        # Japanese
-        (0x3040, 0x309F, 'Japanese'),
-        (0x30A0, 0x30FF, 'Japanese'),
-        (0x31F0, 0x31FF, 'Japanese'),
-        (0xFF65, 0xFF9F, 'Japanese'),
-        
-        # Chinese
-        (0x4E00, 0x9FFF, 'Chinese'),
-        (0x3400, 0x4DBF, 'Chinese'),
-        (0x20000, 0x2A6DF, 'Chinese'),
-        (0x2A700, 0x2B73F, 'Chinese'),
-        
-        # Other scripts
-        (0x0590, 0x05FF, 'Hebrew'),
-        (0x0600, 0x06FF, 'Arabic'),
-        (0x0700, 0x074F, 'Syriac'),
-        (0x0750, 0x077F, 'Arabic'),
-        (0x0E00, 0x0E7F, 'Thai'),
-        (0x0400, 0x04FF, 'Cyrillic'),
-        (0x0500, 0x052F, 'Cyrillic'),
+        (0xAC00, 0xD7AF, 'Korean'), (0x1100, 0x11FF, 'Korean'),
+        (0x3130, 0x318F, 'Korean'), (0xA960, 0xA97F, 'Korean'),
+        (0xD7B0, 0xD7FF, 'Korean'), (0x3040, 0x309F, 'Japanese'),
+        (0x30A0, 0x30FF, 'Japanese'), (0x31F0, 0x31FF, 'Japanese'),
+        (0xFF65, 0xFF9F, 'Japanese'), (0x4E00, 0x9FFF, 'Chinese'),
+        (0x3400, 0x4DBF, 'Chinese'), (0x20000, 0x2A6DF, 'Chinese'),
+        (0x2A700, 0x2B73F, 'Chinese'), (0x0590, 0x05FF, 'Hebrew'),
+        (0x0600, 0x06FF, 'Arabic'), (0x0700, 0x074F, 'Syriac'),
+        (0x0750, 0x077F, 'Arabic'), (0x0E00, 0x0E7F, 'Thai'),
+        (0x0400, 0x04FF, 'Cyrillic'), (0x0500, 0x052F, 'Cyrillic'),
     ]
     
-    # Check each character in the text
     script_chars = {}
     total_non_latin = 0
     
-    for char in text:
-        code_point = ord(char)
-        for start, end, script_name in non_latin_ranges:
-            if start <= code_point <= end:
-                total_non_latin += 1
-                if script_name not in script_chars:
-                    script_chars[script_name] = {'count': 0, 'examples': []}
-                script_chars[script_name]['count'] += 1
-                if len(script_chars[script_name]['examples']) < 10:
-                    script_chars[script_name]['examples'].append(char)
-                break
+    # Split text into potential separator patterns and other content
+    # This regex finds patterns like [ㅡㅡㅡ] or similar
+    separator_pattern = r'\[[ㅡ\s―—–\-［］【】〔〕《》「」『』]+\]'
+    parts = re.split(f'({separator_pattern})', filtered_text)
     
-    # If ANY non-Latin characters found, report them
+    for part in parts:
+        # Skip if this part is a Korean separator pattern
+        if is_korean_separator_pattern(part):
+            continue
+        
+        # Check characters in this part
+        for char in part:
+            # Skip Korean separator characters
+            if char in KOREAN_SEPARATOR_CHARS:
+                continue
+            
+            # Skip whitespace and common punctuation
+            if char.isspace() or char in '[](){}.,;:!?\'"-':
+                continue
+                
+            code_point = ord(char)
+            for start, end, script_name in non_latin_ranges:
+                if start <= code_point <= end:
+                    total_non_latin += 1
+                    if script_name not in script_chars:
+                        script_chars[script_name] = {'count': 0, 'examples': []}
+                    script_chars[script_name]['count'] += 1
+                    if len(script_chars[script_name]['examples']) < 10:
+                        script_chars[script_name]['examples'].append(char)
+                    break
+    
     if total_non_latin > 0:
         for script, data in script_chars.items():
             examples = ''.join(data['examples'][:5])
             count = data['count']
-            # Create user-friendly issue description
             issues.append(f"{script}_text_found_{count}_chars_[{examples}]")
     
     return len(issues) > 0, issues
 
 def extract_content_fingerprint(text):
     """Extract key sentences that can identify duplicate content"""
-    # Remove common headers/footers
-    lines = text.split('\n')
+    lines = [line.strip() for line in text.split('\n') 
+             if len(line.strip()) > 50 and not is_dash_separator_line(line)]
     
-    # Filter out very short lines (likely headers/navigation)
-    content_lines = [line.strip() for line in lines if len(line.strip()) > 50]
-    
-    if len(content_lines) < 5:
+    if len(lines) < 5:
         return ""
     
     # Take first, middle, and last substantial sentences
     fingerprint_lines = []
-    if len(content_lines) >= 3:
-        fingerprint_lines.append(content_lines[0])  # First
-        fingerprint_lines.append(content_lines[len(content_lines)//2])  # Middle
-        fingerprint_lines.append(content_lines[-1])  # Last
+    if len(lines) >= 3:
+        fingerprint_lines = [lines[0], lines[len(lines)//2], lines[-1]]
     else:
-        fingerprint_lines = content_lines[:3]
+        fingerprint_lines = lines[:3]
     
     return ' '.join(fingerprint_lines).lower()
 
-def generate_content_hashes(text):
-    """Generate multiple hashes for better duplicate detection - ENHANCED"""
-    # 1. Raw hash - exact content match
-    raw_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
-    
-    # 2. Normalized hash - removes common variations (MORE AGGRESSIVE)
+def normalize_text(text):
+    """Normalize text for comparison"""
     normalized = text.lower().strip()
     
-    # Remove ALL chapter indicators more aggressively
-    normalized = re.sub(r'chapter\s*\d+\s*:?\s*', '', normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r'第\s*\d+\s*章', '', normalized)  # Chinese chapter markers
-    normalized = re.sub(r'제\s*\d+\s*장', '', normalized)  # Korean chapter markers
-    normalized = re.sub(r'chapter\s+[ivxlcdm]+\s*:?\s*', '', normalized, flags=re.IGNORECASE)  # Roman numerals
-    normalized = re.sub(r'\bch\.?\s*\d+\s*:?\s*', '', normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r'^\s*\d+\s*\.?\s*', '', normalized, flags=re.MULTILINE)  # Line-starting numbers
+    # Remove chapter indicators
+    patterns = [
+        r'chapter\s*\d+\s*:?\s*', r'第\s*\d+\s*章', r'제\s*\d+\s*장',
+        r'chapter\s+[ivxlcdm]+\s*:?\s*', r'\bch\.?\s*\d+\s*:?\s*',
+        r'^\s*\d+\s*\.?\s*', r'response_\d+_.*?\.html',
+        r'\d{4}-\d{2}-\d{2}', r'\d{2}:\d{2}:\d{2}', r'<[^>]+>'
+    ]
     
-    # Remove file references
-    normalized = re.sub(r'response_\d+_.*?\.html', '', normalized, flags=re.IGNORECASE)
-    
-    # Remove timestamps if any
-    normalized = re.sub(r'\d{4}-\d{2}-\d{2}', '', normalized)
-    normalized = re.sub(r'\d{2}:\d{2}:\d{2}', '', normalized)
-    
-    # Remove HTML tags if any leaked through
-    normalized = re.sub(r'<[^>]+>', '', normalized)
+    for pattern in patterns:
+        normalized = re.sub(pattern, '', normalized, flags=re.IGNORECASE | re.MULTILINE)
     
     # Normalize whitespace and punctuation
     normalized = re.sub(r'\s+', ' ', normalized)
     normalized = re.sub(r'[^\w\s]', '', normalized)
     
+    return normalized
+
+def generate_content_hashes(text):
+    """Generate multiple hashes for better duplicate detection"""
+    normalized = normalize_text(text)
+    
+    # 1. Raw hash
+    raw_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
+    
+    # 2. Normalized hash
     normalized_hash = hashlib.md5(normalized.encode('utf-8')).hexdigest()
     
-    # 3. Content fingerprint - key sentences
+    # 3. Content fingerprint
     fingerprint = extract_content_fingerprint(text)
     fingerprint_hash = hashlib.md5(fingerprint.encode('utf-8')).hexdigest() if fingerprint else None
     
-    # 4. Word frequency hash - catches reordered content
+    # 4. Word frequency hash
     words = re.findall(r'\w+', normalized.lower())
     word_freq = Counter(words)
-    # Take top 50 most common words (excluding very common ones)
-    common_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 
-                    'of', 'with', 'by', 'from', 'up', 'about', 'into', 'through', 'after',
-                    'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had',
-                    'do', 'does', 'did', 'will', 'would', 'should', 'could', 'may', 'might',
-                    'chapter', 'each', 'person', 'persons'}  # Added common title words
-    significant_words = [(w, c) for w, c in word_freq.most_common(100) if w not in common_words][:50]
+    significant_words = [(w, c) for w, c in word_freq.most_common(100) 
+                        if w not in COMMON_WORDS][:50]
     word_sig = ' '.join([f"{w}:{c}" for w, c in significant_words])
     word_hash = hashlib.md5(word_sig.encode('utf-8')).hexdigest() if word_sig else None
     
-    # 5. NEW: First 1000 chars hash (to catch identical beginnings)
+    # 5. First chunk hash
     first_chunk = normalized[:1000] if len(normalized) > 1000 else normalized
     first_chunk_hash = hashlib.md5(first_chunk.encode('utf-8')).hexdigest()
     
@@ -202,7 +275,6 @@ def extract_chapter_info(filename, text):
     chapter_num = None
     chapter_title = ""
     
-    # Try to extract from filename
     m = re.match(r"response_(\d+)_(.+?)\.html", filename)
     if m:
         chapter_num = int(m.group(1))
@@ -212,14 +284,11 @@ def extract_chapter_info(filename, text):
 
 def calculate_similarity_ratio(text1, text2):
     """Calculate similarity with optimizations for large texts"""
-    # Quick length check
     len_ratio = len(text1) / max(1, len(text2))
     if len_ratio < 0.7 or len_ratio > 1.3:
-        return 0.0  # Too different in length
+        return 0.0
     
-    # For very long texts, sample portions
     if len(text1) > 10000:
-        # Sample beginning, middle, and end
         sample_size = 3000
         samples1 = [
             text1[:sample_size],
@@ -231,45 +300,427 @@ def calculate_similarity_ratio(text1, text2):
             text2[len(text2)//2 - sample_size//2:len(text2)//2 + sample_size//2],
             text2[-sample_size:]
         ]
-        # Average similarity of samples
         similarities = [SequenceMatcher(None, s1, s2).ratio() for s1, s2 in zip(samples1, samples2)]
         return sum(similarities) / len(similarities)
     else:
         return SequenceMatcher(None, text1, text2).ratio()
 
+def extract_chapter_title(text):
+    """Extract chapter title from text"""
+    patterns = [
+        r'Chapter\s+\d+\s*:\s*([^\n\r]+)',
+        r'Chapter\s+\d+\s+([^\n\r]+)',
+        r'第\s*\d+\s*章\s*[:：]?\s*([^\n\r]+)',
+        r'제\s*\d+\s*장\s*[:：]?\s*([^\n\r]+)',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text[:500], re.IGNORECASE)
+        if match:
+            title = match.group(1).strip()
+            title = re.sub(r'\s+', ' ', title)
+            title = title.split('.')[0].split('The')[0].strip()
+            return title[:100] if len(title) > 100 else title
+    
+    return None
+
+def detect_duplicates(results, log, stop_flag, aggressive_mode):
+    """Detect duplicates using multiple strategies"""
+    content_hashes = {'raw': {}, 'normalized': {}, 'fingerprint': {}, 
+                     'word_freq': {}, 'first_chunk': {}}
+    duplicate_groups = {}
+    near_duplicate_groups = {}
+    next_group_id = 0
+    near_duplicate_next_id = 1000
+    
+    # Build hash dictionaries
+    for idx, result in enumerate(results):
+        hashes = result['hashes']
+        file_info = {
+            'filename': result['filename'],
+            'idx': idx,
+            'chapter_num': result['chapter_num'],
+            'raw_text': result['raw_text'],
+            'hashes': hashes
+        }
+        
+        for hash_type, hash_value in hashes.items():
+            if hash_value:
+                if hash_value not in content_hashes[hash_type]:
+                    content_hashes[hash_type][hash_value] = []
+                content_hashes[hash_type][hash_value].append(file_info)
+    
+    # Multiple levels of duplicate detection
+    duplicate_detection_levels = [
+        ("exact content", 'raw', lambda files: len(files) > 1),
+        ("normalized content", 'normalized', lambda files: len(files) > 1),
+        ("first 1000 characters", 'first_chunk', lambda files: len(files) > 1),
+        ("content fingerprints", 'fingerprint', lambda files: len(files) > 1),
+        ("word frequency patterns", 'word_freq', lambda files: len(files) > 1)
+    ]
+    
+    for level_name, hash_type, condition in duplicate_detection_levels:
+        log(f"🔍 Checking {level_name}...")
+        for hash_value, files in content_hashes[hash_type].items():
+            if hash_value and condition(files):
+                process_duplicate_group(files, duplicate_groups, next_group_id, log)
+                next_group_id = max(duplicate_groups.values(), default=-1) + 1
+    
+    # Deep similarity check
+    similarity_threshold = 0.75 if aggressive_mode else 0.85
+    perform_deep_similarity_check(results, duplicate_groups, similarity_threshold, 
+                                 next_group_id, log, stop_flag)
+    
+    # Additional checks for specific patterns
+    check_consecutive_chapters(results, duplicate_groups, aggressive_mode, log)
+    check_specific_patterns(results, duplicate_groups, log)
+    
+    return duplicate_groups, near_duplicate_groups
+
+def process_duplicate_group(files, duplicate_groups, next_group_id, log):
+    """Process a group of duplicate files"""
+    existing_group = None
+    for file_info in files:
+        if file_info['filename'] in duplicate_groups:
+            existing_group = duplicate_groups[file_info['filename']]
+            break
+    
+    group_id = existing_group if existing_group is not None else next_group_id
+    
+    for file_info in files:
+        duplicate_groups[file_info['filename']] = group_id
+    
+    if existing_group is None:
+        log(f"   └─ Found duplicate group: {[f['filename'] for f in files]}")
+
+def perform_deep_similarity_check(results, duplicate_groups, threshold, next_group_id, log, stop_flag):
+    """Perform deep similarity analysis between files"""
+    log(f"🔍 Deep similarity analysis (threshold: {int(threshold*100)}%)...")
+    
+    for i in range(len(results)):
+        if stop_flag and stop_flag():
+            log("⛔ Similarity check interrupted by user.")
+            break
+        
+        if i % 10 == 0:
+            log(f"   Progress: {i}/{len(results)} files analyzed...")
+        
+        if results[i]['filename'] in duplicate_groups:
+            continue
+        
+        for j in range(i + 1, len(results)):
+            if results[j]['filename'] in duplicate_groups:
+                continue
+            
+            similarity = calculate_similarity_ratio(results[i]['raw_text'], results[j]['raw_text'])
+            
+            if similarity > threshold:
+                if results[i]['filename'] not in duplicate_groups and results[j]['filename'] not in duplicate_groups:
+                    duplicate_groups[results[i]['filename']] = next_group_id
+                    duplicate_groups[results[j]['filename']] = next_group_id
+                    next_group_id += 1
+                
+                log(f"   └─ Found similarity match: {results[i]['filename']} ≈ {results[j]['filename']} ({int(similarity*100)}%)")
+
+def check_consecutive_chapters(results, duplicate_groups, aggressive_mode, log):
+    """Check for consecutive chapters with same title"""
+    log("🔍 Checking consecutive same-titled chapters...")
+    
+    # Extract chapter titles
+    for result in results:
+        result['chapter_title'] = extract_chapter_title(result['raw_text'])
+    
+    # Sort by chapter number
+    chapter_sorted = [r for r in results if r['chapter_num'] is not None and r['chapter_title']]
+    chapter_sorted.sort(key=lambda x: x['chapter_num'])
+    
+    for i in range(len(chapter_sorted) - 1):
+        current = chapter_sorted[i]
+        
+        for j in range(i + 1, min(i + 4, len(chapter_sorted))):
+            next_chapter = chapter_sorted[j]
+            
+            if (current['chapter_title'] == next_chapter['chapter_title'] and
+                abs(current['chapter_num'] - next_chapter['chapter_num']) <= 3 and
+                current['filename'] not in duplicate_groups and 
+                next_chapter['filename'] not in duplicate_groups):
+                
+                # Compare content
+                text1 = re.sub(r'Chapter\s+\d+\s*:?\s*', '', current['raw_text'][:2000], flags=re.IGNORECASE)
+                text2 = re.sub(r'Chapter\s+\d+\s*:?\s*', '', next_chapter['raw_text'][:2000], flags=re.IGNORECASE)
+                
+                similarity = calculate_similarity_ratio(text1, text2)
+                similarity_threshold = 0.70 if aggressive_mode else 0.80
+                
+                if similarity > similarity_threshold:
+                    group_id = max(duplicate_groups.values(), default=-1) + 1
+                    duplicate_groups[current['filename']] = group_id
+                    duplicate_groups[next_chapter['filename']] = group_id
+                    log(f"   └─ Chapters {current['chapter_num']} & {next_chapter['chapter_num']} marked as duplicates (same title, {int(similarity*100)}% similar)")
+
+def check_specific_patterns(results, duplicate_groups, log):
+    """Check for specific known duplicate patterns"""
+    log("🔍 Checking for known duplicate patterns...")
+    
+    # Check for specific content patterns
+    chapel_pattern = r"under the pretense of offering a prayer.*?visited the chapel.*?hiding while holding.*?breath.*?watching the scene"
+    
+    for i in range(len(results)):
+        if results[i]['filename'] in duplicate_groups:
+            continue
+        
+        if re.search(chapel_pattern, results[i]['preview'], re.IGNORECASE | re.DOTALL):
+            for j in range(i + 1, len(results)):
+                if results[j]['filename'] in duplicate_groups:
+                    continue
+                
+                if re.search(chapel_pattern, results[j]['preview'], re.IGNORECASE | re.DOTALL):
+                    group_id = max(duplicate_groups.values(), default=-1) + 1
+                    duplicate_groups[results[i]['filename']] = group_id
+                    duplicate_groups[results[j]['filename']] = group_id
+                    log(f"   └─ Pattern match found: {results[i]['filename']} ≈ {results[j]['filename']}")
+
+def generate_reports(results, folder_path, log):
+    """Generate output reports"""
+    output_dir = os.path.basename(folder_path.rstrip('/\\')) + "_Scan Report"
+    output_path = os.path.join(folder_path, output_dir)
+    os.makedirs(output_path, exist_ok=True)
+    
+    # Save JSON report
+    with open(os.path.join(output_path, "validation_results.json"), "w", encoding="utf-8") as jf:
+        json.dump(results, jf, indent=2, ensure_ascii=False)
+    
+    # Save CSV report
+    with open(os.path.join(output_path, "validation_results.csv"), "w", encoding="utf-8", newline="") as cf:
+        writer = csv.DictWriter(cf, fieldnames=["file_index", "filename", "score", "issues"])
+        writer.writeheader()
+        for row in results:
+            writer.writerow({
+                "file_index": row["file_index"],
+                "filename": row["filename"],
+                "score": row["score"],
+                "issues": "; ".join(row["issues"])
+            })
+    
+    # Generate HTML report
+    generate_html_report(results, output_path)
+    
+    log(f"\n✅ Scan complete!")
+    log(f"📁 Reports saved to: {output_path}")
+
+def generate_html_report(results, output_path):
+    """Generate HTML report"""
+    issue_counts = {}
+    for r in results:
+        for issue in r['issues']:
+            issue_type = issue.split(':')[0] if ':' in issue else issue.split('_')[0]
+            issue_counts[issue_type] = issue_counts.get(issue_type, 0) + 1
+    
+    html = f"""<html>
+<head>
+    <meta charset='utf-8'>
+    <title>Translation QA Report</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; }}
+        table {{ border-collapse: collapse; width: 100%; margin-top: 20px; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+        th {{ background-color: #4CAF50; color: white; }}
+        tr:nth-child(even) {{ background-color: #f2f2f2; }}
+        .error {{ background-color: #ffcccc; }}
+        .warning {{ background-color: #fff3cd; }}
+        .preview {{ font-size: 0.9em; color: #666; max-width: 400px; }}
+        .issues {{ font-size: 0.9em; }}
+        .non-english {{ color: red; font-weight: bold; }}
+        .duplicate-group {{ background-color: #ffe6e6; }}
+    </style>
+</head>
+<body>
+    <h1>Translation QA Report</h1>
+    <p><strong>Total Files Scanned:</strong> {len(results)}</p>
+    <p><strong>Files with Issues:</strong> {sum(1 for r in results if r['issues'])}</p>
+    <p><strong>Clean Files:</strong> {sum(1 for r in results if not r['issues'])}</p>
+"""
+    
+    if issue_counts:
+        html += "<h2>Issues Summary</h2><ul>"
+        for issue_type, count in sorted(issue_counts.items()):
+            style = ' class="non-english"' if any(x in issue_type.lower() for x in ['korean', 'chinese', 'japanese']) else ''
+            html += f"<li{style}><strong>{issue_type}</strong>: {count} files</li>"
+        html += "</ul>"
+    
+    html += "<h2>Detailed Results</h2>"
+    html += "<table><tr><th>Index</th><th>Filename</th><th>Issues</th><th>Preview</th></tr>"
+    
+    for row in results:
+        link = f"<a href='../{row['filename']}' target='_blank'>{row['filename']}</a>"
+        
+        formatted_issues = []
+        for issue in row["issues"]:
+            if issue.startswith("DUPLICATE:"):
+                formatted_issues.append(f'<span style="color: red; font-weight: bold;">{issue}</span>')
+            elif issue.startswith("NEAR_DUPLICATE:"):
+                formatted_issues.append(f'<span style="color: darkorange; font-weight: bold;">{issue}</span>')
+            elif '_text_found_' in issue:
+                formatted_issues.append(f'<span class="non-english">{issue}</span>')
+            else:
+                formatted_issues.append(issue)
+        
+        issues_str = "<br>".join(formatted_issues) if formatted_issues else "None"
+        
+        row_class = 'duplicate-group' if any('DUPLICATE:' in issue for issue in row['issues']) else ''
+        if not row_class and any('NEAR_DUPLICATE:' in issue for issue in row['issues']):
+            row_class = 'warning'
+        if not row_class:
+            row_class = 'error' if row["score"] > 1 else 'warning' if row["score"] == 1 else ''
+        
+        preview_escaped = html_lib.escape(row['preview'][:300])
+        
+        html += f"""<tr class='{row_class}'>
+            <td>{row['file_index']}</td>
+            <td>{link}</td>
+            <td class='issues'>{issues_str}</td>
+            <td class='preview'>{preview_escaped}</td>
+        </tr>"""
+    
+    html += "</table></body></html>"
+    
+    with open(os.path.join(output_path, "validation_results.html"), "w", encoding="utf-8") as html_file:
+        html_file.write(html)
+
+def update_progress_file(folder_path, results, log):
+    """Update translation progress file"""
+    prog_path = os.path.join(folder_path, "translation_progress.json")
+    
+    try:
+        with open(prog_path, "r", encoding="utf-8") as pf:
+            prog = json.load(pf)
+    except FileNotFoundError:
+        log("[INFO] No progress file found - nothing to update")
+        return
+    
+    faulty_chapters = [row for row in results if row["issues"]]
+    
+    if not faulty_chapters:
+        log("✅ No faulty chapters found - progress unchanged")
+        return
+    
+    # Detect progress format version
+    is_new_format = "chapters" in prog and isinstance(prog.get("chapters"), dict)
+    
+    if is_new_format:
+        update_new_format_progress(prog, faulty_chapters, log)
+    else:
+        update_legacy_format_progress(prog, faulty_chapters, log)
+    
+    # Write back updated progress
+    with open(prog_path, "w", encoding="utf-8") as pf:
+        json.dump(prog, pf, indent=2, ensure_ascii=False)
+    
+    # Log affected chapters
+    affected_chapters = []
+    for faulty_row in faulty_chapters:
+        chapter_num = faulty_row.get("file_index", 0) + 1
+        if faulty_row.get("filename"):
+            match = re.search(r'response_(\d+)', faulty_row["filename"])
+            if match:
+                chapter_num = int(match.group(1))
+        affected_chapters.append(chapter_num)
+    
+    if affected_chapters:
+        log(f"📝 Chapters marked for re-translation: {', '.join(str(c) for c in sorted(affected_chapters))}")
+
+def update_new_format_progress(prog, faulty_chapters, log):
+    """Update new format progress file"""
+    log("[INFO] Detected new progress format")
+    
+    # Build reverse mapping
+    output_file_to_chapter_key = {}
+    for chapter_key, chapter_info in prog["chapters"].items():
+        output_file = chapter_info.get("output_file")
+        if output_file:
+            output_file_to_chapter_key[output_file] = chapter_key
+    
+    updated_count = 0
+    for faulty_row in faulty_chapters:
+        faulty_filename = faulty_row["filename"]
+        chapter_key = output_file_to_chapter_key.get(faulty_filename)
+        
+        if chapter_key and chapter_key in prog["chapters"]:
+            chapter_info = prog["chapters"][chapter_key]
+            old_status = chapter_info.get("status", "unknown")
+            
+            chapter_info["status"] = "qa_failed"
+            chapter_info["qa_issues"] = True
+            chapter_info["qa_timestamp"] = time.time()
+            chapter_info["qa_issues_found"] = faulty_row.get("issues", [])
+            
+            updated_count += 1
+            
+            chapter_num = chapter_info.get('actual_num', faulty_row.get("file_index", 0) + 1)
+            log(f"   └─ Marked chapter {chapter_num} as qa_failed (was: {old_status})")
+            
+            # Remove from content_hashes
+            content_hash = chapter_info.get("content_hash")
+            if content_hash and content_hash in prog.get("content_hashes", {}):
+                del prog["content_hashes"][content_hash]
+            
+            # Remove chunk data
+            if "chapter_chunks" in prog and chapter_key in prog["chapter_chunks"]:
+                del prog["chapter_chunks"][chapter_key]
+                log(f"   └─ Removed chunk data for chapter {chapter_num}")
+    
+    log(f"🔧 Updated {updated_count} chapters in new format")
+
+def update_legacy_format_progress(prog, faulty_chapters, log):
+    """Update legacy format progress file"""
+    log("[INFO] Detected legacy progress format")
+    
+    existing = prog.get("completed", [])
+    faulty_indices = [row["file_index"] for row in faulty_chapters]
+    updated = [idx for idx in existing if idx not in faulty_indices]
+    removed_count = len(existing) - len(updated)
+    
+    prog["completed"] = updated
+    
+    # Remove chunk data
+    if "chapter_chunks" in prog:
+        for faulty_idx in faulty_indices:
+            chapter_key = str(faulty_idx)
+            if chapter_key in prog["chapter_chunks"]:
+                del prog["chapter_chunks"][chapter_key]
+                log(f"   └─ Removed chunk data for chapter {faulty_idx + 1}")
+    
+    # Remove from content_hashes
+    if "content_hashes" in prog:
+        hashes_to_remove = []
+        for hash_val, hash_info in prog["content_hashes"].items():
+            if hash_info.get("completed_idx") in faulty_indices:
+                hashes_to_remove.append(hash_val)
+        
+        for hash_val in hashes_to_remove:
+            del prog["content_hashes"][hash_val]
+            log(f"   └─ Removed content hash entry")
+    
+    log(f"🔧 Removed {removed_count} chapters from legacy completed list")
+
 def scan_html_folder(folder_path, log=print, stop_flag=None, aggressive_mode=True):
+    """Main scanning function"""
     global _stop_flag
     _stop_flag = False
     
-    # Show mode
-    if aggressive_mode:
-        log("🚨 Running in AGGRESSIVE duplicate detection mode - will flag files with similar beginnings as duplicates")
-    else:
-        log("📋 Running in standard duplicate detection mode")
+    log(f"{'🚨 AGGRESSIVE' if aggressive_mode else '📋 Standard'} duplicate detection mode")
     
-    # Multiple hash tracking for different detection methods
-    content_hashes = {
-        'raw': {},
-        'normalized': {},
-        'fingerprint': {},
-        'word_freq': {},
-        'first_chunk': {}  # Added new hash type
-    }
+    html_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith(".html")])
+    log(f"🔍 Found {len(html_files)} HTML files. Starting scan...")
     
     results = []
-    chapter_contents = {}
-    html_files = [f for f in os.listdir(folder_path) if f.lower().endswith(".html")]
-    html_files.sort()
-
-    log(f"🔍 Found {len(html_files)} HTML files. Starting enhanced duplicate detection...")
-
-    # First pass: collect all data with multiple hashing strategies
+    
+    # First pass: collect all data
     for idx, filename in enumerate(html_files):
         if stop_flag and stop_flag():
             log("⛔ QA scan interrupted by user.")
             return
         
-        # Progress indicator
         log(f"📄 [{idx+1}/{len(html_files)}] Scanning {filename}...")
         
         full_path = os.path.join(folder_path, filename)
@@ -278,74 +729,26 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, aggressive_mode=Tru
         except Exception as e:
             log(f"⚠️ Failed to read {filename}: {e}")
             continue
-
+        
         if len(raw_text.strip()) < 100:
             log(f"⚠️ Skipped {filename}: Too short")
             continue
-
-        # Extract chapter info
-        chapter_num, chapter_title = extract_chapter_info(filename, raw_text)
         
-        # Generate multiple content hashes
+        chapter_num, chapter_title = extract_chapter_info(filename, raw_text)
         hashes = generate_content_hashes(raw_text)
         
-        # Store file info under each hash type
-        file_info = {
-            'filename': filename,
-            'idx': idx,
-            'chapter_num': chapter_num,
-            'raw_text': raw_text,
-            'hashes': hashes
-        }
-        
-        # Track in all hash dictionaries
-        for hash_type, hash_value in hashes.items():
-            if hash_value:
-                if hash_value not in content_hashes[hash_type]:
-                    content_hashes[hash_type][hash_value] = []
-                content_hashes[hash_type][hash_value].append(file_info)
-        
-        # Store chapter data
-        if chapter_num is not None:
-            if chapter_num not in chapter_contents:
-                chapter_contents[chapter_num] = []
-            chapter_contents[chapter_num].append({
-                'filename': filename,
-                'text': raw_text,
-                'idx': idx,
-                'hashes': hashes
-            })
-
-        issues = []
         preview = raw_text[:500].replace('\n', ' ')
         if len(preview) > 500:
             preview = preview[:497] + '...'
         
-        # Create a more normalized preview for duplicate detection
-        # Remove all chapter markers and numbers aggressively
-        preview_normalized = preview.lower()
-        preview_normalized = re.sub(r'chapter\s*\d+\s*:?\s*', '', preview_normalized, flags=re.IGNORECASE)
-        preview_normalized = re.sub(r'第\s*\d+\s*章', '', preview_normalized)
-        preview_normalized = re.sub(r'제\s*\d+\s*장', '', preview_normalized)
-        preview_normalized = re.sub(r'\bch\.?\s*\d+\s*:?\s*', '', preview_normalized, flags=re.IGNORECASE)
-        preview_normalized = re.sub(r'^\s*\d+\s*\.?\s*', '', preview_normalized)
+        # Normalize preview
+        preview_normalized = normalize_text(preview)[:300]
         
-        # Also normalize character names that might differ slightly
-        # Common patterns: "Character A was" vs "Character B was"
-        preview_normalized = re.sub(r'\b[A-Z][a-z]+\s+was\s+trying\s+to\s+\w+\s+at\s+what\s+[A-Z][a-z]+\s+was', 
-                                   'PERSON was trying to ACTION at what OTHER was', preview_normalized)
-        preview_normalized = re.sub(r'\b[A-Z][a-z]+\s+was\s+trying\s+to\s+\w+\s+at\s+what\s+the\s+[A-Z][a-z]+\s+was', 
-                                   'PERSON was trying to ACTION at what the OTHER was', preview_normalized)
-        
-        preview_normalized = re.sub(r'\s+', ' ', preview_normalized).strip()
-        preview_normalized = preview_normalized[:300]  # Consistent length
-
-        # Store result with empty issues for now
         results.append({
             "file_index": idx,
             "filename": filename,
             "filepath": full_path,
-            "issues": [],  # Will be populated later
+            "issues": [],
             "preview": preview,
             "preview_normalized": preview_normalized,
             "score": 0,
@@ -353,497 +756,27 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, aggressive_mode=Tru
             "hashes": hashes,
             "raw_text": raw_text
         })
-
-    log("\n✅ Initial scan complete. Performing multi-level duplicate detection...")
-
-    # Track all duplicate relationships
-    duplicate_groups = {}  # Maps file to its duplicate group ID
-    next_group_id = 0
     
-    # Level 1: Exact raw content match
-    log("🔍 Level 1: Checking for exact content matches...")
-    for hash_value, files in content_hashes['raw'].items():
-        if len(files) > 1:
-            group_id = next_group_id
-            next_group_id += 1
-            for file_info in files:
-                duplicate_groups[file_info['filename']] = group_id
-            log(f"   └─ Found exact duplicate group: {[f['filename'] for f in files]}")
+    log("\n✅ Initial scan complete. Performing duplicate detection...")
     
-    # Level 2: Normalized content match (ignores headers, chapter numbers)
-    log("🔍 Level 2: Checking normalized content...")
-    for hash_value, files in content_hashes['normalized'].items():
-        if len(files) > 1:
-            # Check if any file is already in a group
-            existing_group = None
-            for file_info in files:
-                if file_info['filename'] in duplicate_groups:
-                    existing_group = duplicate_groups[file_info['filename']]
-                    break
-            
-            # Assign all files to the same group
-            if existing_group is not None:
-                group_id = existing_group
-            else:
-                group_id = next_group_id
-                next_group_id += 1
-            
-            for file_info in files:
-                duplicate_groups[file_info['filename']] = group_id
-            
-            if existing_group is None:
-                log(f"   └─ Found normalized duplicate group: {[f['filename'] for f in files]}")
+    # Detect duplicates
+    duplicate_groups, near_duplicate_groups = detect_duplicates(results, log, stop_flag, aggressive_mode)
     
-    # Level 2.5: First chunk match (NEW)
-    log("🔍 Level 2.5: Checking first 1000 characters...")
-    for hash_value, files in content_hashes['first_chunk'].items():
-        if len(files) > 1:
-            # Only flag if not already detected
-            new_duplicates = [f for f in files if f['filename'] not in duplicate_groups]
-            if len(new_duplicates) > 1:
-                # Double check with more content
-                for i in range(len(new_duplicates)):
-                    for j in range(i + 1, len(new_duplicates)):
-                        # Check first 5000 chars similarity
-                        text1 = new_duplicates[i]['raw_text'][:5000]
-                        text2 = new_duplicates[j]['raw_text'][:5000]
-                        if calculate_similarity_ratio(text1, text2) > 0.95:
-                            # Assign to same group
-                            if new_duplicates[i]['filename'] in duplicate_groups:
-                                duplicate_groups[new_duplicates[j]['filename']] = duplicate_groups[new_duplicates[i]['filename']]
-                            elif new_duplicates[j]['filename'] in duplicate_groups:
-                                duplicate_groups[new_duplicates[i]['filename']] = duplicate_groups[new_duplicates[j]['filename']]
-                            else:
-                                group_id = next_group_id
-                                next_group_id += 1
-                                duplicate_groups[new_duplicates[i]['filename']] = group_id
-                                duplicate_groups[new_duplicates[j]['filename']] = group_id
-                            log(f"   └─ Found beginning match: {new_duplicates[i]['filename']} ≈ {new_duplicates[j]['filename']}")
+    # Process results and check for issues
+    log("\n📊 Checking for other issues...")
     
-    # Level 3: Fingerprint match (same key sentences)
-    log("🔍 Level 3: Checking content fingerprints...")
-    for hash_value, files in content_hashes['fingerprint'].items():
-        if hash_value and len(files) > 1:
-            # Only flag if not already detected
-            new_duplicates = [f for f in files if f['filename'] not in duplicate_groups]
-            if len(new_duplicates) > 1:
-                group_id = next_group_id
-                next_group_id += 1
-                for file_info in new_duplicates:
-                    duplicate_groups[file_info['filename']] = group_id
-                log(f"   └─ Found fingerprint match: {[f['filename'] for f in new_duplicates]}")
-    
-    # Level 4: Word frequency match (catches reordered content)
-    log("🔍 Level 4: Checking word frequency patterns...")
-    for hash_value, files in content_hashes['word_freq'].items():
-        if hash_value and len(files) > 1:
-            # Double-check with similarity to avoid false positives
-            for i in range(len(files)):
-                for j in range(i + 1, len(files)):
-                    if files[i]['filename'] not in duplicate_groups or files[j]['filename'] not in duplicate_groups:
-                        similarity = calculate_similarity_ratio(files[i]['raw_text'][:2000], files[j]['raw_text'][:2000])
-                        if similarity > 0.9:
-                            # Assign to same group
-                            if files[i]['filename'] in duplicate_groups:
-                                duplicate_groups[files[j]['filename']] = duplicate_groups[files[i]['filename']]
-                            elif files[j]['filename'] in duplicate_groups:
-                                duplicate_groups[files[i]['filename']] = duplicate_groups[files[j]['filename']]
-                            else:
-                                group_id = next_group_id
-                                next_group_id += 1
-                                duplicate_groups[files[i]['filename']] = group_id
-                                duplicate_groups[files[j]['filename']] = group_id
-                            log(f"   └─ Found word pattern match: {files[i]['filename']} ≈ {files[j]['filename']}")
-    
-    # Level 5: Deep similarity check for remaining files
-    log("🔍 Level 5: Deep similarity analysis...")
-    
-    # Check all files against each other (optimized)
-    similarity_threshold = 0.75 if aggressive_mode else 0.85
-    deep_check_count = 0
-    
-    log(f"   └─ Using similarity threshold: {int(similarity_threshold*100)}%")
-    
-    for i in range(len(results)):
-        if stop_flag and stop_flag():
-            log("⛔ Similarity check interrupted by user.")
-            break
-            
-        # Progress for similarity check
-        if i % 10 == 0:
-            log(f"   Progress: {i}/{len(results)} files analyzed...")
-        
-        # Skip if already in a duplicate group
-        if results[i]['filename'] in duplicate_groups:
-            continue
-        
-        # Check against all other non-duplicate files
-        for j in range(i + 1, len(results)):
-            if results[j]['filename'] in duplicate_groups:
-                continue
-            
-            # Quick pre-checks
-            text1 = results[i]['raw_text']
-            text2 = results[j]['raw_text']
-            
-            # Length check
-            len_ratio = len(text1) / max(1, len(text2))
-            if len_ratio < 0.7 or len_ratio > 1.3:
-                continue
-            
-            deep_check_count += 1
-            similarity = calculate_similarity_ratio(text1, text2)
-            
-            if similarity > similarity_threshold:
-                # Assign to same group
-                if results[i]['filename'] in duplicate_groups:
-                    duplicate_groups[results[j]['filename']] = duplicate_groups[results[i]['filename']]
-                elif results[j]['filename'] in duplicate_groups:
-                    duplicate_groups[results[i]['filename']] = duplicate_groups[results[j]['filename']]
-                else:
-                    group_id = next_group_id
-                    next_group_id += 1
-                    duplicate_groups[results[i]['filename']] = group_id
-                    duplicate_groups[results[j]['filename']] = group_id
-                
-                log(f"   └─ Found similarity match: {results[i]['filename']} ≈ {results[j]['filename']} ({int(similarity*100)}%)")
-    
-    log(f"   └─ Performed {deep_check_count} deep similarity checks")
-    
-    # Level 6: Preview and near-duplicate detection
-    log("🔍 Level 6: Preview-based and near-duplicate detection...")
-    
-    # Track near-duplicates separately
-    near_duplicate_groups = {}  # Similar to duplicate_groups but for near-duplicates
-    near_duplicate_next_id = 1000  # Start at 1000 to avoid conflicts
-    
-    # Check all pairs of files for high similarity
-    for i in range(len(results)):
-        if stop_flag and stop_flag():
-            log("⛔ Near-duplicate check interrupted by user.")
-            break
-            
-        for j in range(i + 1, len(results)):
-            # Skip if already marked as exact duplicates
-            if (results[i]['filename'] in duplicate_groups and 
-                results[j]['filename'] in duplicate_groups and
-                duplicate_groups[results[i]['filename']] == duplicate_groups[results[j]['filename']]):
-                continue
-            
-            # Calculate preview similarity
-            preview1 = results[i]['preview_normalized']
-            preview2 = results[j]['preview_normalized']
-            preview_similarity = calculate_similarity_ratio(preview1, preview2)
-            
-            # If previews are very similar (>90%), check more content
-            threshold = 0.85 if aggressive_mode else 0.90
-            if preview_similarity > threshold:
-                text1 = results[i]['raw_text']
-                text2 = results[j]['raw_text']
-                
-                # Check first 1000 characters
-                content_similarity = calculate_similarity_ratio(text1[:1000], text2[:1000])
-                
-                content_threshold = 0.75 if aggressive_mode else 0.85
-                if content_similarity > content_threshold:
-                    # These are near-duplicates
-                    log(f"   └─ {'AGGRESSIVE: ' if aggressive_mode else ''}Near-duplicate found: {results[i]['filename']} ≈ {results[j]['filename']} (preview: {int(preview_similarity*100)}%, content: {int(content_similarity*100)}%)")
-                    
-                    # In aggressive mode, mark as exact duplicates if very similar
-                    if aggressive_mode and content_similarity > 0.80:
-                        # Mark as exact duplicates
-                        if results[i]['filename'] not in duplicate_groups and results[j]['filename'] not in duplicate_groups:
-                            group_id = next_group_id
-                            next_group_id += 1
-                            duplicate_groups[results[i]['filename']] = group_id
-                            duplicate_groups[results[j]['filename']] = group_id
-                            log(f"   └─ AGGRESSIVE MODE: Marked as exact duplicates due to high similarity")
-                            continue
-                    
-                    # Check if they're consecutive chapters with same title
-                    if (results[i]['chapter_num'] is not None and 
-                        results[j]['chapter_num'] is not None and
-                        abs(results[i]['chapter_num'] - results[j]['chapter_num']) == 1):
-                        
-                        # Extract chapter titles
-                        title1 = re.search(r'Chapter \d+:\s*(.+?)(?:\s+The|\s*$)', text1[:200])
-                        title2 = re.search(r'Chapter \d+:\s*(.+?)(?:\s+The|\s*$)', text2[:200])
-                        
-                        if title1 and title2 and title1.group(1).strip() == title2.group(1).strip():
-                            log(f"   └─ Consecutive chapters with same title: '{title1.group(1).strip()}'")
-                            
-                            # Mark as exact duplicates since they're consecutive with same title
-                            if results[i]['filename'] not in duplicate_groups and results[j]['filename'] not in duplicate_groups:
-                                group_id = next_group_id
-                                next_group_id += 1
-                                duplicate_groups[results[i]['filename']] = group_id
-                                duplicate_groups[results[j]['filename']] = group_id
-                    else:
-                        # Mark as near-duplicates
-                        if results[i]['filename'] not in near_duplicate_groups and results[j]['filename'] not in near_duplicate_groups:
-                            if results[i]['filename'] not in duplicate_groups and results[j]['filename'] not in duplicate_groups:
-                                near_group_id = near_duplicate_next_id
-                                near_duplicate_next_id += 1
-                                near_duplicate_groups[results[i]['filename']] = near_group_id
-                                near_duplicate_groups[results[j]['filename']] = near_group_id
-    
-    # Debug output for specific files
-    for result in results:
-        if 'response_014' in result['filename'] or 'response_015' in result['filename']:
-            log(f"   [DEBUG] {result['filename']} - In duplicates: {result['filename'] in duplicate_groups}, In near-duplicates: {result['filename'] in near_duplicate_groups}")
-    
-    # Level 7: Aggressive consecutive chapter detection for same-titled chapters
-    log("🔍 Level 7: Aggressive detection for consecutive same-titled chapters...")
-    
-    # Extract chapter titles for all files
-    for result in results:
-        text = result['raw_text'][:500]  # Look in first 500 chars
-        
-        # Try multiple patterns to extract chapter title
-        patterns = [
-            r'Chapter\s+\d+\s*:\s*([^\n\r]+)',  # Chapter 14: Title
-            r'Chapter\s+\d+\s+([^\n\r]+)',      # Chapter 14 Title
-            r'第\s*\d+\s*章\s*[:：]?\s*([^\n\r]+)',  # Chinese format
-            r'제\s*\d+\s*장\s*[:：]?\s*([^\n\r]+)',  # Korean format
-        ]
-        
-        title = None
-        for pattern in patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                title = match.group(1).strip()
-                # Clean up the title
-                title = re.sub(r'\s+', ' ', title)  # Normalize spaces
-                title = title.split('.')[0].split('The')[0].strip()  # Remove trailing sentences
-                if len(title) > 100:
-                    title = title[:100]
-                break
-        
-        result['chapter_title'] = title
-        
-        # Debug log for chapters 14 and 15
-        if result['chapter_num'] in [14, 15]:
-            log(f"   [DEBUG] Chapter {result['chapter_num']} ({result['filename']}): Title = '{title}'")
-    
-    # Check consecutive chapters with same title
-    chapter_sorted = [r for r in results if r['chapter_num'] is not None and r['chapter_title']]
-    chapter_sorted.sort(key=lambda x: x['chapter_num'])
-    
-    for i in range(len(chapter_sorted) - 1):
-        current = chapter_sorted[i]
-        
-        # Look for the next few chapters (not just immediate next)
-        for j in range(i + 1, min(i + 4, len(chapter_sorted))):
-            next_chapter = chapter_sorted[j]
-            
-            # If they have the same title and are close in number
-            if (current['chapter_title'] == next_chapter['chapter_title'] and
-                abs(current['chapter_num'] - next_chapter['chapter_num']) <= 3):
-                
-                # Check if not already marked as duplicates
-                if (current['filename'] not in duplicate_groups and 
-                    next_chapter['filename'] not in duplicate_groups):
-                    
-                    # Compare content more thoroughly
-                    text1 = current['raw_text']
-                    text2 = next_chapter['raw_text']
-                    
-                    # Remove chapter numbers from both texts for comparison
-                    clean1 = re.sub(r'Chapter\s+\d+\s*:?\s*', '', text1[:2000], flags=re.IGNORECASE)
-                    clean2 = re.sub(r'Chapter\s+\d+\s*:?\s*', '', text2[:2000], flags=re.IGNORECASE)
-                    
-                    similarity = calculate_similarity_ratio(clean1, clean2)
-                    
-                    log(f"   └─ Chapters {current['chapter_num']} & {next_chapter['chapter_num']} have same title: '{current['chapter_title']}' (similarity: {int(similarity*100)}%)")
-                    
-                    similarity_threshold = 0.70 if aggressive_mode else 0.80
-                    if similarity > similarity_threshold:  # Lower threshold for same-titled chapters
-                        # Mark as duplicates
-                        group_id = next_group_id
-                        next_group_id += 1
-                        duplicate_groups[current['filename']] = group_id
-                        duplicate_groups[next_chapter['filename']] = group_id
-                        log(f"   └─ Marked as duplicates due to same title and high content similarity")
-    
-    # Special check for "Each Person's Circumstances" chapters (common duplicate pattern)
-    circumstances_chapters = [r for r in results if r.get('chapter_title') and 
-                             "each person's circumstances" in r['chapter_title'].lower()]
-    
-    if len(circumstances_chapters) > 1:
-        log(f"   └─ Found {len(circumstances_chapters)} chapters with 'Each Person's Circumstances' title")
-        
-        for i in range(len(circumstances_chapters)):
-            for j in range(i + 1, len(circumstances_chapters)):
-                if (circumstances_chapters[i]['filename'] not in duplicate_groups and
-                    circumstances_chapters[j]['filename'] not in duplicate_groups):
-                    
-                    # These are very likely duplicates
-                    preview_sim = calculate_similarity_ratio(
-                        circumstances_chapters[i]['preview_normalized'],
-                        circumstances_chapters[j]['preview_normalized']
-                    )
-                    
-                    preview_threshold = 0.80 if aggressive_mode else 0.85
-                    if preview_sim > preview_threshold:
-                        log(f"   └─ Marking {circumstances_chapters[i]['filename']} and {circumstances_chapters[j]['filename']} as duplicates (same common title, {int(preview_sim*100)}% preview similarity)")
-                        group_id = next_group_id
-                        next_group_id += 1
-                        duplicate_groups[circumstances_chapters[i]['filename']] = group_id
-                        duplicate_groups[circumstances_chapters[j]['filename']] = group_id
-    
-    # Final aggressive check: If preview shows they're talking about the same scene
-    log("🔍 Level 8: Final aggressive duplicate check for highly similar chapters...")
-    
-    for i in range(len(results)):
-        if results[i]['filename'] in duplicate_groups:
-            continue
-            
-        for j in range(i + 1, len(results)):
-            if results[j]['filename'] in duplicate_groups:
-                continue
-            
-            # Check if they're consecutive or near-consecutive chapters
-            if (results[i]['chapter_num'] is not None and 
-                results[j]['chapter_num'] is not None and
-                abs(results[i]['chapter_num'] - results[j]['chapter_num']) <= 2):
-                
-                # Extract the core content (first meaningful paragraph after title)
-                text1 = results[i]['raw_text']
-                text2 = results[j]['raw_text']
-                
-                # Skip past the chapter header to the actual content
-                content1 = re.sub(r'^.*?Chapter\s+\d+\s*:?\s*[^\n]*\n+', '', text1[:1000], flags=re.IGNORECASE | re.DOTALL)
-                content2 = re.sub(r'^.*?Chapter\s+\d+\s*:?\s*[^\n]*\n+', '', text2[:1000], flags=re.IGNORECASE | re.DOTALL)
-                
-                # Normalize for comparison (remove character names)
-                norm1 = re.sub(r'\b[A-Z][a-z]{2,15}\b', 'PERSON', content1)
-                norm2 = re.sub(r'\b[A-Z][a-z]{2,15}\b', 'PERSON', content2)
-                
-                similarity = calculate_similarity_ratio(norm1[:500], norm2[:500])
-                
-                threshold = 0.65 if aggressive_mode else 0.75
-                if similarity > threshold:  # Lower threshold in aggressive mode
-                    log(f"   └─ AGGRESSIVE MATCH: {results[i]['filename']} and {results[j]['filename']} - {int(similarity*100)}% similar content")
-                    
-                    # Mark as duplicates
-                    group_id = next_group_id
-                    next_group_id += 1
-                    duplicate_groups[results[i]['filename']] = group_id
-                    duplicate_groups[results[j]['filename']] = group_id
-                    
-                    # Log the specific content that matched
-                    log(f"      Content 1: {content1[:100]}...")
-                    log(f"      Content 2: {content2[:100]}...")
-    
-    # Super specific check for the exact pattern shown in the user's example
-    log("🔍 Level 9: Ultra-specific pattern matching for known duplicate patterns...")
-    
-    chapel_pattern = r"under the pretense of offering a prayer.*?visited the chapel.*?hiding while holding.*?breath.*?watching the scene"
-    
-    for i in range(len(results)):
-        if results[i]['filename'] in duplicate_groups:
-            continue
-            
-        # Check if this file matches the chapel pattern
-        if re.search(chapel_pattern, results[i]['preview'], re.IGNORECASE | re.DOTALL):
-            for j in range(i + 1, len(results)):
-                if results[j]['filename'] in duplicate_groups:
-                    continue
-                    
-                # Check if the other file also matches
-                if re.search(chapel_pattern, results[j]['preview'], re.IGNORECASE | re.DOTALL):
-                    log(f"   └─ PATTERN MATCH: Both {results[i]['filename']} and {results[j]['filename']} contain the chapel scene pattern")
-                    
-                    # These are duplicates based on the specific pattern
-                    group_id = next_group_id
-                    next_group_id += 1
-                    duplicate_groups[results[i]['filename']] = group_id
-                    duplicate_groups[results[j]['filename']] = group_id
-    
-    # Super specific check for files that should obviously be duplicates
-    log("🔍 Level 10: Final safety net - checking specific problem files...")
-    
-    # Specifically check for response_014 and response_015 type patterns
-    problem_patterns = [
-        (14, 15),  # Common duplicate pairs
-        (22, 23),
-        (30, 31),
-    ]
-    
-    for num1, num2 in problem_patterns:
-        file1 = None
-        file2 = None
-        
-        for result in results:
-            if result['chapter_num'] == num1:
-                file1 = result
-            elif result['chapter_num'] == num2:
-                file2 = result
-        
-        if file1 and file2:
-            # Check if they're not already marked as duplicates
-            if (file1['filename'] not in duplicate_groups and 
-                file2['filename'] not in duplicate_groups):
-                
-                # Compare their previews
-                preview_sim = calculate_similarity_ratio(
-                    file1['preview_normalized'], 
-                    file2['preview_normalized']
-                )
-                
-                if preview_sim > 0.70:  # Very aggressive for known problem pairs
-                    log(f"   └─ KNOWN PROBLEM PAIR: Chapters {num1} & {num2} have {int(preview_sim*100)}% similar previews")
-                    log(f"      File 1: {file1['filename']}")
-                    log(f"      File 2: {file2['filename']}")
-                    log(f"      Preview 1: {file1['preview'][:100]}...")
-                    log(f"      Preview 2: {file2['preview'][:100]}...")
-                    
-                    # Special handling for chapters 14 & 15 with "Each Person's Circumstances"
-                    if (num1 == 14 and num2 == 15 and 
-                        file1.get('chapter_title') and 
-                        "each person" in file1.get('chapter_title', '').lower()):
-                        log(f"   └─ SPECIAL CASE: Chapters 14 & 15 with 'Each Person's Circumstances' - marking as duplicates")
-                        group_id = next_group_id
-                        next_group_id += 1
-                        duplicate_groups[file1['filename']] = group_id
-                        duplicate_groups[file2['filename']] = group_id
-                    elif preview_sim > 0.80:  # Higher threshold for other pairs
-                        # Mark as duplicates
-                        group_id = next_group_id
-                        next_group_id += 1
-                        duplicate_groups[file1['filename']] = group_id
-                        duplicate_groups[file2['filename']] = group_id
-                        log(f"   └─ Marked as duplicates based on known problem pattern")
-    
-    # Final debug output for chapters 14 and 15
-    log("\n[FINAL DEBUG] Status of key chapters:")
-    for result in results:
-        if result['chapter_num'] in [14, 15, 22, 23]:
-            dup_status = "NOT DUPLICATE"
-            if result['filename'] in duplicate_groups:
-                dup_status = f"DUPLICATE (group {duplicate_groups[result['filename']]})"
-            elif result['filename'] in near_duplicate_groups:
-                dup_status = f"NEAR_DUPLICATE (group {near_duplicate_groups[result['filename']]})"
-            
-            log(f"   Chapter {result['chapter_num']} ({result['filename']}): {dup_status}")
-            log(f"      Title: {result.get('chapter_title', 'N/A')}")
-            log(f"      Preview: {result['preview'][:80]}...")
-    
-    # NOW check for other issues and apply duplicate markings
-    log("\n📊 Checking for other issues and marking duplicates...")
-    
-    # Group files by their duplicate group
+    # Group files by duplicate group
     groups = {}
     for filename, group_id in duplicate_groups.items():
         if group_id not in groups:
             groups[group_id] = []
         groups[group_id].append(filename)
     
-    # Process each result for all issues
+    # Check each file for all issues
     for result in results:
         issues = []
         
-        # Check if it's a duplicate FIRST
+        # Check duplicates
         if result['filename'] in duplicate_groups:
             group_id = duplicate_groups[result['filename']]
             group_files = groups[group_id]
@@ -854,7 +787,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, aggressive_mode=Tru
                 else:
                     issues.append(f"DUPLICATE: part_of_{len(group_files)}_file_group")
         
-        # Check if it's a near-duplicate
+        # Check near-duplicates
         elif result['filename'] in near_duplicate_groups:
             near_group_id = near_duplicate_groups[result['filename']]
             near_group_files = [f for f, gid in near_duplicate_groups.items() if gid == near_group_id]
@@ -865,10 +798,10 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, aggressive_mode=Tru
                 else:
                     issues.append(f"NEAR_DUPLICATE: similar_to_{len(near_group_files)-1}_other_files")
         
-        # Now check for other issues
+        # Check other issues
         raw_text = result['raw_text']
         
-        # Non-English content
+        # Non-English content (excluding Korean separators)
         has_non_english, lang_issues = detect_non_english_content(raw_text)
         if has_non_english:
             issues.extend(lang_issues)
@@ -881,260 +814,30 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, aggressive_mode=Tru
         if has_repeating_sentences(raw_text):
             issues.append("excessive_repetition")
         
-        # Update result
         result['issues'] = issues
         result['score'] = len(issues)
         
-        # Log issues found
         if issues:
             log(f"   {result['filename']}: {', '.join(issues[:2])}" + (" ..." if len(issues) > 2 else ""))
     
-    # Clean up raw_text from results to save memory
+    # Clean up raw_text to save memory
     for result in results:
         result.pop('raw_text', None)
-        result.pop('hashes', None)  # Remove hash details from final output
-
-    # Log summary of issues found
-    log(f"\n📊 Issues Summary:")
-    issue_counts = {}
-    for r in results:
-        for issue in r['issues']:
-            # Simplify issue type for counting
-            if 'DUPLICATE:' in issue:
-                issue_type = 'DUPLICATE'
-            elif 'NEAR_DUPLICATE:' in issue:
-                issue_type = 'NEAR_DUPLICATE'
-            elif 'SIMILAR:' in issue:
-                issue_type = 'SIMILAR'
-            elif '_text_found_' in issue:
-                issue_type = issue.split('_text_found_')[0]
-            else:
-                issue_type = issue.split('_')[0]
-            issue_counts[issue_type] = issue_counts.get(issue_type, 0) + 1
+        result.pop('hashes', None)
     
-    for issue_type, count in sorted(issue_counts.items()):
-        log(f"  - {issue_type}: {count} files")
-    
-    # Log specific info about chapters 14 and 15 if present
-    for result in results:
-        if 'response_014' in result['filename'] or 'response_015' in result['filename']:
-            log(f"\n[FINAL DEBUG] {result['filename']}: {result['issues']}")
-
     # Generate reports
-    output_dir = os.path.basename(folder_path.rstrip('/\\')) + "_Scan Report"
-    output_path = os.path.join(folder_path, output_dir)
-    os.makedirs(output_path, exist_ok=True)
-
-    # Save detailed results
-    with open(os.path.join(output_path, "validation_results.json"), "w", encoding="utf-8") as jf:
-        json.dump(results, jf, indent=2, ensure_ascii=False)
-
-    # Create CSV report (without chapter column)
-    with open(os.path.join(output_path, "validation_results.csv"), "w", encoding="utf-8", newline="") as cf:
-        writer = csv.DictWriter(cf, fieldnames=["file_index", "filename", "score", "issues"])
-        writer.writeheader()
-        for row in results:
-            writer.writerow({
-                "file_index": row["file_index"],
-                "filename": row["filename"],
-                "score": row["score"],
-                "issues": "; ".join(row["issues"])
-            })
-
-    # Generate HTML report
-    html_report = """<html>
-<head>
-    <meta charset='utf-8'>
-    <title>Translation QA Report</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; }
-        table { border-collapse: collapse; width: 100%; margin-top: 20px; }
-        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-        th { background-color: #4CAF50; color: white; }
-        tr:nth-child(even) { background-color: #f2f2f2; }
-        .error { background-color: #ffcccc; }
-        .warning { background-color: #fff3cd; }
-        .preview { font-size: 0.9em; color: #666; max-width: 400px; }
-        .issues { font-size: 0.9em; }
-        .non-english { color: red; font-weight: bold; }
-        .duplicate-group { background-color: #ffe6e6; }
-    </style>
-</head>
-<body>"""
+    generate_reports(results, folder_path, log)
     
-    html_report += "<h1>Translation QA Report</h1>"
-    html_report += f"<p><strong>Total Files Scanned:</strong> {len(results)}</p>"
-    html_report += f"<p><strong>Files with Issues:</strong> {sum(1 for r in results if r['issues'])}</p>"
-    html_report += f"<p><strong>Clean Files:</strong> {sum(1 for r in results if not r['issues'])}</p>"
-    
-    # Add duplicate groups summary
-    if groups:
-        html_report += f"<p><strong>Duplicate Groups Found:</strong> {len(groups)}</p>"
-    
-    if issue_counts:
-        html_report += "<h2>Issues Summary</h2><ul>"
-        for issue_type, count in sorted(issue_counts.items()):
-            style = ' class="non-english"' if 'korean' in issue_type.lower() or 'chinese' in issue_type.lower() or 'japanese' in issue_type.lower() else ''
-            html_report += f"<li{style}><strong>{issue_type}</strong>: {count} files</li>"
-        html_report += "</ul>"
-    
-    html_report += "<h2>Detailed Results</h2>"
-    html_report += "<table><tr><th>Index</th><th>Filename</th><th>Issues</th><th>Preview</th></tr>"
-
-    for row in results:
-        link = f"<a href='../{row['filename']}' target='_blank'>{row['filename']}</a>"
-        
-        # Format issues with highlighting
-        formatted_issues = []
-        for issue in row["issues"]:
-            if issue.startswith("DUPLICATE:"):
-                formatted_issues.append(f'<span style="color: red; font-weight: bold;">{issue}</span>')
-            elif issue.startswith("NEAR_DUPLICATE:"):
-                formatted_issues.append(f'<span style="color: darkorange; font-weight: bold;">{issue}</span>')
-            elif issue.startswith("SIMILAR:"):
-                formatted_issues.append(f'<span style="color: orange; font-weight: bold;">{issue}</span>')
-            elif '_text_found_' in issue:
-                # Make non-Latin text issues more readable
-                formatted_issues.append(f'<span class="non-english">{issue}</span>')
-            else:
-                formatted_issues.append(issue)
-        
-        issues_str = "<br>".join(formatted_issues) if formatted_issues else "None"
-        
-        # Special styling for duplicates
-        row_class = 'duplicate-group' if any('DUPLICATE:' in issue for issue in row['issues']) else ''
-        if not row_class and any('NEAR_DUPLICATE:' in issue for issue in row['issues']):
-            row_class = 'warning'  # Use warning style for near-duplicates
-        if not row_class:
-            row_class = 'error' if row["score"] > 1 else 'warning' if row["score"] == 1 else ''
-        
-        # Escape preview text for HTML
-        import html
-        preview_escaped = html.escape(row['preview'][:300])
-        
-        html_report += f"""<tr class='{row_class}'>
-            <td>{row['file_index']}</td>
-            <td>{link}</td>
-            <td class='issues'>{issues_str}</td>
-            <td class='preview'>{preview_escaped}</td>
-        </tr>"""
-
-    html_report += "</table></body></html>"
-
-    with open(os.path.join(output_path, "validation_results.html"), "w", encoding="utf-8") as html_file:
-        html_file.write(html_report)
-
-    # Update progress file with support for both old and new formats
-    prog_path = os.path.join(folder_path, "translation_progress.json")
-    
-    try:
-        with open(prog_path, "r", encoding="utf-8") as pf:
-            prog = json.load(pf)
-    except FileNotFoundError:
-        log("[INFO] No progress file found - nothing to update")
-        log(f"\n✅ Scan complete!")
-        log(f"📁 Reports saved to: {output_path}")
-        return
-    
-    # Build list of FILE INDICES that have issues
-    faulty_indices = [row["file_index"] for row in results if row["issues"]]
-    
-    if not faulty_indices:
-        log("✅ No faulty chapters found - progress unchanged")
-    else:
-        # Detect progress format version
-        is_new_format = "chapters" in prog and isinstance(prog.get("chapters"), dict)
-        
-        if is_new_format:
-            # Handle new format (v2.0)
-            log("[INFO] Detected new progress format")
-            
-            # Update chapter statuses
-            updated_count = 0
-            for faulty_idx in faulty_indices:
-                chapter_key = str(faulty_idx)
-                
-                # Update chapter status if it exists
-                if chapter_key in prog["chapters"]:
-                    chapter_info = prog["chapters"][chapter_key]
-                    old_status = chapter_info.get("status", "unknown")
-                    
-                    # Mark as needing re-translation
-                    chapter_info["status"] = "qa_failed"
-                    chapter_info["qa_issues"] = True
-                    chapter_info["qa_timestamp"] = time.time()
-                    
-                    updated_count += 1
-                    log(f"   └─ Marked chapter {faulty_idx + 1} as qa_failed (was: {old_status})")
-                    
-                    # Remove from content_hashes if present
-                    content_hash = chapter_info.get("content_hash")
-                    if content_hash and content_hash in prog.get("content_hashes", {}):
-                        del prog["content_hashes"][content_hash]
-                
-                # Also remove chunk data if it exists
-                if "chapter_chunks" in prog and chapter_key in prog["chapter_chunks"]:
-                    del prog["chapter_chunks"][chapter_key]
-                    log(f"   └─ Removed chunk data for chapter {faulty_idx + 1}")
-            
-            log(f"🔧 Updated {updated_count} chapters in new format")
-            
-        else:
-            # Handle old format (legacy)
-            log("[INFO] Detected legacy progress format")
-            
-            # Get existing completed list
-            existing = prog.get("completed", [])
-            
-            # Remove faulty indices from the completed list
-            updated = [idx for idx in existing if idx not in faulty_indices]
-            removed_count = len(existing) - len(updated)
-            
-            # Update the progress
-            prog["completed"] = updated
-            
-            # Also remove chunk data for faulty chapters if it exists
-            if "chapter_chunks" in prog:
-                for faulty_idx in faulty_indices:
-                    chapter_key = str(faulty_idx)
-                    if chapter_key in prog["chapter_chunks"]:
-                        del prog["chapter_chunks"][chapter_key]
-                        log(f"   └─ Removed chunk data for chapter {faulty_idx + 1}")
-            
-            # Remove from content_hashes if present
-            if "content_hashes" in prog:
-                # In old format, we need to check each hash entry
-                hashes_to_remove = []
-                for hash_val, hash_info in prog["content_hashes"].items():
-                    if hash_info.get("completed_idx") in faulty_indices:
-                        hashes_to_remove.append(hash_val)
-                
-                for hash_val in hashes_to_remove:
-                    del prog["content_hashes"][hash_val]
-                    log(f"   └─ Removed content hash entry")
-            
-            log(f"🔧 Removed {removed_count} chapters from legacy completed list")
-        
-        # Write back the updated progress data
-        with open(prog_path, "w", encoding="utf-8") as pf:
-            json.dump(prog, pf, indent=2, ensure_ascii=False)
-        
-        log(f"📝 Chapters marked for re-translation: {', '.join(str(i+1) for i in sorted(faulty_indices))}")
-    
-    log(f"\n✅ Scan complete!")
-    log(f"📁 Reports saved to: {output_path}")
-    
-    # Log which chapters were affected
-    if faulty_indices:
-        log(f"📝 Chapters marked for re-translation: {', '.join(str(i+1) for i in sorted(faulty_indices))}")
+    # Update progress file
+    update_progress_file(folder_path, results, log)
 
 def launch_gui():
+    """Launch GUI interface"""
     def run_scan():
         folder_path = filedialog.askdirectory(title="Select Folder with HTML Files")
         if folder_path:
-            # Always run in aggressive mode from GUI
             threading.Thread(target=scan_html_folder, args=(folder_path, print, None, True), daemon=True).start()
-
+    
     root = tk.Tk()
     root.title("Translation QA Scanner")
     root.geometry("400x100")
@@ -1147,7 +850,6 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         launch_gui()
     else:
-        # Command line mode - default to aggressive
         aggressive = True
         if len(sys.argv) > 2 and sys.argv[2] == "--standard":
             aggressive = False
