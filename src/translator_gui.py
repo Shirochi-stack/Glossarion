@@ -78,7 +78,9 @@ def load_application_icon(window, base_dir):
         logging.warning(f"Could not load icon image: {e}")
     
     return None
+    
 
+            
 class TranslatorGUI:
     def __init__(self, master):
         self.master = master
@@ -321,6 +323,9 @@ class TranslatorGUI:
         self.disable_epub_gallery_var = tk.BooleanVar(
             value=self.config.get('disable_epub_gallery', False)  # Default to False (gallery enabled)
         )
+        self.disable_zero_detection_var = tk.BooleanVar(
+            value=self.config.get('disable_zero_detection', False)  # Default to False (detection enabled)
+        )
         # Default prompts
         self.default_prompts = {
             "korean": "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title> ,<h1>, <h2>, <p>, <br>, <div>, etc.",
@@ -347,6 +352,7 @@ class TranslatorGUI:
         dialog.title("Configure Book Title Translation")
         dialog.geometry("950x700")
         dialog.transient(self.master)
+        load_application_icon(dialog, self.base_dir)
         
         # Main frame
         main_frame = tk.Frame(dialog, padx=20, pady=20)
@@ -397,6 +403,7 @@ class TranslatorGUI:
         button_frame = tk.Frame(main_frame)
         button_frame.pack(fill=tk.X, pady=(20, 0))
         
+                    
         def save_title_prompt():
             self.book_title_prompt = self.title_prompt_text.get('1.0', tk.END).strip()
             self.config['book_title_prompt'] = self.book_title_prompt
@@ -868,6 +875,7 @@ class TranslatorGUI:
         dialog = tk.Toplevel(self.master)
         dialog.title("Force Retranslation")
         dialog.geometry("660x600")
+        load_application_icon(dialog, self.base_dir)
         
         # Instructions
         tk.Label(dialog, text="Select chapters to retranslate:", font=('Arial', 12)).pack(pady=10)
@@ -1189,6 +1197,7 @@ class TranslatorGUI:
         manager.title("Glossary Manager")
         manager.geometry("1200x1550")
         manager.transient(self.master)
+        load_application_icon(manager, self.base_dir)
         
         
         # Main container
@@ -1922,6 +1931,8 @@ class TranslatorGUI:
             dialog.title("Smart Trim Glossary")
             dialog.geometry("500x700")
             dialog.transient(self.master)
+            load_application_icon(dialog, self.base_dir)
+            
             
             # Main frame with padding
             main_frame = tk.Frame(dialog, padx=20, pady=20)
@@ -2038,6 +2049,7 @@ class TranslatorGUI:
             dialog.title("Filter Entries")
             dialog.geometry("400x300")
             dialog.transient(self.master)
+            load_application_icon(dialog, self.base_dir)
             
             main_frame = tk.Frame(dialog, padx=20, pady=20)
             main_frame.pack(fill=tk.BOTH, expand=True)
@@ -2272,6 +2284,7 @@ class TranslatorGUI:
         dialog.title(f"Edit {col_name.replace('_', ' ').title()}")
         dialog.geometry("400x150")
         dialog.transient(self.master)
+        load_application_icon(dialog, self.base_dir)
         
         # Center the dialog
         dialog.update_idletasks()
@@ -2564,6 +2577,7 @@ class TranslatorGUI:
                     'CHUNK_TIMEOUT': self.chunk_timeout_var.get(),
                     'BATCH_TRANSLATION': "1" if self.batch_translation_var.get() else "0",
                     'BATCH_SIZE': self.batch_size_var.get(),
+                    'DISABLE_ZERO_DETECTION': "1" if self.disable_zero_detection_var.get() else "0",
                     'TRANSLATION_HISTORY_ROLLING': "1" if self.translation_history_rolling_var.get() else "0"
 
                 })
@@ -3414,6 +3428,7 @@ class TranslatorGUI:
         dialog.title("Configure Memory System Prompts")
         dialog.geometry("800x1050")
         dialog.transient(self.master)
+        load_application_icon(dialog, self.base_dir)
         
         # Main container with padding
         main_frame = tk.Frame(dialog, padx=20, pady=20)
@@ -3496,8 +3511,9 @@ class TranslatorGUI:
         """Open the Other Settings dialog with all advanced options in a grid layout"""
         top = tk.Toplevel(self.master)
         top.title("Other Settings")
-        top.geometry("900x1380")
+        top.geometry("900x1470")
         top.transient(self.master)
+        load_application_icon(top, self.base_dir)
         #top.grab_set()
         
         # Store reference to prevent garbage collection issues
@@ -3725,6 +3741,15 @@ class TranslatorGUI:
         tk.Label(section4_frame, 
                  text="Skip creating image gallery page in EPUB",
                  font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+                 
+        # Disable 0-based detection
+        tb.Checkbutton(section4_frame, text="Disable 0-based Chapter Detection", 
+                       variable=self.disable_zero_detection_var,
+                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+
+        tk.Label(section4_frame, 
+                 text="Always use chapter ranges as specified\n(don't adjust for 0-based novels)",
+                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
 
         # =================================================================
         # SECTION 5: IMAGE TRANSLATION (Bottom - Spanning Both Columns)
@@ -3826,6 +3851,10 @@ class TranslatorGUI:
                 self.config['reset_failed_chapters'] = self.reset_failed_chapters_var.get()
                 self.config['comprehensive_extraction'] = self.comprehensive_extraction_var.get()
                 self.config['disable_epub_gallery'] = self.disable_epub_gallery_var.get()
+                self.disable_zero_detection_var = tk.BooleanVar(
+                    value=self.config.get('disable_zero_detection', False)  # Default to False (detection enabled)
+                )
+                
                 
                 # Image Translation Settings
                 self.config['enable_image_translation'] = self.enable_image_translation_var.get()
