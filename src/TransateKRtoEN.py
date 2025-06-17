@@ -70,7 +70,7 @@ class ChunkContextManager:
         total_chunks = len(self.current_chunks)
         
         # For user content: Include chapter info and first chunk sample
-        user_summary = f"[Chapter {self.actual_num}: {self.chapter_title}]\n"
+        user_summary = f"[Chapter {self.chapter_num}: {self.chapter_title}]\n"
         user_summary += f"[{total_chunks} chunks processed]\n"
         if self.current_chunks:
             first_chunk = self.current_chunks[0]['user']
@@ -81,7 +81,7 @@ class ChunkContextManager:
                 user_summary += first_chunk
         
         # For assistant content: Include translation summary
-        assistant_summary = f"[Chapter {self.actual_num} Translation Complete]\n"
+        assistant_summary = f"[Chapter {self.chapter_num} Translation Complete]\n"
         assistant_summary += f"[Translated in {total_chunks} chunks]\n"
         if self.current_chunks:
             # Include samples from beginning, middle, and end
@@ -109,7 +109,7 @@ class ChunkContextManager:
     def clear(self):
         """Clear the current chapter context"""
         self.current_chunks = []
-        self.actual_num = None
+        self.chapter_num = None 
         self.chapter_title = None
 
 def clean_memory_artifacts(text):
