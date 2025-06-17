@@ -4,7 +4,8 @@
 
 # 📚 Glossarion
 
-Glossarion is an AI translator and AI glossary generator for Korean, Japanese, and Chinese light novels, built to transform EPUB files and raw .txt files into high-quality, context-aware English translations. It supports OpenAI, Gemini, DeepSeek, and Sonnet APIs, with a GUI that gives you total control over every step of the process—from prompt customization to final EPUB export.
+**Glossarion** is an AI translator and AI glossary generator for Korean, Japanese, and Chinese light novels, built to transform EPUB files **and raw .txt files** into high-quality, context-aware English translations. It supports OpenAI, Gemini, DeepSeek, and Sonnet APIs, with a GUI that gives you total control over every step of the process—from prompt customization to final EPUB export.
+
 ---
 
 ## 🏷️ Badges
