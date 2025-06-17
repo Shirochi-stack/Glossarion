@@ -336,6 +336,30 @@ def set_output_redirect(log_callback=None):
                 
         sys.stdout = CallbackWriter(log_callback)
 
+def extract_chapter_number_from_filename(filename):
+    """Extract chapter number from filename, handling various formats"""
+    # Remove extension
+    name_without_ext = os.path.splitext(filename)[0]
+
+    # Patterns to try, in order of priority
+    patterns = [
+        (r'^(\d+)[_\.]', 'direct_number'),           # 0000_ or 0000.
+        (r'^response_(\d+)[_\.]', 'response_prefix'), # response_0000_
+        (r'[Cc]hapter[_\s]*(\d+)', 'chapter_word'),  # Chapter0, chapter_0
+        (r'[Cc]h[_\s]*(\d+)', 'ch_abbreviation'),    # Ch0, ch_0
+        (r'No(\d+)', 'no_prefix'),                   # No0000
+        (r'第(\d+)[章话回]', 'chinese_chapter'),      # Chinese chapter markers
+        (r'_(\d+)$', 'underscore_suffix'),           # something_0
+        (r'-(\d+)$', 'dash_suffix'),                 # something-0
+        (r'(\d+)$', 'trailing_number'),              # something0
+    ]
+
+    for pattern, method in patterns:
+        match = re.search(pattern, name_without_ext, re.IGNORECASE)
+        if match:
+            return int(match.group(1)), method
+
+    return None, None
     
 def process_chapter_images(chapter_html: str, chapter_num: int, image_translator: ImageTranslator, 
                          check_stop_fn=None) -> Tuple[str, Dict[str, str]]:
@@ -624,62 +648,76 @@ def init_progress_tracking(payloads_dir):
     return prog, PROGRESS_FILE
 
 def check_chapter_status(prog, chapter_idx, chapter_num, content_hash, output_dir):
-    """Check if a chapter needs translation"""
-    # OLD: chapter_key = str(chapter_idx)
-    chapter_key = content_hash  # NEW: Use content hash as key
+    """Check if a chapter needs translation with fallback"""
+    # Try content hash first
+    chapter_key = content_hash
     
     # FIRST: Always check if the actual output file exists
     if chapter_key in prog["chapters"]:
         chapter_info = prog["chapters"][chapter_key]
-        output_file = chapter_info.get("output_file")
-        
-        if output_file:
-            output_path = os.path.join(output_dir, output_file)
-            if not os.path.exists(output_path):
-                # File was deleted! Mark chapter as needing retranslation
-                print(f"⚠️ Output file missing for chapter {chapter_num}: {output_file}")
-                print(f"🔄 Chapter {chapter_num} will be retranslated")
-                
-                # Clean up progress tracking for this chapter
-                if content_hash in prog["content_hashes"]:
-                    stored_info = prog["content_hashes"][content_hash]
-                    if stored_info.get("chapter_idx") == chapter_idx:
-                        del prog["content_hashes"][content_hash]
-                
-                # Mark chapter as needing retranslation
-                chapter_info["status"] = "file_deleted"
-                chapter_info["output_file"] = None
-                
-                # Also clear any chunk data
-                if str(chapter_idx) in prog.get("chapter_chunks", {}):
-                    del prog["chapter_chunks"][str(chapter_idx)]
-                
-                return True, None, None
-            else:
-                # File exists, check if it's a valid translation
-                try:
-                    with open(output_path, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                        if len(content.strip()) < 100:
-                            print(f"⚠️ Output file for chapter {chapter_num} seems corrupted/empty")
-                            return True, None, None
-                except Exception as e:
-                    print(f"⚠️ Error reading output file for chapter {chapter_num}: {e}")
-                    return True, None, None
-                
-                return False, f"Chapter {chapter_num} already translated (file exists: {output_file})", output_file
-        
-        elif chapter_info.get("status") in ["in_progress", "file_deleted"]:
+    else:
+        # FALLBACK: Try old index-based key
+        old_key = str(chapter_idx)
+        if old_key in prog["chapters"]:
+            print(f"[PROGRESS] Using legacy index-based tracking for chapter {chapter_num}")
+            chapter_info = prog["chapters"][old_key]
+            # Migrate this entry to new system
+            prog["chapters"][chapter_key] = chapter_info
+            chapter_info["content_hash"] = content_hash
+            del prog["chapters"][old_key]
+        else:
+            # Not found in either system
             return True, None, None
     
-    # Check for duplicate content ONLY if we haven't already determined we need to translate
+    # Rest of the function remains the same...
+    output_file = chapter_info.get("output_file")
+    
+    if output_file:
+        output_path = os.path.join(output_dir, output_file)
+        if not os.path.exists(output_path):
+            # File was deleted! Mark chapter as needing retranslation
+            print(f"⚠️ Output file missing for chapter {chapter_num}: {output_file}")
+            print(f"🔄 Chapter {chapter_num} will be retranslated")
+            
+            # ... rest of the function
+            return True, None, None
+        else:
+            # File exists, check if it's a valid translation
+            try:
+                with open(output_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    if len(content.strip()) < 100:
+                        print(f"⚠️ Output file for chapter {chapter_num} seems corrupted/empty")
+                        return True, None, None
+            except Exception as e:
+                print(f"⚠️ Error reading output file for chapter {chapter_num}: {e}")
+                return True, None, None
+            
+            # Use the actual chapter number in the message
+            return False, f"Chapter {chapter_num} already translated (file exists: {output_file})", output_file
+    
+    
+    elif chapter_info.get("status") in ["in_progress", "file_deleted"]:
+        return True, None, None
+    
+    # Check for duplicate content
     if content_hash in prog["content_hashes"]:
         duplicate_info = prog["content_hashes"][content_hash]
         duplicate_idx = duplicate_info.get("chapter_idx")
         
         # Only skip if the duplicate's file ACTUALLY exists
-        if str(duplicate_idx) in prog["chapters"]:
-            dup_chapter = prog["chapters"][str(duplicate_idx)]
+        duplicate_key = None
+        # Try hash-based key first
+        for key, info in prog["chapters"].items():
+            if info.get("chapter_idx") == duplicate_idx:
+                duplicate_key = key
+                break
+        # Fallback to index-based
+        if not duplicate_key:
+            duplicate_key = str(duplicate_idx)
+            
+        if duplicate_key in prog["chapters"]:
+            dup_chapter = prog["chapters"][duplicate_key]
             dup_output_file = dup_chapter.get("output_file")
             if dup_output_file:
                 dup_path = os.path.join(output_dir, dup_output_file)
@@ -703,7 +741,6 @@ def cleanup_missing_files(prog, output_dir):
     cleaned_count = 0
     
     for chapter_key, chapter_info in list(prog["chapters"].items()):
-        # chapter_key is now content_hash
         output_file = chapter_info.get("output_file")
         
         if output_file:
@@ -717,7 +754,9 @@ def cleanup_missing_files(prog, output_dir):
                 content_hash = chapter_info.get("content_hash")
                 if content_hash and content_hash in prog["content_hashes"]:
                     stored_info = prog["content_hashes"][content_hash]
-                    if stored_info.get("chapter_idx") == int(chapter_key):
+                    # FIXED: Compare content hashes, not chapter indices
+                    # Since chapter_key is now a hash, we compare hashes directly
+                    if content_hash == chapter_key:
                         del prog["content_hashes"][content_hash]
                 
                 if chapter_key in prog.get("chapter_chunks", {}):
@@ -1161,10 +1200,29 @@ def extract_comprehensive_content_hash(html_content):
         print(f"[WARNING] Failed to create comprehensive hash: {e}")
         simple_text = BeautifulSoup(html_content, 'html.parser').get_text()
         return hashlib.md5(simple_text.encode('utf-8')).hexdigest()
-
+        
 def get_content_hash(html_content):
-    """Create a comprehensive hash of content to detect duplicates"""
-    return extract_comprehensive_content_hash(html_content)
+    """Create a stable hash of content"""
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Remove elements that might change between extractions
+        for tag in soup(['script', 'style', 'meta', 'link']):
+            tag.decompose()
+        
+        # Get text content only (more stable)
+        text_content = soup.get_text(separator=' ', strip=True)
+        
+        # Normalize whitespace
+        text_content = ' '.join(text_content.split())
+        
+        # Create hash from normalized text
+        return hashlib.md5(text_content.encode('utf-8')).hexdigest()
+        
+    except Exception as e:
+        print(f"[WARNING] Failed to create hash: {e}")
+        # Fallback to simple hash
+        return hashlib.md5(html_content.encode('utf-8')).hexdigest()
 
 def sanitize_resource_filename(filename):
     """Sanitize resource filenames for filesystem compatibility"""
@@ -1534,6 +1592,7 @@ def _extract_advanced_chapter_info(zf):
         return _extract_chapters_smart(zf)
 
 
+
 def _extract_all_chapters_comprehensive(zf):
     """Comprehensive extraction - includes ALL HTML files including image-only chapters"""
     chapters = []
@@ -1597,13 +1656,17 @@ def _extract_all_chapters_comprehensive(zf):
                 content_html = html_content
                 content_text = soup.get_text(strip=True)
             
-            # Try to extract actual chapter number from filename first
+            # INITIALIZE actual_chapter_num BEFORE using it
             actual_chapter_num = None
-
-            # Try to extract from filename patterns like "No00248Chapter"
+            
+            # Try to extract actual chapter number from filename first
             filename_base = os.path.basename(file_path)
-            # Match patterns like No00248Chapter, Chapter248, etc.
+            
+            # Debug print to see what we're matching
+            print(f"[EXTRACT DEBUG] Trying to extract number from: {filename_base}")
+
             patterns = [
+                r'^(\d+)[_\.]',        # Matches "0249_" or "0249."
                 r'No(\d+)Chapter',
                 r'Chapter(\d+)',
                 r'chapter(\d+)',
@@ -1620,7 +1683,7 @@ def _extract_all_chapters_comprehensive(zf):
                     break
 
             # If we found a number in the filename, use it
-            if actual_chapter_num:
+            if actual_chapter_num is not None:
                 chapter_num = actual_chapter_num
             else:
                 # Fallback to sequential numbering
@@ -1667,7 +1730,7 @@ def _extract_all_chapters_comprehensive(zf):
                 "has_images": len(images) > 0,
                 "image_count": len(images),
                 "is_empty": len(content_text.strip()) == 0,
-                "is_image_only": is_image_only  # Add this flag
+                "is_image_only": is_image_only
             }
             
             chapters.append(chapter_info)
@@ -1864,10 +1927,10 @@ def _extract_chapters_smart(zf):
             chapter_num = None
             chapter_title = None
             detection_method = None
-            
-            # Determine header priority based on usage
-            header_priority = ['h2', 'h1', 'h3'] if h2_count > h1_count else ['h1', 'h2', 'h3']
-            
+
+            # INITIALIZE actual_chapter_num to prevent the error
+            actual_chapter_num = None
+
             # Method 1: Check filename
             for pattern, flags, method in chapter_patterns:
                 if method.endswith('_number'):
@@ -1992,6 +2055,7 @@ def _extract_chapters_smart(zf):
                 # Try to extract actual chapter number from filename
                 filename_base = os.path.basename(file_path)
                 patterns = [
+                    r'^(\d+)[_\.]',        # Add this pattern to catch "0000_" or "0000."
                     r'No(\d+)Chapter',
                     r'Chapter(\d+)',
                     r'chapter(\d+)',
@@ -2004,7 +2068,8 @@ def _extract_chapters_smart(zf):
                 for pattern in patterns:
                     match = re.search(pattern, filename_base, re.IGNORECASE)
                     if match:
-                        chapter_num = int(match.group(1))
+                        actual_chapter_num = int(match.group(1))  # Now this won't error
+                        chapter_num = actual_chapter_num
                         detection_method = "filename_number"
                         break
                 
@@ -2014,7 +2079,7 @@ def _extract_chapters_smart(zf):
                     while chapter_num in seen_chapters:
                         chapter_num += 1
                     detection_method = "sequential_fallback"
-                print(f"[DEBUG] No chapter number found in {file_path}, assigning: {chapter_num}")
+                    print(f"[DEBUG] No chapter number found in {file_path}, assigning: {chapter_num}")
             
             # Handle duplicate chapter numbers
             if chapter_num in seen_chapters:
@@ -3538,15 +3603,6 @@ def build_system_prompt(user_prompt, glossary_path):
     system = user_prompt if user_prompt else ""
     
     # Helper function to format glossary for prompt
-def build_system_prompt(user_prompt, glossary_path):
-    """Build the system prompt with glossary - NO FALLBACK"""
-    # Check if we should append glossary (default is True if not set)
-    append_glossary = os.getenv("APPEND_GLOSSARY", "1") == "1"
-    
-    # Start with user prompt - if empty, it stays empty
-    system = user_prompt if user_prompt else ""
-    
-    # Helper function to format glossary for prompt
     def format_glossary_for_prompt(glossary_data):
         """Convert various glossary formats into a unified prompt format"""
         formatted_entries = {}
@@ -3614,94 +3670,6 @@ def build_system_prompt(user_prompt, glossary_path):
             print(f"Warning: Could not load glossary: {e}")
     
     # Return whatever we have - empty string if nothing
-    return system
-    
-    # Normal flow when hardcoded prompts are enabled
-    if user_prompt:
-        system = user_prompt
-        # Append glossary if the toggle is on
-        if append_glossary and glossary_path and os.path.exists(glossary_path):
-            try:
-                with open(glossary_path, "r", encoding="utf-8") as gf:
-                    glossary_data = json.load(gf)
-                
-                formatted_entries = format_glossary_for_prompt(glossary_data)
-                
-                if formatted_entries and isinstance(formatted_entries, dict):
-                    glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
-                    system += (
-                        "\n\nCharacter/Term Glossary (use these translations consistently):\n"
-                        f"{glossary_block}"
-                    )
-            except Exception as e:
-                print(f"Warning: Could not load glossary: {e}")
-            
-    elif glossary_path and os.path.exists(glossary_path) and append_glossary:
-        try:
-            with open(glossary_path, "r", encoding="utf-8") as gf:
-                glossary_data = json.load(gf)
-            
-            formatted_entries = format_glossary_for_prompt(glossary_data)
-            
-            if formatted_entries and isinstance(formatted_entries, dict):
-                glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
-                system = (
-                    instructions + "\n\n"
-                    "Character/Term Glossary (use these translations consistently):\n"
-                    f"{glossary_block}"
-                )
-            else:
-                system = instructions
-        except Exception as e:
-            print(f"Warning: Could not load glossary: {e}")
-            system = instructions
-    else:
-        system = instructions
-
-    return system
-    
-    # Normal flow when hardcoded prompts are enabled
-    if user_prompt:
-        system = user_prompt
-        # Append glossary if the toggle is on
-        if append_glossary and os.path.exists(glossary_path):
-            try:
-                with open(glossary_path, "r", encoding="utf-8") as gf:
-                    glossary_data = json.load(gf)
-                
-                formatted_entries = format_glossary_for_prompt(glossary_data)
-                
-                if formatted_entries:
-                    glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
-                    system += (
-                        "\n\nCharacter/Term Glossary (use these translations consistently):\n"
-                        f"{glossary_block}"
-                    )
-            except Exception as e:
-                print(f"Warning: Could not load glossary: {e}")
-            
-    elif os.path.exists(glossary_path) and append_glossary:
-        try:
-            with open(glossary_path, "r", encoding="utf-8") as gf:
-                glossary_data = json.load(gf)
-            
-            formatted_entries = format_glossary_for_prompt(glossary_data)
-            
-            if formatted_entries:
-                glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
-                system = (
-                    instructions + "\n\n"
-                    "Character/Term Glossary (use these translations consistently):\n"
-                    f"{glossary_block}"
-                )
-            else:
-                system = instructions
-        except Exception as e:
-            print(f"Warning: Could not load glossary: {e}")
-            system = instructions
-    else:
-        system = instructions
-
     return system
 
 # =============================================================================
@@ -4210,15 +4178,18 @@ def main(log_callback=None, stop_callback=None):
         # Extract actual chapter number from filename FIRST
         actual_num = None
         if c.get('original_basename'):
+            # In all three range checking locations, update the patterns:
             patterns = [
+                r'^(\d+)_',            # NEW: Matches "0249_" at start
+                r'^(\d+)\.',           # NEW: Matches "0249." at start
                 r'No(\d+)Chapter',     # No00248Chapter
                 r'Chapter(\d+)',       # Chapter248
                 r'chapter(\d+)',       # chapter248
                 r'ch(\d+)',           # ch248
                 r'_(\d+)$',           # something_248
                 r'-(\d+)$',           # something-248
-                r'(\d+)$'             # just 248
-            ]
+                r'(\d+)$'             # just 248 at end
+            ]   
             
             for pattern in patterns:
                 match = re.search(pattern, c['original_basename'])
@@ -4229,18 +4200,38 @@ def main(log_callback=None, stop_callback=None):
         # If no number in filename, use the internal chapter number
         if actual_num is None:
             actual_num = chap_num
+            
+        # Store actual chapter number in the dict
+        c['actual_chapter_num'] = actual_num
 
         # Apply chapter range filter using ACTUAL chapter numbers
         if start is not None:
+            # Extract actual chapter number
+            actual_num = None
+            if c.get('original_basename'):
+                patterns = [
+                    r'No(\d+)Chapter', r'Chapter(\d+)', r'chapter(\d+)',
+                    r'ch(\d+)', r'_(\d+)$', r'-(\d+)$', r'(\d+)$'
+                ]
+                for pattern in patterns:
+                    match = re.search(pattern, c['original_basename'])
+                    if match:
+                        actual_num = int(match.group(1))
+                        break
+            
+            if actual_num is None:
+                actual_num = chap_num
+            
+            # Simple range check - no special handling
             if not (start <= actual_num <= end):
                 continue
-
         # Check chapter status with improved logic
         needs_translation, skip_reason, existing_file = check_chapter_status(
             prog, idx, chap_num, content_hash, out
         )
 
         if not needs_translation:
+            # The skip_reason already contains the correct chapter number from check_chapter_status
             print(f"[SKIP] {skip_reason}")
             continue
 
@@ -4284,7 +4275,17 @@ def main(log_callback=None, stop_callback=None):
             chunks = [(c["body"], 1, 1)]
         
         # Count chunks needed for this chapter
-        chapter_key_str = content_hash  # Use content hash instead of idx
+        chapter_key_str = content_hash
+        old_key_str = str(idx)
+
+        # Check for old tracking and migrate
+        if chapter_key_str not in prog.get("chapter_chunks", {}) and old_key_str in prog.get("chapter_chunks", {}):
+            # Migrate old chunks to new key
+            prog["chapter_chunks"][chapter_key_str] = prog["chapter_chunks"][old_key_str]
+            del prog["chapter_chunks"][old_key_str]
+            print(f"[PROGRESS] Migrated chunks for chapter {chap_num} to new tracking system")
+
+        # Now check chunks with the correct key
         if chapter_key_str in prog.get("chapter_chunks", {}):
             completed_chunks = len(prog["chapter_chunks"][chapter_key_str].get("completed", []))
             chunks_needed = len(chunks) - completed_chunks
@@ -4333,7 +4334,7 @@ def main(log_callback=None, stop_callback=None):
             
             # Apply chapter range filter using ACTUAL chapter numbers
             if start is not None:
-                # Extract actual chapter number from filename
+                # Extract actual chapter number
                 actual_num = None
                 if c.get('original_basename'):
                     patterns = [
@@ -4349,6 +4350,7 @@ def main(log_callback=None, stop_callback=None):
                 if actual_num is None:
                     actual_num = chap_num
                 
+                # Simple range check - no special handling
                 if not (start <= actual_num <= end):
                     continue
             
@@ -4412,14 +4414,21 @@ def main(log_callback=None, stop_callback=None):
                 # Process images if needed
                 chapter_body = chapter["body"]
                 if chapter.get('has_images') and image_translator and ENABLE_IMAGE_TRANSLATION:
-                    print(f"🖼️ Processing images for Chapter {chap_num}...")
+                    print(f"🖼️ Processing images for Chapter {actual_chapter_num}...")
                     chapter_body, image_translations = process_chapter_images(
                         chapter_body, 
                         chap_num, 
                         image_translator,
                         check_stop
                     )
-                    if image_translations:
+                    if image_translator:
+                        image_translator.set_current_chapter(chapter_num)
+                        chapter_body, image_translations = process_chapter_images(
+                            chapter_body, 
+                            chapter_num, 
+                            image_translator,
+                            check_stop
+                        )
                         print(f"✅ Processed {len(image_translations)} images for Chapter {chap_num}")
                 
                 # Create messages for this chapter
@@ -4580,7 +4589,7 @@ def main(log_callback=None, stop_callback=None):
 
             # Apply chapter range filter using ACTUAL chapter numbers
             if start is not None:
-                # Extract actual chapter number from filename
+                # Extract actual chapter number
                 actual_num = None
                 if c.get('original_basename'):
                     patterns = [
@@ -4596,6 +4605,7 @@ def main(log_callback=None, stop_callback=None):
                 if actual_num is None:
                     actual_num = chap_num
                 
+                # Simple range check - no special handling
                 if not (start <= actual_num <= end):
                     continue
 
@@ -4631,7 +4641,17 @@ def main(log_callback=None, stop_callback=None):
             # Debug logging for chapter type
             if is_empty_chapter:
                 print(f"📄 Empty chapter detected")
+            # Process image-only chapters
             elif is_image_only_chapter:
+                if image_translator and ENABLE_IMAGE_TRANSLATION:
+                    print(f"🖼️ Translating {c.get('image_count', 0)} images...")
+                    image_translator.set_current_chapter(chap_num)
+                    translated_html, image_translations = process_chapter_images(
+                        c["body"], 
+                        actual_num, 
+                        image_translator,
+                        check_stop
+                    )
                 print(f"📸 Image-only chapter: {c.get('image_count', 0)} images, no meaningful text")
             elif is_mixed_content:
                 print(f"📖📸 Mixed content: {text_size} chars + {c.get('image_count', 0)} images")
@@ -4708,10 +4728,10 @@ def main(log_callback=None, stop_callback=None):
                     print(c["body"][:200])
                     print(f"[DEBUG] Has h1 tags: {'<h1>' in c['body']}")
                     print(f"[DEBUG] Has h2 tags: {'<h2>' in c['body']}")
-                    
+                    image_translator.set_current_chapter(chap_num)
                     c["body"], image_translations = process_chapter_images(
                         c["body"], 
-                        chap_num, 
+                        actual_num,
                         image_translator,
                         check_stop
                     )
@@ -4773,6 +4793,26 @@ def main(log_callback=None, stop_callback=None):
             
             # Process each chunk
             for chunk_html, chunk_idx, total_chunks in chunks:
+                chapter_key_str = content_hash
+                old_key_str = str(idx)
+                
+                # Check new key first, then old key
+                if chapter_key_str not in prog.get("chapter_chunks", {}) and old_key_str in prog.get("chapter_chunks", {}):
+                    # Migrate old chunks to new key
+                    prog["chapter_chunks"][chapter_key_str] = prog["chapter_chunks"][old_key_str]
+                    del prog["chapter_chunks"][old_key_str]
+                    print(f"[PROGRESS] Migrated chunks for chapter {chap_num} to new tracking system")
+                
+                # NOW continue with the existing code:
+                # Track translated chunks for this chapter
+                if chapter_key_str not in prog["chapter_chunks"]:
+                    prog["chapter_chunks"][chapter_key_str] = {
+                        "total": len(chunks),
+                        "completed": [],
+                        "chunks": {}
+                    }
+                
+                prog["chapter_chunks"][chapter_key_str]["total"] = len(chunks)                
                 # Check if this chunk was already translated
                 if chunk_idx in prog["chapter_chunks"][chapter_key_str]["completed"]:
                     saved_chunk = prog["chapter_chunks"][chapter_key_str]["chunks"].get(str(chunk_idx))
