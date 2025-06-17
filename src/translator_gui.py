@@ -3852,22 +3852,29 @@ class TranslatorGUI:
         def save_and_close():
             """Save all settings and close the dialog"""
             try:
+                # Helper function to safely convert to int with default value
+                def safe_int(value, default):
+                    try:
+                        return int(value)
+                    except (ValueError, TypeError):
+                        return default
+                
                 # Context Management
                 self.config['use_rolling_summary'] = self.rolling_summary_var.get()
                 self.config['summary_role'] = self.summary_role_var.get()
-                self.config['rolling_summary_exchanges'] = int(self.rolling_summary_exchanges_var.get())
+                self.config['rolling_summary_exchanges'] = safe_int(self.rolling_summary_exchanges_var.get(), 5)
                 self.config['rolling_summary_mode'] = self.rolling_summary_mode_var.get()
                 
                 # Response Handling
                 self.config['retry_truncated'] = self.retry_truncated_var.get()
-                self.config['max_retry_tokens'] = int(self.max_retry_tokens_var.get())
+                self.config['max_retry_tokens'] = safe_int(self.max_retry_tokens_var.get(), 16384)
                 self.config['retry_duplicate_bodies'] = self.retry_duplicate_var.get()
-                self.config['duplicate_lookback_chapters'] = int(self.duplicate_lookback_var.get())
+                self.config['duplicate_lookback_chapters'] = safe_int(self.duplicate_lookback_var.get(), 5)
                 self.config['retry_timeout'] = self.retry_timeout_var.get()
-                self.config['chunk_timeout'] = int(self.chunk_timeout_var.get())
+                self.config['chunk_timeout'] = safe_int(self.chunk_timeout_var.get(), 900)
                 
                 # Prompt Management
-                self.config['reinforcement_frequency'] = int(self.reinforcement_freq_var.get())
+                self.config['reinforcement_frequency'] = safe_int(self.reinforcement_freq_var.get(), 10)
                 self.config['translate_book_title'] = self.translate_book_title_var.get()
                 self.config['book_title_prompt'] = getattr(self, 'book_title_prompt', 
                     "Translate this book title to English while retaining any acronyms:")
@@ -3877,35 +3884,47 @@ class TranslatorGUI:
                 self.config['reset_failed_chapters'] = self.reset_failed_chapters_var.get()
                 self.config['comprehensive_extraction'] = self.comprehensive_extraction_var.get()
                 self.config['disable_epub_gallery'] = self.disable_epub_gallery_var.get()
-                self.disable_zero_detection_var = tk.BooleanVar(
-                    value=self.config.get('disable_zero_detection', False)  # Default to False (detection enabled)
-                )
+                self.config['disable_zero_detection'] = self.disable_zero_detection_var.get()
                 
-                
-                # Image Translation Settings
+                # Image Translation Settings - validate before converting
                 self.config['enable_image_translation'] = self.enable_image_translation_var.get()
                 self.config['process_webnovel_images'] = self.process_webnovel_images_var.get()
-                self.config['webnovel_min_height'] = int(self.webnovel_min_height_var.get())
-                self.config['image_max_tokens'] = int(self.image_max_tokens_var.get())
-                self.config['max_images_per_chapter'] = int(self.max_images_per_chapter_var.get())
-                self.config['image_chunk_height'] = int(self.image_chunk_height_var.get())
-                self.config['hide_image_translation_label'] = self.hide_image_translation_label_var.get()
+                
+                # Validate numeric fields before saving
+                numeric_fields = [
+                    ('webnovel_min_height', self.webnovel_min_height_var, 1000),
+                    ('image_max_tokens', self.image_max_tokens_var, 16384),
+                    ('max_images_per_chapter', self.max_images_per_chapter_var, 1),
+                    ('image_chunk_height', self.image_chunk_height_var, 1500)
+                ]
+                
+                # Check all numeric fields first
+                for field_name, var, default in numeric_fields:
+                    value = var.get().strip()
+                    if value and not value.isdigit():
+                        messagebox.showerror("Invalid Input", 
+                            f"Please enter a valid number for {field_name.replace('_', ' ').title()}")
+                        return
+                
+                # If validation passes, save the values
+                for field_name, var, default in numeric_fields:
+                    self.config[field_name] = safe_int(var.get(), default)
                 
                 # Set environment variables for immediate effect
                 os.environ.update({
                     "USE_ROLLING_SUMMARY": "1" if self.rolling_summary_var.get() else "0",
                     "SUMMARY_ROLE": self.summary_role_var.get(),
-                    "ROLLING_SUMMARY_EXCHANGES": self.rolling_summary_exchanges_var.get(),
+                    "ROLLING_SUMMARY_EXCHANGES": str(self.config['rolling_summary_exchanges']),
                     "ROLLING_SUMMARY_MODE": self.rolling_summary_mode_var.get(),
                     "ROLLING_SUMMARY_SYSTEM_PROMPT": self.rolling_summary_system_prompt,
                     "ROLLING_SUMMARY_USER_PROMPT": self.rolling_summary_user_prompt,
                     "RETRY_TRUNCATED": "1" if self.retry_truncated_var.get() else "0",
-                    "MAX_RETRY_TOKENS": self.max_retry_tokens_var.get(),
+                    "MAX_RETRY_TOKENS": str(self.config['max_retry_tokens']),
                     "RETRY_DUPLICATE_BODIES": "1" if self.retry_duplicate_var.get() else "0",
-                    "DUPLICATE_LOOKBACK_CHAPTERS": self.duplicate_lookback_var.get(),
+                    "DUPLICATE_LOOKBACK_CHAPTERS": str(self.config['duplicate_lookback_chapters']),
                     "RETRY_TIMEOUT": "1" if self.retry_timeout_var.get() else "0",
-                    "CHUNK_TIMEOUT": self.chunk_timeout_var.get(),
-                    "REINFORCEMENT_FREQUENCY": self.reinforcement_freq_var.get(),
+                    "CHUNK_TIMEOUT": str(self.config['chunk_timeout']),
+                    "REINFORCEMENT_FREQUENCY": str(self.config['reinforcement_frequency']),
                     "TRANSLATE_BOOK_TITLE": "1" if self.translate_book_title_var.get() else "0",
                     "BOOK_TITLE_PROMPT": self.book_title_prompt,
                     "EMERGENCY_PARAGRAPH_RESTORE": "1" if self.emergency_restore_var.get() else "0",
@@ -3913,13 +3932,13 @@ class TranslatorGUI:
                     "COMPREHENSIVE_EXTRACTION": "1" if self.comprehensive_extraction_var.get() else "0",
                     "ENABLE_IMAGE_TRANSLATION": "1" if self.enable_image_translation_var.get() else "0",
                     "PROCESS_WEBNOVEL_IMAGES": "1" if self.process_webnovel_images_var.get() else "0",
-                    "WEBNOVEL_MIN_HEIGHT": self.webnovel_min_height_var.get(),
-                    "IMAGE_MAX_TOKENS": self.image_max_tokens_var.get(),
-                    "MAX_IMAGES_PER_CHAPTER": self.max_images_per_chapter_var.get(),
-                    "IMAGE_CHUNK_HEIGHT": self.image_chunk_height_var.get(),
+                    "WEBNOVEL_MIN_HEIGHT": str(self.config['webnovel_min_height']),
+                    "IMAGE_MAX_TOKENS": str(self.config['image_max_tokens']),
+                    "MAX_IMAGES_PER_CHAPTER": str(self.config['max_images_per_chapter']),
+                    "IMAGE_CHUNK_HEIGHT": str(self.config['image_chunk_height']),
                     "HIDE_IMAGE_TRANSLATION_LABEL": "1" if self.hide_image_translation_label_var.get() else "0",
-                    "DISABLE_EPUB_GALLERY": "1" if self.disable_epub_gallery_var.get() else "0"
-
+                    "DISABLE_EPUB_GALLERY": "1" if self.disable_epub_gallery_var.get() else "0",
+                    "DISABLE_ZERO_DETECTION": "1" if self.disable_zero_detection_var.get() else "0"
                 })
                 
                 # Save to config file
@@ -3929,8 +3948,6 @@ class TranslatorGUI:
                 self.append_log("✅ Other Settings saved successfully")
                 top.destroy()
                 
-            except ValueError as e:
-                messagebox.showerror("Invalid Input", f"Please enter valid numbers for all numeric fields.\nError: {e}")
             except Exception as e:
                 print(f"❌ Failed to save Other Settings: {e}")
                 messagebox.showerror("Error", f"Failed to save settings: {e}")
@@ -4131,13 +4148,47 @@ class TranslatorGUI:
     def save_config(self):
         """Persist all settings to config.json."""
         try:
+            # Helper function to safely convert to int with default value
+            def safe_int(value, default):
+                try:
+                    return int(value)
+                except (ValueError, TypeError):
+                    return default
+            
+            # Helper function to safely convert to float with default value
+            def safe_float(value, default):
+                try:
+                    return float(value)
+                except (ValueError, TypeError):
+                    return default
+            
             self.config['model'] = self.model_var.get()
             self.config['active_profile'] = self.profile_var.get()
             self.config['prompt_profiles'] = self.prompt_profiles
             self.config['contextual'] = self.contextual_var.get()
-            self.config['delay'] = int(self.delay_entry.get())
-            self.config['translation_temperature'] = float(self.trans_temp.get())
-            self.config['translation_history_limit'] = int(self.trans_history.get())
+            
+            # Validate and save numeric fields
+            delay_val = self.delay_entry.get().strip()
+            if delay_val and not delay_val.replace('.', '', 1).isdigit():
+                messagebox.showerror("Invalid Input", "Please enter a valid number for API call delay")
+                return
+            self.config['delay'] = safe_int(delay_val, 2)
+            
+            trans_temp_val = self.trans_temp.get().strip()
+            if trans_temp_val:
+                try:
+                    float(trans_temp_val)
+                except ValueError:
+                    messagebox.showerror("Invalid Input", "Please enter a valid number for Temperature")
+                    return
+            self.config['translation_temperature'] = safe_float(trans_temp_val, 0.3)
+            
+            trans_history_val = self.trans_history.get().strip()
+            if trans_history_val and not trans_history_val.isdigit():
+                messagebox.showerror("Invalid Input", "Please enter a valid number for Translation History Limit")
+                return
+            self.config['translation_history_limit'] = safe_int(trans_history_val, 3)
+            
             self.config['api_key'] = self.api_key_entry.get()
             self.config['REMOVE_AI_ARTIFACTS'] = self.REMOVE_AI_ARTIFACTS_var.get()
             self.config['chapter_range'] = self.chapter_range_entry.get().strip()
@@ -4148,28 +4199,26 @@ class TranslatorGUI:
             self.config['book_title_prompt'] = self.book_title_prompt
             self.config['append_glossary'] = self.append_glossary_var.get()
             self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()
-            self.config['reinforcement_frequency'] = int(self.reinforcement_freq_var.get())
+            self.config['reinforcement_frequency'] = safe_int(self.reinforcement_freq_var.get(), 10)
             self.config['reset_failed_chapters'] = self.reset_failed_chapters_var.get()
             self.config['retry_duplicate_bodies'] = self.retry_duplicate_var.get()
-            self.config['duplicate_lookback_chapters'] = int(self.duplicate_lookback_var.get())
+            self.config['duplicate_lookback_chapters'] = safe_int(self.duplicate_lookback_var.get(), 5)
             self.config['token_limit_disabled'] = self.token_limit_disabled
-            self.config['glossary_min_frequency'] = int(self.glossary_min_frequency_var.get())
-            self.config['glossary_max_names'] = int(self.glossary_max_names_var.get())
-            self.config['glossary_max_titles'] = int(self.glossary_max_titles_var.get())
-            self.config['glossary_batch_size'] = int(self.glossary_batch_size_var.get())
+            self.config['glossary_min_frequency'] = safe_int(self.glossary_min_frequency_var.get(), 2)
+            self.config['glossary_max_names'] = safe_int(self.glossary_max_names_var.get(), 50)
+            self.config['glossary_max_titles'] = safe_int(self.glossary_max_titles_var.get(), 30)
+            self.config['glossary_batch_size'] = safe_int(self.glossary_batch_size_var.get(), 50)
             self.config['enable_image_translation'] = self.enable_image_translation_var.get()
             self.config['process_webnovel_images'] = self.process_webnovel_images_var.get()
-            self.config['webnovel_min_height'] = int(self.webnovel_min_height_var.get())
-            self.config['image_max_tokens'] = int(self.image_max_tokens_var.get())
-            self.config['max_images_per_chapter'] = int(self.max_images_per_chapter_var.get())
+            self.config['webnovel_min_height'] = safe_int(self.webnovel_min_height_var.get(), 1000)
+            self.config['image_max_tokens'] = safe_int(self.image_max_tokens_var.get(), 16384)
+            self.config['max_images_per_chapter'] = safe_int(self.max_images_per_chapter_var.get(), 1)
             self.config['batch_translation'] = self.batch_translation_var.get()
-            self.config['batch_size'] = int(self.batch_size_var.get())
+            self.config['batch_size'] = safe_int(self.batch_size_var.get(), 3)
             self.config['translation_history_rolling'] = self.translation_history_rolling_var.get()
             self.config['glossary_history_rolling'] = self.glossary_history_rolling_var.get()
             self.config['disable_epub_gallery'] = self.disable_epub_gallery_var.get()
 
-
-            
             _tl = self.token_limit_entry.get().strip()
             if _tl.isdigit():
                 self.config['token_limit'] = int(_tl)
@@ -4179,9 +4228,10 @@ class TranslatorGUI:
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, ensure_ascii=False, indent=2)
             messagebox.showinfo("Saved", "Configuration saved.")
+            self.append_log("✅ Configuration saved successfully")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save config: {e}")
-
+            self.append_log(f"❌ Failed to save configuration: {e}")
 
 
     def log_debug(self, message):
