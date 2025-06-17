@@ -261,15 +261,54 @@ class ImageTranslator:
         """Load progress tracking for image chunks"""
         progress_file = os.path.join(self.output_dir, "translation_progress.json")
         if os.path.exists(progress_file):
-            with open(progress_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {"image_chunks": {}}
+            try:
+                with open(progress_file, 'r', encoding='utf-8') as f:
+                    prog = json.load(f)
+                # Ensure image_chunks key exists
+                if "image_chunks" not in prog:
+                    prog["image_chunks"] = {}
+                return prog
+            except Exception as e:
+                print(f"⚠️ Warning: Could not load progress file: {e}")
+                # Return minimal structure to avoid breaking
+                return {
+                    "chapters": {},
+                    "content_hashes": {},
+                    "chapter_chunks": {},
+                    "image_chunks": {},
+                    "version": "2.1"
+                }
+        # Return the same structure as TranslateKRtoEN expects
+        return {
+            "chapters": {},
+            "content_hashes": {},
+            "chapter_chunks": {},
+            "image_chunks": {},
+            "version": "2.1"
+        }
+
 
     def save_progress(self, prog):
-        """Save progress tracking"""
+        """Save progress tracking - with safe writing"""
         progress_file = os.path.join(self.output_dir, "translation_progress.json")
-        with open(progress_file, 'w', encoding='utf-8') as f:
-            json.dump(prog, f, ensure_ascii=False, indent=2)
+        try:
+            # Write to a temporary file first
+            temp_file = progress_file + '.tmp'
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(prog, f, ensure_ascii=False, indent=2)
+            
+            # If successful, replace the original file
+            if os.path.exists(progress_file):
+                os.remove(progress_file)
+            os.rename(temp_file, progress_file)
+        except Exception as e:
+            print(f"⚠️ Warning: Failed to save progress: {e}")
+            # Clean up temp file if it exists
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except:
+                    pass
     
     def preprocess_image_for_watermarks(self, image_path: str) -> Optional[bytes]:
         """
@@ -392,11 +431,28 @@ class ImageTranslator:
         print(f"   ⏳ This may take {num_chunks * 30}-{num_chunks * 60} seconds to complete")
         print(f"   ℹ️ Stop will take effect after current chunk completes")
         
-        # Load progress
+        # Load progress - maintaining full structure
         prog = self.load_progress()
         
-        # Create unique key for this image
-        image_key = os.path.basename(self.current_image_path) if hasattr(self, 'current_image_path') else str(hash(str(img)))
+        # Create unique key for this image - include chapter info if available
+        image_basename = os.path.basename(self.current_image_path) if hasattr(self, 'current_image_path') else str(hash(str(img)))
+        
+        # Try to extract chapter number from context or path
+        chapter_num = None
+        if hasattr(self, 'current_chapter_num'):
+            chapter_num = self.current_chapter_num
+        else:
+            # Try to extract from filename
+            import re
+            match = re.search(r'ch(?:apter)?[\s_-]*(\d+)', image_basename, re.IGNORECASE)
+            if match:
+                chapter_num = match.group(1)
+        
+        # Create a more unique key that includes chapter info
+        if chapter_num:
+            image_key = f"ch{chapter_num}_{image_basename}"
+        else:
+            image_key = image_basename
         
         # Initialize image chunk tracking
         if "image_chunks" not in prog:
@@ -408,12 +464,15 @@ class ImageTranslator:
                 "completed": [],
                 "chunks": {},
                 "height": height,
-                "width": width
+                "width": width,
+                "chapter": chapter_num,  # Store chapter association
+                "filename": image_basename
             }
         
         all_translations = []
         was_stopped = False
         
+        # Rest of the method remains the same...
         for i in range(num_chunks):
             # Check if this chunk was already translated
             if i in prog["image_chunks"][image_key]["completed"]:
@@ -460,13 +519,12 @@ class ImageTranslator:
                 chunk_text = self._clean_translation_response(translation)
                 all_translations.append(chunk_text)
                 
-                # ===== NEW CODE: Store context for next chunks =====
+                # Store context for next chunks
                 if self.contextual_enabled:
                     self.image_chunk_context.append({
-                        "user": chunk_context,  # The "This is part X of Y" message
-                        "assistant": chunk_text  # The translation result
+                        "user": chunk_context,
+                        "assistant": chunk_text
                     })
-                # ===== END NEW CODE =====
                 
                 # Save chunk progress
                 prog["image_chunks"][image_key]["completed"].append(i)
@@ -495,6 +553,10 @@ class ImageTranslator:
             print(f"   ❌ No successful translations from any chunks")
             return None
 
+    def set_current_chapter(self, chapter_num):
+        """Set the current chapter number for progress tracking"""
+        self.current_chapter_num = chapter_num
+    
     def _process_single_image(self, img, context, check_stop_fn):
         """Process a single image that doesn't need chunking"""
         
