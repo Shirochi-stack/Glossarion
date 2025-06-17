@@ -312,7 +312,7 @@ class TranslatorGUI:
             value=str(self.config.get('chunk_timeout', '900'))  # 15 minutes default
         )
         self.retry_timeout_var = tk.BooleanVar(
-            value=self.config.get('retry_timeout', False)
+            value=self.config.get('retry_timeout', True)
         )
         self.batch_translation_var = tk.BooleanVar(
             value=self.config.get('batch_translation', False)  # Default to False
