@@ -1597,8 +1597,34 @@ def _extract_all_chapters_comprehensive(zf):
                 content_html = html_content
                 content_text = soup.get_text(strip=True)
             
-            # Increment chapter number
-            chapter_num += 1
+            # Try to extract actual chapter number from filename first
+            actual_chapter_num = None
+
+            # Try to extract from filename patterns like "No00248Chapter"
+            filename_base = os.path.basename(file_path)
+            # Match patterns like No00248Chapter, Chapter248, etc.
+            patterns = [
+                r'No(\d+)Chapter',
+                r'Chapter(\d+)',
+                r'chapter(\d+)',
+                r'ch(\d+)',
+                r'第(\d+)[章话回]',
+                r'_(\d+)\.x?html',
+                r'-(\d+)\.x?html'
+            ]
+
+            for pattern in patterns:
+                match = re.search(pattern, filename_base, re.IGNORECASE)
+                if match:
+                    actual_chapter_num = int(match.group(1))
+                    break
+
+            # If we found a number in the filename, use it
+            if actual_chapter_num:
+                chapter_num = actual_chapter_num
+            else:
+                # Fallback to sequential numbering
+                chapter_num += 1
             
             # Try to extract title
             chapter_title = None
@@ -1961,12 +1987,33 @@ def _extract_chapters_smart(zf):
                     if chapter_num:
                         break
             
-            # Fallback: Assign sequential number
+            # Fallback: Try to extract from filename first
             if not chapter_num:
-                chapter_num = len(chapters) + 1
-                while chapter_num in seen_chapters:
-                    chapter_num += 1
-                detection_method = "sequential_fallback"
+                # Try to extract actual chapter number from filename
+                filename_base = os.path.basename(file_path)
+                patterns = [
+                    r'No(\d+)Chapter',
+                    r'Chapter(\d+)',
+                    r'chapter(\d+)',
+                    r'ch(\d+)',
+                    r'第(\d+)[章话回]',
+                    r'_(\d+)\.x?html',
+                    r'-(\d+)\.x?html'
+                ]
+                
+                for pattern in patterns:
+                    match = re.search(pattern, filename_base, re.IGNORECASE)
+                    if match:
+                        chapter_num = int(match.group(1))
+                        detection_method = "filename_number"
+                        break
+                
+                # If still no number, use sequential
+                if not chapter_num:
+                    chapter_num = len(chapters) + 1
+                    while chapter_num in seen_chapters:
+                        chapter_num += 1
+                    detection_method = "sequential_fallback"
                 print(f"[DEBUG] No chapter number found in {file_path}, assigning: {chapter_num}")
             
             # Handle duplicate chapter numbers
@@ -3666,7 +3713,8 @@ def main(log_callback=None, stop_callback=None):
     
     # Handle the case where we're called from GUI (no args object)
     args = None
-    
+    chapters_completed = 0
+    chunks_completed = 0
     
     
     # Get the input path (EPUB or text file)
@@ -4159,10 +4207,48 @@ def main(log_callback=None, stop_callback=None):
         chap_num = c["num"]
         content_hash = c.get("content_hash") or get_content_hash(c["body"])
         
-        # Apply chapter range filter
-        # Change to use index instead:
-        if start is not None and not (start <= idx + 1 <= end):
+        # Extract actual chapter number from filename FIRST
+        actual_num = None
+        if c.get('original_basename'):
+            patterns = [
+                r'No(\d+)Chapter',     # No00248Chapter
+                r'Chapter(\d+)',       # Chapter248
+                r'chapter(\d+)',       # chapter248
+                r'ch(\d+)',           # ch248
+                r'_(\d+)$',           # something_248
+                r'-(\d+)$',           # something-248
+                r'(\d+)$'             # just 248
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, c['original_basename'])
+                if match:
+                    actual_num = int(match.group(1))
+                    break
+
+        # If no number in filename, use the internal chapter number
+        if actual_num is None:
+            actual_num = chap_num
+
+        # Apply chapter range filter using ACTUAL chapter numbers
+        if start is not None:
+            if not (start <= actual_num <= end):
+                continue
+
+        # Check chapter status with improved logic
+        needs_translation, skip_reason, existing_file = check_chapter_status(
+            prog, idx, chap_num, content_hash, out
+        )
+
+        if not needs_translation:
+            print(f"[SKIP] {skip_reason}")
             continue
+
+        # Calculate chapter position for progress (NOW it's safe to calculate)
+        chapter_position = f"{chapters_completed + 1}/{chapters_to_process}"
+
+        # NOW print with all variables defined
+        print(f"\n🔄 Processing #{idx+1}/{total_chapters} (Actual: Chapter {actual_num}) ({chapter_position} to translate): {c['title']} [File: {c.get('original_basename', f'Chapter_{chap_num}')}]")
         
         # Check chapter status
         needs_translation, skip_reason, _ = check_chapter_status(
@@ -4245,9 +4331,26 @@ def main(log_callback=None, stop_callback=None):
             chap_num = c["num"]
             content_hash = c.get("content_hash") or get_content_hash(c["body"])
             
-            # Apply chapter range filter
-            if start is not None and not (start <= idx + 1 <= end):
-                continue
+            # Apply chapter range filter using ACTUAL chapter numbers
+            if start is not None:
+                # Extract actual chapter number from filename
+                actual_num = None
+                if c.get('original_basename'):
+                    patterns = [
+                        r'No(\d+)Chapter', r'Chapter(\d+)', r'chapter(\d+)',
+                        r'ch(\d+)', r'_(\d+)$', r'-(\d+)$', r'(\d+)$'
+                    ]
+                    for pattern in patterns:
+                        match = re.search(pattern, c['original_basename'])
+                        if match:
+                            actual_num = int(match.group(1))
+                            break
+                
+                if actual_num is None:
+                    actual_num = chap_num
+                
+                if not (start <= actual_num <= end):
+                    continue
             
             # Check chapter status
             needs_translation, skip_reason, existing_file = check_chapter_status(
@@ -4475,9 +4578,26 @@ def main(log_callback=None, stop_callback=None):
             chap_num = c["num"]
             content_hash = c.get("content_hash") or get_content_hash(c["body"])
 
-            # Apply chapter range filter
-            if start is not None and not (start <= idx + 1 <= end):
-                continue
+            # Apply chapter range filter using ACTUAL chapter numbers
+            if start is not None:
+                # Extract actual chapter number from filename
+                actual_num = None
+                if c.get('original_basename'):
+                    patterns = [
+                        r'No(\d+)Chapter', r'Chapter(\d+)', r'chapter(\d+)',
+                        r'ch(\d+)', r'_(\d+)$', r'-(\d+)$', r'(\d+)$'
+                    ]
+                    for pattern in patterns:
+                        match = re.search(pattern, c['original_basename'])
+                        if match:
+                            actual_num = int(match.group(1))
+                            break
+                
+                if actual_num is None:
+                    actual_num = chap_num
+                
+                if not (start <= actual_num <= end):
+                    continue
 
             # Check chapter status with improved logic
             needs_translation, skip_reason, existing_file = check_chapter_status(
@@ -4491,7 +4611,8 @@ def main(log_callback=None, stop_callback=None):
             # Calculate chapter position for progress
             chapter_position = f"{chapters_completed + 1}/{chapters_to_process}"
           
-            print(f"\n🔄 Processing #{idx+1}/{total_chapters} (Internal: Chapter {chap_num}) ({chapter_position} to translate): {c['title']} [File: {c.get('original_basename', f'Chapter_{chap_num}')}]")
+            print(f"\n🔄 Processing #{idx+1}/{total_chapters} (Actual: Chapter {actual_num}) ({chapter_position} to translate): {c['title']} [File: {c.get('original_basename', f'Chapter_{chap_num}')}]")
+
                         
             # Start new chapter context
             chunk_context_manager.start_chapter(chap_num, c['title'])
