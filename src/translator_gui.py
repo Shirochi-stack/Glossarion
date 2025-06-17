@@ -8,6 +8,7 @@ import shutil
 import sys
 import threading
 import time
+import re
 
 # Standard Library - GUI Framework
 import tkinter as tk
@@ -831,7 +832,7 @@ class TranslatorGUI:
         if not input_path or not os.path.isfile(input_path):
             messagebox.showerror("Error", "Please select a valid EPUB or text file first.")
             return
-        epub_path = input_path  # Keep using epub_path for compatibility
+        epub_path = input_path
         
         # Get the output directory
         epub_base = os.path.splitext(os.path.basename(epub_path))[0]
@@ -849,6 +850,19 @@ class TranslatorGUI:
         
         with open(progress_file, 'r', encoding='utf-8') as f:
             prog = json.load(f)
+        
+        # Also load chapters_info.json if it exists
+        chapters_info_file = os.path.join(output_dir, "chapters_info.json")
+        chapters_info_map = {}
+        if os.path.exists(chapters_info_file):
+            try:
+                with open(chapters_info_file, 'r', encoding='utf-8') as f:
+                    chapters_info = json.load(f)
+                    for ch_info in chapters_info:
+                        if 'num' in ch_info:
+                            chapters_info_map[ch_info['num']] = ch_info
+            except:
+                pass
         
         # Create dialog to select chapters
         dialog = tk.Toplevel(self.master)
@@ -870,18 +884,168 @@ class TranslatorGUI:
         listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=listbox.yview)
         
-        # Populate with chapters
+        # First, detect if this EPUB uses 0-based or 1-based numbering
+        all_extracted_nums = []
+        
+        # Quick scan to detect numbering system
+        for chapter_key, chapter_info in prog.get("chapters", {}).items():
+            output_file = chapter_info.get("output_file", "")
+            if output_file:
+                patterns = [
+                    r'(\d{4})[_\.]',
+                    r'(\d{3,4})[_\.]',
+                    r'No(\d+)Chapter',
+                    r'response_(\d+)[_\.]',
+                    r'chapter[_\s]*(\d+)',
+                    r'_(\d+)_',
+                ]
+                
+                for pattern in patterns:
+                    match = re.search(pattern, output_file, re.IGNORECASE)
+                    if match:
+                        num = int(match.group(1))
+                        all_extracted_nums.append(num)
+                        break
+        
+        # Determine if EPUB uses 0-based numbering
+        # First, detect if this EPUB uses 0-based or 1-based numbering
+        uses_zero_based = False
+
+        # Method 1: Check if we can find a chapter where filename number differs from chapter number
+        for chapter_key, chapter_info in prog.get("chapters", {}).items():
+            if chapter_info.get("status") == "completed":
+                output_file = chapter_info.get("output_file", "")
+                stored_chapter_num = chapter_info.get("chapter_num", 0)
+                
+                if output_file:
+                    # Extract number from filename
+                    match = re.search(r'response_(\d+)', output_file)
+                    if match:
+                        file_num = int(match.group(1))
+                        
+                        # If file says 249 but it's chapter 250, it's 0-based
+                        if file_num == stored_chapter_num - 1:
+                            uses_zero_based = True
+                            print(f"[DEBUG] Detected 0-based: {output_file} (file: {file_num}) is chapter {stored_chapter_num}")
+                            break
+                        elif file_num == stored_chapter_num:
+                            uses_zero_based = False
+                            print(f"[DEBUG] Detected 1-based: {output_file} (file: {file_num}) is chapter {stored_chapter_num}")
+                            break
+
+        # Method 2: If no detection yet, scan actual files and look for 0
+        if not uses_zero_based:
+            try:
+                for file in os.listdir(output_dir):
+                    if re.search(r'_0+[_\.]', file):  # Look for _0_ or _00_ or _000_ etc
+                        uses_zero_based = True
+                        print(f"[DEBUG] Found 0-based indicator in filename: {file}")
+                        break
+            except:
+                pass
+
+        print(f"[DEBUG] Final determination: {'0-based' if uses_zero_based else '1-based'}")
+        
+        # Now process chapters with the correct adjustment
         chapter_keys = []
-        for chapter_key, chapter_info in sorted(prog.get("chapters", {}).items(), 
-                                               key=lambda x: int(x[0])):
-            chapter_num = chapter_info.get("chapter_num", "?")
+        chapters_with_nums = []
+        
+        for chapter_key, chapter_info in prog.get("chapters", {}).items():
+            output_file = chapter_info.get("output_file", "")
+            stored_num = chapter_info.get("chapter_num", 0)
+            actual_num = stored_num
+            
+            # Try multiple sources for the actual number
+            sources_to_try = []
+            
+            if output_file:
+                sources_to_try.append(("output_file", output_file))
+            
+            if "display_name" in chapter_info:
+                sources_to_try.append(("display_name", chapter_info["display_name"]))
+            
+            if "file_basename" in chapter_info:
+                sources_to_try.append(("file_basename", chapter_info["file_basename"]))
+            
+            # Patterns to extract number
+            patterns = [
+                r'(\d{4})[_\.]',
+                r'(\d{3,4})[_\.]',
+                r'No(\d+)Chapter',
+                r'response_(\d+)[_\.]',
+                r'chapter[_\s]*(\d+)',
+                r'ch[_\s]*(\d+)',
+                r'_(\d+)_',
+                r'(\d{3,4})[^\d]',
+            ]
+            
+            # Try each source with each pattern
+            found = False
+            for source_name, source in sources_to_try:
+                if not source:
+                    continue
+                
+                for pattern in patterns:
+                    match = re.search(pattern, source, re.IGNORECASE)
+                    if match:
+                        extracted_num = int(match.group(1))
+                        
+                        # For in_progress chapters, the stored values might already be correct
+                        if chapter_info.get("status") == "in_progress":
+                            # Don't adjust for in_progress - the stored values are already chapter numbers
+                            actual_num = extracted_num
+                        else:
+                            # For completed chapters, apply 0-based adjustment if needed
+                            if uses_zero_based:
+                                actual_num = extracted_num + 1
+                            else:
+                                actual_num = extracted_num
+                        
+                        found = True
+                        break
+                
+                if found:
+                    break
+
+            # For in_progress chapters without output files, use chapter_idx
+            if not found:
+                if chapter_info.get("status") == "in_progress":
+                    # For in_progress, chapter_idx is the 0-based index
+                    chapter_idx = chapter_info.get("chapter_idx")
+                    if chapter_idx is not None:
+                        # Always add 1 to convert from 0-based index to chapter number
+                        actual_num = chapter_idx + 1  # 250 → 251
+                    else:
+                        actual_num = stored_num
+                else:
+                    # For completed chapters, the stored_num should be correct
+                    actual_num = stored_num
+            
+            # Debug output for in_progress chapters
+            if chapter_info.get("status") == "in_progress":
+                print(f"[DEBUG] After append, actual_num in tuple: {chapters_with_nums[-1][2]}")
+                print(f"[DEBUG] In-progress chapter:")
+                print(f"  - chapter_key: {chapter_key}")
+                print(f"  - stored_num: {stored_num}")
+                print(f"  - chapter_idx: {chapter_info.get('chapter_idx')}")
+                print(f"  - found: {found}")
+                print(f"  - actual_num before append: {actual_num}")
+                print(f"  - uses_zero_based: {uses_zero_based}")
+
+            chapters_with_nums.append((chapter_key, chapter_info, actual_num))
+        
+        # Sort by actual number
+        chapters_with_nums.sort(key=lambda x: x[2])
+        
+        # Populate listbox
+        for chapter_key, chapter_info, actual_num in chapters_with_nums:
             status = chapter_info.get("status", "unknown")
             output_file = chapter_info.get("output_file", "")
             
             # Check if file exists
             file_exists = "✓" if output_file and os.path.exists(os.path.join(output_dir, output_file)) else "✗"
             
-            display_text = f"Chapter {chapter_num} - {status} - File: {file_exists}"
+            display_text = f"Chapter {actual_num} - {status} - File: {file_exists}"
             listbox.insert(tk.END, display_text)
             chapter_keys.append(chapter_key)
         
@@ -905,7 +1069,8 @@ class TranslatorGUI:
                     # Remove from content hashes
                     content_hash = chapter_info.get("content_hash")
                     if content_hash and content_hash in prog.get("content_hashes", {}):
-                        if prog["content_hashes"][content_hash].get("chapter_idx") == int(chapter_key):
+                        stored_hash_info = prog["content_hashes"].get(content_hash, {})
+                        if stored_hash_info.get("chapter_idx") == chapter_info.get("chapter_idx"):
                             del prog["content_hashes"][content_hash]
                     
                     # Remove chunk data
@@ -913,7 +1078,7 @@ class TranslatorGUI:
                         del prog["chapter_chunks"][chapter_key]
                     
                     # Delete the output file if it exists
-                    output_file = chapter_info.get("output_file")
+                    output_file = chapter_info.get("output_file", "")
                     if output_file:
                         output_path = os.path.join(output_dir, output_file)
                         if os.path.exists(output_path):
