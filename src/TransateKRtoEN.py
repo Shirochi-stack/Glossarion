@@ -1865,7 +1865,7 @@ class TranslationProcessor:
                 current_temp = self.config.TEMP
                 
                 total_tokens = sum(self.chapter_splitter.count_tokens(m["content"]) for m in msgs)
-                print(f"    [DEBUG] Chunk {chunk_idx}/{total_chunks} tokens = {total_tokens:,} / {self.get_token_budget_str()} [File: {c.get('original_basename', f'Chapter_{c[\"num\"]}')}]")
+                print(f"[DEBUG] Chunk {chunk_idx}/{total_chunks} tokens = {total_tokens:,} / {self.get_token_budget_str()} [File: {c['original_basename'] if 'original_basename' in c else 'Chapter_'+str(c['num'])}]")
                 
                 self.client.context = 'translation'
                 
