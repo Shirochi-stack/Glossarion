@@ -3635,7 +3635,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
 # =============================================================================
 
 def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None):
-    """Send API request with interrupt capability and timeout retry"""
+    """Send API request with interrupt capability and optional timeout retry"""
     result_queue = queue.Queue()
     
     def api_call():
@@ -3651,16 +3651,8 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     api_thread.daemon = True
     api_thread.start()
     
-    # Determine timeout based on whether retry is enabled
-    if chunk_timeout is None:
-        # No retry timeout - use a very long timeout (1 hour)
-        timeout = 3600
-        retry_enabled = False
-    else:
-        # Use specified timeout for retry
-        timeout = chunk_timeout
-        retry_enabled = True
-    
+    # If no chunk_timeout specified, wait indefinitely (well, 24 hours)
+    timeout = chunk_timeout if chunk_timeout is not None else 86400  # 24 hours when disabled
     check_interval = 0.5
     elapsed = 0
     
@@ -3671,8 +3663,8 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 raise result
             if isinstance(result, tuple):
                 api_result, api_time = result
-                # Only check for slow response if retry is enabled
-                if retry_enabled and api_time > chunk_timeout:
+                # Only enforce timeout if chunk_timeout was actually specified
+                if chunk_timeout and api_time > chunk_timeout:
                     raise UnifiedClientError(f"API call took {api_time:.1f}s (timeout: {chunk_timeout}s)")
                 return api_result
             return result
@@ -3681,6 +3673,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 raise UnifiedClientError("Translation stopped by user")
             elapsed += check_interval
     
+    # This should rarely happen with 24 hour timeout
     raise UnifiedClientError(f"API call timed out after {timeout} seconds")
 
 def parse_token_limit(env_value):
@@ -5102,7 +5095,7 @@ def main(log_callback=None, stop_callback=None):
 
                         # Get timeout settings
                         chunk_timeout = None
-                        if os.getenv("RETRY_TIMEOUT", "1") == "1":
+                        if os.getenv("RETRY_TIMEOUT", "0") == "1":
                             chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "900"))
 
                         # Initialize result variable
