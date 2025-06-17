@@ -20,6 +20,7 @@ import time
 # Import the new modules
 from history_manager import HistoryManager
 from chapter_splitter import ChapterSplitter
+from chapter_splitter import ChapterSplitter
 from image_translator import ImageTranslator
 from typing import Dict, List, Tuple 
 from txt_processor import TextFileProcessor
@@ -112,6 +113,558 @@ class ChunkContextManager:
         self.chapter_num = None 
         self.chapter_title = None
 
+# =====================================================
+# CONFIGURATION AND ENVIRONMENT MANAGEMENT
+# =====================================================
+class TranslationConfig:
+    """Centralized configuration management"""
+    def __init__(self):
+        self.MODEL = os.getenv("MODEL", "gemini-1.5-flash")
+        self.input_path = os.getenv("input_path", "default.epub")
+        self.PROFILE_NAME = os.getenv("PROFILE_NAME", "korean").lower()
+        self.CONTEXTUAL = os.getenv("CONTEXTUAL", "1") == "1"
+        self.DELAY = int(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+        self.SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "").strip()
+        self.REMOVE_AI_ARTIFACTS = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
+        self.TEMP = float(os.getenv("TRANSLATION_TEMPERATURE", "0.3"))
+        self.HIST_LIMIT = int(os.getenv("TRANSLATION_HISTORY_LIMIT", "20"))
+        self.MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
+        self.EMERGENCY_RESTORE = os.getenv("EMERGENCY_PARAGRAPH_RESTORE", "1") == "1"
+        self.BATCH_TRANSLATION = os.getenv("BATCH_TRANSLATION", "0") == "1"  
+        self.BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
+        self.ENABLE_IMAGE_TRANSLATION = os.getenv("ENABLE_IMAGE_TRANSLATION", "1") == "1"
+        self.TRANSLATE_BOOK_TITLE = os.getenv("TRANSLATE_BOOK_TITLE", "1") == "1"
+        self.DISABLE_ZERO_DETECTION = os.getenv("DISABLE_ZERO_DETECTION", "0") == "1"
+        self.COMPREHENSIVE_EXTRACTION = os.getenv("COMPREHENSIVE_EXTRACTION", "0") == "1"
+        self.DISABLE_AUTO_GLOSSARY = os.getenv("DISABLE_AUTO_GLOSSARY", "0") == "1"
+        self.MANUAL_GLOSSARY = os.getenv("MANUAL_GLOSSARY")
+        
+        # Retry settings
+        self.RETRY_TRUNCATED = os.getenv("RETRY_TRUNCATED", "0") == "1"
+        self.RETRY_DUPLICATE_BODIES = os.getenv("RETRY_DUPLICATE_BODIES", "1") == "1"
+        self.RETRY_TIMEOUT = os.getenv("RETRY_TIMEOUT", "0") == "1"
+        self.CHUNK_TIMEOUT = int(os.getenv("CHUNK_TIMEOUT", "900"))
+        self.MAX_RETRY_TOKENS = int(os.getenv("MAX_RETRY_TOKENS", "16384"))
+        self.DUPLICATE_LOOKBACK_CHAPTERS = int(os.getenv("DUPLICATE_LOOKBACK_CHAPTERS", "3"))
+        
+        # Rolling summary settings
+        self.USE_ROLLING_SUMMARY = os.getenv("USE_ROLLING_SUMMARY", "0") == "1"
+        self.ROLLING_SUMMARY_EXCHANGES = int(os.getenv("ROLLING_SUMMARY_EXCHANGES", "5"))
+        self.ROLLING_SUMMARY_MODE = os.getenv("ROLLING_SUMMARY_MODE", "append")
+        self.TRANSLATION_HISTORY_ROLLING = os.getenv("TRANSLATION_HISTORY_ROLLING", "0") == "1"
+        
+        # API key
+        self.API_KEY = (os.getenv("API_KEY") or 
+                       os.getenv("OPENAI_API_KEY") or 
+                       os.getenv("OPENAI_OR_Gemini_API_KEY") or
+                       os.getenv("GEMINI_API_KEY"))
+
+# =====================================================
+# FILE AND PATH UTILITIES
+# =====================================================
+class FileUtilities:
+    """Utilities for file and path operations"""
+    
+    @staticmethod
+    def extract_actual_chapter_number(chapter, patterns=None):
+        """Extract actual chapter number from filename"""
+        if patterns is None:
+            patterns = [
+                r'^(\d+)[_\.]',          # "0249_" or "0249."
+                r'^(\d{3,4})$',          # "0249" (just numbers)
+                r'No(\d+)Chapter',       # "No249Chapter"
+                r'[Cc]hapter[_\s]*(\d+)', # "Chapter249" or "chapter_249"
+                r'[Cc]h[_\s]*(\d+)',     # "ch249" or "CH 249"
+                r'_(\d+)$',              # "text_249"
+                r'-(\d+)$',              # "text-249"
+                r'(\d+)$'                # "text249" (fallback: any number)
+            ]
+        
+        actual_num = None
+        if chapter.get('original_basename'):
+            basename = chapter['original_basename']
+            for pattern in patterns:
+                match = re.search(pattern, basename, re.IGNORECASE)
+                if match:
+                    actual_num = int(match.group(1))
+                    break
+        
+        if actual_num is None:
+            actual_num = chapter.get("num", 0)
+        
+        return actual_num
+    
+    @staticmethod
+    def create_chapter_filename(chapter, actual_num=None):
+        """Create consistent chapter filename"""
+        if actual_num is None:
+            actual_num = FileUtilities.extract_actual_chapter_number(chapter)
+        
+        if 'original_basename' in chapter and chapter['original_basename']:
+            # Use the original filename structure
+            return f"response_{chapter['original_basename']}.html"
+        else:
+            # Fallback to the current naming scheme
+            safe_title = make_safe_filename(chapter['title'], actual_num)   
+            if isinstance(actual_num, float):
+                return f"response_{actual_num:06.1f}_{safe_title}.html"
+            else:
+                return f"response_{actual_num:03d}_{safe_title}.html"
+
+# =====================================================
+# TRANSLATION PROCESSOR
+# =====================================================
+class TranslationProcessor:
+    """Handles the core translation processing logic"""
+    
+    def __init__(self, config, client, out_dir, log_callback=None, stop_callback=None):
+        self.config = config
+        self.client = client
+        self.out_dir = out_dir
+        self.log_callback = log_callback
+        self.stop_callback = stop_callback
+        self.chapter_splitter = ChapterSplitter(model_name=config.MODEL)
+        
+    def check_stop(self):
+        """Check if translation should stop"""
+        if self.stop_callback and self.stop_callback():
+            print("❌ Translation stopped by user request.")
+            return True
+        return is_stop_requested()
+    
+    def check_duplicate_content(self, result, idx, prog, out):
+        """Check if translated content is duplicate of recent chapters"""
+        if not self.config.RETRY_DUPLICATE_BODIES:
+            return False, 0
+            
+        try:
+            # Simple text comparison
+            result_clean = re.sub(r'<[^>]+>', '', result).strip().lower()
+            result_sample = result_clean[:1000]  # First 1000 chars
+            
+            # Check against last few chapters only
+            lookback_chapters = self.config.DUPLICATE_LOOKBACK_CHAPTERS
+            
+            for prev_idx in range(max(0, idx - lookback_chapters), idx):
+                prev_key = str(prev_idx)
+                if prev_key in prog["chapters"] and prog["chapters"][prev_key].get("output_file"):
+                    prev_file = prog["chapters"][prev_key]["output_file"]
+                    prev_path = os.path.join(out, prev_file)
+                    
+                    if os.path.exists(prev_path):
+                        try:
+                            with open(prev_path, 'r', encoding='utf-8') as f:
+                                prev_content = f.read()
+                            
+                            prev_clean = re.sub(r'<[^>]+>', '', prev_content).strip().lower()
+                            prev_sample = prev_clean[:1000]
+                            
+                            # Simple similarity check
+                            if len(result_sample) > 100 and len(prev_sample) > 100:
+                                # Count common words
+                                result_words = set(result_sample.split())
+                                prev_words = set(prev_sample.split())
+                                
+                                if len(result_words) > 0 and len(prev_words) > 0:
+                                    common = len(result_words & prev_words)
+                                    total = len(result_words | prev_words)
+                                    similarity = common / total if total > 0 else 0
+                                    
+                                    # More conservative 85% threshold
+                                    if similarity > 0.85:
+                                        return True, int(similarity * 100)
+                        
+                        except Exception as e:
+                            print(f"    [WARN] Error checking file: {e}")
+                            continue
+            
+        except Exception as e:
+            print(f"    [WARN] Duplicate check error: {e}")
+            # Continue without duplicate detection
+        
+        return False, 0
+    
+    def generate_rolling_summary(self, history_manager, idx, chunk_idx):
+        """Generate rolling summary for context continuity"""
+        if not self.config.USE_ROLLING_SUMMARY or not self.config.CONTEXTUAL:
+            return None
+            
+        current_history = history_manager.load_history()
+        
+        # Calculate how many messages to include (2 messages per exchange)
+        messages_to_include = self.config.ROLLING_SUMMARY_EXCHANGES * 2
+        
+        if len(current_history) >= 4:  # At least 2 exchanges
+            # Extract recent assistant responses
+            assistant_responses = []
+            recent_messages = current_history[-messages_to_include:] if messages_to_include > 0 else current_history
+            
+            for h in recent_messages:
+                if h.get("role") == "assistant":
+                    assistant_responses.append(h["content"])
+            
+            if assistant_responses:
+                # Get custom prompts or use defaults
+                system_prompt = os.getenv("ROLLING_SUMMARY_SYSTEM_PROMPT", 
+                                        "Create a concise summary for context continuity.")
+                user_prompt_template = os.getenv("ROLLING_SUMMARY_USER_PROMPT",
+                                                "Summarize the key events, characters, tone, and important details from these translations. "
+                                                "Focus on: character names/relationships, plot developments, and any special terminology used.\n\n"
+                                                "{translations}")
+                
+                # Format the translations
+                translations_text = "\n---\n".join(assistant_responses)
+                user_prompt = user_prompt_template.replace("{translations}", translations_text)
+                
+                summary_msgs = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ]
+                
+                try:
+                    summary_resp, _ = send_with_interrupt(
+                        summary_msgs, self.client, self.config.TEMP, 
+                        min(2000, self.config.MAX_OUTPUT_TOKENS), 
+                        self.check_stop
+                    )
+                    
+                    # Save summary to file
+                    summary_file = os.path.join(self.out_dir, "rolling_summary.txt")
+                    
+                    # Handle append vs replace mode
+                    if self.config.ROLLING_SUMMARY_MODE == "append":
+                        mode = "a"
+                        with open(summary_file, mode, encoding="utf-8") as sf:
+                            sf.write(f"\n\n=== Summary before chapter {idx+1}, chunk {chunk_idx} ===\n")
+                            sf.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n")
+                            sf.write(summary_resp.strip())
+                    else:  # replace mode
+                        mode = "w"
+                        with open(summary_file, mode, encoding="utf-8") as sf:
+                            sf.write(f"=== Latest Summary (Chapter {idx+1}, chunk {chunk_idx}) ===\n")
+                            sf.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n")
+                            sf.write(summary_resp.strip())
+                    
+                    print(f"📝 Generated rolling summary ({self.config.ROLLING_SUMMARY_MODE} mode, {self.config.ROLLING_SUMMARY_EXCHANGES} exchanges)")
+                    
+                    # In append mode, also show total summaries
+                    if self.config.ROLLING_SUMMARY_MODE == "append" and os.path.exists(summary_file):
+                        try:
+                            with open(summary_file, 'r', encoding='utf-8') as sf:
+                                content = sf.read()
+                            summary_count = content.count("=== Summary")
+                            print(f"   📚 Total summaries in memory: {summary_count}")
+                        except:
+                            pass
+                    
+                    return summary_resp.strip()
+                    
+                except Exception as e:
+                    print(f"⚠️ Failed to generate rolling summary: {e}")
+                    return None
+        
+        return None
+    
+    def translate_with_retry(self, msgs, chunk_html, c, chunk_idx, total_chunks):
+        """Handle translation with retry logic"""
+        retry_count = 0
+        max_retries = 3
+        duplicate_retry_count = 0
+        max_duplicate_retries = 6
+        timeout_retry_count = 0
+        max_timeout_retries = 2
+        history_purged = False
+        
+        # Store original values for retry
+        original_max_tokens = self.config.MAX_OUTPUT_TOKENS
+        original_temp = self.config.TEMP
+        original_user_prompt = msgs[-1]["content"]
+        
+        # Get timeout settings
+        chunk_timeout = None
+        if self.config.RETRY_TIMEOUT:
+            chunk_timeout = self.config.CHUNK_TIMEOUT
+        
+        result = None
+        finish_reason = None
+        
+        while True:
+            # Check for stop before API call
+            if self.check_stop():
+                return None, None
+            
+            try:
+                # Use current values (may be modified by retry logic)
+                current_max_tokens = self.config.MAX_OUTPUT_TOKENS
+                current_temp = self.config.TEMP
+                
+                # Calculate actual token usage
+                total_tokens = sum(self.chapter_splitter.count_tokens(m["content"]) for m in msgs)
+                print(f"    [DEBUG] Chunk {chunk_idx}/{total_chunks} tokens = {total_tokens:,} / {self.get_token_budget_str()} [File: {c.get('original_basename', f'Chapter_{c['num']}')}]")
+                
+                self.client.context = 'translation'
+                
+                # Make API call
+                result, finish_reason = send_with_interrupt(
+                    msgs, self.client, current_temp, current_max_tokens, 
+                    self.check_stop, chunk_timeout
+                )
+                
+                # Check if retry is needed
+                retry_needed = False
+                retry_reason = ""
+                is_duplicate_retry = False
+                
+                # Check for truncation
+                if finish_reason == "length" and self.config.RETRY_TRUNCATED:
+                    if retry_count < max_retries:
+                        retry_needed = True
+                        retry_reason = "truncated output"
+                        self.config.MAX_OUTPUT_TOKENS = min(self.config.MAX_OUTPUT_TOKENS * 2, self.config.MAX_RETRY_TOKENS)
+                        retry_count += 1
+                
+                # Check for duplicate content
+                if not retry_needed and self.config.RETRY_DUPLICATE_BODIES:
+                    if duplicate_retry_count < max_duplicate_retries:
+                        idx = c.get('__index', 0)  # Need to pass this from caller
+                        prog = c.get('__progress', {})  # Need to pass this from caller
+                        is_duplicate, similarity = self.check_duplicate_content(result, idx, prog, self.out_dir)
+                        
+                        if is_duplicate:
+                            retry_needed = True
+                            is_duplicate_retry = True
+                            retry_reason = f"duplicate content (similarity: {similarity}%)"
+                            duplicate_retry_count += 1
+                            
+                            # Handle temperature and history management
+                            if duplicate_retry_count >= 3 and not history_purged:
+                                print(f"    🧹 Clearing history after 3 attempts...")
+                                # Need access to history_manager - passed in context
+                                if 'history_manager' in c:
+                                    c['history_manager'].save_history([])
+                                history_purged = True
+                                self.config.TEMP = original_temp
+                            
+                            elif duplicate_retry_count == 1:
+                                print(f"    🔄 First duplicate retry - same temperature")
+                            
+                            elif history_purged:
+                                # Post-purge: gradual increase
+                                attempts_since_purge = duplicate_retry_count - 3
+                                self.config.TEMP = min(original_temp + (0.1 * attempts_since_purge), 1.0)
+                                print(f"    🌡️ Post-purge temp: {self.config.TEMP}")
+                            
+                            else:
+                                # Pre-purge: gradual increase
+                                self.config.TEMP = min(original_temp + (0.1 * (duplicate_retry_count - 1)), 1.0)
+                                print(f"    🌡️ Gradual temp increase: {self.config.TEMP}")
+                            
+                            # Simple prompt variation
+                            if duplicate_retry_count == 1:
+                                user_prompt = f"[RETRY] Chapter {c['num']}: Ensure unique translation.\n{chunk_html}"
+                            elif duplicate_retry_count <= 3:
+                                user_prompt = f"[ATTEMPT {duplicate_retry_count}] Translate uniquely:\n{chunk_html}"
+                            else:
+                                user_prompt = f"Chapter {c['num']}:\n{chunk_html}"
+                            
+                            msgs[-1] = {"role": "user", "content": user_prompt}
+                
+                # If retry is needed, log and continue
+                if retry_needed:
+                    if is_duplicate_retry:
+                        print(f"    🔄 Duplicate retry {duplicate_retry_count}/{max_duplicate_retries}")
+                    else:
+                        print(f"    🔄 Retry {retry_count}/{max_retries}: {retry_reason}")
+                    
+                    time.sleep(2)
+                    continue
+                
+                # If we get here, we have a successful result
+                break
+                
+            except UnifiedClientError as e:
+                error_msg = str(e)
+                
+                # Handle user stop
+                if "stopped by user" in error_msg:
+                    print("❌ Translation stopped by user during API call")
+                    return None, None
+                
+                # Handle timeout specifically
+                if "took" in error_msg and "timeout:" in error_msg:
+                    if timeout_retry_count < max_timeout_retries:
+                        timeout_retry_count += 1
+                        print(f"    ⏱️ Chunk took too long, retry {timeout_retry_count}/{max_timeout_retries}")
+                        print(f"    🔄 Retrying")
+                        time.sleep(2)
+                        continue
+                    else:
+                        print(f"    ❌ Max timeout retries reached")
+                        raise UnifiedClientError("Translation failed after timeout retries")
+                
+                # Handle regular timeout
+                elif "timed out" in error_msg and "timeout:" not in error_msg:
+                    print(f"⚠️ {error_msg}, retrying...")
+                    time.sleep(5)
+                    continue
+                
+                # Handle rate limiting
+                elif getattr(e, "http_status", None) == 429:
+                    print("⚠️ Rate limited, sleeping 60s…")
+                    for i in range(60):
+                        if self.check_stop():
+                            print("❌ Translation stopped during rate limit wait")
+                            return None, None
+                        time.sleep(1)
+                    continue
+                
+                # Re-raise other errors
+                else:
+                    raise
+            
+            except Exception as e:
+                # Catch any other unexpected errors
+                print(f"❌ Unexpected error during API call: {e}")
+                raise
+        
+        # Restore original values
+        self.config.MAX_OUTPUT_TOKENS = original_max_tokens
+        self.config.TEMP = original_temp
+        
+        # Only print restoration message if values were actually changed
+        if retry_count > 0 or duplicate_retry_count > 0 or timeout_retry_count > 0:
+            if duplicate_retry_count > 0:
+                print(f"    🔄 Restored original temperature: {self.config.TEMP} (after {duplicate_retry_count} duplicate retries)")
+            elif timeout_retry_count > 0:
+                print(f"    🔄 Restored original settings after {timeout_retry_count} timeout retries")
+            elif retry_count > 0:
+                print(f"    🔄 Restored original settings after {retry_count} retries")
+        
+        # If duplicate was detected but not resolved, add a warning
+        if duplicate_retry_count >= max_duplicate_retries:
+            print(f"    ⚠️ WARNING: Duplicate content issue persists after {max_duplicate_retries} attempts")
+        
+        return result, finish_reason
+    
+    def get_token_budget_str(self):
+        """Get token budget as string"""
+        _tok_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
+        max_tokens_limit, budget_str = parse_token_limit(_tok_env)
+        return budget_str
+
+# =====================================================
+# BATCH TRANSLATION PROCESSOR
+# =====================================================
+class BatchTranslationProcessor:
+    """Handles batch/parallel translation processing"""
+    
+    def __init__(self, config, client, base_msg, out_dir, progress_lock, 
+                 save_progress_fn, update_progress_fn, check_stop_fn, 
+                 image_translator=None):
+        self.config = config
+        self.client = client
+        self.base_msg = base_msg
+        self.out_dir = out_dir
+        self.progress_lock = progress_lock
+        self.save_progress_fn = save_progress_fn
+        self.update_progress_fn = update_progress_fn
+        self.check_stop_fn = check_stop_fn
+        self.image_translator = image_translator
+        self.chapters_completed = 0
+        self.chunks_completed = 0
+    
+    def process_single_chapter(self, chapter_data):
+        """Process a single chapter (runs in thread)"""
+        idx, chapter = chapter_data
+        chap_num = chapter["num"]
+        
+        # Extract actual chapter number
+        actual_num = FileUtilities.extract_actual_chapter_number(chapter)
+        
+        try:
+            print(f"🔄 Starting #{idx+1} (Internal: Chapter {chap_num}, Actual: Chapter {actual_num})  (thread: {threading.current_thread().name}) [File: {chapter.get('original_basename', f'Chapter_{chap_num}')}]")
+            
+            # Update progress to in-progress
+            content_hash = chapter.get("content_hash") or get_content_hash(chapter["body"])
+            with self.progress_lock:
+                self.update_progress_fn(idx, actual_num, content_hash, output_filename=None, status="in_progress")
+                self.save_progress_fn()
+            
+            # Process images if needed
+            chapter_body = chapter["body"]
+            if chapter.get('has_images') and self.image_translator and self.config.ENABLE_IMAGE_TRANSLATION:
+                print(f"🖼️ Processing images for Chapter {actual_num}...")
+                self.image_translator.set_current_chapter(actual_num)
+                chapter_body, image_translations = process_chapter_images(
+                    chapter_body, 
+                    actual_num, 
+                    self.image_translator,
+                    self.check_stop_fn
+                )
+                if image_translations:
+                    print(f"✅ Processed {len(image_translations)} images for Chapter {actual_num}")
+            
+            # Create messages for this chapter
+            chapter_msgs = self.base_msg + [{"role": "user", "content": chapter_body}]
+            
+            # Make API call
+            print(f"📤 Sending Chapter {actual_num} to API...")
+            result, finish_reason = send_with_interrupt(
+                chapter_msgs, self.client, self.config.TEMP, 
+                self.config.MAX_OUTPUT_TOKENS, self.check_stop_fn
+            )
+            
+            print(f"📥 Received Chapter {actual_num} response, finish_reason: {finish_reason}")
+            
+            # Check if response was truncated
+            if finish_reason in ["length", "max_tokens"]:
+                print(f"⚠️ Chapter {actual_num} response was TRUNCATED!")
+            
+            # Clean up the result
+            if self.config.REMOVE_AI_ARTIFACTS:
+                result = clean_ai_artifacts(result)
+                
+            # ALWAYS clean memory artifacts to prevent leakage
+            result = clean_memory_artifacts(result)
+            
+            if self.config.EMERGENCY_RESTORE:
+                result = emergency_restore_paragraphs(result, chapter_body)
+            
+            # Final cleanup
+            cleaned = re.sub(r"^```(?:html)?\s*\n?", "", result, count=1, flags=re.MULTILINE)
+            cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
+            cleaned = clean_ai_artifacts(cleaned, remove_artifacts=self.config.REMOVE_AI_ARTIFACTS)
+            
+            # Save the chapter
+            fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+            
+            with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                f.write(cleaned)
+            
+            print(f"💾 Saved Chapter {actual_num}: {fname} ({len(cleaned)} chars)")
+            
+            # Update progress
+            with self.progress_lock:
+                self.update_progress_fn(idx, actual_num, content_hash, fname, status="completed")
+                self.save_progress_fn()
+                
+                # Update global counters
+                self.chapters_completed += 1
+                self.chunks_completed += 1
+            
+            print(f"✅ Chapter {actual_num} completed successfully")
+            return True, actual_num
+            
+        except Exception as e:
+            print(f"❌ Chapter {actual_num} failed: {e}")
+            with self.progress_lock:
+                self.update_progress_fn(idx, actual_num, content_hash, output_filename=None, status="failed")
+                self.save_progress_fn()
+            return False, actual_num
+
+# =====================================================
+# UTILITY FUNCTIONS
+# =====================================================
 def clean_memory_artifacts(text):
     """Remove any memory/summary artifacts that leaked into the translation"""
     
@@ -1158,7 +1711,18 @@ def detect_novel_numbering(chapters):
     if isinstance(chapters[0], str):
         print("[DEBUG] Text file detected, skipping numbering detection")
         return False
-        
+    
+    # Define patterns at the function level - BEFORE any loops
+    patterns = [
+        (r'^(\d+)[_\.]', 'prefix_number'),      # "0248_" or "0248."
+        (r'^(\d{3,4})$', 'pure_number'),        # "0248" (just numbers)
+        (r'No(\d+)Chapter', 'no_chapter'),      # "No248Chapter"
+        (r'[Cc]hapter[_\s]*(\d+)', 'chapter'),  # "Chapter248"
+        (r'[Cc]h[_\s]*(\d+)', 'ch'),           # "ch248"
+        (r'_(\d+)$', 'suffix_underscore'),      # "text_248"
+        (r'-(\d+)$', 'suffix_dash'),           # "text-248"
+        (r'(\d+)$', 'trailing_number')         # "text248"
+    ]
     
     # Method 1: Check the actual files for chapter 0
     has_chapter_0 = False
@@ -1174,18 +1738,7 @@ def detect_novel_numbering(chapters):
             basename = chapter['original_basename']
             print(f"[DEBUG] Checking basename: {basename}")
             
-            # Patterns to extract numbers
-            patterns = [
-                (r'^(\d+)[_\.]', 'prefix_number'),      # "0248_" or "0248."
-                (r'^(\d{3,4})$', 'pure_number'),        # "0248" (just numbers)
-                (r'No(\d+)Chapter', 'no_chapter'),      # "No248Chapter"
-                (r'[Cc]hapter[_\s]*(\d+)', 'chapter'),  # "Chapter248"
-                (r'[Cc]h[_\s]*(\d+)', 'ch'),           # "ch248"
-                (r'_(\d+)$', 'suffix_underscore'),      # "text_248"
-                (r'-(\d+)$', 'suffix_dash'),           # "text-248"
-                (r'(\d+)$', 'trailing_number')         # "text248"
-            ]
-            
+            # Use the patterns defined above
             for pattern, pattern_name in patterns:
                 match = re.search(pattern, basename)
                 if match:
@@ -2640,9 +3193,6 @@ def cleanup_previous_extraction(output_dir):
 # =============================================================================
 # GLOSSARY MANAGEMENT
 # =============================================================================
-# =============================================================================
-# GLOSSARY MANAGEMENT - Complete Implementation
-# =============================================================================
 
 def parse_translation_response(response, original_terms):
     """Parse translation response - handles numbered format"""
@@ -2779,208 +3329,6 @@ def translate_terms_batch(term_list, profile_name, batch_size=50):
     except Exception as e:
         print(f"⚠️ Glossary translation failed: {e}")
         return {term: term for term in term_list}
-
-def save_glossary(output_dir, chapters, instructions, language="korean"):
-    """
-    Targeted glossary generator - Focuses on titles and CJK names with honorifics
-    Fixed version that properly extracts complete names instead of individual syllables
-    """
-    
-    print("📑 Targeted Glossary Generator v3.1 (Fixed)")
-    print("📑 Extracting complete names with honorifics and titles")
-    
-    # Check for existing manual glossary first
-    manual_glossary_path = os.getenv("MANUAL_GLOSSARY")
-    if manual_glossary_path and os.path.exists(manual_glossary_path):
-        print(f"📑 Manual glossary detected: {os.path.basename(manual_glossary_path)}")
-        
-        # Copy manual glossary to output directory
-        target_path = os.path.join(output_dir, "glossary.json")
-        try:
-            shutil.copy2(manual_glossary_path, target_path)
-            print(f"📑 ✅ Manual glossary copied to: {target_path}")
-            print(f"📑 Skipping automatic glossary generation")
-            
-            # Also create a simple format version for compatibility
-            with open(manual_glossary_path, 'r', encoding='utf-8') as f:
-                manual_data = json.load(f)
-            
-            # Convert manual format to simple format
-            simple_entries = {}
-            if isinstance(manual_data, list):
-                for char in manual_data:
-                    original = char.get('original_name', '')
-                    translated = char.get('name', original)
-                    if original and translated:
-                        simple_entries[original] = translated
-            
-            simple_path = os.path.join(output_dir, "glossary_simple.json")
-            with open(simple_path, 'w', encoding='utf-8') as f:
-                json.dump(simple_entries, f, ensure_ascii=False, indent=2)
-            
-            return simple_entries
-            
-        except Exception as e:
-            print(f"⚠️ Could not copy manual glossary: {e}")
-            print(f"📑 Proceeding with automatic generation...")
-    
-    # Check if there's an existing glossary from the manual extractor
-    glossary_folder_path = os.path.join(output_dir, "Glossary")
-    existing_glossary = None
-    
-    if os.path.exists(glossary_folder_path):
-        # Look for JSON files in the Glossary folder
-        for file in os.listdir(glossary_folder_path):
-            if file.endswith("_glossary.json"):
-                existing_path = os.path.join(glossary_folder_path, file)
-                try:
-                    with open(existing_path, 'r', encoding='utf-8') as f:
-                        existing_glossary = json.load(f)
-                    print(f"📑 Found existing glossary from manual extraction: {file}")
-                    break
-                except Exception as e:
-                    print(f"⚠️ Could not load existing glossary: {e}")
-    
-    # Load settings
-    min_frequency = int(os.getenv("GLOSSARY_MIN_FREQUENCY", "2"))
-    max_names = int(os.getenv("GLOSSARY_MAX_NAMES", "50"))
-    max_titles = int(os.getenv("GLOSSARY_MAX_TITLES", "30"))
-    batch_size = int(os.getenv("GLOSSARY_BATCH_SIZE", "50"))
-    
-    print(f"📑 Settings: Min frequency: {min_frequency}, Max names: {max_names}, Max titles: {max_titles}")
-    
-    def clean_html(html_text):
-        """Remove HTML tags to get clean text"""
-        soup = BeautifulSoup(html_text, 'html.parser')
-        return soup.get_text()
-    
-    # Extract and combine all text from chapters
-    all_text = ' '.join(clean_html(chapter["body"]) for chapter in chapters)
-    print(f"📑 Processing {len(all_text):,} characters of text")
-    
-    # Focused honorifics for CJK languages only
-    CJK_HONORIFICS = {
-        'korean': ['님', '씨', '선배', '형', '누나', '언니', '오빠', '선생님', '교수님', '사장님', '회장님'],
-        'japanese': ['さん', 'ちゃん', '君', 'くん', '様', 'さま', '先生', 'せんせい', '殿', 'どの', '先輩', 'せんぱい'],
-        'chinese': ['先生', '小姐', '夫人', '公子', '大人', '老师', '师父', '师傅', '同志', '同学'],
-        'english': [
-            # Japanese romanized (typically written with space, not hyphen)
-            ' san', ' chan', ' kun', ' sama', ' sensei', ' senpai', ' dono', ' shi', ' tan', ' chin',
-            # Korean romanized (typically written with hyphen)
-            '-ssi', '-nim', '-ah', '-ya', '-hyung', '-hyungnim', '-oppa', '-unnie', '-noona', 
-            '-sunbae', '-sunbaenim', '-hubae', '-seonsaeng', '-seonsaengnim', '-gun', '-yang',
-            # Chinese romanized (typically written with hyphen)
-            '-xiong', '-di', '-ge', '-gege', '-didi', '-jie', '-jiejie', '-meimei', '-shixiong',
-            '-shidi', '-shijie', '-shimei', '-gongzi', '-guniang', '-xiaojie', '-daren', '-qianbei',
-            '-daoyou', '-zhanglao', '-shibo', '-shishu', '-shifu', '-laoshi', '-xiansheng'
-        ]  # For romanized content
-    }
-    
-    # Title patterns for various languages
-    TITLE_PATTERNS = {
-        'korean': [
-            r'\b(왕|여왕|왕자|공주|황제|황후|대왕|대공|공작|백작|자작|남작|기사|장군|대장|원수|제독|함장|대신|재상|총리|대통령|시장|지사|검사|판사|변호사|의사|박사|교수|신부|목사|스님|도사)\b',
-            r'\b(폐하|전하|각하|예하|님|대감|영감|나리|도련님|아가씨|부인|선생)\b'
-        ],
-        'japanese': [
-            r'\b(王|女王|王子|姫|皇帝|皇后|天皇|皇太子|大王|大公|公爵|伯爵|子爵|男爵|騎士|将軍|大将|元帥|提督|艦長|大臣|宰相|総理|大統領|市長|知事|検事|裁判官|弁護士|医者|博士|教授|神父|牧師|僧侶|道士)\b',
-            r'\b(陛下|殿下|閣下|猊下|様|大人|殿|卿|君|氏)\b'
-        ],
-        'chinese': [
-            r'\b(王|女王|王子|公主|皇帝|皇后|大王|大公|公爵|伯爵|子爵|男爵|骑士|将军|大将|元帅|提督|舰长|大臣|宰相|总理|大总统|市长|知事|检察官|法官|律师|医生|博士|教授|神父|牧师|和尚|道士)\b',
-            r'\b(陛下|殿下|阁下|大人|老爷|夫人|小姐|公子|少爷|姑娘|先生)\b'
-        ],
-        'english': [
-            r'\b(King|Queen|Prince|Princess|Emperor|Empress|Duke|Duchess|Marquis|Marquess|Earl|Count|Countess|Viscount|Viscountess|Baron|Baroness|Knight|Lord|Lady|Sir|Dame|General|Admiral|Captain|Major|Colonel|Commander|Lieutenant|Sergeant|Minister|Chancellor|President|Mayor|Governor|Judge|Doctor|Professor|Father|Reverend|Master|Mistress)\b',
-            r'\b(His|Her|Your|Their)\s+(Majesty|Highness|Grace|Excellency|Honor|Worship|Lordship|Ladyship)\b'
-        ]
-    }
-    
-    # Enhanced exclusions - more comprehensive
-    COMMON_WORDS = {
-        # Korean particles and common words
-        '이', '그', '저', '우리', '너희', '자기', '당신', '여기', '거기', '저기',
-        '오늘', '내일', '어제', '지금', '아까', '나중', '먼저', '다음', '마지막',
-        '모든', '어떤', '무슨', '이런', '그런', '저런', '같은', '다른', '새로운',
-        '하다', '있다', '없다', '되다', '하는', '있는', '없는', '되는',
-        '것', '수', '때', '년', '월', '일', '시', '분', '초',
-        
-        # Korean particles
-        '은', '는', '이', '가', '을', '를', '에', '의', '와', '과', '도', '만',
-        '에서', '으로', '로', '까지', '부터', '에게', '한테', '께', '께서',
-        
-        # Japanese particles and common words
-        'この', 'その', 'あの', 'どの', 'これ', 'それ', 'あれ', 'どれ',
-        'わたし', 'あなた', 'かれ', 'かのじょ', 'わたしたち', 'あなたたち',
-        'きょう', 'あした', 'きのう', 'いま', 'あとで', 'まえ', 'つぎ',
-        'の', 'は', 'が', 'を', 'に', 'で', 'と', 'も', 'や', 'から', 'まで',
-        
-        # Chinese common words
-        '这', '那', '哪', '这个', '那个', '哪个', '这里', '那里', '哪里',
-        '我', '你', '他', '她', '它', '我们', '你们', '他们', '她们',
-        '今天', '明天', '昨天', '现在', '刚才', '以后', '以前', '后来',
-        '的', '了', '在', '是', '有', '和', '与', '或', '但', '因为', '所以',
-        
-        # Numbers
-        '一', '二', '三', '四', '五', '六', '七', '八', '九', '十',
-        '1', '2', '3', '4', '5', '6', '7', '8', '9', '0',
-    }
-    
-    def is_valid_name(name, language_hint='unknown'):
-        """Strict validation for proper names only"""
-        if not name or len(name.strip()) < 1:
-            return False
-            
-        name = name.strip()
-        
-        # Exclude common words and particles
-        if name.lower() in COMMON_WORDS or name in COMMON_WORDS:
-            return False
-        
-        # Language-specific validation
-        if language_hint == 'korean':
-            # Korean names are usually 2-4 characters (family name + given name)
-            if not (2 <= len(name) <= 4):
-                return False
-            # Should be all Hangul
-            if not all(0xAC00 <= ord(char) <= 0xD7AF for char in name):
-                return False
-            # Additional check: should not be all the same character
-            if len(set(name)) == 1:
-                return False
-                
-        elif language_hint == 'japanese':
-            # Japanese names can be 2-6 characters
-            if not (2 <= len(name) <= 6):
-                return False
-            # Should contain kanji or kana
-            has_kanji = any(0x4E00 <= ord(char) <= 0x9FFF for char in name)
-            has_kana = any((0x3040 <= ord(char) <= 0x309F) or (0x30A0 <= ord(char) <= 0x30FF) for char in name)
-            if not (has_kanji or has_kana):
-                return False
-                
-        elif language_hint == 'chinese':
-            # Chinese names are usually 2-4 characters
-            if not (2 <= len(name) <= 4):
-                return False
-            # Should be all Chinese characters
-            if not all(0x4E00 <= ord(char) <= 0x9FFF for char in name):
-                return False
-                
-        elif language_hint == 'english':
-            # English names should start with capital letter
-            if not name[0].isupper():
-                return False
-            # Should be mostly letters
-            if sum(1 for c in name if c.isalpha()) < len(name) * 0.8:
-                return False
-            # Reasonable length
-            if not (2 <= len(name) <= 20):
-                return False
-        
-        return True
-    
-# Updates for TranslateKRtoEN.py - Update the save_glossary function
 
 def save_glossary(output_dir, chapters, instructions, language="korean"):
     """
@@ -3777,14 +4125,16 @@ def build_system_prompt(user_prompt, glossary_path):
 def main(log_callback=None, stop_callback=None):
     """Main translation function with enhanced duplicate detection and progress tracking"""
     
+    # Initialize configuration
+    config = TranslationConfig()
+    
     # Handle the case where we're called from GUI (no args object)
     args = None
     chapters_completed = 0
     chunks_completed = 0
     
-    
     # Get the input path (EPUB or text file)
-    input_path = os.getenv("input_path", "")  # Still reading from input_path env var for backward compatibility
+    input_path = config.input_path
     if not input_path and len(sys.argv) > 1:
         input_path = sys.argv[1]
     
@@ -3815,23 +4165,20 @@ def main(log_callback=None, stop_callback=None):
             return True
         return is_stop_requested()
     
-    # Parse all environment variables
-    MODEL = os.getenv("MODEL", "gemini-1.5-flash")
-    input_path = os.getenv("input_path", "default.epub")
-    PROFILE_NAME = os.getenv("PROFILE_NAME", "korean").lower()
-    CONTEXTUAL = os.getenv("CONTEXTUAL", "1") == "1"
-    DELAY = int(os.getenv("SEND_INTERVAL_SECONDS", "2"))
-    SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "").strip()
-    REMOVE_AI_ARTIFACTS = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
-    TEMP = float(os.getenv("TRANSLATION_TEMPERATURE", "0.3"))
-    HIST_LIMIT = int(os.getenv("TRANSLATION_HISTORY_LIMIT", "20"))
-    MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
-    EMERGENCY_RESTORE = os.getenv("EMERGENCY_PARAGRAPH_RESTORE", "1") == "1"
-    BATCH_TRANSLATION = os.getenv("BATCH_TRANSLATION", "0") == "1"  
-    BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
-
-
-
+    # Log settings
+    if config.EMERGENCY_RESTORE:
+        print("✅ Emergency paragraph restoration is ENABLED")
+    else:
+        print("⚠️ Emergency paragraph restoration is DISABLED")
+    
+    # Add debug logging
+    print(f"[DEBUG] REMOVE_AI_ARTIFACTS environment variable: {os.getenv('REMOVE_AI_ARTIFACTS', 'NOT SET')}")
+    print(f"[DEBUG] REMOVE_AI_ARTIFACTS parsed value: {config.REMOVE_AI_ARTIFACTS}")
+    if config.REMOVE_AI_ARTIFACTS:
+        print("⚠️ AI artifact removal is ENABLED - will clean AI response artifacts")
+    else:
+        print("✅ AI artifact removal is DISABLED - preserving all content as-is")
+       
     # Check if we need to parse command line arguments
     if '--epub' in sys.argv or (len(sys.argv) > 1 and sys.argv[1].endswith(('.epub', '.txt'))):
         # Command line mode - parse arguments
@@ -3845,150 +4192,20 @@ def main(log_callback=None, stop_callback=None):
         # GUI mode - already set input_path at beginning of function
         pass  # input_path already defined
 
-
     # Check if input is text file
     is_text_file = input_path.lower().endswith('.txt')
     
+    # Set up paths
     if is_text_file:
-        # Import text processor
-        from extract_glossary_from_txt import extract_chapters_from_txt
-        chapters = extract_chapters_from_txt(input_path)
         file_base = os.path.splitext(os.path.basename(input_path))[0]
     else:
-        # Existing EPUB code
-        if is_text_file:
-            # Import and use text processor
-            
-            from extract_glossary_from_txt import extract_chapters_from_txt
-            chapters = extract_chapters_from_txt(input_path)
-        else:
-            # For EPUB files, use the extract_chapters function (check the actual function name)
-            # Create output directory name based on input file
-            file_base = os.path.splitext(os.path.basename(input_path))[0]
-            output_dir = file_base
-            os.makedirs(output_dir, exist_ok=True)
- 
-
-            # Extract chapters with both arguments
-            with zipfile.ZipFile(input_path, 'r') as zf:
-                chapters = extract_chapters(zf, output_dir) 
         epub_base = os.path.splitext(os.path.basename(input_path))[0]
         file_base = epub_base
         
-    # Log the setting
-    if EMERGENCY_RESTORE:
-        print("✅ Emergency paragraph restoration is ENABLED")
-    else:
-        print("⚠️ Emergency paragraph restoration is DISABLED")
-    
-    # Add debug logging
-    print(f"[DEBUG] REMOVE_AI_ARTIFACTS environment variable: {os.getenv('REMOVE_AI_ARTIFACTS', 'NOT SET')}")
-    print(f"[DEBUG] REMOVE_AI_ARTIFACTS parsed value: {REMOVE_AI_ARTIFACTS}")
-    if REMOVE_AI_ARTIFACTS:
-        print("⚠️ AI artifact removal is ENABLED - will clean AI response artifacts")
-    else:
-        print("✅ AI artifact removal is DISABLED - preserving all content as-is")
-       
-    # Detect numbering system BEFORE parsing range
-    if chapters:
-        uses_zero_based = detect_novel_numbering(chapters)
-    else:
-        uses_zero_based = False
-
-    # Parse chapter range
-    rng = os.getenv("CHAPTER_RANGE", "")
-    if rng and re.match(r"^\d+\s*-\s*\d+$", rng):
-        start, end = map(int, rng.split("-", 1))
-        
-        # Check if 0-based detection is disabled
-        disable_zero_detection = os.getenv("DISABLE_ZERO_DETECTION", "0") == "1"
-        
-        if disable_zero_detection:
-            # Use range as specified, no adjustment
-            print(f"📊 0-based detection disabled - using range as specified: {start}-{end}")
-            uses_zero_based = False
-        else:
-            # Existing detection logic
-            if chapters:
-                uses_zero_based = detect_novel_numbering(chapters)
-            else:
-                uses_zero_based = False
-                
-            # Log the detection result
-            if uses_zero_based:
-                print(f"📊 0-based novel detected")
-                print(f"📊 User range {start}-{end} will map to files {start-1}-{end-1}")
-            else:
-                print(f"📊 1-based novel detected")
-                print(f"📊 Using range as specified: {start}-{end}")
-    else:
-        start, end = None, None
-
-    
-    # Set up tokenizer
-    try:
-        enc = tiktoken.encoding_for_model(MODEL)
-    except:
-        enc = tiktoken.get_encoding("cl100k_base")
-    
-    # Get API key
-    API_KEY = (os.getenv("API_KEY") or 
-               os.getenv("OPENAI_API_KEY") or 
-               os.getenv("OPENAI_OR_Gemini_API_KEY") or
-               os.getenv("GEMINI_API_KEY"))
-
-    if not API_KEY:
-        print("❌ Error: Set API_KEY, OPENAI_API_KEY, or OPENAI_OR_Gemini_API_KEY in your environment.")
-        return
-
-    print(f"[DEBUG] Found API key: {API_KEY[:10]}...")
-    print(f"[DEBUG] Using model = {MODEL}")
-    print(f"[DEBUG] Max output tokens = {MAX_OUTPUT_TOKENS}")
-
-    # Initialize client
-    client = UnifiedClient(model=MODEL, api_key=API_KEY)
-        
-    # Set up paths
-    input_path = sys.argv[1] if len(sys.argv) > 1 else input_path
-    
-    # Check if it's a text file
-    is_text_file = input_path.lower().endswith('.txt')
-    
-    if is_text_file:
-        # Handle text file
-        epub_base = os.path.splitext(os.path.basename(input_path))[0]
-        out = epub_base
-        os.makedirs(out, exist_ok=True)
-        print(f"[DEBUG] Processing text file → {out}")
-        
-        # Process text file
-        txt_processor = TextFileProcessor(input_path, out)
-        chapters = txt_processor.extract_chapters()
-        txt_processor.save_original_structure()
-        
-        # Create a simple metadata
-        metadata = {
-            "title": epub_base,
-            "type": "text",
-            "chapter_count": len(chapters)
-        }
-    else:
-        # Existing EPUB handling code
-        epub_base = os.path.splitext(os.path.basename(input_path))[0]
-        out = epub_base
-        os.makedirs(out, exist_ok=True)
-        print(f"[DEBUG] Created output folder → {out}")
-        
-        if is_text_file:
-            print(f"[DEBUG] Processing text file → {out}")
-        else:
-            print(f"[DEBUG] Processing EPUB → {out}")      
-        
-    epub_base = os.path.splitext(os.path.basename(input_path))[0]
-    out = epub_base
+    out = file_base
     os.makedirs(out, exist_ok=True)
     print(f"[DEBUG] Created output folder → {out}")
-
+    
     # FIXED: Clean up previous extraction files to prevent duplicates
     cleanup_previous_extraction(out)
 
@@ -3998,7 +4215,7 @@ def main(log_callback=None, stop_callback=None):
     
     # Initialize HistoryManager and ChapterSplitter
     history_manager = HistoryManager(payloads_dir)
-    chapter_splitter = ChapterSplitter(model_name=MODEL)
+    chapter_splitter = ChapterSplitter(model_name=config.MODEL)
     chunk_context_manager = ChunkContextManager()
 
     
@@ -4090,6 +4307,18 @@ def main(log_callback=None, stop_callback=None):
     if check_stop():
         return
 
+    # Check API key
+    if not config.API_KEY:
+        print("❌ Error: Set API_KEY, OPENAI_API_KEY, or OPENAI_OR_Gemini_API_KEY in your environment.")
+        return
+
+    print(f"[DEBUG] Found API key: {config.API_KEY[:10]}...")
+    print(f"[DEBUG] Using model = {config.MODEL}")
+    print(f"[DEBUG] Max output tokens = {config.MAX_OUTPUT_TOKENS}")
+
+    # Initialize client
+    client = UnifiedClient(model=config.MODEL, api_key=config.API_KEY)
+    
     # Extract contents based on file type
     if is_text_file:
         print("📄 Processing text file...")
@@ -4149,11 +4378,11 @@ def main(log_callback=None, stop_callback=None):
     metadata["chapter_titles"] = {str(c["num"]): c["title"] for c in chapters}
 
     # Initialize client for title translation
-    print(f"[DEBUG] Initializing client with model = {MODEL}")
-    client = UnifiedClient(model=MODEL, api_key=API_KEY)
+    print(f"[DEBUG] Initializing client with model = {config.MODEL}")
+    client = UnifiedClient(model=config.MODEL, api_key=config.API_KEY)
     
     # Translate the title BEFORE saving metadata if toggle is enabled
-    if "title" in metadata and os.getenv("TRANSLATE_BOOK_TITLE", "1") == "1" and not metadata.get("title_translated", False):
+    if "title" in metadata and config.TRANSLATE_BOOK_TITLE and not metadata.get("title_translated", False):
         original_title = metadata["title"]
         print(f"📚 Original title: {original_title}")
         
@@ -4165,7 +4394,7 @@ def main(log_callback=None, stop_callback=None):
                 client, 
                 None,  # Pass None to make it clear we're not using system prompt
                 None,  # Pass None to make it clear we're not using user prompt
-                TEMP   # Use the configured translation temperature
+                config.TEMP   # Use the configured translation temperature
             )
             
             # Store both original and translated titles
@@ -4183,26 +4412,25 @@ def main(log_callback=None, stop_callback=None):
     print(f"💾 Saved metadata with {'translated' if metadata.get('title_translated', False) else 'original'} title")
         
     # Handle glossary - ENSURE IT COMPLETES BEFORE TRANSLATION
-    manual_gloss = os.getenv("MANUAL_GLOSSARY")
-    disable_auto_glossary = os.getenv("DISABLE_AUTO_GLOSSARY", "0") == "1"
-
     print("\n" + "="*50)
     print("📑 GLOSSARY GENERATION PHASE")
     print("="*50)
 
-    if manual_gloss and os.path.isfile(manual_gloss):
+    if config.MANUAL_GLOSSARY and os.path.isfile(config.MANUAL_GLOSSARY):
         target_path = os.path.join(out, "glossary.json")
         # Check if source and destination are the same file
-        if os.path.abspath(manual_gloss) != os.path.abspath(target_path):
-            shutil.copy(manual_gloss, target_path)
-            print("📑 Using manual glossary from:", manual_gloss)
+        if os.path.abspath(config.MANUAL_GLOSSARY) != os.path.abspath(target_path):
+            shutil.copy(config.MANUAL_GLOSSARY, target_path)
+            print("📑 Using manual glossary from:", config.MANUAL_GLOSSARY)
         else:
-            print("📑 Using existing glossary:", manual_gloss)
-    elif not disable_auto_glossary:
+            print("📑 Using existing glossary:", config.MANUAL_GLOSSARY)
+    elif not config.DISABLE_AUTO_GLOSSARY:
         print("📑 Starting automatic glossary generation...")
         
         # Generate glossary and WAIT for completion
         try:
+            # Create a dummy instructions parameter since save_glossary expects it
+            instructions = ""
             save_glossary(out, chapters, instructions)  # No language parameter needed
             print("✅ Automatic glossary generation COMPLETED")
         except Exception as e:
@@ -4274,23 +4502,22 @@ def main(log_callback=None, stop_callback=None):
             print(f"[DEBUG] Error checking glossary: {e}")
             
     # Build system prompt (this will now use the completed glossary)
-    system = build_system_prompt(SYSTEM_PROMPT, glossary_path)  # No instructions fallback
+    system = build_system_prompt(config.SYSTEM_PROMPT, glossary_path)  # No instructions fallback
     base_msg = [{"role": "system", "content": system}]
     
     # Initialize image translator based on toggle only
     image_translator = None
-    ENABLE_IMAGE_TRANSLATION = os.getenv("ENABLE_IMAGE_TRANSLATION", "1") == "1"
 
-    if ENABLE_IMAGE_TRANSLATION:
-        print(f"🖼️ Image translation enabled for model: {MODEL}")
+    if config.ENABLE_IMAGE_TRANSLATION:
+        print(f"🖼️ Image translation enabled for model: {config.MODEL}")
         print("🖼️ Image translation will use your custom system prompt and glossary")
         # Pass the complete system prompt (including GUI prompt + glossary + instructions)
         image_translator = ImageTranslator(
             client, 
             out, 
-            PROFILE_NAME, 
+            config.PROFILE_NAME, 
             system, 
-            TEMP,
+            config.TEMP,
             log_callback 
         )
         
@@ -4300,12 +4527,45 @@ def main(log_callback=None, stop_callback=None):
             'gpt-4-turbo', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1-nano', 'o4-mini'
         ]
         
-        if MODEL.lower() not in known_vision_models:
-            print(f"⚠️ Note: {MODEL} may not have vision capabilities. Image translation will be attempted anyway.")
+        if config.MODEL.lower() not in known_vision_models:
+            print(f"⚠️ Note: {config.MODEL} may not have vision capabilities. Image translation will be attempted anyway.")
     else:
         print("ℹ️ Image translation disabled by user")
     
-    total_chapters = len(chapters)    
+    total_chapters = len(chapters)
+
+    # Detect numbering system BEFORE parsing range
+    if chapters:
+        uses_zero_based = detect_novel_numbering(chapters)
+    else:
+        uses_zero_based = False
+
+    # Parse chapter range
+    rng = os.getenv("CHAPTER_RANGE", "")
+    start = None
+    end = None
+    if rng and re.match(r"^\d+\s*-\s*\d+$", rng):
+        start, end = map(int, rng.split("-", 1))
+        
+        # Check if 0-based detection is disabled
+        if config.DISABLE_ZERO_DETECTION:
+            # Use range as specified, no adjustment
+            print(f"📊 0-based detection disabled - using range as specified: {start}-{end}")
+            uses_zero_based = False
+        else:
+            # Existing detection logic
+            if chapters:
+                uses_zero_based = detect_novel_numbering(chapters)
+            else:
+                uses_zero_based = False
+                
+            # Log the detection result
+            if uses_zero_based:
+                print(f"📊 0-based novel detected")
+                print(f"📊 User range {start}-{end} will map to files {start-1}-{end-1}")
+            else:
+                print(f"📊 1-based novel detected")
+                print(f"📊 Using range as specified: {start}-{end}")
     
     # First pass: Count total chunks needed
     print("📊 Calculating total chunks needed...")
@@ -4318,32 +4578,8 @@ def main(log_callback=None, stop_callback=None):
         content_hash = c.get("content_hash") or get_content_hash(c["body"])
         
         # Extract actual chapter number from filename
-        actual_num = None
-        if c.get('original_basename'):
-            # Use the same patterns as in detection
-            patterns = [
-                r'^(\d+)[_\.]',          # "0248_" or "0248."
-                r'^(\d{3,4})$',          # "0248" (just numbers)
-                r'No(\d+)Chapter',       # "No248Chapter"
-                r'[Cc]hapter[_\s]*(\d+)', # "Chapter248"
-                r'[Cc]h[_\s]*(\d+)',     # "ch248"
-                r'_(\d+)$',              # "text_248"
-                r'-(\d+)$',              # "text-248"
-                r'(\d+)$'                # "text248"
-            ]
-            
-            basename = c['original_basename']
-            for pattern in patterns:
-                match = re.search(pattern, basename)
-                if match:
-                    actual_num = int(match.group(1))
-                    break
+        actual_num = FileUtilities.extract_actual_chapter_number(c)
         
-        # Fallback to internal number if extraction failed
-        if actual_num is None:
-            actual_num = chap_num
-            print(f"[DEBUG] No number extracted from filename, using internal: {chap_num}")
-            
         # Store actual chapter number in the dict
         c['actual_chapter_num'] = actual_num
 
@@ -4378,7 +4614,7 @@ def main(log_callback=None, stop_callback=None):
         
         # Calculate available tokens
         system_tokens = chapter_splitter.count_tokens(system)
-        history_tokens = HIST_LIMIT * 2 * 1000
+        history_tokens = config.HIST_LIMIT * 2 * 1000
         safety_margin = 1000
         
         if max_tokens_limit is not None:
@@ -4428,9 +4664,9 @@ def main(log_callback=None, stop_callback=None):
     current_chunk_number = 0
 
     # Check if batch translation is enabled
-    if BATCH_TRANSLATION:
+    if config.BATCH_TRANSLATION:
         print(f"\n📦 PARALLEL TRANSLATION MODE ENABLED")
-        print(f"📦 Processing chapters with up to {BATCH_SIZE} concurrent API calls")
+        print(f"📦 Processing chapters with up to {config.BATCH_SIZE} concurrent API calls")
         
         import concurrent.futures
         from threading import Lock
@@ -4448,20 +4684,7 @@ def main(log_callback=None, stop_callback=None):
             # Apply chapter range filter using ACTUAL chapter numbers
             if start is not None:
                 # Extract actual chapter number
-                actual_num = None
-                if c.get('original_basename'):
-                    patterns = [
-                        r'No(\d+)Chapter', r'Chapter(\d+)', r'chapter(\d+)',
-                        r'ch(\d+)', r'_(\d+)$', r'-(\d+)$', r'(\d+)$'
-                    ]
-                    for pattern in patterns:
-                        match = re.search(pattern, c['original_basename'])
-                        if match:
-                            actual_num = int(match.group(1))
-                            break
-                
-                if actual_num is None:
-                    actual_num = chap_num
+                actual_num = FileUtilities.extract_actual_chapter_number(c)
                 
                 # Simple range check - no special handling
                 if not (start <= actual_num <= end):
@@ -4509,157 +4732,35 @@ def main(log_callback=None, stop_callback=None):
         
         print(f"📊 Found {len(chapters_to_translate)} chapters to translate in parallel")
         
-        # Function to process a single chapter (runs in thread)
-        def process_single_chapter_parallel(chapter_data):
-            idx, chapter = chapter_data
-            chap_num = chapter["num"]
-            
-            # Extract actual chapter number (ADD THIS SECTION)
-            actual_num = None
-            if chapter.get('original_basename'):
-                patterns = [
-                    r'^(\d+)[_\.]',
-                    r'No(\d+)Chapter',
-                    r'Chapter(\d+)',
-                    r'chapter(\d+)',
-                    r'ch(\d+)',
-                    r'_(\d+)$',
-                    r'-(\d+)$',
-                    r'(\d+)$'
-                ]
-                basename = chapter['original_basename']
-                for pattern in patterns:
-                    match = re.search(pattern, basename, re.IGNORECASE)
-                    if match:
-                        actual_num = int(match.group(1))
-                        break
-            
-            if actual_num is None:
-                actual_num = chap_num
-            
-            try:
-                print(f"🔄 Starting #{idx+1} (Internal: Chapter {chap_num}, Actual: Chapter {actual_num})  (thread: {threading.current_thread().name}) [File: {chapter.get('original_basename', f'Chapter_{chap_num}')}]")
-
-                
-                # Update progress to in-progress
-                content_hash = chapter.get("content_hash") or get_content_hash(chapter["body"])
-                with progress_lock:
-                    update_progress(prog, idx, chap_num, content_hash, output_filename=None, status="in_progress")
-                    save_progress()
-                
-                # Process images if needed
-                chapter_body = chapter["body"]
-                if chapter.get('has_images') and image_translator and ENABLE_IMAGE_TRANSLATION:
-                    print(f"🖼️ Processing images for Chapter {actual_chapter_num}...")
-                    chapter_body, image_translations = process_chapter_images(
-                        chapter_body, 
-                        chap_num, 
-                        image_translator,
-                        check_stop
-                    )
-                    if image_translator:
-                        image_translator.set_current_chapter(chapter_num)
-                        chapter_body, image_translations = process_chapter_images(
-                            chapter_body, 
-                            chapter_num, 
-                            image_translator,
-                            check_stop
-                        )
-                        print(f"✅ Processed {len(image_translations)} images for Chapter {chap_num}")
-                
-                # Create messages for this chapter
-                chapter_msgs = base_msg + [{"role": "user", "content": chapter_body}]
-                
-                # Make API call
-                print(f"📤 Sending Chapter {chap_num} to API...")
-                result, finish_reason = send_with_interrupt(
-                    chapter_msgs, client, TEMP, MAX_OUTPUT_TOKENS, check_stop
-                )
-                
-                print(f"📥 Received Chapter {chap_num} response, finish_reason: {finish_reason}")
-                
-                # Check if response was truncated
-                if finish_reason in ["length", "max_tokens"]:
-                    print(f"⚠️ Chapter {chap_num} response was TRUNCATED!")
-                
-                # Clean up the result
-                if REMOVE_AI_ARTIFACTS:
-                    result = clean_ai_artifacts(result)
-                    
-                # ALWAYS clean memory artifacts to prevent leakage
-                result = clean_memory_artifacts(result)
-                
-                if EMERGENCY_RESTORE:
-                    result = emergency_restore_paragraphs(result, chapter_body)
-                
-                # Final cleanup
-                cleaned = re.sub(r"^```(?:html)?\s*\n?", "", result, count=1, flags=re.MULTILINE)
-                cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
-                cleaned = clean_ai_artifacts(cleaned, remove_artifacts=REMOVE_AI_ARTIFACTS)
-                
-                # Save the chapter - preserve original filename structure
-                if 'original_basename' in chapter and chapter['original_basename']:
-                    # Use the original filename structure
-                    fname = f"response_{chapter['original_basename']}.html"
-                else:
-                    # Fallback to the current naming scheme
-                    safe_title = make_safe_filename(chapter['title'], actual_num)   
-                    if isinstance(actual_num, float):
-                        fname = f"response_{actual_num:06.1f}_{safe_title}.html"
-                    else:
-                        fname = f"response_{actual_num:03d}_{safe_title}.html"
-                
-                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                    f.write(cleaned)
-                
-                print(f"💾 Saved Chapter {actual_num}: {fname} ({len(cleaned)} chars)")
-                
-                # Update progress
-                with progress_lock:
-                    update_progress(prog, idx, actual_num, content_hash, fname, status="completed")
-                    save_progress()
-                    
-                    # Update global counters
-                    nonlocal chapters_completed, chunks_completed
-                    chapters_completed += 1
-                    chunks_completed += 1
-                
-                # Update history for contextual translation (if needed)
-                if CONTEXTUAL:
-                    # This might need to be serialized or handled differently for parallel execution
-                    # For now, we'll skip history updates in parallel mode
-                    pass
-                
-                print(f"✅ Chapter {actual_num} completed successfully")
-                return True, actual_num
-                
-            except Exception as e:
-                print(f"❌ Chapter {actual_num} failed: {e}")
-                with progress_lock:
-                    update_progress(prog, idx, actual_num, content_hash, output_filename=None, status="failed")
-                    save_progress()
-                return False, actual_num
+        # Initialize batch processor
+        batch_processor = BatchTranslationProcessor(
+            config, client, base_msg, out, progress_lock,
+            save_progress, 
+            lambda idx, actual_num, content_hash, fname=None, status="completed": update_progress(prog, idx, actual_num, content_hash, fname, status),
+            check_stop,
+            image_translator
+        )
         
         # Process chapters in parallel batches
         total_to_process = len(chapters_to_translate)
         processed = 0
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=BATCH_SIZE) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=config.BATCH_SIZE) as executor:
             # Process in chunks to avoid overwhelming the system
-            for batch_start in range(0, total_to_process, BATCH_SIZE * 3):  # Process 3x batch size at once
+            for batch_start in range(0, total_to_process, config.BATCH_SIZE * 3):  # Process 3x batch size at once
                 if check_stop():
                     print("❌ Translation stopped during parallel processing")
                     executor.shutdown(wait=False)
                     return
                 
-                batch_end = min(batch_start + BATCH_SIZE * 3, total_to_process)
+                batch_end = min(batch_start + config.BATCH_SIZE * 3, total_to_process)
                 current_batch = chapters_to_translate[batch_start:batch_end]
                 
-                print(f"\n📦 Submitting batch {batch_start//BATCH_SIZE + 1}: {len(current_batch)} chapters")
+                print(f"\n📦 Submitting batch {batch_start//config.BATCH_SIZE + 1}: {len(current_batch)} chapters")
                 
                 # Submit all chapters in this batch
                 future_to_chapter = {
-                    executor.submit(process_single_chapter_parallel, chapter_data): chapter_data
+                    executor.submit(batch_processor.process_single_chapter, chapter_data): chapter_data
                     for chapter_data in current_batch
                 }
                 
@@ -4682,10 +4783,10 @@ def main(log_callback=None, stop_callback=None):
                         success, chap_num = future.result()
                         if success:
                             completed_in_batch += 1
-                            print(f"✅ Chapter {actual_num} done ({completed_in_batch + failed_in_batch}/{len(current_batch)} in batch)")
+                            print(f"✅ Chapter {chap_num} done ({completed_in_batch + failed_in_batch}/{len(current_batch)} in batch)")
                         else:
                             failed_in_batch += 1
-                            print(f"❌ Chapter {actual_num} failed ({completed_in_batch + failed_in_batch}/{len(current_batch)} in batch)")
+                            print(f"❌ Chapter {chap_num} failed ({completed_in_batch + failed_in_batch}/{len(current_batch)} in batch)")
                     except Exception as e:
                         failed_in_batch += 1
                         print(f"❌ Chapter thread error: {e}")
@@ -4702,42 +4803,28 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Small delay between batches to avoid rate limiting
                 if batch_end < total_to_process:
-                    print(f"⏳ Waiting {DELAY}s before next batch...")
-                    time.sleep(DELAY)
+                    print(f"⏳ Waiting {config.DELAY}s before next batch...")
+                    time.sleep(config.DELAY)
+        
+        # Update counters
+        chapters_completed = batch_processor.chapters_completed
+        chunks_completed = batch_processor.chunks_completed
         
         print(f"\n🎉 Parallel translation complete!")
         print(f"   Total chapters processed: {processed}")
         print(f"   Successful: {chapters_completed}")
         
         # Don't run the individual loop if batch mode was used
-        BATCH_TRANSLATION = False  # Prevent fallthrough to individual processing
+        config.BATCH_TRANSLATION = False  # Prevent fallthrough to individual processing
 
     # Original loop - only runs if batch mode is off or failed
-    if not BATCH_TRANSLATION:
+    if not config.BATCH_TRANSLATION:
+        # Initialize translation processor for individual processing
+        translation_processor = TranslationProcessor(config, client, out, log_callback, check_stop)
+        
+        # Extract actual numbers for all chapters first
         for idx, c in enumerate(chapters):
-            actual_num = None
-            if c.get('original_basename'):
-                patterns = [
-                    r'^(\d+)[_\.]',          # "0249_" or "0249."
-                    r'^(\d{3,4})$',          # "0249" (just numbers)
-                    r'No(\d+)Chapter',       # "No249Chapter"
-                    r'[Cc]hapter[_\s]*(\d+)', # "Chapter249" or "chapter_249"
-                    r'[Cc]h[_\s]*(\d+)',     # "ch249" or "CH 249"
-                    r'_(\d+)$',              # "text_249"
-                    r'-(\d+)$',              # "text-249"
-                    r'(\d+)$'                # "text249" (fallback: any number)
-                ]
-                
-                basename = c['original_basename']
-                for pattern in patterns:
-                    match = re.search(pattern, basename, re.IGNORECASE)
-                    if match:
-                        actual_num = int(match.group(1))
-                        break
-            
-            if actual_num is None:
-                actual_num = c.get("num", idx)
-            
+            actual_num = FileUtilities.extract_actual_chapter_number(c)
             c['actual_chapter_num'] = actual_num
 
         # Now process chapters
@@ -4785,7 +4872,7 @@ def main(log_callback=None, stop_callback=None):
                 print(f"📄 Empty chapter detected")
             # Process image-only chapters
             elif is_image_only_chapter:
-                if image_translator and ENABLE_IMAGE_TRANSLATION:
+                if image_translator and config.ENABLE_IMAGE_TRANSLATION:
                     print(f"🖼️ Translating {c.get('image_count', 0)} images...")
                     image_translator.set_current_chapter(chap_num)
                     translated_html, image_translations = process_chapter_images(
@@ -4821,7 +4908,7 @@ def main(log_callback=None, stop_callback=None):
 
             # Process image-only chapters
             elif is_image_only_chapter:
-                if image_translator and ENABLE_IMAGE_TRANSLATION:
+                if image_translator and config.ENABLE_IMAGE_TRANSLATION:
                     print(f"🖼️ Translating {c.get('image_count', 0)} images...")
                     translated_html, image_translations = process_chapter_images(
                         c["body"], 
@@ -4862,7 +4949,7 @@ def main(log_callback=None, stop_callback=None):
             # Process chapters with text (either mixed or text-only)
             else:
                 # For mixed content, process images first
-                if is_mixed_content and image_translator and ENABLE_IMAGE_TRANSLATION:
+                if is_mixed_content and image_translator and config.ENABLE_IMAGE_TRANSLATION:
                     print(f"🖼️ Processing {c.get('image_count', 0)} images first...")
                     
                     # DEBUG: Check content before image processing
@@ -4899,7 +4986,7 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Calculate available tokens for content
                 system_tokens = chapter_splitter.count_tokens(system)
-                history_tokens = HIST_LIMIT * 2 * 1000
+                history_tokens = config.HIST_LIMIT * 2 * 1000
                 safety_margin = 1000
                 
                 # Determine if we need to split the chapter
@@ -4964,8 +5051,8 @@ def main(log_callback=None, stop_callback=None):
                         continue
                         
                 # Check if history will reset on this chapter
-                if CONTEXTUAL and history_manager.will_reset_on_next_append(HIST_LIMIT):
-                    print(f"  📌 History will reset after this chunk (current: {len(history_manager.load_history())//2}/{HIST_LIMIT} exchanges)")
+                if config.CONTEXTUAL and history_manager.will_reset_on_next_append(config.HIST_LIMIT):
+                    print(f"  📌 History will reset after this chunk (current: {len(history_manager.load_history())//2}/{config.HIST_LIMIT} exchanges)")
                     
                 if check_stop():
                     print(f"❌ Translation stopped during chapter {idx+1}, chunk {chunk_idx}")
@@ -5039,9 +5126,9 @@ def main(log_callback=None, stop_callback=None):
                 history = history_manager.load_history()
                 
                 # Build messages with context
-                if CONTEXTUAL:
+                if config.CONTEXTUAL:
                     # Get both history and chunk context
-                    trimmed = history[-HIST_LIMIT*2:]
+                    trimmed = history[-config.HIST_LIMIT*2:]
                     
                     # Add recent chunk context (last 2-3 chunks from current chapter)
                     chunk_context = chunk_context_manager.get_context_messages(limit=2)
@@ -5054,7 +5141,7 @@ def main(log_callback=None, stop_callback=None):
 
                 # Build messages - FILTER OUT OLD SUMMARIES
                 if base_msg:
-                    if os.getenv("USE_ROLLING_SUMMARY", "0") == "0":
+                    if not config.USE_ROLLING_SUMMARY:
                         filtered_base = [msg for msg in base_msg if "summary of the previous" not in msg.get("content", "")]
                         # Include chunk context between base and history
                         msgs = filtered_base + chunk_context + trimmed + [{"role": "user", "content": user_prompt}]
@@ -5066,469 +5153,125 @@ def main(log_callback=None, stop_callback=None):
                     else:
                         msgs = [{"role": "user", "content": user_prompt}]
 
-                while True:
-                    # Check for stop before API call
-                    if check_stop():
-                        print(f"❌ Translation stopped during chapter {idx+1}")
-                        return
-                        
-                    try:
-                        # Calculate actual token usage
-                        total_tokens = sum(chapter_splitter.count_tokens(m["content"]) for m in msgs)
-                        print(f"    [DEBUG] Chunk {chunk_idx}/{total_chunks} - Current message size: {total_tokens:,} tokens (chunk split threshold: {budget_str})")
-                        
-                        client.context = 'translation'
-                        
-                        # BASIC RETRY LOGIC WITH GRADUAL TEMPERATURE INCREASE
-                        retry_count = 0
-                        max_retries = 3
-                        duplicate_retry_count = 0
-                        max_duplicate_retries = 6
-                        timeout_retry_count = 0
-                        max_timeout_retries = 2
-                        history_purged = False
+                # Add context to chapter for retry logic
+                c['__index'] = idx
+                c['__progress'] = prog
+                c['history_manager'] = history_manager
+                
+                # Use the translation processor with retry logic
+                result, finish_reason = translation_processor.translate_with_retry(
+                    msgs, chunk_html, c, chunk_idx, total_chunks
+                )
+                
+                if result is None:
+                    # Translation failed
+                    update_progress(prog, idx, actual_num, content_hash, output_filename=None, status="failed")
+                    save_progress()
+                    continue
 
-                        # Store original values for retry
-                        original_max_tokens = MAX_OUTPUT_TOKENS
-                        original_temp = TEMP
-                        original_user_prompt = user_prompt
+                # Clean AI artifacts ONLY if the toggle is enabled
+                if config.REMOVE_AI_ARTIFACTS:
+                    result = clean_ai_artifacts(result)
 
-                        # Get timeout settings
-                        chunk_timeout = None
-                        if os.getenv("RETRY_TIMEOUT", "0") == "1":
-                            chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "900"))
+                if config.EMERGENCY_RESTORE:
+                    result = emergency_restore_paragraphs(result, chunk_html)
 
-                        # Initialize result variable
-                        result = None
-                        finish_reason = None
-
-                        while True:
-                            # Check for stop before API call
-                            if check_stop():
-                                print(f"❌ Translation stopped during chapter {idx+1}")
-                                return
-                            
-                            try:
-                                # Use current values (may be modified by retry logic)
-                                current_max_tokens = MAX_OUTPUT_TOKENS
-                                current_temp = TEMP
-                                current_user_prompt = user_prompt
-                                
-                                # Calculate actual token usage
-                                total_tokens = sum(chapter_splitter.count_tokens(m["content"]) for m in msgs)
-                                print(f"    [DEBUG] Chunk {chunk_idx}/{total_chunks} tokens = {total_tokens:,} / {budget_str} [File: {c.get('original_basename', f'Chapter_{actual_num}')}]")
-                                
-                                client.context = 'translation'
-                                
-                                # Make API call
-                                result, finish_reason = send_with_interrupt(
-                                    msgs, client, current_temp, current_max_tokens, check_stop, chunk_timeout
-                                )
-                                
-                                # Check if retry is needed
-                                retry_needed = False
-                                retry_reason = ""
-                                is_duplicate_retry = False
-                                is_timeout_retry = False
-                                
-                                # Check for truncation (existing toggle)
-                                if finish_reason == "length" and os.getenv("RETRY_TRUNCATED", "0") == "1":
-                                    if retry_count < max_retries:
-                                        retry_needed = True
-                                        retry_reason = "truncated output"
-                                        retry_max_tokens = int(os.getenv("MAX_RETRY_TOKENS", "16384"))
-                                        MAX_OUTPUT_TOKENS = min(MAX_OUTPUT_TOKENS * 2, retry_max_tokens)
-                                        retry_count += 1
-                                
-                                # Check for duplicate content
-                                if not retry_needed and os.getenv("RETRY_DUPLICATE_BODIES", "1") == "1":
-                                    if duplicate_retry_count < max_duplicate_retries:
-                                        try:
-                                            # Simple text comparison
-                                            result_clean = re.sub(r'<[^>]+>', '', result).strip().lower()
-                                            result_sample = result_clean[:1000]  # First 1000 chars
-                                            
-                                            # Check against last few chapters only
-                                            lookback_chapters = int(os.getenv("DUPLICATE_LOOKBACK_CHAPTERS", "3"))
-                                            
-                                            for prev_idx in range(max(0, idx - lookback_chapters), idx):
-                                                prev_key = str(prev_idx)
-                                                if prev_key in prog["chapters"] and prog["chapters"][prev_key].get("output_file"):
-                                                    prev_file = prog["chapters"][prev_key]["output_file"]
-                                                    prev_path = os.path.join(out, prev_file)
-                                                    
-                                                    if os.path.exists(prev_path):
-                                                        try:
-                                                            with open(prev_path, 'r', encoding='utf-8') as f:
-                                                                prev_content = f.read()
-                                                            
-                                                            prev_clean = re.sub(r'<[^>]+>', '', prev_content).strip().lower()
-                                                            prev_sample = prev_clean[:1000]
-                                                            
-                                                            # Simple similarity check
-                                                            if len(result_sample) > 100 and len(prev_sample) > 100:
-                                                                # Count common words
-                                                                result_words = set(result_sample.split())
-                                                                prev_words = set(prev_sample.split())
-                                                                
-                                                                if len(result_words) > 0 and len(prev_words) > 0:
-                                                                    common = len(result_words & prev_words)
-                                                                    total = len(result_words | prev_words)
-                                                                    similarity = common / total if total > 0 else 0
-                                                                    
-                                                                    # More conservative 85% threshold
-                                                                    if similarity > 0.85:
-                                                                        retry_needed = True
-                                                                        is_duplicate_retry = True
-                                                                        retry_reason = f"duplicate content (similarity: {int(similarity*100)}%)"
-                                                                        duplicate_retry_count += 1
-                                                                        
-                                                                        # Handle temperature and history management
-                                                                        if duplicate_retry_count >= 3 and not history_purged:
-                                                                            print(f"    🧹 Clearing history after 3 attempts...")
-                                                                            history_manager.save_history([])
-                                                                            history = []
-                                                                            trimmed = []
-                                                                            history_purged = True
-                                                                            TEMP = original_temp
-                                                                            
-                                                                            # Rebuild messages
-                                                                            if base_msg:
-                                                                                if os.getenv("USE_ROLLING_SUMMARY", "0") == "0":
-                                                                                    filtered_base = [msg for msg in base_msg if "summary of the previous" not in msg.get("content", "")]
-                                                                                    msgs = filtered_base + [{"role": "user", "content": user_prompt}]
-                                                                                else:
-                                                                                    msgs = base_msg + [{"role": "user", "content": user_prompt}]
-                                                                            else:
-                                                                                msgs = [{"role": "user", "content": user_prompt}]
-                                                                        
-                                                                        elif duplicate_retry_count == 1:
-                                                                            # First retry: same temperature
-                                                                            print(f"    🔄 First duplicate retry - same temperature")
-                                                                        
-                                                                        elif history_purged:
-                                                                            # Post-purge: gradual increase
-                                                                            attempts_since_purge = duplicate_retry_count - 3
-                                                                            TEMP = min(original_temp + (0.1 * attempts_since_purge), 1.0)
-                                                                            print(f"    🌡️ Post-purge temp: {TEMP}")
-                                                                        
-                                                                        else:
-                                                                            # Pre-purge: gradual increase
-                                                                            TEMP = min(original_temp + (0.1 * (duplicate_retry_count - 1)), 1.0)
-                                                                            print(f"    🌡️ Gradual temp increase: {TEMP}")
-                                                                        
-                                                                        # Simple prompt variation
-                                                                        if duplicate_retry_count == 1:
-                                                                            user_prompt = f"[RETRY] Chapter {c['num']}: Ensure unique translation.\n{chunk_html}"
-                                                                        elif duplicate_retry_count <= 3:
-                                                                            user_prompt = f"[ATTEMPT {duplicate_retry_count}] Translate uniquely:\n{chunk_html}"
-                                                                        else:
-                                                                            user_prompt = f"Chapter {c['num']}:\n{chunk_html}"
-                                                                        
-                                                                        msgs[-1] = {"role": "user", "content": user_prompt}
-                                                                        break
-                                                        
-                                                        except Exception as e:
-                                                            print(f"    [WARN] Error checking file: {e}")
-                                                            continue
-                                        
-                                        except Exception as e:
-                                            print(f"    [WARN] Duplicate check error: {e}")
-                                            # Continue without duplicate detection
-                                
-                                # If retry is needed, log and continue
-                                if retry_needed:
-                                    if is_duplicate_retry:
-                                        print(f"    🔄 Duplicate retry {duplicate_retry_count}/{max_duplicate_retries}")
-                                    else:
-                                        print(f"    🔄 Retry {retry_count}/{max_retries}: {retry_reason}")
-                                    
-                                    time.sleep(2)
-                                    continue
-                                
-                                # If we get here, we have a successful result
-                                break
-                                
-                            except UnifiedClientError as e:
-                                error_msg = str(e)
-                                
-                                # Handle user stop
-                                if "stopped by user" in error_msg:
-                                    print("❌ Translation stopped by user during API call")
-                                    return
-                                
-                                # Handle timeout specifically
-                                if "took" in error_msg and "timeout:" in error_msg:
-                                    if timeout_retry_count < max_timeout_retries:
-                                        timeout_retry_count += 1
-                                        print(f"    ⏱️ Chunk took too long, retry {timeout_retry_count}/{max_timeout_retries}")
-                                        
-                                        print(f"    🔄 Retrying")
-                                       
-                                        time.sleep(2)
-                                        continue
-                                    else:
-                                        print(f"    ❌ Max timeout retries reached")
-                                        raise UnifiedClientError("Translation failed after timeout retries")
-                                
-                                # Handle regular timeout
-                                elif "timed out" in error_msg and "timeout:" not in error_msg:
-                                    print(f"⚠️ {error_msg}, retrying...")
-                                    time.sleep(5)
-                                    continue
-                                
-                                # Handle rate limiting
-                                elif getattr(e, "http_status", None) == 429:
-                                    print("⚠️ Rate limited, sleeping 60s…")
-                                    for i in range(60):
-                                        if check_stop():
-                                            print("❌ Translation stopped during rate limit wait")
-                                            return
-                                        time.sleep(1)
-                                    continue
-                                
-                                # Re-raise other errors
-                                else:
-                                    raise
-                            
-                            except Exception as e:
-                                # Catch any other unexpected errors
-                                print(f"❌ Unexpected error during API call: {e}")
-                                raise
-
-                        # Check if we exhausted all retries without success
-                        if result is None:
-                            print(f"❌ Failed to get translation after all retries")
-                            update_progress(prog, idx, actual_num, content_hash, output_filename=None, status="failed")
-                            save_progress()
-                            continue
-
-                        # Restore original values
-                        MAX_OUTPUT_TOKENS = original_max_tokens
-                        TEMP = original_temp
-                        user_prompt = original_user_prompt
-
-                        # Only print restoration message if values were actually changed
-                        if retry_count > 0 or duplicate_retry_count > 0 or timeout_retry_count > 0:
-                            if duplicate_retry_count > 0:
-                                print(f"    🔄 Restored original temperature: {TEMP} (after {duplicate_retry_count} duplicate retries)")
-                            elif timeout_retry_count > 0:
-                                print(f"    🔄 Restored original settings after {timeout_retry_count} timeout retries")
-                            elif retry_count > 0:
-                                print(f"    🔄 Restored original settings after {retry_count} retries")
-
-                        # If duplicate was detected but not resolved, add a warning
-                        if duplicate_retry_count >= max_duplicate_retries:
-                            print(f"    ⚠️ WARNING: Duplicate content issue persists after {max_duplicate_retries} attempts")
-
-                        # Clean AI artifacts ONLY if the toggle is enabled
-                        if REMOVE_AI_ARTIFACTS:
-                            result = clean_ai_artifacts(result)
-
-                        if EMERGENCY_RESTORE:
-                            result = emergency_restore_paragraphs(result, chunk_html)
-
-                        # Additional cleaning if remove artifacts is enabled
-                        if REMOVE_AI_ARTIFACTS:
-                            # Remove any JSON artifacts at the very beginning
-                            lines = result.split('\n')
-                            
-                            # Only check the first few lines for JSON artifacts
-                            json_line_count = 0
-                            for i, line in enumerate(lines[:5]):  # Only check first 5 lines
-                                if line.strip() and any(pattern in line for pattern in [
-                                    '"role":', '"content":', '"messages":', 
-                                    '{"role"', '{"content"', '[{', '}]'
-                                ]):
-                                    json_line_count = i + 1
-                                else:
-                                    # Found a non-JSON line, stop here
-                                    break
-                            
-                            if json_line_count > 0 and json_line_count < len(lines):
-                                # Only remove if we found JSON and there's content after it
-                                remaining = '\n'.join(lines[json_line_count:])
-                                if remaining.strip() and len(remaining) > 100:
-                                    result = remaining
-                                    print(f"✂️ Removed {json_line_count} lines of JSON artifacts")
-
-                        # Remove chunk markers if present
-                        result = re.sub(r'\[PART \d+/\d+\]\s*', '', result, flags=re.IGNORECASE)
-
-                        # Save chunk result
-                        translated_chunks.append((result, chunk_idx, total_chunks))
-                        
-                        # Add to chunk context for better continuity
-                        chunk_context_manager.add_chunk(user_prompt, result, chunk_idx, total_chunks)
-
-                        # Update progress for this chunk
-                        prog["chapter_chunks"][chapter_key_str]["completed"].append(chunk_idx)
-                        prog["chapter_chunks"][chapter_key_str]["chunks"][str(chunk_idx)] = result
-                        save_progress()
-
-                        # Increment completed chunks counter
-                        chunks_completed += 1
-                            
-                        # Check if we're about to reset history BEFORE appending
-                        rolling_window = os.getenv('TRANSLATION_HISTORY_ROLLING', '0') == '1'
-                        will_reset = history_manager.will_reset_on_next_append(HIST_LIMIT if CONTEXTUAL else 0, rolling_window)
-
-                        # Generate rolling summary BEFORE history reset
-                        if will_reset and os.getenv("USE_ROLLING_SUMMARY", "0") == "1" and CONTEXTUAL:
-                            if check_stop():
-                                print(f"❌ Translation stopped during summary generation for chapter {idx+1}")
-                                return
-                            
-                            # Get current history before it's cleared
-                            current_history = history_manager.load_history()
-                            
-                            # Get configuration
-                            exchanges_to_summarize = int(os.getenv("ROLLING_SUMMARY_EXCHANGES", "5"))
-                            summary_mode = os.getenv("ROLLING_SUMMARY_MODE", "append")
-                            
-                            # Calculate how many messages to include (2 messages per exchange)
-                            messages_to_include = exchanges_to_summarize * 2
-                            
-                            if len(current_history) >= 4:  # At least 2 exchanges
-                                # Extract recent assistant responses
-                                assistant_responses = []
-                                recent_messages = current_history[-messages_to_include:] if messages_to_include > 0 else current_history
-                                
-                                for h in recent_messages:
-                                    if h.get("role") == "assistant":
-                                        assistant_responses.append(h["content"])
-                                
-                                if assistant_responses:
-                                    # Get custom prompts or use defaults
-                                    system_prompt = os.getenv("ROLLING_SUMMARY_SYSTEM_PROMPT", 
-                                                            "Create a concise summary for context continuity.")
-                                    user_prompt_template = os.getenv("ROLLING_SUMMARY_USER_PROMPT",
-                                                                    "Summarize the key events, characters, tone, and important details from these translations. "
-                                                                    "Focus on: character names/relationships, plot developments, and any special terminology used.\n\n"
-                                                                    "{translations}")
-                                    
-                                    # Format the translations
-                                    translations_text = "\n---\n".join(assistant_responses)
-                                    user_prompt = user_prompt_template.replace("{translations}", translations_text)
-                                    
-                                    summary_msgs = [
-                                        {"role": "system", "content": system_prompt},
-                                        {"role": "user", "content": user_prompt}
-                                    ]
-                                    
-                                    try:
-                                        summary_resp, _ = send_with_interrupt(
-                                            summary_msgs, client, TEMP, min(2000, MAX_OUTPUT_TOKENS), check_stop
-                                        )
-                                        
-                                        # Save summary to file
-                                        summary_file = os.path.join(out, "rolling_summary.txt")
-                                        
-                                        # Handle append vs replace mode
-                                        if summary_mode == "append":
-                                            mode = "a"
-                                            with open(summary_file, mode, encoding="utf-8") as sf:
-                                                sf.write(f"\n\n=== Summary before chapter {idx+1}, chunk {chunk_idx} ===\n")
-                                                sf.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n")
-                                                sf.write(summary_resp.strip())
-                                        else:  # replace mode
-                                            mode = "w"
-                                            with open(summary_file, mode, encoding="utf-8") as sf:
-                                                sf.write(f"=== Latest Summary (Chapter {idx+1}, chunk {chunk_idx}) ===\n")
-                                                sf.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n")
-                                                sf.write(summary_resp.strip())
-                                        
-                                        # Update base_msg to include summary
-                                        # First, remove any existing summary message
-                                        base_msg[:] = [msg for msg in base_msg if "[MEMORY]" not in msg.get("content", "")]
-                                        
-                                        # Add new summary with clear labeling
-                                        summary_msg = {
-                                            "role": os.getenv("SUMMARY_ROLE", "user"),
-                                            "content": (
-                                                "CONTEXT ONLY - DO NOT INCLUDE IN TRANSLATION:\n"
-                                                "[MEMORY] Previous context summary:\n\n"
-                                                f"{summary_resp.strip()}\n\n"
-                                                "[END MEMORY]\n"
-                                                "END OF CONTEXT - BEGIN ACTUAL CONTENT TO TRANSLATE:"
-                                            )
-                                        }
-                                        
-                                        # Insert after system message
-                                        if base_msg and base_msg[0].get("role") == "system":
-                                            base_msg.insert(1, summary_msg)
-                                        else:
-                                            base_msg.insert(0, summary_msg)
-                                        
-                                        print(f"📝 Generated rolling summary ({summary_mode} mode, {exchanges_to_summarize} exchanges)")
-                                        
-                                        # In append mode, also show total summaries
-                                        if summary_mode == "append" and os.path.exists(summary_file):
-                                            try:
-                                                with open(summary_file, 'r', encoding='utf-8') as sf:
-                                                    content = sf.read()
-                                                summary_count = content.count("=== Summary")
-                                                print(f"   📚 Total summaries in memory: {summary_count}")
-                                            except:
-                                                pass
-                                        
-                                    except Exception as e:
-                                        print(f"⚠️ Failed to generate rolling summary: {e}")
-
-                        # append to history (which may reset it)
-                        rolling_window = os.getenv('TRANSLATION_HISTORY_ROLLING', '0') == '1'
-                        history = history_manager.append_to_history(
-                            user_prompt, 
-                            result, 
-                            HIST_LIMIT if CONTEXTUAL else 0,
-                            reset_on_limit=True,
-                            rolling_window=rolling_window
-                        )
-
-                        # Delay between chunks/API calls
-                        if chunk_idx < total_chunks:
-                            for i in range(DELAY):
-                                if check_stop():
-                                    print("❌ Translation stopped during delay")
-                                    return
-                                time.sleep(1)
-                        break
-
-                    except UnifiedClientError as e:
-                        error_msg = str(e)
-                        
-                        # Handle timeout specifically
-                        if "took" in error_msg and "timeout:" in error_msg:
-                            if timeout_retry_count < max_timeout_retries:
-                                timeout_retry_count += 1
-                                print(f"    ⏱️ Chunk took too long, retry {timeout_retry_count}/{max_timeout_retries}")
-                                
-                                print(f"    🔄 Retrying")
-                               
-                                time.sleep(2)
-                                continue
-                            else:
-                                print(f"    ❌ Max timeout retries reached")
-                                # For timeout failures, we don't have a result, so we need to fail
-                                raise UnifiedClientError("Translation failed after timeout retries")
-                        
-                        # Handle other errors as before
-                        if "stopped by user" in error_msg:
-                            print("❌ Translation stopped by user during API call")
-                            return
-                        elif "timed out" in error_msg and "timeout:" not in error_msg:  # Different kind of timeout
-                            print(f"⚠️ {error_msg}, retrying...")
-                            continue
-                        elif getattr(e, "http_status", None) == 429:
-                            print("⚠️ Rate limited, sleeping 60s…")
-                            for i in range(60):
-                                if check_stop():
-                                    print("❌ Translation stopped during rate limit wait")
-                                    return
-                                time.sleep(1)
-                            continue  # ADD THIS to retry after rate limit
+                # Additional cleaning if remove artifacts is enabled
+                if config.REMOVE_AI_ARTIFACTS:
+                    # Remove any JSON artifacts at the very beginning
+                    lines = result.split('\n')
+                    
+                    # Only check the first few lines for JSON artifacts
+                    json_line_count = 0
+                    for i, line in enumerate(lines[:5]):  # Only check first 5 lines
+                        if line.strip() and any(pattern in line for pattern in [
+                            '"role":', '"content":', '"messages":', 
+                            '{"role"', '{"content"', '[{', '}]'
+                        ]):
+                            json_line_count = i + 1
                         else:
-                            raise
+                            # Found a non-JSON line, stop here
+                            break
+                    
+                    if json_line_count > 0 and json_line_count < len(lines):
+                        # Only remove if we found JSON and there's content after it
+                        remaining = '\n'.join(lines[json_line_count:])
+                        if remaining.strip() and len(remaining) > 100:
+                            result = remaining
+                            print(f"✂️ Removed {json_line_count} lines of JSON artifacts")
+
+                # Remove chunk markers if present
+                result = re.sub(r'\[PART \d+/\d+\]\s*', '', result, flags=re.IGNORECASE)
+
+                # Save chunk result
+                translated_chunks.append((result, chunk_idx, total_chunks))
+                
+                # Add to chunk context for better continuity
+                chunk_context_manager.add_chunk(user_prompt, result, chunk_idx, total_chunks)
+
+                # Update progress for this chunk
+                prog["chapter_chunks"][chapter_key_str]["completed"].append(chunk_idx)
+                prog["chapter_chunks"][chapter_key_str]["chunks"][str(chunk_idx)] = result
+                save_progress()
+
+                # Increment completed chunks counter
+                chunks_completed += 1
+                    
+                # Check if we're about to reset history BEFORE appending
+                will_reset = history_manager.will_reset_on_next_append(
+                    config.HIST_LIMIT if config.CONTEXTUAL else 0, 
+                    config.TRANSLATION_HISTORY_ROLLING
+                )
+
+                # Generate rolling summary BEFORE history reset
+                if will_reset and config.USE_ROLLING_SUMMARY and config.CONTEXTUAL:
+                    if check_stop():
+                        print(f"❌ Translation stopped during summary generation for chapter {idx+1}")
+                        return
+                    
+                    summary_resp = translation_processor.generate_rolling_summary(
+                        history_manager, idx, chunk_idx
+                    )
+                    
+                    if summary_resp:
+                        # Update base_msg to include summary
+                        # First, remove any existing summary message
+                        base_msg[:] = [msg for msg in base_msg if "[MEMORY]" not in msg.get("content", "")]
+                        
+                        # Add new summary with clear labeling
+                        summary_msg = {
+                            "role": os.getenv("SUMMARY_ROLE", "user"),
+                            "content": (
+                                "CONTEXT ONLY - DO NOT INCLUDE IN TRANSLATION:\n"
+                                "[MEMORY] Previous context summary:\n\n"
+                                f"{summary_resp}\n\n"
+                                "[END MEMORY]\n"
+                                "END OF CONTEXT - BEGIN ACTUAL CONTENT TO TRANSLATE:"
+                            )
+                        }
+                        
+                        # Insert after system message
+                        if base_msg and base_msg[0].get("role") == "system":
+                            base_msg.insert(1, summary_msg)
+                        else:
+                            base_msg.insert(0, summary_msg)
+
+                # append to history (which may reset it)
+                history = history_manager.append_to_history(
+                    user_prompt, 
+                    result, 
+                    config.HIST_LIMIT if config.CONTEXTUAL else 0,
+                    reset_on_limit=True,
+                    rolling_window=config.TRANSLATION_HISTORY_ROLLING
+                )
+
+                # Delay between chunks/API calls
+                if chunk_idx < total_chunks:
+                    for i in range(config.DELAY):
+                        if check_stop():
+                            print("❌ Translation stopped during delay")
+                            return
+                        time.sleep(1)
 
             # Check for stop before merging and saving
             if check_stop():
@@ -5544,7 +5287,7 @@ def main(log_callback=None, stop_callback=None):
                 merged_result = translated_chunks[0][0] if translated_chunks else ""
 
             # Create chapter summary for history if we have multiple chunks
-            if CONTEXTUAL and len(translated_chunks) > 1:
+            if config.CONTEXTUAL and len(translated_chunks) > 1:
                 user_summary, assistant_summary = chunk_context_manager.get_summary_for_history()
                 
                 if user_summary and assistant_summary:
@@ -5553,39 +5296,30 @@ def main(log_callback=None, stop_callback=None):
                     history_manager.append_to_history(
                         user_summary,
                         assistant_summary,
-                        HIST_LIMIT,
+                        config.HIST_LIMIT,
                         reset_on_limit=False,  # Don't reset on this append
-                        rolling_window=os.getenv('TRANSLATION_HISTORY_ROLLING', '0') == '1'
+                        rolling_window=config.TRANSLATION_HISTORY_ROLLING
                     )
                     print(f"  📝 Added chapter summary to history")
 
             # Clear chunk context for next chapter
             chunk_context_manager.clear()
 
-            # Save translated chapter - preserve original filename structure
-            if 'original_basename' in c and c['original_basename']:
-                # Use the original filename structure
-                fname = f"response_{c['original_basename']}.html"
-            else:
-                # Fallback to the current naming scheme
-                safe_title = make_safe_filename(c['title'], c['num'])   
-                if isinstance(c['num'], float):
-                    fname = f"response_{c['num']:06.1f}_{safe_title}.html"  # Format: response_001.0_title.html
-                else:
-                    fname = f"response_{c['num']:03d}_{safe_title}.html"    # Format: response_001_title.html
+            # Save translated chapter
+            fname = FileUtilities.create_chapter_filename(c, actual_num)
 
             # Clean up code fences only
             cleaned = re.sub(r"^```(?:html)?\s*\n?", "", merged_result, count=1, flags=re.MULTILINE)
             cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
 
             # Final artifact cleanup - NOW RESPECTS THE TOGGLE and is conservative
-            cleaned = clean_ai_artifacts(cleaned, remove_artifacts=REMOVE_AI_ARTIFACTS)
+            cleaned = clean_ai_artifacts(cleaned, remove_artifacts=config.REMOVE_AI_ARTIFACTS)
 
             # Write HTML file
             with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
                 f.write(cleaned)
             
-            final_title = c['title'] or safe_title
+            final_title = c['title'] or make_safe_filename(c['title'], actual_num)
             print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
             
             # Update progress with completed status
@@ -5627,89 +5361,81 @@ def main(log_callback=None, stop_callback=None):
             print("❌ Text file output build failed:", e)
     else:
         # Existing EPUB building code
+        # FIX: Ensure we have response_ files for EPUB builder
+        print("🔍 Checking for translated chapters...")
+        response_files = [f for f in os.listdir(out) if f.startswith('response_') and f.endswith('.html')]
+        chapter_files = [f for f in os.listdir(out) if f.startswith('chapter_') and f.endswith('.html')]
+
+        if not response_files and chapter_files:
+            print(f"⚠️ No translated files found, but {len(chapter_files)} original chapters exist")
+            print("📝 Creating placeholder response files for EPUB compilation...")
+            
+            # Create response files from chapter files
+            for chapter_file in chapter_files:
+                response_file = chapter_file.replace('chapter_', 'response_', 1)
+                src = os.path.join(out, chapter_file)
+                dst = os.path.join(out, response_file)
+                
+                try:
+                    # Read the original content
+                    with open(src, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    # Add a notice that this is untranslated
+                    soup = BeautifulSoup(content, 'html.parser')
+                    notice = soup.new_tag('p')
+                    notice.string = "[Note: This chapter could not be translated - showing original content]"
+                    notice['style'] = "color: red; font-style: italic;"
+                    
+                    # Insert notice at the beginning of body
+                    if soup.body:
+                        soup.body.insert(0, notice)
+                    
+                    # Write as response file
+                    with open(dst, 'w', encoding='utf-8') as f:
+                        f.write(str(soup))
+                        
+                except Exception as e:
+                    print(f"⚠️ Error processing {chapter_file}: {e}")
+                    # Fallback - just copy the file
+                    try:
+                        shutil.copy2(src, dst)
+                    except:
+                        pass
+            
+            print(f"✅ Created {len(chapter_files)} placeholder response files")
+            print("⚠️ Note: The EPUB will contain untranslated content")
+        
+        # Build final EPUB
         print("📘 Building final EPUB…")
         try:
             from epub_converter import fallback_compile_epub
             fallback_compile_epub(out, log_callback=log_callback)
             print("✅ All done: your final EPUB is in", out)
+            
+            # Print final statistics
+            total_time = time.time() - translation_start_time
+            hours = int(total_time // 3600)
+            minutes = int((total_time % 3600) // 60)
+            seconds = int(total_time % 60)
+            
+            print(f"\n📊 Translation Statistics:")
+            print(f"   • Total chunks processed: {chunks_completed}")
+            print(f"   • Total time: {hours}h {minutes}m {seconds}s")
+            if chunks_completed > 0:
+                avg_time = total_time / chunks_completed
+                print(f"   • Average time per chunk: {avg_time:.1f} seconds")
+            
+            # Print progress tracking statistics
+            stats = get_translation_stats(prog, out)
+            print(f"\n📊 Progress Tracking Summary:")
+            print(f"   • Total chapters tracked: {stats['total_tracked']}")
+            print(f"   • Successfully completed: {stats['completed']}")
+            print(f"   • Missing files: {stats['missing_files']}")
+            print(f"   • In progress: {stats['in_progress']}")
+                
         except Exception as e:
             print("❌ EPUB build failed:", e)
-            
-    # FIX: Ensure we have response_ files for EPUB builder
-    print("🔍 Checking for translated chapters...")
-    response_files = [f for f in os.listdir(out) if f.startswith('response_') and f.endswith('.html')]
-    chapter_files = [f for f in os.listdir(out) if f.startswith('chapter_') and f.endswith('.html')]
-
-    if not response_files and chapter_files:
-        print(f"⚠️ No translated files found, but {len(chapter_files)} original chapters exist")
-        print("📝 Creating placeholder response files for EPUB compilation...")
-        
-        # Create response files from chapter files
-        for chapter_file in chapter_files:
-            response_file = chapter_file.replace('chapter_', 'response_', 1)
-            src = os.path.join(out, chapter_file)
-            dst = os.path.join(out, response_file)
-            
-            try:
-                # Read the original content
-                with open(src, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                
-                # Add a notice that this is untranslated
-                soup = BeautifulSoup(content, 'html.parser')
-                notice = soup.new_tag('p')
-                notice.string = "[Note: This chapter could not be translated - showing original content]"
-                notice['style'] = "color: red; font-style: italic;"
-                
-                # Insert notice at the beginning of body
-                if soup.body:
-                    soup.body.insert(0, notice)
-                
-                # Write as response file
-                with open(dst, 'w', encoding='utf-8') as f:
-                    f.write(str(soup))
-                    
-            except Exception as e:
-                print(f"⚠️ Error processing {chapter_file}: {e}")
-                # Fallback - just copy the file
-                try:
-                    shutil.copy2(src, dst)
-                except:
-                    pass
-        
-        print(f"✅ Created {len(chapter_files)} placeholder response files")
-        print("⚠️ Note: The EPUB will contain untranslated content")
-        
-    # Build final EPUB
-    print("📘 Building final EPUB…")
-    try:
-        from epub_converter import fallback_compile_epub
-        fallback_compile_epub(out, log_callback=log_callback)
-        print("✅ All done: your final EPUB is in", out)
-        
-        # Print final statistics
-        total_time = time.time() - translation_start_time
-        hours = int(total_time // 3600)
-        minutes = int((total_time % 3600) // 60)
-        seconds = int(total_time % 60)
-        
-        print(f"\n📊 Translation Statistics:")
-        print(f"   • Total chunks processed: {chunks_completed}")
-        print(f"   • Total time: {hours}h {minutes}m {seconds}s")
-        if chunks_completed > 0:
-            avg_time = total_time / chunks_completed
-            print(f"   • Average time per chunk: {avg_time:.1f} seconds")
-        
-        # Print progress tracking statistics
-        stats = get_translation_stats(prog, out)
-        print(f"\n📊 Progress Tracking Summary:")
-        print(f"   • Total chapters tracked: {stats['total_tracked']}")
-        print(f"   • Successfully completed: {stats['completed']}")
-        print(f"   • Missing files: {stats['missing_files']}")
-        print(f"   • In progress: {stats['in_progress']}")
-            
-    except Exception as e:
-        print("❌ EPUB build failed:", e)
 
     # Signal completion to GUI
     print("TRANSLATION_COMPLETE_SIGNAL")
