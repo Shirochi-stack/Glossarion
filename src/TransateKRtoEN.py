@@ -1150,6 +1150,16 @@ def detect_novel_numbering(chapters):
     """
     print("[DEBUG] Detecting novel numbering system...")
     
+    # Check if chapters is empty or not the expected format
+    if not chapters:
+        return False
+    
+    # Check if this is a text file (chapters might be strings or different format)
+    if isinstance(chapters[0], str):
+        print("[DEBUG] Text file detected, skipping numbering detection")
+        return False
+        
+    
     # Method 1: Check the actual files for chapter 0
     has_chapter_0 = False
     has_chapter_1 = False
@@ -1852,6 +1862,8 @@ def _extract_all_chapters_comprehensive(zf):
 def _extract_chapters_smart(zf):
     """Extract comprehensive chapter information with improved detection for image-only chapters"""
     chapters = []
+    # Define header priority for chapter detection
+    header_priority = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']
     
     # Get all potential document files
     html_files = []
@@ -4501,8 +4513,31 @@ def main(log_callback=None, stop_callback=None):
             idx, chapter = chapter_data
             chap_num = chapter["num"]
             
+            # Extract actual chapter number (ADD THIS SECTION)
+            actual_num = None
+            if chapter.get('original_basename'):
+                patterns = [
+                    r'^(\d+)[_\.]',
+                    r'No(\d+)Chapter',
+                    r'Chapter(\d+)',
+                    r'chapter(\d+)',
+                    r'ch(\d+)',
+                    r'_(\d+)$',
+                    r'-(\d+)$',
+                    r'(\d+)$'
+                ]
+                basename = chapter['original_basename']
+                for pattern in patterns:
+                    match = re.search(pattern, basename, re.IGNORECASE)
+                    if match:
+                        actual_num = int(match.group(1))
+                        break
+            
+            if actual_num is None:
+                actual_num = chap_num
+            
             try:
-                print(f"🔄 Starting #{idx+1} (Internal: Chapter {chap_num}) (thread: {threading.current_thread().name}) [File: {chapter.get('original_basename', f'Chapter_{chap_num}')}]")
+                print(f"🔄 Starting #{idx+1} (Internal: Chapter {chap_num}, Actual: Chapter {actual_num})  (thread: {threading.current_thread().name}) [File: {chapter.get('original_basename', f'Chapter_{chap_num}')}]")
 
                 
                 # Update progress to in-progress
@@ -4646,10 +4681,10 @@ def main(log_callback=None, stop_callback=None):
                         success, chap_num = future.result()
                         if success:
                             completed_in_batch += 1
-                            print(f"✅ Chapter {chap_num} done ({completed_in_batch + failed_in_batch}/{len(current_batch)} in batch)")
+                            print(f"✅ Chapter {actual_num} done ({completed_in_batch + failed_in_batch}/{len(current_batch)} in batch)")
                         else:
                             failed_in_batch += 1
-                            print(f"❌ Chapter {chap_num} failed ({completed_in_batch + failed_in_batch}/{len(current_batch)} in batch)")
+                            print(f"❌ Chapter {actual_num} failed ({completed_in_batch + failed_in_batch}/{len(current_batch)} in batch)")
                     except Exception as e:
                         failed_in_batch += 1
                         print(f"❌ Chapter thread error: {e}")
