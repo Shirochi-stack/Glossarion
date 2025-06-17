@@ -670,7 +670,7 @@ class UnifiedClient:
                 f"{base_url}/chat/completions",
                 headers=headers,
                 json=data,
-                timeout=180
+                # timeout removed - will use requests default (no timeout)
             )
             
             if resp.status_code != 200:
@@ -711,7 +711,7 @@ class UnifiedClient:
             )
             
         except requests.exceptions.Timeout:
-            raise UnifiedClientError(f"{provider} API timeout after 180 seconds")
+            raise UnifiedClientError(f"{provider} API timeout after 3600 seconds")
         except requests.exceptions.RequestException as e:
             raise UnifiedClientError(f"{provider} API request error: {e}")
 
@@ -738,7 +738,7 @@ class UnifiedClient:
                 "https://api.anthropic.com/v1/messages",
                 headers=headers,
                 json=data,
-                timeout=180
+                # timeout removed - will use requests default (no timeout)
             )
             
             if resp.status_code != 200:
@@ -779,7 +779,7 @@ class UnifiedClient:
             )
             
         except requests.exceptions.Timeout:
-            raise UnifiedClientError("Anthropic API timeout after 180 seconds")
+            raise UnifiedClientError("Anthropic API timeout after 3600 seconds")
         except requests.exceptions.RequestException as e:
             raise UnifiedClientError(f"Anthropic API request error: {e}")
 
