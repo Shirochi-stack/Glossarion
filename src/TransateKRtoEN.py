@@ -677,7 +677,7 @@ def check_chapter_status(prog, chapter_idx, chapter_num, content_hash, output_di
         if not os.path.exists(output_path):
             # File was deleted! Mark chapter as needing retranslation
             print(f"⚠️ Output file missing for chapter {chapter_num}: {output_file}")
-            print(f"🔄 Chapter {chapter_num} will be retranslated")
+            print(f"🔄 Chapter {actual_num} will be retranslated")
             
             # ... rest of the function
             return True, None, None
@@ -817,7 +817,10 @@ def update_progress(prog, chapter_idx, chapter_num, content_hash, output_filenam
         "content_hash": content_hash,
         "output_file": output_filename,
         "status": status,
-        "timestamp": time.time()
+        "timestamp": time.time(),
+        # display info for GUI
+        "display_name": f"Chapter {chapter_num}",  
+        "file_basename": output_filename.replace('response_', '').replace('.html', '') if output_filename else None
     }
     
     if output_filename and status == "completed":
@@ -1137,6 +1140,87 @@ def detect_content_language(text_sample):
     else:
         return 'unknown'
 
+
+def detect_novel_numbering(chapters):
+    """
+    Detect if the novel uses 0-based or 1-based chapter numbering
+    
+    Returns:
+        True if 0-based, False if 1-based
+    """
+    print("[DEBUG] Detecting novel numbering system...")
+    
+    # Method 1: Check the actual files for chapter 0
+    has_chapter_0 = False
+    has_chapter_1 = False
+    lowest_chapter = float('inf')
+    
+    for idx, chapter in enumerate(chapters):
+        # Extract number from various sources
+        extracted_num = None
+        
+        # Try original_basename first
+        if 'original_basename' in chapter:
+            basename = chapter['original_basename']
+            print(f"[DEBUG] Checking basename: {basename}")
+            
+            # Patterns to extract numbers
+            patterns = [
+                (r'^(\d+)[_\.]', 'prefix_number'),      # "0248_" or "0248."
+                (r'^(\d{3,4})$', 'pure_number'),        # "0248" (just numbers)
+                (r'No(\d+)Chapter', 'no_chapter'),      # "No248Chapter"
+                (r'[Cc]hapter[_\s]*(\d+)', 'chapter'),  # "Chapter248"
+                (r'[Cc]h[_\s]*(\d+)', 'ch'),           # "ch248"
+                (r'_(\d+)$', 'suffix_underscore'),      # "text_248"
+                (r'-(\d+)$', 'suffix_dash'),           # "text-248"
+                (r'(\d+)$', 'trailing_number')         # "text248"
+            ]
+            
+            for pattern, pattern_name in patterns:
+                match = re.search(pattern, basename)
+                if match:
+                    extracted_num = int(match.group(1))
+                    print(f"[DEBUG] Pattern '{pattern_name}' matched: {extracted_num}")
+                    break
+        
+        # Try filename if no basename
+        if extracted_num is None and 'filename' in chapter:
+            filename = chapter['filename']
+            for pattern, pattern_name in patterns:
+                match = re.search(pattern, os.path.basename(filename))
+                if match:
+                    extracted_num = int(match.group(1))
+                    print(f"[DEBUG] Filename pattern '{pattern_name}' matched: {extracted_num}")
+                    break
+        
+        # Track what we found
+        if extracted_num is not None:
+            if extracted_num == 0:
+                has_chapter_0 = True
+                print(f"[DEBUG] ✓ Found chapter 0 at index {idx}")
+            elif extracted_num == 1:
+                has_chapter_1 = True
+            lowest_chapter = min(lowest_chapter, extracted_num)
+    
+    # Method 2: Check the internal chapter numbers
+    if not has_chapter_0 and chapters:
+        # Check if the first file in the list has number 0
+        first_chapter = chapters[0]
+        if first_chapter.get('num') == 0:
+            has_chapter_0 = True
+            print("[DEBUG] ✓ First chapter has num=0")
+    
+    # Decision logic
+    if has_chapter_0:
+        print(f"[DEBUG] ✅ 0-based novel detected (found chapter 0)")
+        return True
+    elif lowest_chapter == 0:
+        print(f"[DEBUG] ✅ 0-based novel detected (lowest chapter is 0)")
+        return True
+    else:
+        print(f"[DEBUG] ✅ 1-based novel detected (no chapter 0, lowest chapter: {lowest_chapter})")
+        return False
+               
 def extract_comprehensive_content_hash(html_content):
     """Create a more comprehensive hash that captures content structure and meaning"""
     try:
@@ -3790,11 +3874,25 @@ def main(log_callback=None, stop_callback=None):
         print("⚠️ AI artifact removal is ENABLED - will clean AI response artifacts")
     else:
         print("✅ AI artifact removal is DISABLED - preserving all content as-is")
-        
+       
+    # Detect numbering system BEFORE parsing range
+    if chapters:
+        uses_zero_based = detect_novel_numbering(chapters)
+    else:
+        uses_zero_based = False
+
     # Parse chapter range
     rng = os.getenv("CHAPTER_RANGE", "")
     if rng and re.match(r"^\d+\s*-\s*\d+$", rng):
         start, end = map(int, rng.split("-", 1))
+        
+        # Log the detection result
+        if uses_zero_based:
+            print(f"📊 0-based novel detected")
+            print(f"📊 User range {start}-{end} will map to files {start-1}-{end-1}")
+        else:
+            print(f"📊 1-based novel detected")
+            print(f"📊 Using range as specified: {start}-{end}")
     else:
         start, end = None, None
 
@@ -3888,7 +3986,23 @@ def main(log_callback=None, stop_callback=None):
 
     def save_progress():
         try:
-            # Write to a temporary file first
+            # ADD THIS: Create completed list for GUI compatibility
+            prog["completed_list"] = []
+            for chapter_key, chapter_info in prog.get("chapters", {}).items():
+                if chapter_info.get("status") == "completed" and chapter_info.get("output_file"):
+                    prog["completed_list"].append({
+                        "num": chapter_info.get("chapter_num", 0),
+                        "idx": chapter_info.get("chapter_idx", 0),
+                        "title": f"Chapter {chapter_info.get('chapter_num', 0)}",
+                        "file": chapter_info.get("output_file", ""),
+                        "key": chapter_key  # Include the hash key
+                    })
+            
+            # Sort by chapter number
+            if prog.get("completed_list"):
+                prog["completed_list"].sort(key=lambda x: x["num"])
+            
+            # EXISTING CODE: Write to a temporary file first
             temp_file = PROGRESS_FILE + '.tmp'
             with open(temp_file, "w", encoding="utf-8") as pf:
                 json.dump(prog, pf, ensure_ascii=False, indent=2)
@@ -3900,6 +4014,7 @@ def main(log_callback=None, stop_callback=None):
         except Exception as e:
             print(f"⚠️ Warning: Failed to save progress: {e}")
             # Clean up temp file if it exists
+            temp_file = PROGRESS_FILE + '.tmp'  # Define it here too
             if os.path.exists(temp_file):
                 try:
                     os.remove(temp_file)
@@ -4162,88 +4277,58 @@ def main(log_callback=None, stop_callback=None):
     else:
         print("ℹ️ Image translation disabled by user")
     
-    total_chapters = len(chapters)
+    total_chapters = len(chapters)    
     
     # First pass: Count total chunks needed
     print("📊 Calculating total chunks needed...")
     total_chunks_needed = 0
     chunks_per_chapter = {}
     chapters_to_process = 0  # Count chapters that need processing
-    
-    
+
     for idx, c in enumerate(chapters):
         chap_num = c["num"]
         content_hash = c.get("content_hash") or get_content_hash(c["body"])
         
-        # Extract actual chapter number from filename FIRST
+        # Extract actual chapter number from filename
         actual_num = None
         if c.get('original_basename'):
-            # In all three range checking locations, update the patterns:
+            # Use the same patterns as in detection
             patterns = [
-                r'^(\d+)_',            # NEW: Matches "0249_" at start
-                r'^(\d+)\.',           # NEW: Matches "0249." at start
-                r'No(\d+)Chapter',     # No00248Chapter
-                r'Chapter(\d+)',       # Chapter248
-                r'chapter(\d+)',       # chapter248
-                r'ch(\d+)',           # ch248
-                r'_(\d+)$',           # something_248
-                r'-(\d+)$',           # something-248
-                r'(\d+)$'             # just 248 at end
-            ]   
+                r'^(\d+)[_\.]',          # "0248_" or "0248."
+                r'^(\d{3,4})$',          # "0248" (just numbers)
+                r'No(\d+)Chapter',       # "No248Chapter"
+                r'[Cc]hapter[_\s]*(\d+)', # "Chapter248"
+                r'[Cc]h[_\s]*(\d+)',     # "ch248"
+                r'_(\d+)$',              # "text_248"
+                r'-(\d+)$',              # "text-248"
+                r'(\d+)$'                # "text248"
+            ]
             
+            basename = c['original_basename']
             for pattern in patterns:
-                match = re.search(pattern, c['original_basename'])
+                match = re.search(pattern, basename)
                 if match:
                     actual_num = int(match.group(1))
                     break
-
-        # If no number in filename, use the internal chapter number
+        
+        # Fallback to internal number if extraction failed
         if actual_num is None:
             actual_num = chap_num
+            print(f"[DEBUG] No number extracted from filename, using internal: {chap_num}")
             
         # Store actual chapter number in the dict
         c['actual_chapter_num'] = actual_num
 
         # Apply chapter range filter using ACTUAL chapter numbers
         if start is not None:
-            # Extract actual chapter number
-            actual_num = None
-            if c.get('original_basename'):
-                patterns = [
-                    r'No(\d+)Chapter', r'Chapter(\d+)', r'chapter(\d+)',
-                    r'ch(\d+)', r'_(\d+)$', r'-(\d+)$', r'(\d+)$'
-                ]
-                for pattern in patterns:
-                    match = re.search(pattern, c['original_basename'])
-                    if match:
-                        actual_num = int(match.group(1))
-                        break
-            
-            if actual_num is None:
-                actual_num = chap_num
-            
-            # Simple range check - no special handling
+            # Simple range check with adjusted values
             if not (start <= actual_num <= end):
+                print(f"[SKIP] Chapter {actual_num} outside range {start}-{end}")
                 continue
-        # Check chapter status with improved logic
-        needs_translation, skip_reason, existing_file = check_chapter_status(
-            prog, idx, chap_num, content_hash, out
-        )
-
-        if not needs_translation:
-            # The skip_reason already contains the correct chapter number from check_chapter_status
-            print(f"[SKIP] {skip_reason}")
-            continue
-
-        # Calculate chapter position for progress (NOW it's safe to calculate)
-        chapter_position = f"{chapters_completed + 1}/{chapters_to_process}"
-
-        # NOW print with all variables defined
-        print(f"\n🔄 Processing #{idx+1}/{total_chapters} (Actual: Chapter {actual_num}) ({chapter_position} to translate): {c['title']} [File: {c.get('original_basename', f'Chapter_{chap_num}')}]")
-        
+                
         # Check chapter status
         needs_translation, skip_reason, _ = check_chapter_status(
-            prog, idx, chap_num, content_hash, out
+            prog, idx, actual_num, content_hash, out
         )
         
         if not needs_translation:
@@ -4283,7 +4368,7 @@ def main(log_callback=None, stop_callback=None):
             # Migrate old chunks to new key
             prog["chapter_chunks"][chapter_key_str] = prog["chapter_chunks"][old_key_str]
             del prog["chapter_chunks"][old_key_str]
-            print(f"[PROGRESS] Migrated chunks for chapter {chap_num} to new tracking system")
+            print(f"[PROGRESS] Migrated chunks for chapter {actual_num} to new tracking system")
 
         # Now check chunks with the correct key
         if chapter_key_str in prog.get("chapter_chunks", {}):
@@ -4579,39 +4664,45 @@ def main(log_callback=None, stop_callback=None):
     # Original loop - only runs if batch mode is off or failed
     if not BATCH_TRANSLATION:
         for idx, c in enumerate(chapters):
-            # Check for stop at the beginning of each chapter
-            if check_stop():
-                print(f"❌ Translation stopped at chapter {idx+1}")
-                return
+            actual_num = None
+            if c.get('original_basename'):
+                patterns = [
+                    r'^(\d+)[_\.]',          # "0249_" or "0249."
+                    r'^(\d{3,4})$',          # "0249" (just numbers)
+                    r'No(\d+)Chapter',       # "No249Chapter"
+                    r'[Cc]hapter[_\s]*(\d+)', # "Chapter249" or "chapter_249"
+                    r'[Cc]h[_\s]*(\d+)',     # "ch249" or "CH 249"
+                    r'_(\d+)$',              # "text_249"
+                    r'-(\d+)$',              # "text-249"
+                    r'(\d+)$'                # "text249" (fallback: any number)
+                ]
                 
+                basename = c['original_basename']
+                for pattern in patterns:
+                    match = re.search(pattern, basename, re.IGNORECASE)
+                    if match:
+                        actual_num = int(match.group(1))
+                        break
+            
+            if actual_num is None:
+                actual_num = c.get("num", idx)
+            
+            c['actual_chapter_num'] = actual_num
+
+        # Now process chapters
+        for idx, c in enumerate(chapters):
             chap_num = c["num"]
+            actual_num = c['actual_chapter_num']  # Use pre-computed actual number
             content_hash = c.get("content_hash") or get_content_hash(c["body"])
-
-            # Apply chapter range filter using ACTUAL chapter numbers
-            if start is not None:
-                # Extract actual chapter number
-                actual_num = None
-                if c.get('original_basename'):
-                    patterns = [
-                        r'No(\d+)Chapter', r'Chapter(\d+)', r'chapter(\d+)',
-                        r'ch(\d+)', r'_(\d+)$', r'-(\d+)$', r'(\d+)$'
-                    ]
-                    for pattern in patterns:
-                        match = re.search(pattern, c['original_basename'])
-                        if match:
-                            actual_num = int(match.group(1))
-                            break
-                
-                if actual_num is None:
-                    actual_num = chap_num
-                
-                # Simple range check - no special handling
-                if not (start <= actual_num <= end):
-                    continue
-
-            # Check chapter status with improved logic
+            
+            # Apply chapter range filter
+            if start is not None and not (start <= actual_num <= end):
+                print(f"[SKIP] Chapter {actual_num} (file: {c.get('original_basename', 'unknown')}) outside range {start}-{end}")
+                continue
+            
+            # Check chapter status - use actual_num, not chap_num
             needs_translation, skip_reason, existing_file = check_chapter_status(
-                prog, idx, chap_num, content_hash, out
+                prog, idx, actual_num, content_hash, out
             )
             
             if not needs_translation:
@@ -4853,8 +4944,8 @@ def main(log_callback=None, stop_callback=None):
                     print(f"  ⏳ Chunk size: {len(chunk_html):,} characters (~{chapter_splitter.count_tokens(chunk_html):,} tokens)")
                 else:
                     # Single chunk - show more meaningful info
-                    print(f"  📄 Translating chapter content (Overall: {current_chunk_number}/{total_chunks_needed} - {progress_percent:.1f}% - ETA: {eta_str}) [File: {c.get('original_basename', f'Chapter_{chap_num}')}]")
-                    print(f"  📊 Chapter {chap_num} size: {len(chunk_html):,} characters (~{chapter_splitter.count_tokens(chunk_html):,} tokens)")
+                    print(f"  📄 Translating chapter content (Overall: {current_chunk_number}/{total_chunks_needed} - {progress_percent:.1f}% - ETA: {eta_str}) [File: {c.get('original_basename', f'Chapter_{actual_num}')}]")
+                    print(f"  📊 Chapter {actual_num} size: {len(chunk_html):,} characters (~{chapter_splitter.count_tokens(chunk_html):,} tokens)")
                 
                 print(f"  ℹ️ This may take 30-60 seconds. Stop will take effect after completion.")
                 
@@ -4865,7 +4956,7 @@ def main(log_callback=None, stop_callback=None):
                             # For single chunks, pass chapter progress info
                             log_callback.__self__.append_chunk_progress(
                                 1, 1, "text", 
-                                f"Chapter {chap_num}",
+                                f"Chapter {actual_num}",
                                 overall_current=current_chunk_number,
                                 overall_total=total_chunks_needed,
                                 extra_info=f"{len(chunk_html):,} chars"
@@ -4876,16 +4967,16 @@ def main(log_callback=None, stop_callback=None):
                                 chunk_idx, 
                                 total_chunks, 
                                 "text", 
-                                f"Chapter {chap_num}",
+                                f"Chapter {actual_num}",
                                 overall_current=current_chunk_number,
                                 overall_total=total_chunks_needed
                             )
                     else:
                         # Fallback logging
                         if total_chunks == 1:
-                            log_callback(f"📄 Processing Chapter {chap_num} ({chapters_completed + 1}/{chapters_to_process}) - {progress_percent:.1f}% complete")
+                            log_callback(f"📄 Processing Chapter {actual_num} ({chapters_completed + 1}/{chapters_to_process}) - {progress_percent:.1f}% complete")
                         else:
-                            log_callback(f"📄 processing chunk {chunk_idx}/{total_chunks} for chapter {chap_num} - {progress_percent:.1f}% complete")   
+                            log_callback(f"📄 processing chunk {chunk_idx}/{total_chunks} for chapter {actual_num} - {progress_percent:.1f}% complete")   
                         
                 # Add chunk context to prompt if multi-chunk
                 if total_chunks > 1:
@@ -4974,7 +5065,7 @@ def main(log_callback=None, stop_callback=None):
                                 
                                 # Calculate actual token usage
                                 total_tokens = sum(chapter_splitter.count_tokens(m["content"]) for m in msgs)
-                                print(f"    [DEBUG] Chunk {chunk_idx}/{total_chunks} tokens = {total_tokens:,} / {budget_str} [File: {c.get('original_basename', f'Chapter_{chap_num}')}]")
+                                print(f"    [DEBUG] Chunk {chunk_idx}/{total_chunks} tokens = {total_tokens:,} / {budget_str} [File: {c.get('original_basename', f'Chapter_{actual_num}')}]")
                                 
                                 client.context = 'translation'
                                 
@@ -5157,7 +5248,7 @@ def main(log_callback=None, stop_callback=None):
                         # Check if we exhausted all retries without success
                         if result is None:
                             print(f"❌ Failed to get translation after all retries")
-                            update_progress(prog, idx, chap_num, content_hash, output_filename=None, status="failed")
+                            update_progress(prog, idx, actual_num, content_hash, output_filename=None, status="failed")
                             save_progress()
                             continue
 
@@ -5447,7 +5538,7 @@ def main(log_callback=None, stop_callback=None):
             print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved Chapter {c['num']}: {final_title}")
             
             # Update progress with completed status
-            update_progress(prog, idx, chap_num, content_hash, fname, status="completed")
+            update_progress(prog, idx, actual_num, content_hash, fname, status="completed")
             save_progress()
             
             # Increment chapters completed
