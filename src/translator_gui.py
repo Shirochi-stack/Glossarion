@@ -85,7 +85,7 @@ class TranslatorGUI:
         self.max_output_tokens = 8192  # default fallback
         self.proc = None
         self.glossary_proc = None       
-        master.title("Glossarion v2.4.1")
+        master.title("Glossarion v2.4.2")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1600, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
@@ -823,7 +823,7 @@ class TranslatorGUI:
         print("[DEBUG] GUI setup completed with config values loaded")  # Debug logging
         
         # Add initial log message
-        self.append_log("🚀 Glossarion v2.4.1 - Ready to use!")
+        self.append_log("🚀 Glossarion v2.4.2 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
 
     def force_retranslation(self):
@@ -4130,7 +4130,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time  # Add this import
     
-    print("🚀 Starting Glossarion v2.4.1...")
+    print("🚀 Starting Glossarion v2.4.2...")
     
     # Initialize splash screen (main thread only)
     splash_manager = None
