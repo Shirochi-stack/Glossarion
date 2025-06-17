@@ -2030,7 +2030,7 @@ class BatchTranslationProcessor:
             
             content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
             with self.progress_lock:
-                self.update_progress_fn(idx, actual_num, content_hash, output_filename=None, status="in_progress")
+                self.update_progress_fn(idx, actual_num, content_hash, None, status="in_progress")
                 self.save_progress_fn()
             
             chapter_body = chapter["body"]
@@ -2091,7 +2091,7 @@ class BatchTranslationProcessor:
         except Exception as e:
             print(f"❌ Chapter {actual_num} failed: {e}")
             with self.progress_lock:
-                self.update_progress_fn(idx, actual_num, content_hash, output_filename=None, status="failed")
+                self.update_progress_fn(idx, actual_num, content_hash, None, status="failed")
                 self.save_progress_fn()
             return False, actual_num
 
@@ -3978,7 +3978,7 @@ def main(log_callback=None, stop_callback=None):
         batch_processor = BatchTranslationProcessor(
             config, client, base_msg, out, progress_lock,
             progress_manager.save, 
-            lambda idx, actual_num, content_hash, fname=None, status="completed": progress_manager.update(idx, actual_num, content_hash, fname, status),
+            lambda idx, actual_num, content_hash, output_filename=None, status="completed": progress_manager.update(idx, actual_num, content_hash, output_filename, status),
             check_stop,
             image_translator
         )
