@@ -62,6 +62,15 @@ class DuplicateDetectionConfig:
                 'consecutive_chapters': 1,
                 'word_overlap': 0.85,
                 'minhash_threshold': 0.90
+            },
+            'ai-hunter': {
+                'similarity': 0.30, 
+                'semantic': 0.85,
+                'structural': 0.85,
+                'consecutive_chapters': 5,
+                'word_overlap': 0.50,
+                'minhash_threshold': 0.60,
+                'check_all_pairs': True
             }
         }
         
@@ -370,6 +379,91 @@ def extract_structural_signature(text):
         'dialogue_ratio': structure.count('D') / max(1, len(structure))
     }
 
+def roman_to_int(s):
+    """Convert Roman numerals to integer"""
+    try:
+        values = {'I': 1, 'V': 5, 'X': 10, 'L': 50, 'C': 100, 'D': 500, 'M': 1000}
+        result = 0
+        for i in range(len(s)):
+            if i + 1 < len(s) and values[s[i]] < values[s[i + 1]]:
+                result -= values[s[i]]
+            else:
+                result += values[s[i]]
+        return result
+    except:
+        return None
+
+def extract_chapter_info(filename, text):
+    """Extract chapter number and title from filename and content - ENHANCED VERSION"""
+    chapter_num = None
+    chapter_title = ""
+    
+    # Enhanced filename patterns - try multiple approaches
+    filename_patterns = [
+        # Original patterns
+        (r"response_(\d+)_(.+?)\.html", 1, 2),
+        (r"response_chapter(\d+)\.html", 1, None),
+        (r"chapter[\s_-]*(\d+)", 1, None),
+        
+        # New patterns to catch more cases
+        (r"response_(\d{3,4})_", 1, None),  # Catches response_003_
+        (r"response_chapter(\d{4})\.html", 1, None),  # Catches response_chapter0002
+        (r"(\d{3,4})[_\.]", 1, None),  # General 3-4 digit pattern
+        (r"No(\d+)Chapter", 1, None),
+        (r"ch[\s_-]*(\d+)", 1, None),
+        (r"_(\d+)_", 1, None),
+        (r"第(\d+)[章话回]", 1, None),  # Chinese chapter markers
+        (r"제(\d+)[장화회]", 1, None),  # Korean chapter markers
+    ]
+    
+    # Try each pattern
+    for pattern, num_group, title_group in filename_patterns:
+        m = re.search(pattern, filename, re.IGNORECASE)
+        if m:
+            try:
+                # Extract chapter number, removing leading zeros
+                chapter_num = int(m.group(num_group).lstrip('0') or '0')
+                if title_group and len(m.groups()) >= title_group:
+                    chapter_title = m.group(title_group)
+                break
+            except (ValueError, IndexError):
+                continue
+    
+    # If still no chapter number, try content-based extraction
+    if chapter_num is None and text:
+        content_patterns = [
+            r'Chapter\s+(\d+)',
+            r'第\s*(\d+)\s*章',
+            r'제\s*(\d+)\s*장',
+            r'Chapter\s+([IVXLCDM]+)',  # Roman numerals
+            r'\bCh\.?\s*(\d+)',
+            r'Episode\s+(\d+)',
+            r'Part\s+(\d+)',
+        ]
+        
+        for pattern in content_patterns:
+            m = re.search(pattern, text[:1000], re.IGNORECASE)
+            if m:
+                if m.group(1).isdigit():
+                    chapter_num = int(m.group(1))
+                else:
+                    # Try to convert Roman numerals
+                    num = roman_to_int(m.group(1))
+                    if num is not None:
+                        chapter_num = num
+                if chapter_num is not None:
+                    break
+    
+    return chapter_num, chapter_title
+
+def normalize_chapter_numbers(results):
+    """Normalize chapter numbers to handle different formats"""
+    for result in results:
+        # If we have a chapter number, ensure it's normalized
+        if result.get('chapter_num') is not None:
+            # This helps match chapter 2 with 002, etc.
+            result['normalized_chapter_num'] = int(result['chapter_num'])
+
 def fuzzy_match_chapter_numbers(text1, text2, num1, num2):
     """Check if chapter numbers might be the same despite OCR errors"""
     if num1 == num2:
@@ -535,37 +629,6 @@ def generate_content_hashes(text):
         'structural': structural_hash
     }
 
-def extract_chapter_info(filename, text):
-    """Extract chapter number and title from filename and content"""
-    chapter_num = None
-    chapter_title = ""
-    
-    # Try to extract from filename
-    m = re.match(r"response_(\d+)_(.+?)\.html", filename)
-    if m:
-        chapter_num = int(m.group(1))
-        chapter_title = m.group(2) if len(m.groups()) > 1 else ""
-    else:
-        # Try other filename patterns
-        m = re.search(r'chapter[\s_-]*(\d+)', filename, re.IGNORECASE)
-        if m:
-            chapter_num = int(m.group(1))
-    
-    # Extract from content if not found in filename
-    if chapter_num is None:
-        patterns = [
-            r'Chapter\s+(\d+)', r'第\s*(\d+)\s*章', r'제\s*(\d+)\s*장',
-            r'Chapter\s+([IVXLCDM]+)', r'\bCh\.?\s*(\d+)'
-        ]
-        for pattern in patterns:
-            m = re.search(pattern, text[:1000], re.IGNORECASE)
-            if m:
-                if m.group(1).isdigit():
-                    chapter_num = int(m.group(1))
-                break
-    
-    return chapter_num, chapter_title
-
 def calculate_similarity_ratio(text1, text2):
     """Calculate similarity with optimizations for large texts"""
     len_ratio = len(text1) / max(1, len(text2))
@@ -612,6 +675,116 @@ def calculate_semantic_similarity(sig1, sig2):
     
     # Weighted average
     return (char_overlap * 0.4 + dial_sim * 0.2 + act_sim * 0.2 + num_overlap * 0.1 + len_ratio * 0.1)
+    
+def calculate_semantic_fingerprint_similarity(text1, text2):
+    """Calculate similarity based on semantic structure rather than exact wording"""
+    
+    # Step 1: Extract structural elements that persist across translations
+    def extract_semantic_fingerprint(text):
+        # Remove HTML tags
+        text = re.sub(r'<[^>]+>', ' ', text)
+        
+        # Extract all quoted dialogue (preserving order)
+        dialogue_pattern = r'["\"\'""''『』「」]([^"\"\'""''『』「」]+)["\"\'""''『』「」]'
+        dialogues = re.findall(dialogue_pattern, text)
+        
+        # Extract character names that appear multiple times
+        potential_names = re.findall(r'\b[A-Z][a-z]+\b', text)
+        name_freq = {}
+        for name in potential_names:
+            if name not in ['The', 'A', 'An', 'In', 'On', 'At', 'To', 'From', 'With', 'By', 'For', 'Of', 'As', 'But', 'And', 'Or']:
+                name_freq[name] = name_freq.get(name, 0) + 1
+        
+        # Characters mentioned 3+ times are likely actual characters
+        character_names = [name for name, count in name_freq.items() if count >= 3]
+        
+        # Extract numbers (these rarely change in translation)
+        numbers = re.findall(r'\b\d+\b', text)
+        
+        # Extract the sequence of speaker+action patterns
+        # This captures "X said", "Y asked", etc.
+        speaker_actions = re.findall(r'([A-Z][a-z]+)\s+(\w+ed|spoke|says?|asks?|replies?|shouts?|screams?|whispers?)', text)
+        
+        # Extract paragraph structure (length of each paragraph)
+        paragraphs = text.split('\n')
+        para_lengths = [len(p.strip()) for p in paragraphs if len(p.strip()) > 20]
+        
+        # Create a structural signature
+        signature = {
+            'dialogue_count': len(dialogues),
+            'dialogue_lengths': [len(d) for d in dialogues[:50]],  # First 50 dialogue lengths
+            'characters': sorted(character_names),
+            'character_frequencies': sorted([name_freq[name] for name in character_names]),
+            'numbers': sorted(numbers),
+            'speaker_sequence': [f"{speaker}_{action}" for speaker, action in speaker_actions[:30]],
+            'paragraph_structure': para_lengths[:50],  # First 50 paragraph lengths
+            'unique_words': len(set(text.lower().split())),
+            'total_words': len(text.split())
+        }
+        
+        return signature
+    
+    sig1 = extract_semantic_fingerprint(text1)
+    sig2 = extract_semantic_fingerprint(text2)
+    
+    similarities = []
+    
+    # Compare dialogue structure (very reliable indicator)
+    if sig1['dialogue_count'] > 0 and sig2['dialogue_count'] > 0:
+        dialogue_ratio = min(sig1['dialogue_count'], sig2['dialogue_count']) / max(sig1['dialogue_count'], sig2['dialogue_count'])
+        similarities.append(dialogue_ratio)
+        
+        # Compare dialogue length patterns
+        if sig1['dialogue_lengths'] and sig2['dialogue_lengths']:
+            len_similarity = SequenceMatcher(None, sig1['dialogue_lengths'][:30], sig2['dialogue_lengths'][:30]).ratio()
+            similarities.append(len_similarity)
+    
+    # Compare character lists (names should mostly match)
+    if sig1['characters'] and sig2['characters']:
+        char_set1 = set(sig1['characters'])
+        char_set2 = set(sig2['characters'])
+        char_overlap = len(char_set1 & char_set2) / max(len(char_set1), len(char_set2))
+        similarities.append(char_overlap)
+        
+        # Compare character frequency patterns
+        freq_similarity = SequenceMatcher(None, sig1['character_frequencies'], sig2['character_frequencies']).ratio()
+        similarities.append(freq_similarity * 0.8)  # Slightly less weight
+    
+    # Compare numbers (very reliable - numbers rarely change)
+    if sig1['numbers'] and sig2['numbers']:
+        num_set1 = set(sig1['numbers'])
+        num_set2 = set(sig2['numbers'])
+        num_overlap = len(num_set1 & num_set2) / max(len(num_set1), len(num_set2))
+        similarities.append(num_overlap)
+    
+    # Compare speaker sequences
+    if len(sig1['speaker_sequence']) >= 5 and len(sig2['speaker_sequence']) >= 5:
+        seq_similarity = SequenceMatcher(None, sig1['speaker_sequence'], sig2['speaker_sequence']).ratio()
+        similarities.append(seq_similarity)
+    
+    # Compare paragraph structure
+    if len(sig1['paragraph_structure']) >= 10 and len(sig2['paragraph_structure']) >= 10:
+        # Allow for some variation in lengths (±20%)
+        para_similarities = []
+        for i in range(min(len(sig1['paragraph_structure']), len(sig2['paragraph_structure']))):
+            len1 = sig1['paragraph_structure'][i]
+            len2 = sig2['paragraph_structure'][i]
+            if len1 > 0 and len2 > 0:
+                ratio = min(len1, len2) / max(len1, len2)
+                para_similarities.append(1.0 if ratio > 0.8 else ratio)
+        
+        if para_similarities:
+            similarities.append(sum(para_similarities) / len(para_similarities))
+    
+    # Word count ratio (should be similar)
+    word_ratio = min(sig1['total_words'], sig2['total_words']) / max(sig1['total_words'], sig2['total_words'])
+    similarities.append(word_ratio * 0.5)  # Less weight
+    
+    # Calculate weighted average
+    if similarities:
+        return sum(similarities) / len(similarities)
+    else:
+        return 0.0
 
 def calculate_structural_similarity(struct1, struct2):
     """Calculate similarity between two structural signatures"""
@@ -674,6 +847,122 @@ def merge_duplicate_groups(duplicate_groups, filename1, filename2):
         for filename, group in duplicate_groups.items():
             if group == max_group:
                 duplicate_groups[filename] = min_group
+
+def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence, config, log):
+    """Additional duplicate detection specifically for different naming formats"""
+    
+    # First, normalize all chapter numbers
+    normalize_chapter_numbers(results)
+    
+    # Group by normalized chapter number
+    chapter_groups = {}
+    for i, result in enumerate(results):
+        if result.get('normalized_chapter_num') is not None:
+            num = result['normalized_chapter_num']
+            if num not in chapter_groups:
+                chapter_groups[num] = []
+            chapter_groups[num].append((i, result))
+    
+    # Check each group for duplicates
+    duplicates_found = []
+    for chapter_num, group in chapter_groups.items():
+        if len(group) > 1:
+            log(f"   └─ Found {len(group)} files for chapter {chapter_num}")
+            
+            # Multiple files with same chapter number - check if they're duplicates
+            for i in range(len(group)):
+                for j in range(i + 1, len(group)):
+                    idx1, result1 = group[i]
+                    idx2, result2 = group[j]
+                    
+                    # Check content similarity
+                    text1 = result1.get('raw_text', '')[:5000]
+                    text2 = result2.get('raw_text', '')[:5000]
+                    
+                    similarity = calculate_similarity_ratio(text1, text2)
+                    
+                    # Log what we're comparing
+                    log(f"      Comparing: {result1['filename']} vs {result2['filename']}")
+                    log(f"      Preview 1: {text1[:100]}...")
+                    log(f"      Preview 2: {text2[:100]}...")
+                    log(f"      Similarity: {int(similarity*100)}%")
+                    
+                    if similarity >= config.get_threshold('similarity'):
+                        merge_duplicate_groups(duplicate_groups, 
+                                             result1['filename'], 
+                                             result2['filename'])
+                        pair = tuple(sorted([result1['filename'], result2['filename']]))
+                        duplicate_confidence[pair] = max(duplicate_confidence.get(pair, 0), similarity)
+                        
+                        duplicates_found.append({
+                            'file1': result1['filename'],
+                            'file2': result2['filename'],
+                            'chapter': chapter_num,
+                            'similarity': similarity
+                        })
+                        
+                        log(f"      ✓ DUPLICATE: {result1['filename']} ≈ {result2['filename']} ({int(similarity*100)}%)")
+                    else:
+                        log(f"      ✗ NOT SIMILAR ENOUGH (threshold: {int(config.get_threshold('similarity')*100)}%)")
+    # ALSO check for misnamed files - compare all files with different chapter numbers
+    log("🔍 Checking for misnamed chapters (content vs filename mismatch)...")
+    
+    # Group files by their content preview for faster checking
+    preview_groups = {}
+    for i, result in enumerate(results):
+        preview = result.get('raw_text', '')[:1000].strip()
+        if not preview:
+            continue
+            
+        # Normalize the preview for comparison
+        normalized_preview = ' '.join(preview.split()[:50])  # First 50 words
+        
+        # Check against existing groups
+        found_group = False
+        for group_preview, group_indices in preview_groups.items():
+            similarity = calculate_similarity_ratio(normalized_preview[:500], group_preview[:500])
+            if similarity >= 0.9:  # High threshold for preview matching
+                group_indices.append((i, result))
+                found_group = True
+                break
+        
+        if not found_group:
+            preview_groups[normalized_preview] = [(i, result)]
+    
+    # Check groups with multiple files
+    for preview, group in preview_groups.items():
+        if len(group) > 1:
+            log(f"   └─ Found {len(group)} files with similar content")
+            
+            # Check all pairs in this group
+            for i in range(len(group)):
+                for j in range(i + 1, len(group)):
+                    idx1, result1 = group[i]
+                    idx2, result2 = group[j]
+                    
+                    # Do a more thorough check
+                    text1 = result1.get('raw_text', '')[:5000]
+                    text2 = result2.get('raw_text', '')[:5000]
+                    similarity = calculate_similarity_ratio(text1, text2)
+                    
+                    if similarity >= config.get_threshold('similarity'):
+                        log(f"      ✓ Found duplicate content: {result1['filename']} ≈ {result2['filename']} ({int(similarity*100)}%)")
+                        
+                        merge_duplicate_groups(duplicate_groups, 
+                                             result1['filename'], 
+                                             result2['filename'])
+                        pair = tuple(sorted([result1['filename'], result2['filename']]))
+                        duplicate_confidence[pair] = max(duplicate_confidence.get(pair, 0), similarity)
+                        
+                        duplicates_found.append({
+                            'file1': result1['filename'],
+                            'file2': result2['filename'],
+                            'chapter': f"misnamed_{result1.get('chapter_num', '?')}_vs_{result2.get('chapter_num', '?')}",
+                            'similarity': similarity
+                        })
+    
+    return duplicates_found
+
 
 def detect_duplicates(results, log, stop_flag, config):
     """Detect duplicates using multiple strategies with enhanced methods"""
@@ -739,7 +1028,11 @@ def detect_duplicates(results, log, stop_flag, config):
                         )
                 log(f"   └─ Found {len(files)} files with identical {level_name}")
     
-    # 2. MinHash-based detection (if available)
+    # 2. Enhanced duplicate detection for different naming formats
+    log("🔍 Checking for same chapters with different naming...")
+    enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence, config, log)
+    
+    # 3. MinHash-based detection (if available)
     if lsh:
         log("🔍 Performing MinHash similarity detection...")
         for result in results:
@@ -753,47 +1046,128 @@ def detect_duplicates(results, log, stop_flag, config):
                             merge_duplicate_groups(duplicate_groups, result['filename'], candidate)
                             duplicate_confidence[(result['filename'], candidate)] = jaccard
     
-    # 3. Semantic similarity check
+    # 4. Semantic similarity check
     log("🔍 Checking semantic similarity...")
     semantic_threshold = config.get_threshold('semantic')
-    
-    for i in range(len(results)):
-        if stop_flag and stop_flag():
-            log("⛔ Semantic check interrupted by user.")
-            break
-            
-        for j in range(i + 1, len(results)):
-            sem_sim = calculate_semantic_similarity(results[i]['semantic_sig'], 
-                                                   results[j]['semantic_sig'])
-            if sem_sim >= semantic_threshold:
-                # Additional check: structural similarity
+
+    # AI Hunter mode: more aggressive checking
+    if config.mode == 'ai-hunter':
+        log("🤖 AI Hunter mode: Enhanced semantic and structural checking active")
+        
+        # Check EVERY pair of files
+        for i in range(len(results)):
+            if stop_flag and stop_flag():
+                log("⛔ Semantic check interrupted by user.")
+                break
+                
+            for j in range(i + 1, len(results)):
+                # Skip if already in same group
+                if (results[i]['filename'] in duplicate_groups and 
+                    results[j]['filename'] in duplicate_groups and
+                    duplicate_groups[results[i]['filename']] == duplicate_groups[results[j]['filename']]):
+                    continue
+                
+                # Get both semantic and structural signatures
+                sem_sim = calculate_semantic_similarity(results[i]['semantic_sig'], 
+                                                       results[j]['semantic_sig'])
                 struct_sim = calculate_structural_similarity(results[i]['structural_sig'],
                                                            results[j]['structural_sig'])
                 
-                if struct_sim >= config.get_threshold('structural'):
-                    merge_duplicate_groups(duplicate_groups, 
-                                         results[i]['filename'], 
-                                         results[j]['filename'])
-                    confidence = (sem_sim + struct_sim) / 2
-                    duplicate_confidence[(results[i]['filename'], results[j]['filename'])] = confidence
-                    log(f"   └─ Semantic match: {results[i]['filename']} ≈ {results[j]['filename']} "
-                        f"(sem: {int(sem_sim*100)}%, struct: {int(struct_sim*100)}%)")
+                # For AI Hunter, use a combination approach
+                # High semantic + high structural = likely same content
+                if sem_sim >= semantic_threshold and struct_sim >= config.get_threshold('structural'):
+                    # Do a quick text check to see if they're actually different
+                    text_sim = calculate_similarity_ratio(
+                        results[i].get('raw_text', '')[:2000],
+                        results[j].get('raw_text', '')[:2000]
+                    )
+                    
+                    # If text similarity is low but semantic/structural is high, it's likely a retranslation
+                    if text_sim < 0.6:  # Different enough text
+                        log(f"   🎯 AI Hunter: Found potential retranslation")
+                        log(f"      Files: {results[i]['filename']} ≈ {results[j]['filename']}")
+                        log(f"      Text similarity: {int(text_sim*100)}% (low)")
+                        log(f"      Semantic similarity: {int(sem_sim*100)}% (high)")
+                        log(f"      Structural similarity: {int(struct_sim*100)}% (high)")
+                        
+                        merge_duplicate_groups(duplicate_groups, 
+                                             results[i]['filename'], 
+                                             results[j]['filename'])
+                        confidence = (sem_sim + struct_sim) / 2
+                        duplicate_confidence[(results[i]['filename'], results[j]['filename'])] = confidence
+                        log(f"   └─ 🤖 Flagged as AI retranslation variant (confidence: {int(confidence*100)}%)")
+    else:
+        # Normal semantic checking for other modes
+        for i in range(len(results)):
+            if stop_flag and stop_flag():
+                log("⛔ Semantic check interrupted by user.")
+                break
+                
+            for j in range(i + 1, len(results)):
+                sem_sim = calculate_semantic_similarity(results[i]['semantic_sig'], 
+                                                       results[j]['semantic_sig'])
+                if sem_sim >= semantic_threshold:
+                    struct_sim = calculate_structural_similarity(results[i]['structural_sig'],
+                                                               results[j]['structural_sig'])
+                    
+                    if struct_sim >= config.get_threshold('structural'):
+                        merge_duplicate_groups(duplicate_groups, 
+                                             results[i]['filename'], 
+                                             results[j]['filename'])
+                        confidence = (sem_sim + struct_sim) / 2
+                        duplicate_confidence[(results[i]['filename'], results[j]['filename'])] = confidence
+                        log(f"   └─ Semantic match: {results[i]['filename']} ≈ {results[j]['filename']} "
+                            f"(sem: {int(sem_sim*100)}%, struct: {int(struct_sim*100)}%)")
     
-    # 4. Deep similarity check (content-based)
+    # 5. Deep similarity check (content-based)
     similarity_threshold = config.get_threshold('similarity')
-    perform_deep_similarity_check(results, duplicate_groups, duplicate_confidence,
-                                similarity_threshold, log, stop_flag)
+    log(f"🔍 Deep content similarity analysis (threshold: {int(similarity_threshold*100)}%)...")
+
+    # Force check between files that might be misnamed
+    for i in range(len(results)):
+        if stop_flag and stop_flag():
+            log("⛔ Similarity check interrupted by user.")
+            break
+        
+        for j in range(i + 1, len(results)):
+            # Check if already in same group
+            if (results[i]['filename'] in duplicate_groups and 
+                results[j]['filename'] in duplicate_groups and
+                duplicate_groups[results[i]['filename']] == duplicate_groups[results[j]['filename']]):
+                continue
+            
+            # Always check first 2000 chars for similarity
+            text1_preview = results[i].get('raw_text', '')[:2000]
+            text2_preview = results[j].get('raw_text', '')[:2000]
+            
+            # Quick preview check
+            if text1_preview == text2_preview and len(text1_preview) > 100:
+                # Exact match - definitely duplicates
+                merge_duplicate_groups(duplicate_groups, results[i]['filename'], results[j]['filename'])
+                pair = tuple(sorted([results[i]['filename'], results[j]['filename']]))
+                duplicate_confidence[pair] = 1.0
+                log(f"   └─ Exact match: {results[i]['filename']} ≡ {results[j]['filename']} (100%)")
+                continue
+            
+            # Calculate similarity
+            similarity = calculate_similarity_ratio(text1_preview, text2_preview)
+            
+            if similarity >= similarity_threshold:
+                merge_duplicate_groups(duplicate_groups, results[i]['filename'], results[j]['filename'])
+                pair = tuple(sorted([results[i]['filename'], results[j]['filename']]))
+                duplicate_confidence[pair] = max(duplicate_confidence.get(pair, 0), similarity)
+                log(f"   └─ Content match: {results[i]['filename']} ≈ {results[j]['filename']} ({int(similarity*100)}%)")
     
-    # 5. Consecutive chapter check with fuzzy matching
+    # 6. Consecutive chapter check with fuzzy matching
     check_consecutive_chapters(results, duplicate_groups, duplicate_confidence, config, log)
     
-    # 6. Split chapter detection
+    # 7. Split chapter detection
     split_candidates = detect_split_chapters(results)
     if split_candidates:
         log(f"🔍 Found {len(split_candidates)} potential split chapters")
         check_split_chapters(split_candidates, results, duplicate_groups, duplicate_confidence, log)
     
-    # 7. Specific pattern detection
+    # 8. Specific pattern detection
     check_specific_patterns(results, duplicate_groups, duplicate_confidence, log)
     
     return duplicate_groups, near_duplicate_groups, duplicate_confidence
@@ -825,12 +1199,37 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
                 duplicate_groups[results[i]['filename']] == duplicate_groups[results[j]['filename']]):
                 continue
             
-            similarity = calculate_similarity_ratio(results[i]['raw_text'], results[j]['raw_text'])
+            # Get text samples
+            text1 = results[i].get('raw_text', '')
+            text2 = results[j].get('raw_text', '')
+            
+            if len(text1) < 500 or len(text2) < 500:
+                continue
+            
+            # Calculate standard similarity
+            similarity = calculate_similarity_ratio(text1[:5000], text2[:5000])
             
             if similarity >= threshold:
                 merge_duplicate_groups(duplicate_groups, results[i]['filename'], results[j]['filename'])
                 duplicate_confidence[pair] = max(duplicate_confidence[pair], similarity)
                 log(f"   └─ Content similarity: {results[i]['filename']} ≈ {results[j]['filename']} ({int(similarity*100)}%)")
+            
+            # Check for translation variants if similarity is moderate
+            elif 0.5 <= similarity < threshold:
+                log(f"   Checking potential translation variant: {results[i]['filename']} vs {results[j]['filename']} (base: {int(similarity*100)}%)")
+                
+                # Check semantic fingerprint
+                semantic_sim = calculate_semantic_fingerprint_similarity(text1[:10000], text2[:10000])
+                
+                if semantic_sim >= 0.75:  # High semantic similarity threshold
+                    combined_score = (similarity * 0.4 + semantic_sim * 0.6)
+                    
+                    if combined_score >= threshold:
+                        log(f"   └─ Translation variant detected (semantic: {int(semantic_sim*100)}%, combined: {int(combined_score*100)}%)")
+                        merge_duplicate_groups(duplicate_groups, results[i]['filename'], results[j]['filename'])
+                        duplicate_confidence[pair] = combined_score
+                    else:
+                        log(f"   └─ Not similar enough (semantic: {int(semantic_sim*100)}%, combined: {int(combined_score*100)}%)")
 
 def check_consecutive_chapters(results, duplicate_groups, duplicate_confidence, config, log):
     """Check for consecutive chapters with same title using fuzzy matching"""
@@ -1246,8 +1645,19 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='standard'):
     # Initialize configuration
     config = DuplicateDetectionConfig(mode)
     
-    log(f"{'🚨 AGGRESSIVE' if mode == 'aggressive' else '📋 Standard' if mode == 'standard' else '🔒 Strict'} duplicate detection mode")
+    mode_messages = {
+        'aggressive': '🚨 AGGRESSIVE',
+        'standard': '📋 Standard',
+        'strict': '🔒 Strict',
+        'ai-hunter': '🤖 AI HUNTER'
+    }
+    
+    log(f"{mode_messages.get(mode, '📋 Standard')} duplicate detection mode")
     log(f"   Thresholds: {config.thresholds[mode]}")
+    
+    if mode == 'ai-hunter':
+        log("   ⚠️ WARNING: This mode will flag almost everything as potential duplicates!")
+        log("   🎯 Designed specifically for catching AI retranslations of the same content")
     
     html_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith(".html")])
     log(f"🔍 Found {len(html_files)} HTML files. Starting scan...")
@@ -1327,7 +1737,16 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='standard'):
             group_files = groups[group_id]
             if len(group_files) > 1:
                 others = [f for f in group_files if f != result['filename']]
-                confidence = result.get('duplicate_confidence', 0)
+                
+                # Get the highest confidence score for this file
+                confidence = 0
+                for other in others:
+                    pair = tuple(sorted([result['filename'], other]))
+                    if pair in duplicate_confidence:
+                        confidence = max(confidence, duplicate_confidence[pair])
+                
+                result['duplicate_confidence'] = confidence
+                
                 if len(others) == 1:
                     issues.append(f"DUPLICATE: exact_or_near_copy_of_{others[0]}")
                 else:
@@ -1408,7 +1827,7 @@ def launch_gui():
     
     root = tk.Tk()
     root.title("Translation QA Scanner - Enhanced Edition")
-    root.geometry("700x200")
+    root.geometry("690x200")
     
     # Mode selection
     mode_frame = tk.Frame(root)
