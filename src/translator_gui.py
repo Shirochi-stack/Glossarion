@@ -3816,10 +3816,10 @@ if __name__ == "__main__":
             
         except ImportError as e:
             print(f"❌ Failed to import required module: {e}")
-            print(f"💡 Please install missing dependencies with: pip install {str(e).split('No module named ')[-1].strip(\"'\")}")
             sys.exit(1)
         except Exception as e:
             print(f"❌ Failed to start application: {e}")
+            print("💡 Please install missing dependencies with: pip install {}".format(str(e).split("No module named ")[-1].replace("'", "")))
             import traceback
             traceback.print_exc()
             sys.exit(1)
