@@ -49,7 +49,7 @@ class TranslatorGUI:
         self.master = master
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        master.title("Glossarion v2.6.9")
+        master.title("Glossarion v2.6.9 — The AI Hunter Unleashed!!")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1600, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
@@ -417,10 +417,11 @@ class TranslatorGUI:
             ('scan_html_folder', 'QA scanner')
         ]
         
-        for module_name, display_name in modules:
+        for idx, (module_name, display_name) in enumerate(modules):
             try:
                 if splash_callback:
-                    splash_callback(f"Loading {display_name}...")
+                    # Send detailed progress info
+                    splash_callback(f"Loading {display_name} ({idx+1}/{len(modules)})...")
                 
                 if module_name == 'TransateKRtoEN':
                     from TransateKRtoEN import main as translation_main, set_stop_flag as translation_stop_flag, is_stop_requested as translation_stop_check
@@ -439,10 +440,15 @@ class TranslatorGUI:
         
         if splash_callback:
             splash_callback(f"Loaded {success_count}/{len(modules)} modules successfully")
-        if hasattr(self, 'master'):
+        
+        # Only update UI if we're in the main window context
+        if hasattr(self, 'master') and not splash_callback:
             self.master.after(0, self._check_modules)
-        if hasattr(self, 'append_log'):
+        
+        # Only append to log if not called from splash screen
+        if hasattr(self, 'append_log') and not splash_callback:
             self.append_log(f"✅ Loaded {success_count}/{len(modules)} modules successfully")
+        
         return True
 
     def _check_modules(self):
@@ -3749,63 +3755,71 @@ class TranslatorGUI:
 
 
 if __name__ == "__main__":
-    import time
+    import sys
+    import os
     
-    print("🚀 Starting Glossarion v2.6.9...")
+    # Check if splash_utils exists in the same directory
+    splash_utils_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'splash_utils.py')
     
-    # Initialize splash screen
-    splash_manager = None
-    try:
-        from splash_utils import SplashManager
-        splash_manager = SplashManager()
-        splash_started = splash_manager.start_splash()
+    if os.path.exists(splash_utils_path):
+        print("🚀 Launching with splash screen...")
+        print("📝 Redirecting to splash_utils.py")
         
-        if splash_started:
-            splash_manager.update_status("Loading theme framework...")
-            time.sleep(0.5)
-    except Exception as e:
-        print(f"⚠️ Splash screen failed: {e}")
-        splash_manager = None
-    
-    try:
-        if splash_manager:
-            splash_manager.update_status("Loading UI framework...")
-            time.sleep(0.3)
+        # Launch via splash_utils
+        import subprocess
+        subprocess.run([sys.executable, splash_utils_path])
+    else:
+        # Fallback: Direct launch without splash
+        print("⚠️ Splash screen not found, launching directly...")
+        print("🚀 Starting Glossarion v2.6.9...")
         
-        import ttkbootstrap as tb
-        from ttkbootstrap.constants import *
-        
-        if splash_manager:
-            splash_manager.update_status("Creating main window...")
-            time.sleep(0.3)
-        
-        if splash_manager:
-            splash_manager.update_status("Ready!")
-            time.sleep(0.5)
-            splash_manager.close_splash()
-        
-        # Create main window
-        root = tb.Window(themename="darkly")
-        
-        # Initialize the app
-        app = TranslatorGUI(root)
-        
-        print("✅ Ready to use!")
-        
-        # Start main loop
-        root.mainloop()
-        
-    except Exception as e:
-        print(f"❌ Failed to start application: {e}")
-        if splash_manager:
-            splash_manager.close_splash()
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
-    
-    finally:
-        if splash_manager:
-            try:
-                splash_manager.close_splash()
-            except:
-                pass
+        try:
+            import ttkbootstrap as tb
+            
+            # Create main window
+            root = tb.Window(themename="darkly")
+            
+            # Center the window
+            root.withdraw()  # Hide initially
+            root.update_idletasks()
+            
+            # Set default size and center
+            window_width = 1550
+            window_height = 1000
+            screen_width = root.winfo_screenwidth()
+            screen_height = root.winfo_screenheight()
+            
+            # Ensure window fits on screen
+            if window_width > screen_width:
+                window_width = int(screen_width * 0.9)
+            if window_height > screen_height:
+                window_height = int(screen_height * 0.9)
+            
+            x = max(0, (screen_width - window_width) // 2)
+            y = max(0, (screen_height - window_height) // 2)
+            
+            root.geometry(f"{window_width}x{window_height}+{x}+{y}")
+            root.minsize(1600, 1000)
+            
+            # Initialize the app
+            app = TranslatorGUI(root)
+            
+            # Show window
+            root.deiconify()
+            root.lift()
+            root.focus_force()
+            
+            print("✅ Ready to use!")
+            
+            # Start main loop
+            root.mainloop()
+            
+        except ImportError as e:
+            print(f"❌ Failed to import required module: {e}")
+            print(f'💡 Please install missing dependencies with: pip install {str(e).split("No module named ")[-1].strip("\'")}')
+            sys.exit(1)
+        except Exception as e:
+            print(f"❌ Failed to start application: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
