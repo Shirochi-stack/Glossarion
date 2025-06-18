@@ -2410,7 +2410,7 @@ class TranslatorGUI:
                 "value": "ai-hunter",
                 "emoji": "🤖",
                 "title": "AI HUNTER",
-                "subtitle": "1% threshold",
+                "subtitle": "30% threshold",
                 "features": [
                     "✓ Catches AI retranslations",
                     "✓ Different translation styles",
