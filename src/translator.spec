@@ -1,308 +1,718 @@
-import time
-import atexit
+# -*- mode: python ; coding: utf-8 -*-
+"""
+Glossarion v2.6.9 - PyInstaller Specification File
+Enhanced Translation Tool with QA Scanner
+"""
 
-class SplashManager:
-    """Simple splash screen manager that works with main thread"""
-    
-    def __init__(self):
-        self.splash_window = None
-        self._status_text = "Initializing..."
-        self.progress_value = 0  # Track actual progress 0-100
-        self.canvas_width = 320  # Progress bar dimensions (increased from 300)
-        self.canvas_height = 36  # Increased from 30
-        self._after_id = None
-        
-    def start_splash(self):
-        """Create splash window on main thread"""
-        try:
-            import tkinter as tk
-            
-            print("🎨 Starting splash screen...")
-            
-            # Create splash window on main thread
-            self.splash_window = tk.Tk()
-            self.splash_window.title("Loading Glossarion...")
-            self.splash_window.geometry("450x350")
-            self.splash_window.configure(bg='#2b2b2b')
-            self.splash_window.resizable(False, False)
-            self.splash_window.overrideredirect(True)
-            
-            # Center the window
-            self.splash_window.update_idletasks()
-            x = (self.splash_window.winfo_screenwidth() // 2) - 225
-            y = (self.splash_window.winfo_screenheight() // 2) - 175
-            self.splash_window.geometry(f"450x350+{x}+{y}")
-            
-            # Add content
-            main_frame = tk.Frame(self.splash_window, bg='#2b2b2b', relief='raised', bd=2)
-            main_frame.pack(fill='both', expand=True, padx=2, pady=2)
-            
-            # Load the actual Halgakos.ico icon
-            self._load_icon(main_frame)
-            
-            # Title
-            title_label = tk.Label(main_frame, text="Glossarion v2.6.9", 
-                                  bg='#2b2b2b', fg='#4a9eff', font=('Arial', 20, 'bold'))
-            title_label.pack(pady=(10, 5))
-            
-            # Subtitle
-            subtitle_label = tk.Label(main_frame, text="Advanced EPUB Translation Suite", 
-                                     bg='#2b2b2b', fg='#cccccc', font=('Arial', 12))
-            subtitle_label.pack(pady=(0, 15))
-            
-            # Status
-            self.status_label = tk.Label(main_frame, text=self._status_text, 
-                                        bg='#2b2b2b', fg='#ffffff', font=('Arial', 11))
-            self.status_label.pack(pady=(10, 10))
-            
-            # Progress bar container
-            progress_frame = tk.Frame(main_frame, bg='#2b2b2b')
-            progress_frame.pack(pady=(5, 15))  # Adjusted padding for larger bar
-            
-            # Progress bar background
-            self.progress_bg = tk.Canvas(progress_frame, width=self.canvas_width, height=self.canvas_height, 
-                                        bg='#2b2b2b', highlightthickness=0)
-            self.progress_bg.pack()
-            
-            # Create border
-            self.progress_bg.create_rectangle(1, 1, self.canvas_width-1, self.canvas_height-1, 
-                                            outline='#666666', width=2)
-            
-            # Create background
-            self.progress_bg.create_rectangle(3, 3, self.canvas_width-3, self.canvas_height-3, 
-                                            fill='#1a1a1a', outline='')
-            
-            # Progress bar fill (will be updated)
-            self.progress_fill = None
-            
-            # Progress percentage text - moved up and with better font
-            text_x = self.canvas_width // 2  # 160 for 320px width
-            text_y = 13.5  # Positioned slightly above center for visual balance
-            
-            # Use a cleaner, more modern font
-            progress_font = ('Montserrat', 12, 'bold')  # Increased size to 12
-            
-            # Create outline for better readability
-            for dx in [-1, 0, 1]:
-                for dy in [-1, 0, 1]:
-                    if dx != 0 or dy != 0:
-                        self.progress_bg.create_text(text_x + dx, text_y + dy, text="0%", 
-                                                   fill='#000000', font=progress_font,
-                                                   tags="outline", anchor='center')
-            
-            # Main text on top (white)
-            self.progress_text = self.progress_bg.create_text(text_x, text_y, text="0%", 
-                                                             fill='#ffffff', font=progress_font,
-                                                             anchor='center')
-            
-            # Version info
-            version_label = tk.Label(main_frame, text="Starting up...", 
-                                   bg='#2b2b2b', fg='#888888', font=('Arial', 9))
-            version_label.pack(side='bottom', pady=(0, 15))
-            
-            # Start progress animation
-            self._animate_progress()
-            
-            # Update the display
-            self.splash_window.update()
-            
-            # Register cleanup
-            atexit.register(self.close_splash)
-            return True
-            
-        except Exception as e:
-            print(f"⚠️ Could not start splash: {e}")
-            return False
-    
-    def _load_icon(self, parent):
-        """Load the Halgakos.ico icon"""
-        try:
-            # Get icon path - handle both development and packaged modes
-            import os
-            import sys
-            import tkinter as tk
-            
-            if getattr(sys, 'frozen', False):
-                # Running as .exe
-                base_dir = sys._MEIPASS
-            else:
-                # Running as .py files
-                base_dir = os.path.dirname(os.path.abspath(__file__))
-            
-            ico_path = os.path.join(base_dir, 'Halgakos.ico')
-            
-            if os.path.isfile(ico_path):
-                try:
-                    # Try PIL first for better quality
-                    from PIL import Image, ImageTk
-                    pil_image = Image.open(ico_path)
-                    pil_image = pil_image.resize((128, 128), Image.Resampling.LANCZOS)
-                    icon_photo = ImageTk.PhotoImage(pil_image, master=self.splash_window)
-                    icon_label = tk.Label(parent, image=icon_photo, bg='#2b2b2b')
-                    icon_label.image = icon_photo  # Keep reference
-                    icon_label.pack(pady=(20, 10))
-                    return
-                except ImportError:
-                    # Fallback to basic tkinter
-                    try:
-                        icon_image = tk.PhotoImage(file=ico_path)
-                        icon_label = tk.Label(parent, image=icon_image, bg='#2b2b2b')
-                        icon_label.image = icon_image
-                        icon_label.pack(pady=(20, 10))
-                        return
-                    except tk.TclError:
-                        pass
-        except Exception:
-            pass
-        
-        # Fallback emoji if icon loading fails
-        import tkinter as tk
-        icon_frame = tk.Frame(parent, bg='#4a9eff', width=128, height=128)
-        icon_frame.pack(pady=(20, 10))
-        icon_frame.pack_propagate(False)
-        
-        icon_label = tk.Label(icon_frame, text="📚", font=('Arial', 64), 
-                             bg='#4a9eff', fg='white')
-        icon_label.pack(expand=True)
+import sys
+import os
+from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
 
-    def _animate_progress(self):
-        """Animate progress bar filling up"""
-        # Cancel any existing after callback first
-        if self._after_id:
-            try:
-                self.splash_window.after_cancel(self._after_id)
-            except:
-                pass
-            self._after_id = None
-            
-        if self.splash_window and self.splash_window.winfo_exists():
-            try:
-                # Auto-increment progress for visual effect during startup
-                if self.progress_value < 100:
-                    # Increment at different rates for different phases
-                    if self.progress_value < 30:
-                        self.progress_value += 8  # Fast initial progress
-                    elif self.progress_value < 70:
-                        self.progress_value += 4  # Medium progress
-                    elif self.progress_value < 90:
-                        self.progress_value += 2  # Slow progress
-                    else:
-                        self.progress_value += 1  # Very slow final progress
-                    
-                    # Cap at 99% until explicitly set to 100%
-                    if self.progress_value >= 99:
-                        self.progress_value = 99
-                
-                # Update progress bar fill
-                if self.progress_fill:
-                    self.progress_bg.delete(self.progress_fill)
-                # Also delete old highlight
-                self.progress_bg.delete("highlight")
-                
-                # Calculate fill width (3 to canvas_width-3)
-                fill_width = int((self.progress_value / 100) * (self.canvas_width - 6))  # -6 for borders
-                if fill_width > 0:
-                    # Create gradient effect
-                    self.progress_fill = self.progress_bg.create_rectangle(
-                        3, 3, 3 + fill_width, self.canvas_height - 3, 
-                        fill='#4a9eff', outline=''
-                    )
-                    
-                    # Add a highlight effect (adjusted for new height)
-                    if fill_width > 10:
-                        self.progress_bg.create_rectangle(
-                            3, 3, min(13, 3 + fill_width), 12,
-                            fill='#6bb6ff', outline='', tags="highlight"
-                        )
-                
-                # Update percentage text without changing position
-                percent_text = f"{self.progress_value}%"
-                
-                # Update main text
-                self.progress_bg.itemconfig(self.progress_text, text=percent_text)
-                
-                # Update all outline layers
-                for item in self.progress_bg.find_withtag("outline"):
-                    self.progress_bg.itemconfig(item, text=percent_text)
-                
-                # Ensure text stays on top of progress fill
-                self.progress_bg.tag_raise("outline")
-                self.progress_bg.tag_raise(self.progress_text)
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
 
-                # Store the after ID so we can cancel it later
-                self._after_id = self.splash_window.after(100, self._animate_progress)
-                
-            except Exception:
-                self._after_id = None
-                pass
+APP_NAME = 'Glossarion v2.6.9'
+APP_ICON = 'Halgakos.ico'
+ENABLE_CONSOLE = False  # Console disabled for production
+ENABLE_UPX = True      # Compression (smaller file size but slower startup)
+ONE_FILE = True        # Single executable vs folder distribution
+
+# ============================================================================
+# BLOCK CIPHER (for code obfuscation - optional)
+# ============================================================================
+
+block_cipher = None  # Set to pyi_crypto.PyiBlockCipher() if needed
+
+# ============================================================================
+# COLLECT DYNAMIC IMPORTS
+# ============================================================================
+
+# Collect all data files from specific packages
+datas = []
+binaries = []
+hiddenimports = []
+
+# Collect data files from packages that need them
+for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap']:
+    try:
+        data, bins, hidden = collect_all(package)
+        datas.extend(data)
+        binaries.extend(bins)
+        hiddenimports.extend(hidden)
+    except:
+        pass
+
+# ============================================================================
+# APPLICATION FILES
+# ============================================================================
+
+# Main application files
+app_files = [
+    # Core GUI
+    ('translator_gui.py', '.'),
+    ('splash_utils.py', '.'),
     
-    def update_status(self, message):
-        """Update splash status and progress"""
-        self._status_text = message
-        try:
-            if self.splash_window and hasattr(self, 'status_label'):
-                self.status_label.config(text=message)
-                
-                # Map status messages to progress values
-                progress_map = {
-                    "Loading theme framework...": 15,
-                    "Loading UI framework...": 30,
-                    "Creating main window...": 60,
-                    "Loading translation modules...": 75,
-                    "Ready!": 100
-                }
-                
-                # Update progress based on status
-                for key, value in progress_map.items():
-                    if key in message:
-                        self.set_progress(value)
-                        break
-                
-                self.splash_window.update()
-        except:
-            pass
+    # Translation modules
+    ('TransateKRtoEN.py', '.'),
+    ('unified_api_client.py', '.'),
     
-    def set_progress(self, value):
-        """Manually set progress value (0-100)"""
-        self.progress_value = max(0, min(100, value))
+    # File processors
+    ('epub_converter.py', '.'),
+    ('txt_processor.py', '.'),
+    ('chapter_splitter.py', '.'),
     
-    def close_splash(self):
-        """Close the splash screen"""
-        try:
-            # IMPORTANT: Cancel the animation first
-            if self._after_id and self.splash_window:
-                try:
-                    self.splash_window.after_cancel(self._after_id)
-                except:
-                    pass
-                self._after_id = None
-            
-            if self.splash_window and self.splash_window.winfo_exists():
-                # Set to 100% briefly before closing
-                self.progress_value = 100
-                
-                # Update display one last time without scheduling another callback
-                if self.progress_fill:
-                    self.progress_bg.delete(self.progress_fill)
-                self.progress_bg.delete("highlight")
-                
-                fill_width = int((self.progress_value / 100) * (self.canvas_width - 6))
-                if fill_width > 0:
-                    self.progress_fill = self.progress_bg.create_rectangle(
-                        3, 3, 3 + fill_width, self.canvas_height - 3, 
-                        fill='#4a9eff', outline=''
-                    )
-                
-                self.progress_bg.itemconfig(self.progress_text, text="100%")
-                for item in self.progress_bg.find_withtag("outline"):
-                    self.progress_bg.itemconfig(item, text="100%")
-                
-                self.splash_window.update()
-                time.sleep(0.1)
-                
-                self.splash_window.destroy()
-                self.splash_window = None
-        except:
-            # Ensure cleanup even on error
-            self._after_id = None
-            self.splash_window = None
+    # Glossary extractors
+    ('extract_glossary_from_epub.py', '.'),
+    ('extract_glossary_from_txt.py', '.'),
+    
+    # Utilities
+    ('scan_html_folder.py', '.'),
+    ('history_manager.py', '.'),
+    ('image_translator.py', '.'),
+    ('check_epub_directory.py', '.'),
+    ('direct_imports.py', '.'),
+    
+    # Resources
+    ('Halgakos.ico', '.'),
+]
+
+# Add application files to datas
+datas.extend(app_files)
+
+# ============================================================================
+# HIDDEN IMPORTS (Organized by category)
+# ============================================================================
+
+# Application modules
+app_modules = [
+    'TransateKRtoEN',
+    'extract_glossary_from_epub',
+    'extract_glossary_from_txt',
+    'epub_converter',
+    'txt_processor',
+    'scan_html_folder',
+    'unified_api_client',
+    'chapter_splitter',
+    'history_manager',
+    'image_translator',
+    'check_epub_directory',
+    'direct_imports',
+    'splash_utils',
+]
+
+# GUI Framework
+gui_modules = [
+    # Tkinter core
+    'tkinter',
+    'tkinter.filedialog',
+    'tkinter.messagebox',
+    'tkinter.scrolledtext',
+    'tkinter.simpledialog',
+    'tkinter.ttk',
+    '_tkinter',
+    
+    # TTKBootstrap
+    'ttkbootstrap',
+    'ttkbootstrap.constants',
+    'ttkbootstrap.themes',
+    'ttkbootstrap.style',
+    'ttkbootstrap.utility',
+    'ttkbootstrap.widgets',
+    'ttkbootstrap.dialogs',
+    'ttkbootstrap.tooltip',
+    'ttkbootstrap.validation',
+    'ttkbootstrap.scrolled',
+    'ttkbootstrap.icons',
+]
+
+# EPUB/HTML Processing
+epub_modules = [
+    # EbookLib
+    'ebooklib',
+    'ebooklib.epub',
+    'ebooklib.utils',
+    'ebooklib.plugins',
+    
+    # BeautifulSoup
+    'bs4',
+    'soupsieve',
+    
+    # LXML
+    'lxml',
+    'lxml.etree',
+    'lxml._elementpath',
+    'lxml.html',
+    'lxml.html.clean',
+    'lxml.builder',
+    'lxml.cssselect',
+    
+    # HTML processing
+    'html5lib',
+    'html',
+    'html.parser',
+    'html.entities',
+    'cgi',
+    'xml',
+    'xml.etree',
+    'xml.etree.ElementTree',
+    'xml.dom',
+    'xml.dom.minidom',
+]
+
+# Image Processing
+image_modules = [
+    'PIL',
+    'PIL.Image',
+    'PIL.ImageTk',
+    'PIL.ImageDraw',
+    'PIL.ImageFont',
+    'PIL.ImageEnhance',
+    'PIL.ImageFilter',
+    'PIL.ImageOps',
+    'PIL.ImageChops',
+    'PIL.ImageStat',
+    'PIL.ImagePalette',
+    'PIL.ImageSequence',
+    'PIL.ImageGrab',
+    'PIL.ImageMath',
+    'PIL.ImageMode',
+    'PIL.ImageShow',
+    'PIL.ImageTransform',
+    'PIL.ImageQt',
+    'PIL.ImageCms',
+    'PIL._binary',
+    'PIL._imaging',
+    'PIL._imagingft',
+    'PIL._imagingmath',
+    'PIL._imagingtk',
+    'PIL._imagingcms',
+    'PIL._webp',
+    
+    # Image format plugins
+    'PIL.BmpImagePlugin',
+    'PIL.GifImagePlugin',
+    'PIL.JpegImagePlugin',
+    'PIL.PngImagePlugin',
+    'PIL.PpmImagePlugin',
+    'PIL.TiffImagePlugin',
+    'PIL.WebPImagePlugin',
+    'PIL.IcoImagePlugin',
+    'PIL.MicImagePlugin',
+    'PIL.Jpeg2KImagePlugin',
+    'PIL.IcnsImagePlugin',
+    'PIL.DdsImagePlugin',
+    'PIL.BlpImagePlugin',
+    'PIL.FtexImagePlugin',
+    
+    'olefile',
+]
+
+# AI/API Clients
+api_modules = [
+    # Google AI
+    'google',
+    'google.generativeai',
+    'google.ai',
+    'google.ai.generativelanguage',
+    'google.auth',
+    'google.auth.transport',
+    'google.auth.transport.requests',
+    'google.auth.crypt',
+    'google.auth.exceptions',
+    'google.oauth2',
+    'google.oauth2.credentials',
+    'google.api_core',
+    'google.api_core.gapic_v1',
+    'google.api_core.operations_v1',
+    'google.api_core.protobuf_helpers',
+    'google.protobuf',
+    'google.protobuf.message',
+    'google.protobuf.descriptor',
+    'google.protobuf.json_format',
+    'google.rpc',
+    'proto',
+    'proto.message',
+    
+    # OpenAI
+    'openai',
+    'openai.api_resources',
+    'openai.error',
+    'openai.util',
+    'openai.version',
+    
+    # Anthropic
+    'anthropic',
+    'httpx',
+    'httpcore',
+    'anyio',
+    'sniffio',
+    
+    # Token counting
+    'tiktoken',
+    'tiktoken_ext',
+    'tiktoken_ext.openai_public',
+]
+
+# Text Processing & Analysis
+text_modules = [
+    # Language detection
+    'langdetect',
+    'langdetect.detector',
+    'langdetect.lang_detect_exception',
+    'langdetect.language',
+    'langdetect.detector_factory',
+    'langdetect.utils',
+    
+    # Text analysis
+    'difflib',
+    'unicodedata',
+    'string',
+    'textwrap',
+    're',
+    'regex',
+    
+    # Datasketch for enhanced QA Scanner performance
+    'datasketch',
+    'datasketch.minhash',
+    'datasketch.lsh',
+    'datasketch.lshensemble',
+    'datasketch.hashfunc',
+    'datasketch.storage',
+    'datasketch.lean_minhash',
+    'datasketch.weighted_minhash',
+    'datasketch.hyperloglog',
+    'datasketch.hyperloglogplusplus',
+    'datasketch.lshforest',
+    'datasketch.b_bit_minhash',
+    'datasketch.counting',
+    'datasketch.hnsw',
+    'datasketch.utils',
+    
+    # NumPy - Required by datasketch
+    'numpy',
+    'numpy.core',
+    'numpy.core._multiarray_umath',
+    'numpy.core.multiarray',
+    'numpy.core.numeric',
+    'numpy.core.shape_base',
+    'numpy.core.fromnumeric',
+    'numpy.core.getlimits',
+    'numpy.core.arrayprint',
+    'numpy.core._dtype',
+    'numpy.core._type_aliases',
+    'numpy.core._internal',
+    'numpy.core._methods',
+    'numpy.lib',
+    'numpy.lib.type_check',
+    'numpy.lib.npyio',
+    'numpy.lib.format',
+    'numpy.lib.arrayterator',
+    'numpy.lib.arraypad',
+    'numpy.lib.utils',
+    'numpy.lib.stride_tricks',
+    'numpy.linalg',
+    'numpy.fft',
+    'numpy.random',
+    'numpy.random._common',
+    'numpy.random.mtrand',
+    'numpy.ctypeslib',
+    'numpy.ma',
+    'numpy.matrixlib',
+    
+    # SciPy - Required by datasketch
+    'scipy',
+    'scipy.integrate',
+    'scipy.integrate._quadpack',
+    'scipy.integrate._odepack',
+    'scipy.integrate._quad_vec',
+    'scipy.special',
+    'scipy.special._ufuncs',
+    'scipy.special._ufuncs_cxx',
+    'scipy.special._basic',
+    'scipy.special._logsumexp',
+    'scipy.sparse',
+    'scipy.sparse.linalg',
+    'scipy.sparse.csgraph',
+    'scipy._lib',
+    'scipy._lib._util',
+    'scipy._lib._ccallback',
+    'scipy.version',
+]
+
+# Networking & HTTP
+network_modules = [
+    'requests',
+    'requests.adapters',
+    'requests.models',
+    'requests.sessions',
+    'requests.structures',
+    'requests.utils',
+    'requests.cookies',
+    'requests.exceptions',
+    'requests.auth',
+    'requests.api',
+    'chardet',
+    'charset_normalizer',
+    'certifi',
+    'urllib3',
+    'urllib3.util',
+    'urllib3.poolmanager',
+    'urllib3.connectionpool',
+    'urllib3.connection',
+    'urllib',
+    'urllib.parse',
+    'urllib.request',
+    'urllib.error',
+    'idna',
+    'ssl',
+    'socket',
+    'select',
+    'selectors',
+    'http',
+    'http.client',
+    'http.cookies',
+    'http.cookiejar',
+    'email',
+    'email.utils',
+    'email.message',
+    'email.header',
+    'email.mime',
+    'email.mime.text',
+    'email.parser',
+]
+
+# Data Handling & Serialization
+data_modules = [
+    'json',
+    'csv',
+    'configparser',
+    'pickle',
+    'shelve',
+    'sqlite3',
+    'hashlib',
+    'hmac',
+    'secrets',
+    'base64',
+    'binascii',
+    'struct',
+    'array',
+    'collections',
+    'collections.abc',
+    'dataclasses',
+    'enum',
+    'typing',
+    'typing_extensions',
+    'types',
+]
+
+# File & System Operations
+system_modules = [
+    'os',
+    'os.path',
+    'sys',
+    'pathlib',
+    'shutil',
+    'tempfile',
+    'zipfile',
+    'tarfile',
+    'gzip',
+    'io',
+    'mimetypes',
+    'glob',
+    'fnmatch',
+    'filecmp',
+    'stat',
+    'platform',
+    'subprocess',
+    'multiprocessing',
+    'multiprocessing.freeze_support',
+    'multiprocessing.connection',
+    'threading',
+    'queue',
+    'concurrent',
+    'concurrent.futures',
+    'asyncio',
+]
+
+# Date & Time
+datetime_modules = [
+    'datetime',
+    'time',
+    'calendar',
+    'zoneinfo',
+    '_zoneinfo',
+    'tzdata',
+    'pytz',
+    'dateutil',
+    'dateutil.parser',
+    'dateutil.tz',
+]
+
+# Utilities & Helpers
+utility_modules = [
+    'tqdm',
+    'tqdm.auto',
+    'tqdm.std',
+    'tqdm.gui',
+    'tqdm.notebook',
+    'logging',
+    'logging.handlers',
+    'logging.config',
+    'warnings',
+    'traceback',
+    'contextlib',
+    'functools',
+    'itertools',
+    'operator',
+    'copy',
+    'weakref',
+    'gc',
+    'atexit',
+    'signal',
+    'locale',
+    'gettext',
+    'uuid',
+    'random',
+    'math',
+    'decimal',
+    'fractions',
+    'numbers',
+    'cmath',
+    'argparse',
+    'getopt',
+    'cmd',
+    'shlex',
+    'pprint',
+    'reprlib',
+    'dis',
+    'inspect',
+    'ast',
+    'imp',
+    'importlib',
+    'importlib.util',
+    'importlib.machinery',
+    'importlib.metadata',
+    'pkg_resources',
+    'pkg_resources._vendor',
+    'pkg_resources.extern',
+    'setuptools',
+    'distutils',
+    'sysconfig',
+    'site',
+    'sitecustomize',
+    'usercustomize',
+]
+
+# Encoding support
+encoding_modules = [
+    'encodings',
+    'encodings.utf_8',
+    'encodings.ascii',
+    'encodings.latin_1',
+    'encodings.cp1252',
+    'encodings.cp437',
+    'encodings.utf_16',
+    'encodings.utf_16_le',
+    'encodings.utf_16_be',
+    'encodings.utf_32',
+    'encodings.utf_32_le',
+    'encodings.utf_32_be',
+    'encodings.unicode_escape',
+    'encodings.raw_unicode_escape',
+    'encodings.idna',
+    'codecs',
+]
+
+# Combine all hidden imports
+hiddenimports.extend(app_modules)
+hiddenimports.extend(gui_modules)
+hiddenimports.extend(epub_modules)
+hiddenimports.extend(image_modules)
+hiddenimports.extend(api_modules)
+hiddenimports.extend(text_modules)
+hiddenimports.extend(network_modules)
+hiddenimports.extend(data_modules)
+hiddenimports.extend(system_modules)
+hiddenimports.extend(datetime_modules)
+hiddenimports.extend(utility_modules)
+hiddenimports.extend(encoding_modules)
+
+# Remove duplicates
+hiddenimports = list(set(hiddenimports))
+
+# ============================================================================
+# EXCLUSIONS (Packages to exclude to reduce size)
+# ============================================================================
+
+excludes = [
+    # Large scientific packages (unless needed)
+    'matplotlib',
+    'pandas',
+    # 'scipy',  # Required by datasketch - do not exclude
+    # 'numpy',  # Required by datasketch - do not exclude
+    'sklearn',
+    'skimage',
+    'cv2',
+    
+    # Testing frameworks
+    'pytest',
+    'nose',
+    'unittest',
+    'doctest',
+    'test',
+    'tests',
+    
+    # Development tools
+    'IPython',
+    'jupyter',
+    'notebook',
+    'ipykernel',
+    'ipywidgets',
+    'pylint',
+    'black',
+    'flake8',
+    'mypy',
+    'coverage',
+    
+    # Documentation
+    'sphinx',
+    'docutils',
+    
+    # Other unnecessary packages
+    'PyQt5',
+    'PyQt6',
+    'PySide2',
+    'PySide6',
+    'wx',
+    'kivy',
+    'pygame',
+    'tornado',
+    'flask',
+    'django',
+    'fastapi',
+    'uvicorn',
+    'colorama',  # Unless you need colored console output
+    'win32com',  # Unless you need Windows COM
+    'pythoncom', # Unless you need Windows COM
+]
+
+# ============================================================================
+# ANALYSIS
+# ============================================================================
+
+a = Analysis(
+    ['translator_gui.py'],
+    pathex=[],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=excludes,
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+# ============================================================================
+# PYZ (Python Zip archive)
+# ============================================================================
+
+pyz = PYZ(
+    a.pure,
+    a.zipped_data,
+    cipher=block_cipher
+)
+
+# ============================================================================
+# EXECUTABLE CONFIGURATION
+# ============================================================================
+
+if ONE_FILE:
+    # Single file executable
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        [],
+        name=APP_NAME,
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=ENABLE_UPX,
+        upx_exclude=[
+            'vcruntime140.dll',  # Don't compress Windows runtime
+            'python*.dll',       # Don't compress Python DLLs
+            'api-ms-win-*.dll',  # Don't compress Windows API DLLs
+        ],
+        runtime_tmpdir=None,
+        console=ENABLE_CONSOLE,
+        disable_windowed_traceback=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=APP_ICON,
+        version='version_info.txt' if os.path.exists('version_info.txt') else None,
+    )
+else:
+    # Folder distribution
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name=APP_NAME,
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=ENABLE_CONSOLE,
+        disable_windowed_traceback=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=APP_ICON,
+        version='version_info.txt' if os.path.exists('version_info.txt') else None,
+    )
+    
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        strip=False,
+        upx=ENABLE_UPX,
+        upx_exclude=[
+            'vcruntime140.dll',
+            'python*.dll',
+            'api-ms-win-*.dll',
+        ],
+        name=APP_NAME.replace(' ', '_'),
+    )
+
+# ============================================================================
+# NOTES
+# ============================================================================
+
+"""
+Build Instructions:
+1. Install PyInstaller: pip install pyinstaller
+2. Install datasketch: pip install datasketch
+3. Run: pyinstaller translator.spec
+
+Optimization Tips:
+- Set ENABLE_UPX = False for faster startup but larger file
+- Set ONE_FILE = False for faster startup but folder distribution
+
+This build includes datasketch for enhanced QA scanning performance.
+The executable will be larger (~100-150MB more) but will provide
+significantly faster duplicate detection on large datasets (50+ files).
+
+For version information:
+Create a version_info.txt file with Windows version resource information
+"""
