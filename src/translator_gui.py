@@ -3453,7 +3453,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v2.4.2...")
+    print("🚀 Starting Glossarion v2.4.4...")
     
     # Initialize splash screen
     splash_manager = None
