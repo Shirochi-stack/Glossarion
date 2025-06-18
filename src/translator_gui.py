@@ -49,7 +49,7 @@ class TranslatorGUI:
         self.master = master
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        master.title("Glossarion v2.6.9")
+        master.title("Glossarion v2.6.9 — The AI Hunter Unleashed!!")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1600, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
@@ -2376,7 +2376,7 @@ class TranslatorGUI:
         # ALWAYS show mode selection dialog
         mode_dialog = tk.Toplevel(self.master)
         mode_dialog.title("Select QA Scanner Mode")
-        mode_dialog.geometry("1600x820")
+        mode_dialog.geometry("1920x820")
         mode_dialog.withdraw()  # Hide initially for smooth opening
         mode_dialog.transient(self.master)
         load_application_icon(mode_dialog, self.base_dir)
@@ -2404,8 +2404,29 @@ class TranslatorGUI:
         # Mode cards container
         modes_container = tk.Frame(main_frame)
         modes_container.pack(fill=tk.BOTH, expand=True)
-        
+                
         mode_data = [
+            {
+                "value": "ai-hunter",
+                "emoji": "🤖",
+                "title": "AI HUNTER",
+                "subtitle": "30% threshold",
+                "features": [
+                    "✓ Catches AI retranslations",
+                    "✓ Different translation styles",
+                    "⚠ MANY false positives",
+                    "✓ Same chapter, different words",
+                    "✓ Detects paraphrasing",
+                    "✓ Ultimate duplicate finder"
+                ],
+                "bg_color": "#2a1a3e",  # Dark purple
+                "hover_color": "#6a4c93",  # Medium purple
+                "border_color": "#8b5cf6",
+                "accent_color": "#a78bfa",
+                "text_color": "#f0f0f0",
+                "feature_color": "#e0e0e0",
+                "recommendation": "EXTREME"
+            },
             {
                 "value": "aggressive",
                 "emoji": "🔴",
@@ -2419,12 +2440,12 @@ class TranslatorGUI:
                     "✓ Finds similar content patterns",
                     "✓ Aggressive fuzzy matching"
                 ],
-                "bg_color": "#4a1515",  # Dark red base
-                "hover_color": "#dc143c",  # Pure bright red
+                "bg_color": "#4a1515",
+                "hover_color": "#dc143c",
                 "border_color": "#ff0000",
                 "accent_color": "#ff5555",
-                "text_color": "#f0f0f0",  # Bright white text
-                "feature_color": "#e0e0e0",  # Light gray features
+                "text_color": "#f0f0f0",
+                "feature_color": "#e0e0e0",
                 "recommendation": "BEST"
             },
             {
@@ -2440,12 +2461,12 @@ class TranslatorGUI:
                     "✓ Minimal false alarms",
                     "✓ Production ready"
                 ],
-                "bg_color": "#4a4015",  # Dark yellow/amber base
-                "hover_color": "#d4a017",  # Bright yellow on hover
+                "bg_color": "#4a4015",
+                "hover_color": "#d4a017",
                 "border_color": "#ffaa00",
                 "accent_color": "#ffdd44",
-                "text_color": "#f0f0f0",  # Bright white text
-                "feature_color": "#e0e0e0",  # Light gray features
+                "text_color": "#f0f0f0",
+                "feature_color": "#e0e0e0",
                 "recommendation": "RECOMMENDED"
             },
             {
@@ -2461,14 +2482,15 @@ class TranslatorGUI:
                     "✓ High confidence results",
                     "✓ Final QA checks"
                 ],
-                "bg_color": "#1a3a1c",  # Dark green base
-                "hover_color": "#228b22",  # Nice vibrant green
+                "bg_color": "#1a3a1c",
+                "hover_color": "#228b22",
                 "border_color": "#2e7d32",
                 "accent_color": "#66bb6a",
-                "text_color": "#f0f0f0",  # Bright white text
-                "feature_color": "#e0e0e0",  # Light gray features
+                "text_color": "#f0f0f0",
+                "feature_color": "#e0e0e0",
                 "recommendation": "FASTEST"
             }
+
         ]
         
         def select_mode(mode_value):
