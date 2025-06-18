@@ -2273,7 +2273,7 @@ class TranslatorGUI:
                 ))
 
     def run_qa_scan(self):
-        """Run QA scan directly without subprocess"""
+        """Run QA scan with mode selection"""
         if not self._lazy_load_modules():
             self.append_log("❌ Failed to load QA scanner modules")
             return
@@ -2288,12 +2288,79 @@ class TranslatorGUI:
             self.append_log("⛔ QA scan stop requested.")
             return
         
+        # Create mode selection dialog
+        mode_dialog = tk.Toplevel(self.master)
+        mode_dialog.title("Select QA Scanner Mode")
+        mode_dialog.geometry("450x350")
+        mode_dialog.transient(self.master)
+        load_application_icon(mode_dialog, self.base_dir)
+        
+        # Center the dialog
+        mode_dialog.update_idletasks()
+        x = (mode_dialog.winfo_screenwidth() // 2) - (mode_dialog.winfo_width() // 2)
+        y = (mode_dialog.winfo_screenheight() // 2) - (mode_dialog.winfo_height() // 2)
+        mode_dialog.geometry(f"+{x}+{y}")
+        
+        # Variable to store selected mode
+        selected_mode = tk.StringVar(value="standard")
+        user_confirmed = tk.BooleanVar(value=False)
+        
+        # Create UI
+        main_frame = tk.Frame(mode_dialog, padx=20, pady=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        tk.Label(main_frame, text="Select Detection Sensitivity", 
+                 font=('TkDefaultFont', 12, 'bold')).pack(pady=(0, 10))
+        
+        # Mode selection
+        modes_frame = tk.Frame(main_frame)
+        modes_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        mode_info = [
+            ("aggressive", "🔴 Aggressive (75% threshold)", "Catches more duplicates, but may have false positives"),
+            ("standard", "🟡 Standard (85% threshold)", "Balanced detection - recommended for most cases"),
+            ("strict", "🟢 Strict (95% threshold)", "Only flags near-identical content")
+        ]
+        
+        for mode_value, mode_label, mode_desc in mode_info:
+            mode_frame = tk.Frame(modes_frame)
+            mode_frame.pack(fill=tk.X, pady=5)
+            
+            tb.Radiobutton(mode_frame, text=mode_label, value=mode_value,
+                          variable=selected_mode, bootstyle="info").pack(anchor=tk.W)
+            tk.Label(mode_frame, text=mode_desc, font=('TkDefaultFont', 9), 
+                    fg='gray').pack(anchor=tk.W, padx=(25, 0))
+        
+        # Buttons
+        button_frame = tk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        def confirm_selection():
+            user_confirmed.set(True)
+            mode_dialog.destroy()
+        
+        tb.Button(button_frame, text="Continue", command=confirm_selection, 
+                 bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
+        tb.Button(button_frame, text="Cancel", command=mode_dialog.destroy, 
+                 bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
+        
+        # Make dialog modal
+        mode_dialog.grab_set()
+        mode_dialog.wait_window()
+        
+        # Check if user confirmed
+        if not user_confirmed.get():
+            self.append_log("⚠️ QA scan canceled.")
+            return
+        
+        # Now get the folder (after mode selection)
         folder_path = filedialog.askdirectory(title="Select Folder with HTML Files")
         if not folder_path:
             self.append_log("⚠️ QA scan canceled.")
             return
         
-        self.append_log(f"🔍 Starting QA scan for folder: {folder_path}")
+        mode = selected_mode.get()
+        self.append_log(f"🔍 Starting QA scan in {mode.upper()} mode for folder: {folder_path}")
         self.stop_requested = False
         
         def run_scan():
@@ -2301,7 +2368,8 @@ class TranslatorGUI:
             self.qa_button.config(text="Stop Scan", command=self.stop_qa_scan, bootstyle="danger")
             
             try:
-                scan_html_folder(folder_path, log=self.append_log, stop_flag=lambda: self.stop_requested)
+                # Call scan_html_folder with the mode parameter
+                scan_html_folder(folder_path, log=self.append_log, stop_flag=lambda: self.stop_requested, mode=mode)
                 self.append_log("✅ QA scan completed successfully.")
             except Exception as e:
                 self.append_log(f"❌ QA scan error: {e}")
