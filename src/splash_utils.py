@@ -202,8 +202,8 @@ class SplashManager:
                         if distance < 5:
                             self.progress_value = self._target_progress
                         else:
-                            # Fast steps
-                            step = distance * 0.3  # Take 30% of remaining distance
+                            # Very fast steps - 50% of remaining distance
+                            step = distance * 0.5
                             self.progress_value = min(self.progress_value + step, self._target_progress)
                     
                     # Update progress bar fill
@@ -390,37 +390,29 @@ class SplashManager:
             self.update_status("Loading translation engine...", 40)
             try:
                 import TransateKRtoEN
-                time.sleep(0.1)
             except ImportError:
                 pass
             
             self.update_status("Loading glossary extractor...", 50)
             try:
                 import extract_glossary_from_epub
-                time.sleep(0.1)
             except ImportError:
                 pass
             
             self.update_status("Loading EPUB converter...", 60)
             try:
                 import epub_converter
-                time.sleep(0.1)
             except ImportError:
                 pass
             
             self.update_status("Loading QA scanner...", 70)
             try:
                 import scan_html_folder
-                time.sleep(0.1)
             except ImportError:
                 pass
             
             self.update_status("Preparing workspace...", 80)
-            time.sleep(0.2)
-            
             self.update_status("Finalizing...", 90)
-            time.sleep(0.2)
-            
             self.update_status("Ready!", 100)
             
             # Force immediate 100% display
@@ -445,7 +437,7 @@ class SplashManager:
             # Force update
             self.splash_window.update()
             
-            time.sleep(0.5)  # Show 100% for half a second
+            time.sleep(0.1)  # Just 100ms to see 100%
             
             # Get screen dimensions BEFORE closing splash
             screen_width = self.splash_window.winfo_screenwidth()
@@ -467,7 +459,7 @@ class SplashManager:
             self.close_splash()
             
             # Small delay to ensure splash is fully closed
-            time.sleep(0.1)
+            time.sleep(0.05)
             
             # NOW create ttkbootstrap window (no more Tk conflicts)
             root = tb.Window(themename="darkly")
