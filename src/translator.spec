@@ -15,7 +15,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 APP_NAME = 'Glossarion v2.6.9'
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
-ENABLE_UPX = True      # Compression (smaller file size but slower startup)
+ENABLE_UPX = False      # Compression (smaller file size but slower startup)
 ONE_FILE = True        # Single executable vs folder distribution
 
 # ============================================================================
@@ -602,7 +602,7 @@ excludes = [
 # ============================================================================
 
 a = Analysis(
-    ['translator_gui.py'],
+    ['splash_utils.py'],  # Changed from translator_gui.py
     pathex=[],
     binaries=binaries,
     datas=datas,
