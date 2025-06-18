@@ -5,27 +5,38 @@ This is the primary entry point that shows the splash screen immediately
 before loading heavy modules and launching the main application.
 """
 
-# Minimal imports for fastest startup
-import sys
-import os
-
-# Show immediate feedback if running as exe
-if getattr(sys, 'frozen', False):
-    print("Starting Glossarion...", end='', flush=True)
-
-# Fix Python path for Windows file association issues
-if sys.platform == "win32":
-    # Add user site-packages to path
-    import site
-    user_site = site.getusersitepackages()
-    if user_site and os.path.exists(user_site) and user_site not in sys.path:
-        sys.path.insert(0, user_site)
+# INSTANT FEEDBACK - Before any imports!
+if __name__ == "__main__":
+    import sys
+    import os
     
-    # Also add the specific Python 3.13 user packages
-    py313_packages = os.path.expanduser(r"~\AppData\Roaming\Python\Python313\site-packages")
-    if os.path.exists(py313_packages) and py313_packages.lower() not in [p.lower() for p in sys.path]:
-        sys.path.insert(0, py313_packages)
-
+    # IMMEDIATE visual feedback for .exe users
+    if getattr(sys, 'frozen', False):
+        # Try to show a tiny window IMMEDIATELY
+        try:
+            import tkinter as tk
+            quick_splash = tk.Tk()
+            quick_splash.overrideredirect(True)
+            quick_splash.geometry("300x100")
+            quick_splash.configure(bg='#2b2b2b')
+            
+            # Center it
+            quick_splash.update_idletasks()
+            x = (quick_splash.winfo_screenwidth() // 2) - 150
+            y = (quick_splash.winfo_screenheight() // 2) - 50
+            quick_splash.geometry(f"300x100+{x}+{y}")
+            
+            # Simple loading text
+            label = tk.Label(quick_splash, text="Starting Glossarion...", 
+                           bg='#2b2b2b', fg='#4a9eff', font=('Arial', 14))
+            label.pack(expand=True)
+            
+            # Show it immediately
+            quick_splash.update()
+            
+            # This will be replaced by the full splash in ~100ms
+        except:
+            pass
 # Now import the rest
 import time
 import atexit
@@ -112,7 +123,7 @@ class SplashManager:
             
             # Progress percentage text
             text_x = self.canvas_width // 2
-            text_y = self.canvas_height // 2
+            text_y = self.canvas_height // 2.5
             
             progress_font = ('Arial', 11, 'bold')
             
