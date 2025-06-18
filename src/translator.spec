@@ -602,7 +602,7 @@ excludes = [
 # ============================================================================
 
 a = Analysis(
-    ['splash_utils.py'],  # Changed from translator_gui.py
+    ['translator_gui.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,
