@@ -1720,16 +1720,22 @@ class TranslationProcessor:
     def check_duplicate_content(self, result, idx, prog, out):
         """Check if translated content is duplicate - with mode selection"""
         if not self.config.RETRY_DUPLICATE_BODIES:
+            print("    ⚠️ DEBUG: Duplicate detection is DISABLED in config")
             return False, 0
         
         # Get detection mode from config
         detection_mode = getattr(self.config, 'DUPLICATE_DETECTION_MODE', 'basic')
+        print(f"    🔍 DEBUG: Detection mode = '{detection_mode}'")
+        print(f"    🔍 DEBUG: Lookback chapters = {self.config.DUPLICATE_LOOKBACK_CHAPTERS}")
         
         if detection_mode == 'ai-hunter':
+            print("    🤖 DEBUG: Routing to AI Hunter detection...")
             return self._check_duplicate_ai_hunter(result, idx, prog, out)
         elif detection_mode == 'cascading':
+            print("    🔄 DEBUG: Routing to Cascading detection...")
             return self._check_duplicate_cascading(result, idx, prog, out)
         else:
+            print("    📋 DEBUG: Routing to Basic detection...")
             return self._check_duplicate_basic(result, idx, prog, out)
 
     def _check_duplicate_basic(self, result, idx, prog, out):
@@ -1770,110 +1776,202 @@ class TranslationProcessor:
             print(f"    Warning: Failed to check duplicate content: {e}")
             return False, 0
 
+def check_duplicate_content(self, result, idx, prog, out):
+    """Check if translated content is duplicate - with mode selection"""
+    if not self.config.RETRY_DUPLICATE_BODIES:
+        print("    ⚠️ DEBUG: Duplicate detection is DISABLED in config")
+        return False, 0
+    
+    # Get detection mode from config
+    detection_mode = getattr(self.config, 'DUPLICATE_DETECTION_MODE', 'basic')
+    print(f"    🔍 DEBUG: Detection mode = '{detection_mode}'")
+    print(f"    🔍 DEBUG: Lookback chapters = {self.config.DUPLICATE_LOOKBACK_CHAPTERS}")
+    
+    if detection_mode == 'ai-hunter':
+        print("    🤖 DEBUG: Routing to AI Hunter detection...")
+        return self._check_duplicate_ai_hunter(result, idx, prog, out)
+    elif detection_mode == 'cascading':
+        print("    🔄 DEBUG: Routing to Cascading detection...")
+        return self._check_duplicate_cascading(result, idx, prog, out)
+    else:
+        print("    📋 DEBUG: Routing to Basic detection...")
+        return self._check_duplicate_basic(result, idx, prog, out)
+
     def _check_duplicate_ai_hunter(self, result, idx, prog, out):
-        """Enhanced AI Hunter duplicate detection"""
+        """Enhanced AI Hunter duplicate detection with debug logging"""
         try:
+            print(f"\n    ========== AI HUNTER DEBUG START ==========")
+            print(f"    📍 Current chapter index: {idx}")
+            
             # Get threshold from environment or config
-            custom_threshold = os.getenv('AI_HUNTER_THRESHOLD')
-            if custom_threshold and custom_threshold.strip():
+            env_threshold = os.getenv('AI_HUNTER_THRESHOLD')
+            config_threshold = getattr(self.config, 'AI_HUNTER_THRESHOLD', None)
+            
+            print(f"    🔍 Threshold sources:")
+            print(f"       - Environment var: {env_threshold}")
+            print(f"       - Config object: {config_threshold}")
+            
+            if env_threshold and env_threshold.strip():
                 try:
-                    threshold = float(custom_threshold) / 100.0  # Convert percentage to decimal
-                    threshold = max(0.1, min(1.0, threshold))  # Clamp between 10% and 100%
-                    
-                    print(f"    🤖 AI Hunter: Using threshold {int(threshold*100)}%")
+                    threshold = float(env_threshold) / 100.0
+                    threshold = max(0.1, min(1.0, threshold))
+                    print(f"    ✅ Using environment threshold: {int(threshold*100)}%")
                 except ValueError:
-                    # Fallback to default threshold
                     threshold = 0.75
+                    print(f"    ⚠️ Invalid env threshold, using default: 75%")
             else:
-                # Use default threshold
                 threshold = 0.75
+                print(f"    ℹ️ No env threshold, using default: 75%")
             
             # Clean and prepare text
             result_clean = re.sub(r'<[^>]+>', '', result).strip()
+            print(f"    📄 Text length: {len(result_clean)} chars")
             
             # Extract features
+            print(f"    🔬 Extracting text features...")
             result_features = self._extract_text_features(result_clean)
             
+            # Log extracted features
+            print(f"    📊 Extracted features:")
+            print(f"       - Characters found: {len(result_features.get('characters', []))}")
+            print(f"       - Dialogue count: {result_features.get('semantic', {}).get('dialogue_count', 0)}")
+            print(f"       - Top characters: {result_features.get('characters', [])[:5]}")
+            
             lookback_chapters = self.config.DUPLICATE_LOOKBACK_CHAPTERS
+            print(f"    🔄 Checking {lookback_chapters} previous chapters...")
+            
             highest_similarity = 0
             detected_method = None
+            all_similarities = []
             
             for prev_idx in range(max(0, idx - lookback_chapters), idx):
                 prev_key = str(prev_idx)
-                if prev_key in prog["chapters"] and prog["chapters"][prev_key].get("output_file"):
-                    prev_file = prog["chapters"][prev_key]["output_file"]
-                    prev_path = os.path.join(out, prev_file)
+                print(f"\n    📖 Checking against chapter {prev_idx + 1}...")
+                
+                if prev_key not in prog["chapters"]:
+                    print(f"       ❌ Chapter not in progress data")
+                    continue
                     
-                    if os.path.exists(prev_path):
-                        try:
-                            with open(prev_path, 'r', encoding='utf-8') as f:
-                                prev_content = f.read()
-                                prev_clean = re.sub(r'<[^>]+>', '', prev_content).strip()
-                                
-                            # Extract features for previous chapter
-                            prev_features = self._extract_text_features(prev_clean)
-                            
-                            # Multi-method detection
-                            similarities = {}
-                            
-                            # Method 1: Exact content match
-                            exact_sim = self._calculate_exact_similarity(result_clean[:2000], prev_clean[:2000])
-                            similarities['exact'] = exact_sim
-                            
-                            # Method 2: Enhanced text similarity
-                            text_sim = self._calculate_smart_similarity(result_clean, prev_clean)
-                            similarities['text'] = text_sim
-                            
-                            # Method 3: Semantic fingerprint
-                            semantic_sim = self._calculate_semantic_similarity(
-                                result_features['semantic'], prev_features['semantic']
-                            )
-                            similarities['semantic'] = semantic_sim
-                            
-                            # Method 4: Structural signature
-                            structural_sim = self._calculate_structural_similarity(
-                                result_features['structural'], prev_features['structural']
-                            )
-                            similarities['structural'] = structural_sim
-                            
-                            # Method 5: Character analysis
-                            char_sim = self._calculate_character_similarity(
-                                result_features['characters'], prev_features['characters']
-                            )
-                            similarities['character'] = char_sim
-                            
-                            # Method 6: Pattern analysis
-                            pattern_sim = self._calculate_pattern_similarity(
-                                result_features['patterns'], prev_features['patterns']
-                            )
-                            similarities['pattern'] = pattern_sim
-                            
-                            # Find best match
-                            for method, sim in similarities.items():
-                                if sim > highest_similarity:
-                                    highest_similarity = sim
-                                    detected_method = method
-                            
-                            # Check if any method exceeds threshold
-                            if highest_similarity >= threshold:
-                                print(f"    🎯 AI Hunter: Duplicate detected via {detected_method} method")
-                                print(f"       Similarity: {int(highest_similarity*100)}% (threshold: {int(threshold*100)}%)")
-                                print(f"       Compared with: Chapter {prev_idx + 1}")
-                                return True, int(highest_similarity * 100)
-                                
-                        except Exception as e:
-                            print(f"    Warning: Failed to analyze {prev_path}: {e}")
-                            continue
+                if not prog["chapters"][prev_key].get("output_file"):
+                    print(f"       ❌ No output file for this chapter")
+                    continue
+                    
+                prev_file = prog["chapters"][prev_key]["output_file"]
+                prev_path = os.path.join(out, prev_file)
+                
+                if not os.path.exists(prev_path):
+                    print(f"       ❌ Output file doesn't exist: {prev_file}")
+                    continue
+                    
+                try:
+                    with open(prev_path, 'r', encoding='utf-8') as f:
+                        prev_content = f.read()
+                        prev_clean = re.sub(r'<[^>]+>', '', prev_content).strip()
+                        
+                    print(f"       ✅ Loaded {len(prev_clean)} chars from {prev_file}")
+                    
+                    # Extract features for previous chapter
+                    prev_features = self._extract_text_features(prev_clean)
+                    
+                    # Multi-method detection
+                    similarities = {}
+                    
+                    # Method 1: Exact content match
+                    exact_sim = self._calculate_exact_similarity(result_clean[:2000], prev_clean[:2000])
+                    similarities['exact'] = exact_sim
+                    
+                    # Method 2: Enhanced text similarity
+                    text_sim = self._calculate_smart_similarity(result_clean, prev_clean)
+                    similarities['text'] = text_sim
+                    
+                    # Method 3: Semantic fingerprint
+                    semantic_sim = self._calculate_semantic_similarity(
+                        result_features.get('semantic', {}), 
+                        prev_features.get('semantic', {})
+                    )
+                    similarities['semantic'] = semantic_sim
+                    
+                    # Method 4: Structural signature
+                    structural_sim = self._calculate_structural_similarity(
+                        result_features.get('structural', {}), 
+                        prev_features.get('structural', {})
+                    )
+                    similarities['structural'] = structural_sim
+                    
+                    # Method 5: Character analysis
+                    char_sim = self._calculate_character_similarity(
+                        result_features.get('characters', []), 
+                        prev_features.get('characters', [])
+                    )
+                    similarities['character'] = char_sim
+                    
+                    # Method 6: Pattern analysis
+                    pattern_sim = self._calculate_pattern_similarity(
+                        result_features.get('patterns', {}), 
+                        prev_features.get('patterns', {})
+                    )
+                    similarities['pattern'] = pattern_sim
+                    
+                    # Log all similarities
+                    print(f"       📊 Similarity scores:")
+                    for method, sim in similarities.items():
+                        print(f"          - {method}: {int(sim*100)}%")
+                    
+                    # Track for debugging
+                    all_similarities.append({
+                        'chapter': prev_idx + 1,
+                        'similarities': similarities.copy()
+                    })
+                    
+                    # Find best match
+                    for method, sim in similarities.items():
+                        if sim > highest_similarity:
+                            highest_similarity = sim
+                            detected_method = method
+                    
+                    # Check if any method exceeds threshold
+                    if highest_similarity >= threshold:
+                        print(f"\n    🎯 DUPLICATE DETECTED!")
+                        print(f"       Method: {detected_method}")
+                        print(f"       Similarity: {int(highest_similarity*100)}%")
+                        print(f"       Threshold: {int(threshold*100)}%")
+                        print(f"       Match with: Chapter {prev_idx + 1}")
+                        print(f"    ========== AI HUNTER DEBUG END ==========\n")
+                        return True, int(highest_similarity * 100)
+                        
+                except Exception as e:
+                    print(f"       ❌ Error analyzing chapter: {e}")
+                    import traceback
+                    print(f"       {traceback.format_exc()}")
+                    continue
             
-            # Log closest match even if below threshold
-            if highest_similarity > 0:
-                print(f"    📊 Closest match: {int(highest_similarity*100)}% via {detected_method} (below {int(threshold*100)}% threshold)")
+            # No duplicate found
+            print(f"\n    ✅ No duplicate found")
+            print(f"       Highest similarity: {int(highest_similarity*100)}% via {detected_method}")
+            print(f"       Threshold: {int(threshold*100)}%")
             
+            # Show top 3 closest matches
+            if all_similarities:
+                print(f"\n    📊 Top 3 closest matches:")
+                sorted_chapters = sorted(all_similarities, 
+                                       key=lambda x: max(x['similarities'].values()), 
+                                       reverse=True)[:3]
+                for i, chapter_data in enumerate(sorted_chapters, 1):
+                    best_method = max(chapter_data['similarities'].items(), 
+                                    key=lambda x: x[1])
+                    print(f"       {i}. Chapter {chapter_data['chapter']}: "
+                          f"{int(best_method[1]*100)}% ({best_method[0]})")
+            
+            print(f"    ========== AI HUNTER DEBUG END ==========\n")
             return False, int(highest_similarity * 100)
             
         except Exception as e:
-            print(f"    Warning: AI Hunter detection failed: {e}")
+            print(f"    ❌ AI Hunter detection failed with error: {e}")
+            import traceback
+            print(f"    {traceback.format_exc()}")
+            print(f"    ========== AI HUNTER DEBUG END ==========\n")
             return False, 0
+
 
     def _check_duplicate_cascading(self, result, idx, prog, out):
         """Cascading detection - basic first, then AI Hunter for borderline cases"""
