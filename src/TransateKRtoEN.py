@@ -4702,7 +4702,7 @@ def main(log_callback=None, stop_callback=None):
                         print(f"ℹ️ No translatable text found in images")
 
                 print(f"📖 Translating text content ({text_size} characters)")
-                progress_manager.update(idx, chap_num, content_hash, output_filename=None, status="in_progress")
+                progress_manager.update(idx, chap_num, content_hash, output_file=None, status="in_progress")
                 progress_manager.save()
                 
                 _tok_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
