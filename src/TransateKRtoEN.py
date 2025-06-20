@@ -56,6 +56,8 @@ class TranslationConfig:
         self.USE_ROLLING_SUMMARY = os.getenv("USE_ROLLING_SUMMARY", "0") == "1"
         self.ROLLING_SUMMARY_EXCHANGES = int(os.getenv("ROLLING_SUMMARY_EXCHANGES", "5"))
         self.ROLLING_SUMMARY_MODE = os.getenv("ROLLING_SUMMARY_MODE", "append")
+        self.DUPLICATE_DETECTION_MODE = os.getenv("DUPLICATE_DETECTION_MODE", "basic")
+        self.DUPLICATE_THRESHOLD_MODE = os.getenv("DUPLICATE_THRESHOLD_MODE", "standard")
         self.TRANSLATION_HISTORY_ROLLING = os.getenv("TRANSLATION_HISTORY_ROLLING", "0") == "1"
         self.API_KEY = (os.getenv("API_KEY") or 
                        os.getenv("OPENAI_API_KEY") or 
@@ -1716,10 +1718,22 @@ class TranslationProcessor:
         return is_stop_requested()
     
     def check_duplicate_content(self, result, idx, prog, out):
-        """Check if translated content is duplicate of recent chapters"""
+        """Check if translated content is duplicate - with mode selection"""
         if not self.config.RETRY_DUPLICATE_BODIES:
             return False, 0
-            
+        
+        # Get detection mode from config
+        detection_mode = getattr(self.config, 'DUPLICATE_DETECTION_MODE', 'basic')
+        
+        if detection_mode == 'ai-hunter':
+            return self._check_duplicate_ai_hunter(result, idx, prog, out)
+        elif detection_mode == 'cascading':
+            return self._check_duplicate_cascading(result, idx, prog, out)
+        else:
+            return self._check_duplicate_basic(result, idx, prog, out)
+
+    def _check_duplicate_basic(self, result, idx, prog, out):
+        """Original basic duplicate detection"""
         try:
             result_clean = re.sub(r'<[^>]+>', '', result).strip().lower()
             result_sample = result_clean[:1000]
@@ -1736,30 +1750,325 @@ class TranslationProcessor:
                         try:
                             with open(prev_path, 'r', encoding='utf-8') as f:
                                 prev_content = f.read()
-                            
-                            prev_clean = re.sub(r'<[^>]+>', '', prev_content).strip().lower()
-                            prev_sample = prev_clean[:1000]
-                            
-                            if len(result_sample) > 100 and len(prev_sample) > 100:
-                                result_words = set(result_sample.split())
-                                prev_words = set(prev_sample.split())
+                                prev_clean = re.sub(r'<[^>]+>', '', prev_content).strip().lower()
+                                prev_sample = prev_clean[:1000]
                                 
-                                if len(result_words) > 0 and len(prev_words) > 0:
-                                    common = len(result_words & prev_words)
-                                    total = len(result_words | prev_words)
-                                    similarity = common / total if total > 0 else 0
+                                # Use SequenceMatcher for similarity comparison
+                                similarity = SequenceMatcher(None, result_sample, prev_sample).ratio()
+                                
+                                if similarity >= 0.85:  # 85% threshold
+                                    print(f"    🚀 Basic detection: Duplicate found ({int(similarity*100)}%)")
+                                    return True, int(similarity * 100)
                                     
-                                    if similarity > 0.85:
-                                        return True, int(similarity * 100)
-                        
                         except Exception as e:
-                            print(f"    [WARN] Error checking file: {e}")
+                            print(f"    Warning: Failed to read {prev_path}: {e}")
                             continue
             
+            return False, 0
+            
         except Exception as e:
-            print(f"    [WARN] Duplicate check error: {e}")
+            print(f"    Warning: Failed to check duplicate content: {e}")
+            return False, 0
+
+    def _check_duplicate_ai_hunter(self, result, idx, prog, out):
+        """Enhanced AI Hunter duplicate detection"""
+        try:
+            # Get threshold from environment or config
+            custom_threshold = os.getenv('AI_HUNTER_THRESHOLD')
+            if custom_threshold and custom_threshold.strip():
+                try:
+                    threshold = float(custom_threshold) / 100.0  # Convert percentage to decimal
+                    threshold = max(0.1, min(1.0, threshold))  # Clamp between 10% and 100%
+                except ValueError:
+                    # Fallback to default threshold
+                    threshold = 0.75
+            else:
+                # Use default threshold
+                threshold = 0.75
+            
+            # Clean and prepare text
+            result_clean = re.sub(r'<[^>]+>', '', result).strip()
+            
+            # Extract features
+            result_features = self._extract_text_features(result_clean)
+            
+            lookback_chapters = self.config.DUPLICATE_LOOKBACK_CHAPTERS
+            highest_similarity = 0
+            detected_method = None
+            
+            for prev_idx in range(max(0, idx - lookback_chapters), idx):
+                prev_key = str(prev_idx)
+                if prev_key in prog["chapters"] and prog["chapters"][prev_key].get("output_file"):
+                    prev_file = prog["chapters"][prev_key]["output_file"]
+                    prev_path = os.path.join(out, prev_file)
+                    
+                    if os.path.exists(prev_path):
+                        try:
+                            with open(prev_path, 'r', encoding='utf-8') as f:
+                                prev_content = f.read()
+                                prev_clean = re.sub(r'<[^>]+>', '', prev_content).strip()
+                                
+                            # Extract features for previous chapter
+                            prev_features = self._extract_text_features(prev_clean)
+                            
+                            # Multi-method detection
+                            similarities = {}
+                            
+                            # Method 1: Exact content match
+                            exact_sim = self._calculate_exact_similarity(result_clean[:2000], prev_clean[:2000])
+                            similarities['exact'] = exact_sim
+                            
+                            # Method 2: Enhanced text similarity
+                            text_sim = self._calculate_smart_similarity(result_clean, prev_clean)
+                            similarities['text'] = text_sim
+                            
+                            # Method 3: Semantic fingerprint
+                            semantic_sim = self._calculate_semantic_similarity(
+                                result_features['semantic'], prev_features['semantic']
+                            )
+                            similarities['semantic'] = semantic_sim
+                            
+                            # Method 4: Structural signature
+                            structural_sim = self._calculate_structural_similarity(
+                                result_features['structural'], prev_features['structural']
+                            )
+                            similarities['structural'] = structural_sim
+                            
+                            # Method 5: Character analysis
+                            char_sim = self._calculate_character_similarity(
+                                result_features['characters'], prev_features['characters']
+                            )
+                            similarities['character'] = char_sim
+                            
+                            # Method 6: Pattern analysis
+                            pattern_sim = self._calculate_pattern_similarity(
+                                result_features['patterns'], prev_features['patterns']
+                            )
+                            similarities['pattern'] = pattern_sim
+                            
+                            # Find best match
+                            for method, sim in similarities.items():
+                                if sim > highest_similarity:
+                                    highest_similarity = sim
+                                    detected_method = method
+                            
+                            # Check if any method exceeds threshold
+                            if highest_similarity >= threshold:
+                                print(f"    🎯 AI Hunter: Duplicate detected via {detected_method} method")
+                                print(f"       Similarity: {int(highest_similarity*100)}% (threshold: {int(threshold*100)}%)")
+                                print(f"       Compared with: Chapter {prev_idx + 1}")
+                                return True, int(highest_similarity * 100)
+                                
+                        except Exception as e:
+                            print(f"    Warning: Failed to analyze {prev_path}: {e}")
+                            continue
+            
+            # Log closest match even if below threshold
+            if highest_similarity > 0:
+                print(f"    📊 Closest match: {int(highest_similarity*100)}% via {detected_method} (below {int(threshold*100)}% threshold)")
+            
+            return False, int(highest_similarity * 100)
+            
+        except Exception as e:
+            print(f"    Warning: AI Hunter detection failed: {e}")
+            return False, 0
+
+    def _check_duplicate_cascading(self, result, idx, prog, out):
+        """Cascading detection - basic first, then AI Hunter for borderline cases"""
+        # Step 1: Basic detection
+        is_duplicate_basic, similarity_basic = self._check_duplicate_basic(result, idx, prog, out)
         
-        return False, 0
+        if is_duplicate_basic:
+            return True, similarity_basic
+        
+        # Step 2: If basic detection finds moderate similarity, use AI Hunter
+        if similarity_basic >= 60:  # Configurable threshold
+            print(f"    🤖 Moderate similarity ({similarity_basic}%) - running AI Hunter analysis...")
+            is_duplicate_ai, similarity_ai = self._check_duplicate_ai_hunter(result, idx, prog, out)
+            
+            if is_duplicate_ai:
+                return True, similarity_ai
+        
+        return False, max(similarity_basic, 0)
+
+    def _extract_text_features(self, text):
+        """Extract multiple features from text for AI Hunter analysis"""
+        features = {
+            'semantic': {},
+            'structural': {},
+            'characters': [],
+            'patterns': {}
+        }
+        
+        # Semantic fingerprint
+        lines = text.split('\n')
+        
+        # Character extraction (names that appear 3+ times)
+        words = re.findall(r'\b[A-Z][a-z]+\b', text)
+        word_freq = Counter(words)
+        features['characters'] = [name for name, count in word_freq.items() if count >= 3]
+        
+        # Dialogue patterns
+        dialogue_patterns = re.findall(r'"([^"]+)"', text)
+        features['semantic']['dialogue_count'] = len(dialogue_patterns)
+        features['semantic']['dialogue_lengths'] = [len(d) for d in dialogue_patterns[:10]]
+        
+        # Speaker patterns
+        speaker_patterns = re.findall(r'(\w+)\s+(?:said|asked|replied|shouted|whispered)', text.lower())
+        features['semantic']['speakers'] = list(set(speaker_patterns[:20]))
+        
+        # Number extraction
+        numbers = re.findall(r'\b\d+\b', text)
+        features['patterns']['numbers'] = numbers[:20]
+        
+        # Structural signature
+        para_lengths = []
+        dialogue_count = 0
+        for para in text.split('\n\n'):
+            if para.strip():
+                para_lengths.append(len(para))
+                if '"' in para:
+                    dialogue_count += 1
+        
+        features['structural']['para_count'] = len(para_lengths)
+        features['structural']['avg_para_length'] = sum(para_lengths) / max(1, len(para_lengths))
+        features['structural']['dialogue_ratio'] = dialogue_count / max(1, len(para_lengths))
+        
+        # Create structural pattern string
+        pattern = []
+        for para in text.split('\n\n')[:20]:  # First 20 paragraphs
+            if para.strip():
+                if '"' in para:
+                    pattern.append('D')  # Dialogue
+                elif len(para) > 300:
+                    pattern.append('L')  # Long
+                elif len(para) < 100:
+                    pattern.append('S')  # Short
+                else:
+                    pattern.append('M')  # Medium
+        features['structural']['pattern'] = ''.join(pattern)
+        
+        return features
+
+    def _calculate_exact_similarity(self, text1, text2):
+        """Calculate exact text similarity"""
+        return SequenceMatcher(None, text1.lower(), text2.lower()).ratio()
+
+    def _calculate_smart_similarity(self, text1, text2):
+        """Smart similarity with length-aware sampling"""
+        # Check length ratio first
+        len_ratio = len(text1) / max(1, len(text2))
+        if len_ratio < 0.7 or len_ratio > 1.3:
+            return 0.0
+        
+        # Smart sampling for large texts
+        if len(text1) > 10000:
+            sample_size = 3000
+            samples1 = [
+                text1[:sample_size],
+                text1[len(text1)//2 - sample_size//2:len(text1)//2 + sample_size//2],
+                text1[-sample_size:]
+            ]
+            samples2 = [
+                text2[:sample_size],
+                text2[len(text2)//2 - sample_size//2:len(text2)//2 + sample_size//2],
+                text2[-sample_size:]
+            ]
+            similarities = [SequenceMatcher(None, s1.lower(), s2.lower()).ratio() 
+                           for s1, s2 in zip(samples1, samples2)]
+            return sum(similarities) / len(similarities)
+        else:
+            # Use first 2000 chars for smaller texts
+            return SequenceMatcher(None, text1[:2000].lower(), text2[:2000].lower()).ratio()
+
+    def _calculate_semantic_similarity(self, sem1, sem2):
+        """Calculate semantic fingerprint similarity"""
+        score = 0.0
+        max_score = 0.0
+        
+        # Compare dialogue counts
+        if 'dialogue_count' in sem1 and 'dialogue_count' in sem2:
+            max_score += 1.0
+            ratio = min(sem1['dialogue_count'], sem2['dialogue_count']) / max(1, max(sem1['dialogue_count'], sem2['dialogue_count']))
+            score += ratio * 0.3
+        
+        # Compare speakers
+        if 'speakers' in sem1 and 'speakers' in sem2:
+            max_score += 1.0
+            if sem1['speakers'] and sem2['speakers']:
+                overlap = len(set(sem1['speakers']) & set(sem2['speakers']))
+                total = len(set(sem1['speakers']) | set(sem2['speakers']))
+                score += (overlap / max(1, total)) * 0.4
+        
+        # Compare dialogue lengths pattern
+        if 'dialogue_lengths' in sem1 and 'dialogue_lengths' in sem2:
+            max_score += 1.0
+            if sem1['dialogue_lengths'] and sem2['dialogue_lengths']:
+                # Compare dialogue length patterns
+                len1 = sem1['dialogue_lengths'][:10]
+                len2 = sem2['dialogue_lengths'][:10]
+                if len1 and len2:
+                    avg1 = sum(len1) / len(len1)
+                    avg2 = sum(len2) / len(len2)
+                    ratio = min(avg1, avg2) / max(1, max(avg1, avg2))
+                    score += ratio * 0.3
+        
+        return score / max(1, max_score)
+
+    def _calculate_structural_similarity(self, struct1, struct2):
+        """Calculate structural signature similarity"""
+        score = 0.0
+        
+        # Compare paragraph patterns
+        if 'pattern' in struct1 and 'pattern' in struct2:
+            pattern_sim = SequenceMatcher(None, struct1['pattern'], struct2['pattern']).ratio()
+            score += pattern_sim * 0.4
+        
+        # Compare paragraph statistics
+        if all(k in struct1 for k in ['para_count', 'avg_para_length', 'dialogue_ratio']) and \
+           all(k in struct2 for k in ['para_count', 'avg_para_length', 'dialogue_ratio']):
+            
+            # Paragraph count ratio
+            para_ratio = min(struct1['para_count'], struct2['para_count']) / max(1, max(struct1['para_count'], struct2['para_count']))
+            score += para_ratio * 0.2
+            
+            # Average length ratio
+            avg_ratio = min(struct1['avg_para_length'], struct2['avg_para_length']) / max(1, max(struct1['avg_para_length'], struct2['avg_para_length']))
+            score += avg_ratio * 0.2
+            
+            # Dialogue ratio similarity
+            dialogue_diff = abs(struct1['dialogue_ratio'] - struct2['dialogue_ratio'])
+            score += (1 - dialogue_diff) * 0.2
+        
+        return score
+
+    def _calculate_character_similarity(self, chars1, chars2):
+        """Calculate character name similarity"""
+        if not chars1 or not chars2:
+            return 0.0
+        
+        # Find overlapping characters
+        set1 = set(chars1)
+        set2 = set(chars2)
+        overlap = len(set1 & set2)
+        total = len(set1 | set2)
+        
+        return overlap / max(1, total)
+
+    def _calculate_pattern_similarity(self, pat1, pat2):
+        """Calculate pattern-based similarity"""
+        score = 0.0
+        
+        # Compare numbers (they rarely change in translations)
+        if 'numbers' in pat1 and 'numbers' in pat2:
+            nums1 = set(pat1['numbers'])
+            nums2 = set(pat2['numbers'])
+            if nums1 and nums2:
+                overlap = len(nums1 & nums2)
+                total = len(nums1 | nums2)
+                score = overlap / max(1, total)
+        
+        return score
     
     def generate_rolling_summary(self, history_manager, idx, chunk_idx):
         """Generate rolling summary for context continuity"""
@@ -2353,22 +2662,81 @@ class GlossaryManager:
             return True
         
         def detect_language_hint(text_sample):
-            """Quick language detection for validation purposes"""
-            korean_chars = sum(1 for char in text_sample[:1000] if 0xAC00 <= ord(char) <= 0xD7AF)
-            japanese_kana = sum(1 for char in text_sample[:1000] if (0x3040 <= ord(char) <= 0x309F) or (0x30A0 <= ord(char) <= 0x30FF))
-            chinese_chars = sum(1 for char in text_sample[:1000] if 0x4E00 <= ord(char) <= 0x9FFF)
-            latin_chars = sum(1 for char in text_sample[:1000] if 0x0041 <= ord(char) <= 0x007A)
+            """Quick language detection for validation purposes with enhanced debugging"""
+            # Only analyze first 1000 characters for performance
+            sample = text_sample[:1000]
+            sample_length = len(sample)
             
+            # Count characters by script type
+            korean_chars = sum(1 for char in sample if 0xAC00 <= ord(char) <= 0xD7AF)
+            japanese_kana = sum(1 for char in sample if (0x3040 <= ord(char) <= 0x309F) or (0x30A0 <= ord(char) <= 0x30FF))
+            chinese_chars = sum(1 for char in sample if 0x4E00 <= ord(char) <= 0x9FFF)
+            latin_chars = sum(1 for char in sample if 0x0041 <= ord(char) <= 0x007A)
+            
+            # Calculate total CJK characters
+            total_cjk = korean_chars + japanese_kana + chinese_chars
+            
+            # Calculate percentages
+            korean_pct = (korean_chars / sample_length * 100) if sample_length > 0 else 0
+            japanese_pct = (japanese_kana / sample_length * 100) if sample_length > 0 else 0
+            chinese_pct = (chinese_chars / sample_length * 100) if sample_length > 0 else 0
+            latin_pct = (latin_chars / sample_length * 100) if sample_length > 0 else 0
+            
+            # Print detailed debugging information
+            print(f"\n🔍 LANGUAGE DETECTION DEBUG:")
+            print(f"   📊 Sample analyzed: {sample_length} characters")
+            print(f"   📈 Character counts:")
+            print(f"      • Korean (Hangul): {korean_chars} chars ({korean_pct:.1f}%)")
+            print(f"      • Japanese (Kana): {japanese_kana} chars ({japanese_pct:.1f}%)")
+            print(f"      • Chinese (Hanzi): {chinese_chars} chars ({chinese_pct:.1f}%)")
+            print(f"      • Latin/English:   {latin_chars} chars ({latin_pct:.1f}%)")
+            print(f"      • Total CJK:       {total_cjk} chars ({(total_cjk/sample_length*100):.1f}%)")
+            
+            # Show decision thresholds
+            print(f"   ⚖️ Decision thresholds:")
+            print(f"      • Korean threshold: 50 chars (current: {korean_chars})")
+            print(f"      • Japanese threshold: 20 chars (current: {japanese_kana})")
+            print(f"      • Chinese threshold: 50 chars + Japanese < 10 (current: {chinese_chars}, JP: {japanese_kana})")
+            print(f"      • English threshold: 100 chars (current: {latin_chars})")
+            
+            # Apply detection logic with detailed reasoning
             if korean_chars > 50:
-                return 'korean'
+                print(f"   ✅ DETECTED: Korean (Korean chars {korean_chars} > 50)")
+                result = 'korean'
             elif japanese_kana > 20:
-                return 'japanese'
+                print(f"   ✅ DETECTED: Japanese (Japanese kana {japanese_kana} > 20)")
+                result = 'japanese'
             elif chinese_chars > 50 and japanese_kana < 10:
-                return 'chinese'
+                print(f"   ✅ DETECTED: Chinese (Chinese chars {chinese_chars} > 50 AND Japanese kana {japanese_kana} < 10)")
+                result = 'chinese'
             elif latin_chars > 100:
-                return 'english'
+                print(f"   ✅ DETECTED: English (Latin chars {latin_chars} > 100)")
+                result = 'english'
             else:
-                return 'unknown'
+                print(f"   ❓ DETECTED: Unknown (no thresholds met)")
+                result = 'unknown'
+            
+            # Show first few characters as examples
+            if sample:
+                # Get first 20 characters for preview
+                preview = sample[:20].replace('\n', '\\n').replace('\r', '\\r')
+                print(f"   📝 Sample text preview: '{preview}{'...' if len(sample) > 20 else ''}'")
+                
+                # Show some example characters by type
+                korean_examples = [c for c in sample[:50] if 0xAC00 <= ord(c) <= 0xD7AF][:5]
+                japanese_examples = [c for c in sample[:50] if (0x3040 <= ord(c) <= 0x309F) or (0x30A0 <= ord(c) <= 0x30FF)][:5]
+                chinese_examples = [c for c in sample[:50] if 0x4E00 <= ord(c) <= 0x9FFF][:5]
+                
+                if korean_examples:
+                    print(f"   🇰🇷 Korean examples: {''.join(korean_examples)}")
+                if japanese_examples:
+                    print(f"   🇯🇵 Japanese examples: {''.join(japanese_examples)}")
+                if chinese_examples:
+                    print(f"   🇨🇳 Chinese examples: {''.join(chinese_examples)}")
+            
+            print(f"   🎯 FINAL RESULT: {result.upper()}")
+            
+            return result
         
         language_hint = detect_language_hint(all_text)
         print(f"📑 Detected primary language: {language_hint}")
