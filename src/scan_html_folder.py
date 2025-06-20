@@ -1436,20 +1436,6 @@ def generate_html_report(results, output_path, duplicate_confidence):
             issue_type = issue.split(':')[0] if ':' in issue else issue.split('_')[0]
             issue_counts[issue_type] = issue_counts.get(issue_type, 0) + 1
     
-    # Extract duplicate groups from results
-    duplicate_groups = defaultdict(list)
-    for result in results:
-        for issue in result.get('issues', []):
-            if issue.startswith('DUPLICATE:'):
-                if 'part_of_' in issue:
-                    group_id = issue.split('part_of_')[1].split('_')[0]
-                    duplicate_groups[f"group_{group_id}"].append(result)
-                elif 'exact_or_near_copy_of_' in issue:
-                    other = issue.split('exact_or_near_copy_of_')[1]
-                    # Create a consistent group key
-                    group_key = f"pair_{min(result['filename'], other)}_{max(result['filename'], other)}"
-                    duplicate_groups[group_key].append(result)
-    
     html = f"""<html>
 <head>
     <meta charset='utf-8'>
@@ -1466,12 +1452,10 @@ def generate_html_report(results, output_path, duplicate_confidence):
         .issues {{ font-size: 0.9em; }}
         .non-english {{ color: red; font-weight: bold; }}
         .duplicate-group {{ background-color: #ffe6e6; }}
-        .duplicate-group-header {{ background-color: #ff9999; font-weight: bold; }}
         .confidence {{ font-size: 0.8em; color: #666; }}
         .high-confidence {{ color: red; font-weight: bold; }}
         .medium-confidence {{ color: orange; }}
         .low-confidence {{ color: #666; }}
-        .group-separator {{ border-top: 3px solid #333; }}
     </style>
 </head>
 <body>
@@ -1486,80 +1470,28 @@ def generate_html_report(results, output_path, duplicate_confidence):
         for issue_type, count in sorted(issue_counts.items()):
             style = ' class="non-english"' if any(x in issue_type.lower() for x in ['korean', 'chinese', 'japanese']) else ''
             html += f"<li{style}><strong>{issue_type}</strong>: {count} files</li>"
-        html += "</ul>"
-    
-    # Add duplicate groups summary if any exist
-    if duplicate_groups:
-        html += f"<h2>Duplicate Groups Found: {len(duplicate_groups)}</h2>"
-        html += "<ul>"
-        for group_name, group_results in duplicate_groups.items():
-            unique_files = list(set(r['filename'] for r in group_results))
-            html += f"<li><strong>{group_name}</strong>: {len(unique_files)} files</li>"
+        
+        # Count duplicate groups
+        duplicate_groups = set()
+        for result in results:
+            for issue in result.get('issues', []):
+                if issue.startswith('DUPLICATE:'):
+                    if 'part_of_' in issue:
+                        group_id = issue.split('part_of_')[1].split('_')[0]
+                        duplicate_groups.add(f"group_{group_id}")
+                    elif 'exact_or_near_copy_of_' in issue:
+                        other = issue.split('exact_or_near_copy_of_')[1]
+                        duplicate_groups.add(f"pair_{min(result['filename'], other)}_{max(result['filename'], other)}")
+        
+        if duplicate_groups:
+            html += f"<li><strong>Duplicate Groups Found</strong>: {len(duplicate_groups)}</li>"
+        
         html += "</ul>"
     
     html += "<h2>Detailed Results</h2>"
     html += "<table><tr><th>Index</th><th>Filename</th><th>Issues</th><th>Confidence</th><th>Preview</th></tr>"
     
-    # Track which results have been added to avoid duplicates
-    added_results = set()
-    
-    # First, add all duplicate groups
-    for group_idx, (group_name, group_results) in enumerate(duplicate_groups.items()):
-        if group_idx > 0:
-            html += '<tr class="group-separator"><td colspan="5"></td></tr>'
-        
-        # Add group header
-        unique_files = list(set(r['filename'] for r in group_results))
-        html += f'<tr class="duplicate-group-header"><td colspan="5">Duplicate Group: {len(unique_files)} files</td></tr>'
-        
-        # Add all files in this group
-        for result in group_results:
-            if result['filename'] in added_results:
-                continue
-            added_results.add(result['filename'])
-            
-            link = f"<a href='../{result['filename']}' target='_blank'>{result['filename']}</a>"
-            
-            formatted_issues = []
-            for issue in result["issues"]:
-                if issue.startswith("DUPLICATE:"):
-                    formatted_issues.append(f'<span style="color: red; font-weight: bold;">{issue}</span>')
-                elif issue.startswith("NEAR_DUPLICATE:"):
-                    formatted_issues.append(f'<span style="color: darkorange; font-weight: bold;">{issue}</span>')
-                elif '_text_found_' in issue:
-                    formatted_issues.append(f'<span class="non-english">{issue}</span>')
-                else:
-                    formatted_issues.append(issue)
-            
-            issues_str = "<br>".join(formatted_issues) if formatted_issues else "None"
-            
-            # Add confidence score
-            confidence = result.get('duplicate_confidence', 0)
-            if confidence > 0:
-                conf_class = 'high-confidence' if confidence >= 0.9 else 'medium-confidence' if confidence >= 0.8 else 'low-confidence'
-                confidence_str = f'<span class="confidence {conf_class}">{int(confidence * 100)}%</span>'
-            else:
-                confidence_str = '-'
-            
-            preview_escaped = html_lib.escape(result['preview'][:300])
-            
-            html += f"""<tr class='duplicate-group'>
-                <td>{result['file_index']}</td>
-                <td>{link}</td>
-                <td class='issues'>{issues_str}</td>
-                <td>{confidence_str}</td>
-                <td class='preview'>{preview_escaped}</td>
-            </tr>"""
-    
-    # Add separator if there were duplicate groups
-    if duplicate_groups:
-        html += '<tr class="group-separator"><td colspan="5"></td></tr>'
-    
-    # Then add all non-duplicate results
     for row in results:
-        if row['filename'] in added_results:
-            continue
-            
         link = f"<a href='../{row['filename']}' target='_blank'>{row['filename']}</a>"
         
         formatted_issues = []
@@ -1583,13 +1515,11 @@ def generate_html_report(results, output_path, duplicate_confidence):
         else:
             confidence_str = '-'
         
-        row_class = ''
-        if any('NEAR_DUPLICATE:' in issue for issue in row['issues']):
+        row_class = 'duplicate-group' if any('DUPLICATE:' in issue for issue in row['issues']) else ''
+        if not row_class and any('NEAR_DUPLICATE:' in issue for issue in row['issues']):
             row_class = 'warning'
-        elif row["score"] > 1:
-            row_class = 'error'
-        elif row["score"] == 1:
-            row_class = 'warning'
+        if not row_class:
+            row_class = 'error' if row["score"] > 1 else 'warning' if row["score"] == 1 else ''
         
         preview_escaped = html_lib.escape(row['preview'][:300])
         
