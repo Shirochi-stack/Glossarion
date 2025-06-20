@@ -4494,7 +4494,7 @@ def main(log_callback=None, stop_callback=None):
         batch_processor = BatchTranslationProcessor(
             config, client, base_msg, out, progress_lock,
             progress_manager.save, 
-            lambda idx, actual_num, content_hash, output_filename=None, status="completed": progress_manager.update(idx, actual_num, content_hash, output_filename, status),
+            lambda idx, actual_num, content_hash, output_file=None, status="completed": progress_manager.update(idx, actual_num, content_hash, output_filename, status),
             check_stop,
             image_translator
         )
@@ -4859,7 +4859,7 @@ def main(log_callback=None, stop_callback=None):
                 )
                 
                 if result is None:
-                    progress_manager.update(idx, actual_num, content_hash, output_filename=None, status="failed")
+                    progress_manager.update(idx, actual_num, content_hash, output_file=None, status="failed")
                     progress_manager.save()
                     continue
 
