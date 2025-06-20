@@ -1776,26 +1776,26 @@ class TranslationProcessor:
             print(f"    Warning: Failed to check duplicate content: {e}")
             return False, 0
 
-def check_duplicate_content(self, result, idx, prog, out):
-    """Check if translated content is duplicate - with mode selection"""
-    if not self.config.RETRY_DUPLICATE_BODIES:
-        print("    ⚠️ DEBUG: Duplicate detection is DISABLED in config")
-        return False, 0
-    
-    # Get detection mode from config
-    detection_mode = getattr(self.config, 'DUPLICATE_DETECTION_MODE', 'basic')
-    print(f"    🔍 DEBUG: Detection mode = '{detection_mode}'")
-    print(f"    🔍 DEBUG: Lookback chapters = {self.config.DUPLICATE_LOOKBACK_CHAPTERS}")
-    
-    if detection_mode == 'ai-hunter':
-        print("    🤖 DEBUG: Routing to AI Hunter detection...")
-        return self._check_duplicate_ai_hunter(result, idx, prog, out)
-    elif detection_mode == 'cascading':
-        print("    🔄 DEBUG: Routing to Cascading detection...")
-        return self._check_duplicate_cascading(result, idx, prog, out)
-    else:
-        print("    📋 DEBUG: Routing to Basic detection...")
-        return self._check_duplicate_basic(result, idx, prog, out)
+    def check_duplicate_content(self, result, idx, prog, out):
+        """Check if translated content is duplicate - with mode selection"""
+        if not self.config.RETRY_DUPLICATE_BODIES:
+            print("    ⚠️ DEBUG: Duplicate detection is DISABLED in config")
+            return False, 0
+        
+        # Get detection mode from config
+        detection_mode = getattr(self.config, 'DUPLICATE_DETECTION_MODE', 'basic')
+        print(f"    🔍 DEBUG: Detection mode = '{detection_mode}'")
+        print(f"    🔍 DEBUG: Lookback chapters = {self.config.DUPLICATE_LOOKBACK_CHAPTERS}")
+        
+        if detection_mode == 'ai-hunter':
+            print("    🤖 DEBUG: Routing to AI Hunter detection...")
+            return self._check_duplicate_ai_hunter(result, idx, prog, out)
+        elif detection_mode == 'cascading':
+            print("    🔄 DEBUG: Routing to Cascading detection...")
+            return self._check_duplicate_cascading(result, idx, prog, out)
+        else:
+            print("    📋 DEBUG: Routing to Basic detection...")
+            return self._check_duplicate_basic(result, idx, prog, out)
 
     def _check_duplicate_ai_hunter(self, result, idx, prog, out):
         """Enhanced AI Hunter duplicate detection with debug logging"""
