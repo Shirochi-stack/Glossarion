@@ -41,7 +41,7 @@ class SplashManager:
             self._load_icon(main_frame)
             
             # Title
-            title_label = tk.Label(main_frame, text="Glossarion v2.6.9", 
+            title_label = tk.Label(main_frame, text="Glossarion v2.7.2", 
                                   bg='#2b2b2b', fg='#4a9eff', font=('Arial', 20, 'bold'))
             title_label.pack(pady=(10, 5))
             
@@ -237,72 +237,110 @@ class SplashManager:
                 pass
     
     def update_status(self, message):
-        """Update splash status and progress"""
-        self._status_text = message
-        try:
-            if self.splash_window and hasattr(self, 'status_label'):
-                self.status_label.config(text=message)
-                
-                # Map status messages to progress values
-                progress_map = {
-                    "Loading theme framework...": 15,
-                    "Loading UI framework...": 30,
-                    "Creating main window...": 60,
-                    "Loading translation modules...": 75,
-                    "Ready!": 100
-                }
-                
-                # Update progress based on status
-                for key, value in progress_map.items():
-                    if key in message:
-                        self.set_progress(value)
-                        break
-                
-                self.splash_window.update()
-        except:
-            pass
+            """Update splash status and progress with enhanced module loading support"""
+            self._status_text = message
+            try:
+                if self.splash_window and hasattr(self, 'status_label'):
+                    self.status_label.config(text=message)
+                    
+                    # Enhanced progress mapping starting module loading at 10%
+                    progress_map = {
+                        "Loading theme framework...": 5,
+                        "Loading UI framework...": 8,
+                        
+                        # Module loading phase - starts at 10% and goes to 85%
+                        "Loading translation modules...": 10,
+                        "Initializing module system...": 15,
+                        "Loading translation engine...": 20,
+                        "Validating translation engine...": 30,
+                        "✅ translation engine loaded": 40,
+                        "Loading glossary extractor...": 45,
+                        "Validating glossary extractor...": 55,
+                        "✅ glossary extractor loaded": 65,
+                        "Loading EPUB converter...": 70,
+                        "✅ EPUB converter loaded": 75,
+                        "Loading QA scanner...": 78,
+                        "✅ QA scanner loaded": 82,
+                        "Finalizing module initialization...": 85,
+                        "✅ All modules loaded successfully": 88,
+                        
+                        "Creating main window...": 92,
+                        "Ready!": 100
+                    }
+                    
+                    # Check for exact matches first
+                    if message in progress_map:
+                        self.set_progress(progress_map[message])
+                    else:
+                        # Check for partial matches
+                        for key, value in progress_map.items():
+                            if key in message:
+                                self.set_progress(value)
+                                break
+                    
+                    self.splash_window.update()
+            except:
+                pass
     
     def set_progress(self, value):
         """Manually set progress value (0-100)"""
         self.progress_value = max(0, min(100, value))
     
     def close_splash(self):
-        """Close the splash screen"""
-        try:
-            # IMPORTANT: Cancel the animation first
-            if self._after_id and self.splash_window:
-                try:
-                    self.splash_window.after_cancel(self._after_id)
-                except:
-                    pass
+            """Close the splash screen with proper text visibility"""
+            try:
+                # IMPORTANT: Cancel the animation first
+                if self._after_id and self.splash_window:
+                    try:
+                        self.splash_window.after_cancel(self._after_id)
+                    except:
+                        pass
+                    self._after_id = None
+                
+                if self.splash_window and self.splash_window.winfo_exists():
+                    # Set to 100% and ensure text is visible
+                    self.progress_value = 100
+                    
+                    # Update display one last time without scheduling another callback
+                    if hasattr(self, 'progress_fill') and self.progress_fill:
+                        self.progress_bg.delete(self.progress_fill)
+                    self.progress_bg.delete("highlight")
+                    
+                    # Create the 100% progress bar (but leave space for text)
+                    fill_width = int((self.progress_value / 100) * (self.canvas_width - 6))
+                    if fill_width > 0:
+                        # Create progress fill that doesn't cover the text area
+                        self.progress_fill = self.progress_bg.create_rectangle(
+                            3, 3, 3 + fill_width, self.canvas_height - 3, 
+                            fill='#4a9eff', outline=''
+                        )
+                        
+                        # Add highlight effect
+                        if fill_width > 10:
+                            self.progress_bg.create_rectangle(
+                                3, 3, min(13, 3 + fill_width), 12,
+                                fill='#6bb6ff', outline='', tags="highlight"
+                            )
+                    
+                    # CRITICAL: Make sure text stays on top and is visible
+                    if hasattr(self, 'progress_text'):
+                        self.progress_bg.itemconfig(self.progress_text, text="100%", fill='#ffffff')
+                    
+                    # Update all outline layers for better visibility
+                    for item in self.progress_bg.find_withtag("outline"):
+                        self.progress_bg.itemconfig(item, text="100%", fill='#000000')
+                    
+                    # Ensure text layers are on top of progress fill
+                    self.progress_bg.tag_raise("outline")
+                    if hasattr(self, 'progress_text'):
+                        self.progress_bg.tag_raise(self.progress_text)
+                    
+                    self.splash_window.update()
+                    time.sleep(0.1)
+                    
+                    self.splash_window.destroy()
+                    self.splash_window = None
+            except:
+                # Ensure cleanup even on error
                 self._after_id = None
-            
-            if self.splash_window and self.splash_window.winfo_exists():
-                # Set to 100% briefly before closing
-                self.progress_value = 100
-                
-                # Update display one last time without scheduling another callback
-                if self.progress_fill:
-                    self.progress_bg.delete(self.progress_fill)
-                self.progress_bg.delete("highlight")
-                
-                fill_width = int((self.progress_value / 100) * (self.canvas_width - 6))
-                if fill_width > 0:
-                    self.progress_fill = self.progress_bg.create_rectangle(
-                        3, 3, 3 + fill_width, self.canvas_height - 3, 
-                        fill='#4a9eff', outline=''
-                    )
-                
-                self.progress_bg.itemconfig(self.progress_text, text="100%")
-                for item in self.progress_bg.find_withtag("outline"):
-                    self.progress_bg.itemconfig(item, text="100%")
-                
-                self.splash_window.update()
-                time.sleep(0.1)
-                
-                self.splash_window.destroy()
                 self.splash_window = None
-        except:
-            # Ensure cleanup even on error
-            self._after_id = None
-            self.splash_window = None
