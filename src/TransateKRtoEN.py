@@ -57,7 +57,7 @@ class TranslationConfig:
         self.ROLLING_SUMMARY_EXCHANGES = int(os.getenv("ROLLING_SUMMARY_EXCHANGES", "5"))
         self.ROLLING_SUMMARY_MODE = os.getenv("ROLLING_SUMMARY_MODE", "append")
         self.DUPLICATE_DETECTION_MODE = os.getenv("DUPLICATE_DETECTION_MODE", "basic")
-        self.DUPLICATE_THRESHOLD_MODE = os.getenv("DUPLICATE_THRESHOLD_MODE", "standard")
+        self.AI_HUNTER_THRESHOLD = int(os.getenv("AI_HUNTER_THRESHOLD", "75"))
         self.TRANSLATION_HISTORY_ROLLING = os.getenv("TRANSLATION_HISTORY_ROLLING", "0") == "1"
         self.API_KEY = (os.getenv("API_KEY") or 
                        os.getenv("OPENAI_API_KEY") or 
@@ -1779,6 +1779,8 @@ class TranslationProcessor:
                 try:
                     threshold = float(custom_threshold) / 100.0  # Convert percentage to decimal
                     threshold = max(0.1, min(1.0, threshold))  # Clamp between 10% and 100%
+                    
+                    print(f"    🤖 AI Hunter: Using threshold {int(threshold*100)}%")
                 except ValueError:
                     # Fallback to default threshold
                     threshold = 0.75
