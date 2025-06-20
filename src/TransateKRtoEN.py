@@ -399,26 +399,34 @@ class ProgressManager:
                 except:
                     pass
     
-    def update(self, chapter_idx, actual_num, content_hash, output_filename=None, status="completed"):
-        """Update progress tracking after successful translation"""
-        chapter_key = content_hash
+    def update(self, idx, actual_num, content_hash, output_file, status="in_progress", ai_features=None):
+        """Update progress for a chapter"""
+        chapter_key = str(idx)
         
-        self.prog["chapters"][chapter_key] = {
-            "chapter_idx": chapter_idx,
+        chapter_info = {
             "actual_num": actual_num,
             "content_hash": content_hash,
-            "output_file": output_filename,
+            "output_file": output_file,
             "status": status,
-            "timestamp": time.time(),
-            "display_name": f"Chapter {actual_num}",  
-            "file_basename": output_filename.replace('response_', '').replace('.html', '') if output_filename else None
+            "last_updated": time.time()
         }
         
-        if output_filename and status == "completed":
+        # FIXED: Store AI features if provided
+        if ai_features is not None:
+            chapter_info["ai_features"] = ai_features
+        
+        # Preserve existing AI features if not overwriting
+        elif chapter_key in self.prog["chapters"] and "ai_features" in self.prog["chapters"][chapter_key]:
+            chapter_info["ai_features"] = self.prog["chapters"][chapter_key]["ai_features"]
+        
+        self.prog["chapters"][chapter_key] = chapter_info
+        
+        # Update content hash index
+        if content_hash and status == "completed":
             self.prog["content_hashes"][content_hash] = {
-                "chapter_idx": chapter_idx,
+                "chapter_idx": idx,
                 "actual_num": actual_num,
-                "output_file": output_filename
+                "output_file": output_file
             }
     
     def check_chapter_status(self, chapter_idx, actual_num, content_hash, output_dir):
@@ -1851,38 +1859,62 @@ class TranslationProcessor:
                 if prev_key not in prog["chapters"]:
                     print(f"       ❌ Chapter not in progress data")
                     continue
-                    
-                if not prog["chapters"][prev_key].get("output_file"):
-                    print(f"       ❌ No output file for this chapter")
-                    continue
-                    
-                prev_file = prog["chapters"][prev_key]["output_file"]
-                prev_path = os.path.join(out, prev_file)
                 
-                if not os.path.exists(prev_path):
-                    print(f"       ❌ Output file doesn't exist: {prev_file}")
+                # FIXED: Check if we have cached features first
+                prev_features = None
+                if "ai_features" in prog["chapters"][prev_key]:
+                    print(f"       ✅ Using cached features from progress data")
+                    prev_features = prog["chapters"][prev_key]["ai_features"]
+                    prev_clean = None  # We don't need the text if we have features
+                elif prog["chapters"][prev_key].get("output_file"):
+                    # Fall back to reading from file if no cached features
+                    prev_file = prog["chapters"][prev_key]["output_file"]
+                    prev_path = os.path.join(out, prev_file)
+                    
+                    if not os.path.exists(prev_path):
+                        print(f"       ❌ Output file doesn't exist: {prev_file}")
+                        continue
+                        
+                    try:
+                        with open(prev_path, 'r', encoding='utf-8') as f:
+                            prev_content = f.read()
+                            prev_clean = re.sub(r'<[^>]+>', '', prev_content).strip()
+                            
+                        print(f"       ✅ Loaded {len(prev_clean)} chars from {prev_file}")
+                        
+                        # Extract features for previous chapter
+                        prev_features = self._extract_text_features(prev_clean)
+                        
+                        # FIXED: Cache the features for future use
+                        prog["chapters"][prev_key]["ai_features"] = prev_features
+                        
+                    except Exception as e:
+                        print(f"       ❌ Error reading file: {e}")
+                        continue
+                else:
+                    print(f"       ❌ No output file or cached features")
+                    continue
+                
+                if not prev_features:
+                    print(f"       ❌ Could not get features for comparison")
                     continue
                     
                 try:
-                    with open(prev_path, 'r', encoding='utf-8') as f:
-                        prev_content = f.read()
-                        prev_clean = re.sub(r'<[^>]+>', '', prev_content).strip()
-                        
-                    print(f"       ✅ Loaded {len(prev_clean)} chars from {prev_file}")
-                    
-                    # Extract features for previous chapter
-                    prev_features = self._extract_text_features(prev_clean)
-                    
                     # Multi-method detection
                     similarities = {}
                     
-                    # Method 1: Exact content match
-                    exact_sim = self._calculate_exact_similarity(result_clean[:2000], prev_clean[:2000])
-                    similarities['exact'] = exact_sim
-                    
-                    # Method 2: Enhanced text similarity
-                    text_sim = self._calculate_smart_similarity(result_clean, prev_clean)
-                    similarities['text'] = text_sim
+                    # Method 1: Exact content match (only if we have the text)
+                    if prev_clean is not None:
+                        exact_sim = self._calculate_exact_similarity(result_clean[:2000], prev_clean[:2000])
+                        similarities['exact'] = exact_sim
+                        
+                        # Method 2: Enhanced text similarity
+                        text_sim = self._calculate_smart_similarity(result_clean, prev_clean)
+                        similarities['text'] = text_sim
+                    else:
+                        # If we don't have text, use a simplified comparison
+                        similarities['exact'] = 0.0
+                        similarities['text'] = 0.0
                     
                     # Method 3: Semantic fingerprint
                     semantic_sim = self._calculate_semantic_similarity(
@@ -1944,6 +1976,11 @@ class TranslationProcessor:
                     import traceback
                     print(f"       {traceback.format_exc()}")
                     continue
+            
+            # FIXED: Store current chapter's features for future comparisons
+            # This should be done by the caller after translation is complete
+            # But we'll prepare it here
+            self._current_chapter_features = result_features
             
             # No duplicate found
             print(f"\n    ✅ No duplicate found")
@@ -2487,8 +2524,19 @@ class BatchTranslationProcessor:
             
             print(f"💾 Saved Chapter {actual_num}: {fname} ({len(cleaned)} chars)")
             
+            # FIXED: Extract and save AI features for future duplicate detection
+            ai_features = None
+            if hasattr(self.config, 'DUPLICATE_DETECTION_MODE') and self.config.DUPLICATE_DETECTION_MODE in ['ai-hunter', 'cascading']:
+                try:
+                    # Extract features from the translated content
+                    cleaned_text = re.sub(r'<[^>]+>', '', cleaned).strip()
+                    ai_features = self.translator._extract_text_features(cleaned_text)
+                    print(f"    🔬 Extracted and cached AI features for Chapter {actual_num}")
+                except Exception as e:
+                    print(f"    ⚠️ Failed to extract AI features: {e}")
+            
             with self.progress_lock:
-                self.update_progress_fn(idx, actual_num, content_hash, fname, status="completed")
+                self.update_progress_fn(idx, actual_num, content_hash, fname, status="completed", ai_features=ai_features)
                 self.save_progress_fn()
                 
                 self.chapters_completed += 1
