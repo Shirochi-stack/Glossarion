@@ -46,10 +46,12 @@ def load_application_icon(window, base_dir):
 
 class TranslatorGUI:
     def __init__(self, master):
+        master.configure(bg='#2b2b2b')
         self.master = master
+
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        master.title("Glossarion v2.6.9 — The AI Hunter Unleashed!!")
+        master.title("Glossarion v2.7.2 — The AI Hunter Unleashed!!")
         master.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         master.minsize(1600, 1000)
         master.bind('<F11>', self.toggle_fullscreen)
@@ -243,7 +245,7 @@ class TranslatorGUI:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v2.6.9 - Ready to use!")
+        self.append_log("🚀 Glossarion v2.7.2 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -331,6 +333,14 @@ class TranslatorGUI:
                       bootstyle="round-toggle").grid(row=7, column=2, sticky=tk.W, padx=5, pady=5)
         tk.Label(self.frame, text="(Keep recent history instead of purging)",
                 font=('TkDefaultFont', 11), fg='gray').grid(row=7, column=3, sticky=tk.W, padx=5, pady=5)
+                
+        #detection mode
+        self.duplicate_detection_mode_var = tk.StringVar(value=self.config.get('duplicate_detection_mode', 'basic'))
+        self.ai_hunter_threshold_var = tk.StringVar(value=str(self.config.get('ai_hunter_threshold', 75)))
+
+
+        
+
         
         # Hidden entries for compatibility
         self.title_trim = tb.Entry(self.frame, width=6)
@@ -393,57 +403,248 @@ class TranslatorGUI:
             self.log_text.bind("<Button-2>", self._show_context_menu)
 
     def _lazy_load_modules(self, splash_callback=None):
-        """Load heavy modules only when needed"""
-        if self._modules_loaded:
-            return True
-        if self._modules_loading:
-            while self._modules_loading and not self._modules_loaded:
-                time.sleep(0.1)
-            return self._modules_loaded
-        
-        self._modules_loading = True
-        if splash_callback:
-            splash_callback("Loading translation modules...")
-        
-        global translation_main, translation_stop_flag, translation_stop_check
-        global glossary_main, glossary_stop_flag, glossary_stop_check
-        global fallback_compile_epub, scan_html_folder
-        
-        success_count = 0
-        modules = [
-            ('TransateKRtoEN', 'translation engine'),
-            ('extract_glossary_from_epub', 'glossary extractor'),
-            ('epub_converter', 'EPUB converter'),
-            ('scan_html_folder', 'QA scanner')
-        ]
-        
-        for module_name, display_name in modules:
+            """Load heavy modules only when needed - Enhanced with thread safety, retry logic, and progress tracking"""
+            # Quick return if already loaded (unchanged for compatibility)
+            if self._modules_loaded:
+                return True
+                
+            # Enhanced thread safety with timeout protection
+            if self._modules_loading:
+                timeout_start = time.time()
+                timeout_duration = 30.0  # 30 second timeout to prevent infinite waiting
+                
+                while self._modules_loading and not self._modules_loaded:
+                    # Check for timeout to prevent infinite loops
+                    if time.time() - timeout_start > timeout_duration:
+                        self.append_log("⚠️ Module loading timeout - resetting loading state")
+                        self._modules_loading = False
+                        break
+                    time.sleep(0.1)
+                return self._modules_loaded
+            
+            # Set loading flag with enhanced error handling
+            self._modules_loading = True
+            loading_start_time = time.time()
+            
             try:
                 if splash_callback:
-                    splash_callback(f"Loading {display_name}...")
+                    splash_callback("Loading translation modules...")
                 
-                if module_name == 'TransateKRtoEN':
-                    from TransateKRtoEN import main as translation_main, set_stop_flag as translation_stop_flag, is_stop_requested as translation_stop_check
-                elif module_name == 'extract_glossary_from_epub':
-                    from extract_glossary_from_epub import main as glossary_main, set_stop_flag as glossary_stop_flag, is_stop_requested as glossary_stop_check
-                elif module_name == 'epub_converter':
-                    from epub_converter import fallback_compile_epub
-                elif module_name == 'scan_html_folder':
-                    from scan_html_folder import scan_html_folder
-                success_count += 1
-            except ImportError as e:
-                print(f"Warning: Could not import {module_name}: {e}")
-        
-        self._modules_loaded = True
-        self._modules_loading = False
-        
-        if splash_callback:
-            splash_callback(f"Loaded {success_count}/{len(modules)} modules successfully")
-        if hasattr(self, 'master'):
-            self.master.after(0, self._check_modules)
-        if hasattr(self, 'append_log'):
-            self.append_log(f"✅ Loaded {success_count}/{len(modules)} modules successfully")
-        return True
+                # Global module imports (unchanged for compatibility)
+                global translation_main, translation_stop_flag, translation_stop_check
+                global glossary_main, glossary_stop_flag, glossary_stop_check
+                global fallback_compile_epub, scan_html_folder
+                
+                # Enhanced module configuration with validation and retry info
+                modules = [
+                    {
+                        'name': 'TransateKRtoEN',
+                        'display_name': 'translation engine',
+                        'imports': ['main', 'set_stop_flag', 'is_stop_requested'],
+                        'global_vars': ['translation_main', 'translation_stop_flag', 'translation_stop_check'],
+                        'critical': True,
+                        'retry_count': 0,
+                        'max_retries': 2
+                    },
+                    {
+                        'name': 'extract_glossary_from_epub',
+                        'display_name': 'glossary extractor', 
+                        'imports': ['main', 'set_stop_flag', 'is_stop_requested'],
+                        'global_vars': ['glossary_main', 'glossary_stop_flag', 'glossary_stop_check'],
+                        'critical': True,
+                        'retry_count': 0,
+                        'max_retries': 2
+                    },
+                    {
+                        'name': 'epub_converter',
+                        'display_name': 'EPUB converter',
+                        'imports': ['fallback_compile_epub'],
+                        'global_vars': ['fallback_compile_epub'],
+                        'critical': False,
+                        'retry_count': 0,
+                        'max_retries': 1
+                    },
+                    {
+                        'name': 'scan_html_folder', 
+                        'display_name': 'QA scanner',
+                        'imports': ['scan_html_folder'],
+                        'global_vars': ['scan_html_folder'],
+                        'critical': False,
+                        'retry_count': 0,
+                        'max_retries': 1
+                    }
+                ]
+                
+                success_count = 0
+                total_modules = len(modules)
+                failed_modules = []
+                
+                # Enhanced module loading with progress tracking and retry logic
+                for i, module_info in enumerate(modules):
+                    module_name = module_info['name']
+                    display_name = module_info['display_name']
+                    max_retries = module_info['max_retries']
+                    
+                    # Progress callback with detailed information
+                    if splash_callback:
+                        progress_percent = int((i / total_modules) * 100)
+                        splash_callback(f"Loading {display_name}... ({progress_percent}%)")
+                    
+                    # Retry logic for robust loading
+                    loaded_successfully = False
+                    
+                    for retry_attempt in range(max_retries + 1):
+                        try:
+                            if retry_attempt > 0:
+                                # Add small delay between retries
+                                time.sleep(0.2)
+                                if splash_callback:
+                                    splash_callback(f"Retrying {display_name}... (attempt {retry_attempt + 1})")
+                            
+                            # Enhanced import logic with specific error handling
+                            if module_name == 'TransateKRtoEN':
+                                # Validate the module before importing critical functions
+                                import TransateKRtoEN
+                                # Verify the module has required functions
+                                if hasattr(TransateKRtoEN, 'main') and hasattr(TransateKRtoEN, 'set_stop_flag'):
+                                    from TransateKRtoEN import main as translation_main, set_stop_flag as translation_stop_flag, is_stop_requested as translation_stop_check
+                                else:
+                                    raise ImportError("TransateKRtoEN module missing required functions")
+                                    
+                            elif module_name == 'extract_glossary_from_epub':
+                                # Validate the module before importing critical functions  
+                                import extract_glossary_from_epub
+                                if hasattr(extract_glossary_from_epub, 'main') and hasattr(extract_glossary_from_epub, 'set_stop_flag'):
+                                    from extract_glossary_from_epub import main as glossary_main, set_stop_flag as glossary_stop_flag, is_stop_requested as glossary_stop_check
+                                else:
+                                    raise ImportError("extract_glossary_from_epub module missing required functions")
+                                    
+                            elif module_name == 'epub_converter':
+                                # Validate the module before importing
+                                import epub_converter
+                                if hasattr(epub_converter, 'fallback_compile_epub'):
+                                    from epub_converter import fallback_compile_epub
+                                else:
+                                    raise ImportError("epub_converter module missing fallback_compile_epub function")
+                                    
+                            elif module_name == 'scan_html_folder':
+                                # Validate the module before importing
+                                import scan_html_folder
+                                if hasattr(scan_html_folder, 'scan_html_folder'):
+                                    from scan_html_folder import scan_html_folder
+                                else:
+                                    raise ImportError("scan_html_folder module missing scan_html_folder function")
+                            
+                            # If we reach here, import was successful
+                            loaded_successfully = True
+                            success_count += 1
+                            break
+                            
+                        except ImportError as e:
+                            module_info['retry_count'] = retry_attempt + 1
+                            error_msg = str(e)
+                            
+                            # Log retry attempts
+                            if retry_attempt < max_retries:
+                                if hasattr(self, 'append_log'):
+                                    self.append_log(f"⚠️ Failed to load {display_name} (attempt {retry_attempt + 1}): {error_msg}")
+                            else:
+                                # Final failure
+                                print(f"Warning: Could not import {module_name} after {max_retries + 1} attempts: {error_msg}")
+                                failed_modules.append({
+                                    'name': module_name,
+                                    'display_name': display_name,
+                                    'error': error_msg,
+                                    'critical': module_info['critical']
+                                })
+                                break
+                        
+                        except Exception as e:
+                            # Handle unexpected errors
+                            error_msg = f"Unexpected error: {str(e)}"
+                            print(f"Warning: Unexpected error loading {module_name}: {error_msg}")
+                            failed_modules.append({
+                                'name': module_name,
+                                'display_name': display_name, 
+                                'error': error_msg,
+                                'critical': module_info['critical']
+                            })
+                            break
+                    
+                    # Enhanced progress feedback
+                    if loaded_successfully and splash_callback:
+                        progress_percent = int(((i + 1) / total_modules) * 100)
+                        splash_callback(f"✅ {display_name} loaded ({progress_percent}%)")
+                
+                # Calculate loading time for performance monitoring
+                loading_time = time.time() - loading_start_time
+                
+                # Enhanced success/failure reporting
+                if splash_callback:
+                    if success_count == total_modules:
+                        splash_callback(f"Loaded {success_count}/{total_modules} modules successfully in {loading_time:.1f}s")
+                    else:
+                        splash_callback(f"Loaded {success_count}/{total_modules} modules ({len(failed_modules)} failed)")
+                
+                # Enhanced logging with module status details
+                if hasattr(self, 'append_log'):
+                    if success_count == total_modules:
+                        self.append_log(f"✅ Loaded {success_count}/{total_modules} modules successfully in {loading_time:.1f}s")
+                    else:
+                        self.append_log(f"⚠️ Loaded {success_count}/{total_modules} modules successfully ({len(failed_modules)} failed)")
+                        
+                        # Report critical failures
+                        critical_failures = [f for f in failed_modules if f['critical']]
+                        if critical_failures:
+                            for failure in critical_failures:
+                                self.append_log(f"❌ Critical module failed: {failure['display_name']} - {failure['error']}")
+                        
+                        # Report non-critical failures
+                        non_critical_failures = [f for f in failed_modules if not f['critical']]
+                        if non_critical_failures:
+                            for failure in non_critical_failures:
+                                self.append_log(f"⚠️ Optional module failed: {failure['display_name']} - {failure['error']}")
+                
+                # Final module state update with enhanced error checking
+                self._modules_loaded = True
+                self._modules_loading = False
+                
+                # Enhanced module availability checking with better integration
+                if hasattr(self, 'master'):
+                    self.master.after(0, self._check_modules)
+                
+                # Return success status - maintain compatibility by returning True if any modules loaded
+                # But also check for critical module failures
+                critical_failures = [f for f in failed_modules if f['critical']]
+                if critical_failures and success_count == 0:
+                    # Complete failure case
+                    if hasattr(self, 'append_log'):
+                        self.append_log("❌ Critical module loading failed - some functionality may be unavailable")
+                    return False
+                
+                return True
+                
+            except Exception as unexpected_error:
+                # Enhanced error recovery for unexpected failures
+                error_msg = f"Unexpected error during module loading: {str(unexpected_error)}"
+                print(f"Critical error: {error_msg}")
+                
+                if hasattr(self, 'append_log'):
+                    self.append_log(f"❌ Module loading failed: {error_msg}")
+                
+                # Reset states for retry possibility
+                self._modules_loaded = False
+                self._modules_loading = False
+                
+                if splash_callback:
+                    splash_callback(f"Module loading failed: {str(unexpected_error)}")
+                
+                return False
+                
+            finally:
+                # Enhanced cleanup - ensure loading flag is always reset
+                if self._modules_loading:
+                    self._modules_loading = False
 
     def _check_modules(self):
         """Check which modules are available and disable buttons if needed"""
@@ -2069,7 +2270,9 @@ class TranslatorGUI:
             'DISABLE_ZERO_DETECTION': "1" if self.disable_zero_detection_var.get() else "0",
             'TRANSLATION_HISTORY_ROLLING': "1" if self.translation_history_rolling_var.get() else "0",
             'COMPREHENSIVE_EXTRACTION': "1" if self.comprehensive_extraction_var.get() else "0",
-            'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var.get() else "0"
+            'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var.get() else "0",
+            'DUPLICATE_DETECTION_MODE': self.duplicate_detection_mode_var.get(),
+            'DUPLICATE_THRESHOLD_MODE': self.duplicate_threshold_mode_var.get()
         }
 
     def run_glossary_extraction_thread(self):
@@ -3182,8 +3385,8 @@ class TranslatorGUI:
     def _create_context_management_section(self, parent):
         """Create context management section"""
         section_frame = tk.LabelFrame(parent, text="Context Management & Memory", padx=10, pady=10)
-        section_frame.grid(row=0, column=0, sticky="nsew", padx=(10, 5), pady=(10, 5))
-        
+        section_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 10), pady=(10, 5))
+            
         content_frame = tk.Frame(section_frame)
         content_frame.pack(anchor=tk.NW, fill=tk.BOTH, expand=True)
         
@@ -3227,9 +3430,9 @@ class TranslatorGUI:
                 font=('TkDefaultFont', 11), fg='#666', justify=tk.LEFT).pack(anchor=tk.W, padx=5, pady=(0, 5))
 
     def _create_response_handling_section(self, parent):
-        """Create response handling section"""
+        """Create response handling section with AI Hunter additions"""
         section_frame = tk.LabelFrame(parent, text="Response Handling & Retry Logic", padx=10, pady=10)
-        section_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 10), pady=(10, 5))
+        section_frame.grid(row=1, column=0, sticky="nsew", padx=(10, 5), pady=5)  # Fixed: row=1, column=0
         
         # Retry Truncated
         tb.Checkbutton(section_frame, text="Auto-retry Truncated Responses", 
@@ -3256,12 +3459,44 @@ class TranslatorGUI:
         tk.Label(duplicate_frame, text="chapters").pack(side=tk.LEFT)
         
         tk.Label(section_frame, text="Detects when AI returns same content\nfor different chapters",
-                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(5, 5))
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(5, 10))
+        
+        # NEW: Detection Method subsection
+        method_label = tk.Label(section_frame, text="Detection Method:", font=('TkDefaultFont', 10, 'bold'))
+        method_label.pack(anchor=tk.W, padx=20, pady=(10, 5))
+        
+        methods = [
+            ("basic", "Basic (Fast) - Original 85% threshold, 1000 chars"),
+            ("ai-hunter", "AI Hunter - Multi-method semantic analysis"),
+            ("cascading", "Cascading - Basic first, then AI Hunter")
+        ]
+        
+        for value, text in methods:
+            rb = tb.Radiobutton(section_frame, text=text, variable=self.duplicate_detection_mode_var, 
+                               value=value, bootstyle="primary")
+            rb.pack(anchor=tk.W, padx=40, pady=2)
+        
+        # NEW: AI Hunter Custom Threshold
+        threshold_frame = tk.Frame(section_frame)
+        threshold_frame.pack(anchor=tk.W, padx=20, pady=(10, 5))
+        
+        tk.Label(threshold_frame, text="AI Hunter Threshold:", font=('TkDefaultFont', 10, 'bold')).pack(side=tk.LEFT)
+        
+        # Create custom threshold entry
+        self.ai_hunter_threshold_var = tk.StringVar(value=str(self.config.get('ai_hunter_threshold', 75)))
+        tb.Entry(threshold_frame, width=6, textvariable=self.ai_hunter_threshold_var).pack(side=tk.LEFT, padx=(10, 5))
+        tk.Label(threshold_frame, text="%").pack(side=tk.LEFT)
+        
+        tk.Label(section_frame, text="Custom similarity threshold for AI Hunter detection\n"
+                "Lower = more sensitive (more duplicates found)\n"
+                "Higher = less sensitive (fewer false positives)\n"
+                "Recommended: 40-90%",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack
         
         # Retry Slow
         tb.Checkbutton(section_frame, text="Auto-retry Slow Chunks", 
                       variable=self.retry_timeout_var,
-                      bootstyle="round-toggle").pack(anchor=tk.W, pady=(10, 0))
+                      bootstyle="round-toggle").pack(anchor=tk.W, pady=(15, 0))
         
         timeout_frame = tk.Frame(section_frame)
         timeout_frame.pack(anchor=tk.W, padx=20, pady=(5, 0))
@@ -3273,15 +3508,10 @@ class TranslatorGUI:
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
 
     def _create_prompt_management_section(self, parent):
-        """Create prompt management section"""
-        section_frame = tk.LabelFrame(parent, text="Prompt Management", padx=10, pady=10)
-        section_frame.grid(row=1, column=0, sticky="nsew", padx=(10, 5), pady=5)
+        """Create meta data section (formerly prompt management)"""
+        section_frame = tk.LabelFrame(parent, text="Meta Data", padx=10, pady=10)
+        section_frame.grid(row=0, column=0, sticky="nsew", padx=(10, 5), pady=(10, 5))
         
-        reinforce_frame = tk.Frame(section_frame)
-        reinforce_frame.pack(anchor=tk.W, pady=(0, 5))
-        tk.Label(reinforce_frame, text="Reinforce every").pack(side=tk.LEFT)
-        tb.Entry(reinforce_frame, width=6, textvariable=self.reinforcement_freq_var).pack(side=tk.LEFT, padx=5)
-        tk.Label(reinforce_frame, text="messages").pack(side=tk.LEFT)
         
         title_frame = tk.Frame(section_frame)
         title_frame.pack(anchor=tk.W, pady=(10, 10))
@@ -3295,13 +3525,33 @@ class TranslatorGUI:
                  bootstyle="info-outline", width=20).pack(side=tk.LEFT, padx=(10, 0))
         
         tk.Label(section_frame, text="When enabled: Book titles will be translated to English\n"
-                "When disabled: Book titles remain in original language",
-                font=('TkDefaultFont', 11), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+                    "When disabled: Book titles remain in original language",
+                    font=('TkDefaultFont', 11), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+            
+        # EPUB Validation (moved from Processing Options)
+        ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
+        
+        tk.Label(section_frame, text="EPUB Utilities:", font=('TkDefaultFont', 11, 'bold')).pack(anchor=tk.W, pady=(5, 5))
+        
+        tb.Button(section_frame, text="🔍 Validate EPUB Structure", 
+                 command=self.validate_epub_structure_gui, 
+                 bootstyle="success-outline",
+                 width=25).pack(anchor=tk.W, pady=2)
+        
+        tk.Label(section_frame, text="Check if all required EPUB files are\npresent for compilation",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 5))
 
     def _create_processing_options_section(self, parent):
         """Create processing options section"""
         section_frame = tk.LabelFrame(parent, text="Processing Options", padx=10, pady=10)
         section_frame.grid(row=1, column=1, sticky="nsew", padx=(5, 10), pady=5)
+        
+        # Reinforce messages option (moved from Meta Data)
+        reinforce_frame = tk.Frame(section_frame)
+        reinforce_frame.pack(anchor=tk.W, pady=(0, 10))
+        tk.Label(reinforce_frame, text="Reinforce every").pack(side=tk.LEFT)
+        tb.Entry(reinforce_frame, width=6, textvariable=self.reinforcement_freq_var).pack(side=tk.LEFT, padx=5)
+        tk.Label(reinforce_frame, text="messages").pack(side=tk.LEFT)
         
         tb.Checkbutton(section_frame, text="Emergency Paragraph Restoration", 
                       variable=self.emergency_restore_var,
@@ -3317,15 +3567,6 @@ class TranslatorGUI:
         tk.Label(section_frame, text="Automatically retry failed/deleted chapters\non each translation run",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
         
-        tk.Label(section_frame, text="EPUB Utilities:", font=('TkDefaultFont', 11, 'bold')).pack(anchor=tk.W, pady=(5, 5))
-        
-        tb.Button(section_frame, text="🔍 Validate EPUB Structure", 
-                 command=self.validate_epub_structure_gui, 
-                 bootstyle="success-outline",
-                 width=25).pack(anchor=tk.W, pady=2)
-        
-        tk.Label(section_frame, text="Check if all required EPUB files are\npresent for compilation",
-                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 5))
         
         tb.Checkbutton(section_frame, text="Comprehensive Chapter Extraction", 
                       variable=self.comprehensive_extraction_var,
@@ -3443,7 +3684,9 @@ class TranslatorGUI:
                     'disable_zero_detection': self.disable_zero_detection_var.get(),
                     'enable_image_translation': self.enable_image_translation_var.get(),
                     'process_webnovel_images': self.process_webnovel_images_var.get(),
-                    'hide_image_translation_label': self.hide_image_translation_label_var.get()
+                    'hide_image_translation_label': self.hide_image_translation_label_var.get(),
+                    'duplicate_detection_mode': self.duplicate_detection_mode_var.get(),
+                    'ai_hunter_threshold': safe_int(self.ai_hunter_threshold_var.get(), 75)
                 })
                 
                 # Validate numeric fields
@@ -3492,7 +3735,9 @@ class TranslatorGUI:
                     "IMAGE_CHUNK_HEIGHT": str(self.config['image_chunk_height']),
                     "HIDE_IMAGE_TRANSLATION_LABEL": "1" if self.hide_image_translation_label_var.get() else "0",
                     "DISABLE_EPUB_GALLERY": "1" if self.disable_epub_gallery_var.get() else "0",
-                    "DISABLE_ZERO_DETECTION": "1" if self.disable_zero_detection_var.get() else "0"
+                    "DISABLE_ZERO_DETECTION": "1" if self.disable_zero_detection_var.get() else "0",
+                    "DUPLICATE_DETECTION_MODE": self.duplicate_detection_mode_var.get(),
+                    "AI_HUNTER_THRESHOLD": self.ai_hunter_threshold_var.get()
                 }
                 os.environ.update(env_updates)
                 
@@ -3729,6 +3974,9 @@ class TranslatorGUI:
             self.config['glossary_history_rolling'] = self.glossary_history_rolling_var.get()
             self.config['disable_epub_gallery'] = self.disable_epub_gallery_var.get()
             self.config['enable_auto_glossary'] = self.enable_auto_glossary_var.get()
+            self.config['duplicate_detection_mode'] = self.duplicate_detection_mode_var.get()
+            self.config['ai_hunter_threshold'] = safe_int(self.ai_hunter_threshold_var.get(), 75)
+
             
             _tl = self.token_limit_entry.get().strip()
             if _tl.isdigit():
@@ -3747,11 +3995,10 @@ class TranslatorGUI:
     def log_debug(self, message):
         self.append_log(f"[DEBUG] {message}")
 
-
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v2.6.9...")
+    print("🚀 Starting Glossarion v2.7.2...")
     
     # Initialize splash screen
     splash_manager = None
@@ -3762,7 +4009,7 @@ if __name__ == "__main__":
         
         if splash_started:
             splash_manager.update_status("Loading theme framework...")
-            time.sleep(0.5)
+            time.sleep(0.1)  # Reduced from 0.15 to 0.1
     except Exception as e:
         print(f"⚠️ Splash screen failed: {e}")
         splash_manager = None
@@ -3770,25 +4017,135 @@ if __name__ == "__main__":
     try:
         if splash_manager:
             splash_manager.update_status("Loading UI framework...")
-            time.sleep(0.3)
+            time.sleep(0.08)  # Reduced from 0.1 to 0.08
         
+        # Import ttkbootstrap while splash is visible
         import ttkbootstrap as tb
         from ttkbootstrap.constants import *
         
+        # REAL module loading during splash screen with gradual progression
+        if splash_manager:
+            # Create a custom callback function for splash updates
+            def splash_callback(message):
+                if splash_manager and splash_manager.splash_window:
+                    splash_manager.update_status(message)
+                    splash_manager.splash_window.update()
+                    time.sleep(0.09)  # Reduced from 0.15 to 0.1 - faster but still visible
+            
+            # Actually load modules during splash with real feedback
+            splash_callback("Loading translation modules...")
+            
+            # Import and test each module for real
+            translation_main = translation_stop_flag = translation_stop_check = None
+            glossary_main = glossary_stop_flag = glossary_stop_check = None
+            fallback_compile_epub = scan_html_folder = None
+            
+            modules_loaded = 0
+            total_modules = 4
+            
+            # Load TranslateKRtoEN
+            splash_callback("Loading translation engine...")
+            try:
+                splash_callback("Validating translation engine...")
+                import TransateKRtoEN
+                if hasattr(TransateKRtoEN, 'main') and hasattr(TransateKRtoEN, 'set_stop_flag'):
+                    from TransateKRtoEN import main as translation_main, set_stop_flag as translation_stop_flag, is_stop_requested as translation_stop_check
+                    modules_loaded += 1
+                    splash_callback("✅ translation engine loaded")
+                else:
+                    splash_callback("⚠️ translation engine incomplete")
+            except Exception as e:
+                splash_callback("❌ translation engine failed")
+                print(f"Warning: Could not import TransateKRtoEN: {e}")
+            
+            # Load extract_glossary_from_epub
+            splash_callback("Loading glossary extractor...")
+            try:
+                splash_callback("Validating glossary extractor...")
+                import extract_glossary_from_epub
+                if hasattr(extract_glossary_from_epub, 'main') and hasattr(extract_glossary_from_epub, 'set_stop_flag'):
+                    from extract_glossary_from_epub import main as glossary_main, set_stop_flag as glossary_stop_flag, is_stop_requested as glossary_stop_check
+                    modules_loaded += 1
+                    splash_callback("✅ glossary extractor loaded")
+                else:
+                    splash_callback("⚠️ glossary extractor incomplete")
+            except Exception as e:
+                splash_callback("❌ glossary extractor failed")
+                print(f"Warning: Could not import extract_glossary_from_epub: {e}")
+            
+            # Load epub_converter
+            splash_callback("Loading EPUB converter...")
+            try:
+                import epub_converter
+                if hasattr(epub_converter, 'fallback_compile_epub'):
+                    from epub_converter import fallback_compile_epub
+                    modules_loaded += 1
+                    splash_callback("✅ EPUB converter loaded")
+                else:
+                    splash_callback("⚠️ EPUB converter incomplete")
+            except Exception as e:
+                splash_callback("❌ EPUB converter failed")
+                print(f"Warning: Could not import epub_converter: {e}")
+            
+            # Load scan_html_folder
+            splash_callback("Loading QA scanner...")
+            try:
+                import scan_html_folder
+                if hasattr(scan_html_folder, 'scan_html_folder'):
+                    from scan_html_folder import scan_html_folder
+                    modules_loaded += 1
+                    splash_callback("✅ QA scanner loaded")
+                else:
+                    splash_callback("⚠️ QA scanner incomplete")
+            except Exception as e:
+                splash_callback("❌ QA scanner failed")
+                print(f"Warning: Could not import scan_html_folder: {e}")
+            
+            # Final status with pause for visibility
+            splash_callback("Finalizing module initialization...")
+            if modules_loaded == total_modules:
+                splash_callback("✅ All modules loaded successfully")
+            else:
+                splash_callback(f"⚠️ {modules_loaded}/{total_modules} modules loaded")
+            
+            # Store loaded modules globally for GUI access
+            import translator_gui
+            translator_gui.translation_main = translation_main
+            translator_gui.translation_stop_flag = translation_stop_flag  
+            translator_gui.translation_stop_check = translation_stop_check
+            translator_gui.glossary_main = glossary_main
+            translator_gui.glossary_stop_flag = glossary_stop_flag
+            translator_gui.glossary_stop_check = glossary_stop_check
+            translator_gui.fallback_compile_epub = fallback_compile_epub
+            translator_gui.scan_html_folder = scan_html_folder
+        
         if splash_manager:
             splash_manager.update_status("Creating main window...")
-            time.sleep(0.3)
-        
-        if splash_manager:
+            time.sleep(0.07)  # Reduced from 0.1 to 0.08
+            
+            # Extra pause to show "Ready!" before closing
             splash_manager.update_status("Ready!")
-            time.sleep(0.5)
+            time.sleep(0.1)  # Reduced from 0.2 to 0.15
             splash_manager.close_splash()
         
-        # Create main window
+        # Create main window (modules already loaded)
         root = tb.Window(themename="darkly")
         
-        # Initialize the app
+        # CRITICAL: Hide window immediately to prevent white flash
+        root.withdraw()
+        
+        # Initialize the app (modules already available)  
         app = TranslatorGUI(root)
+        
+        # Mark modules as already loaded to skip lazy loading
+        app._modules_loaded = True
+        app._modules_loading = False
+        
+        # CRITICAL: Let all widgets and theme fully initialize
+        root.update_idletasks()
+        
+        # CRITICAL: Now show the window after everything is ready
+        root.deiconify()
         
         print("✅ Ready to use!")
         
