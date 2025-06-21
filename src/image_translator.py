@@ -68,7 +68,8 @@ def send_image_with_interrupt(client, messages, image_data, temperature, max_tok
     raise UnifiedClientError(f"Image API call timed out after {timeout} seconds")
 
 class ImageTranslator:
-    def __init__(self, client, output_dir: str, profile_name: str = "", system_prompt: str = "", temperature: float = 0.3, log_callback=None):
+    def __init__(self, client, output_dir: str, profile_name: str = "", system_prompt: str = "", 
+                 temperature: float = 0.3, log_callback=None, progress_manager=None):
         """
         Initialize the image translator
         
@@ -79,6 +80,7 @@ class ImageTranslator:
             system_prompt: System prompt from GUI to use for translation
             temperature: Temperature for translation
             log_callback: Optional callback function for logging
+            progress_manager: Shared ProgressManager instance for synchronization
         """
         self.client = client
         self.output_dir = output_dir
@@ -86,6 +88,7 @@ class ImageTranslator:
         self.system_prompt = system_prompt
         self.temperature = temperature
         self.log_callback = log_callback
+        self.progress_manager = progress_manager  # Use shared progress manager
         self.images_dir = os.path.join(output_dir, "images")
         self.translated_images_dir = os.path.join(output_dir, "translated_images")
         os.makedirs(self.translated_images_dir, exist_ok=True)
@@ -105,7 +108,6 @@ class ImageTranslator:
         self.image_chunk_context = []
         self.contextual_enabled = os.getenv("CONTEXTUAL", "1") == "1"
         self.context_limit = 2  # Keep last 2 chunks as context
-
 
         
     def extract_images_from_chapter(self, chapter_html: str) -> List[Dict]:
@@ -259,56 +261,71 @@ class ImageTranslator:
     
     def load_progress(self):
         """Load progress tracking for image chunks"""
-        progress_file = os.path.join(self.output_dir, "translation_progress.json")
-        if os.path.exists(progress_file):
-            try:
-                with open(progress_file, 'r', encoding='utf-8') as f:
-                    prog = json.load(f)
-                # Ensure image_chunks key exists
-                if "image_chunks" not in prog:
-                    prog["image_chunks"] = {}
-                return prog
-            except Exception as e:
-                print(f"⚠️ Warning: Could not load progress file: {e}")
-                # Return minimal structure to avoid breaking
-                return {
-                    "chapters": {},
-                    "content_hashes": {},
-                    "chapter_chunks": {},
-                    "image_chunks": {},
-                    "version": "2.1"
-                }
-        # Return the same structure as TranslateKRtoEN expects
-        return {
-            "chapters": {},
-            "content_hashes": {},
-            "chapter_chunks": {},
-            "image_chunks": {},
-            "version": "2.1"
-        }
-
+        if self.progress_manager:
+            # Use the shared progress manager's data
+            prog = self.progress_manager.prog.copy()
+            # Ensure image_chunks key exists
+            if "image_chunks" not in prog:
+                prog["image_chunks"] = {}
+            return prog
+        else:
+            # Fallback to original behavior if no progress manager provided
+            progress_file = os.path.join(self.output_dir, "translation_progress.json")
+            if os.path.exists(progress_file):
+                try:
+                    with open(progress_file, 'r', encoding='utf-8') as f:
+                        prog = json.load(f)
+                    # Ensure image_chunks key exists
+                    if "image_chunks" not in prog:
+                        prog["image_chunks"] = {}
+                    return prog
+                except Exception as e:
+                    print(f"⚠️ Warning: Could not load progress file: {e}")
+                    # Return minimal structure to avoid breaking
+                    return {
+                        "chapters": {},
+                        "content_hashes": {},
+                        "chapter_chunks": {},
+                        "image_chunks": {},
+                        "version": "2.1"
+                    }
+            # Return the same structure as TranslateKRtoEN expects
+            return {
+                "chapters": {},
+                "content_hashes": {},
+                "chapter_chunks": {},
+                "image_chunks": {},
+                "version": "2.1"
+            }
 
     def save_progress(self, prog):
         """Save progress tracking - with safe writing"""
-        progress_file = os.path.join(self.output_dir, "translation_progress.json")
-        try:
-            # Write to a temporary file first
-            temp_file = progress_file + '.tmp'
-            with open(temp_file, 'w', encoding='utf-8') as f:
-                json.dump(prog, f, ensure_ascii=False, indent=2)
-            
-            # If successful, replace the original file
-            if os.path.exists(progress_file):
-                os.remove(progress_file)
-            os.rename(temp_file, progress_file)
-        except Exception as e:
-            print(f"⚠️ Warning: Failed to save progress: {e}")
-            # Clean up temp file if it exists
-            if os.path.exists(temp_file):
-                try:
-                    os.remove(temp_file)
-                except:
-                    pass
+        if self.progress_manager:
+            # Update the shared progress manager's data
+            self.progress_manager.prog["image_chunks"] = prog.get("image_chunks", {})
+            # Save through the progress manager
+            self.progress_manager.save()
+        else:
+            # Fallback to original behavior if no progress manager provided
+            progress_file = os.path.join(self.output_dir, "translation_progress.json")
+            try:
+                # Write to a temporary file first
+                temp_file = progress_file + '.tmp'
+                with open(temp_file, 'w', encoding='utf-8') as f:
+                    json.dump(prog, f, ensure_ascii=False, indent=2)
+                
+                # If successful, replace the original file
+                if os.path.exists(progress_file):
+                    os.remove(progress_file)
+                os.rename(temp_file, progress_file)
+            except Exception as e:
+                print(f"⚠️ Warning: Failed to save progress: {e}")
+                # Clean up temp file if it exists
+                if os.path.exists(temp_file):
+                    try:
+                        os.remove(temp_file)
+                    except:
+                        pass
     
     def preprocess_image_for_watermarks(self, image_path: str) -> Optional[bytes]:
         """
