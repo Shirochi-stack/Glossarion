@@ -1128,42 +1128,55 @@ class TranslatorGUI:
         # Process chapters
         all_extracted_nums = []
         for chapter_key, chapter_info in prog.get("chapters", {}).items():
-            output_file = chapter_info.get("output_file", "")
-            if output_file:
-                patterns = [r'(\d{4})[_\.]', r'(\d{3,4})[_\.]', r'No(\d+)Chapter',
-                           r'response_(\d+)[_\.]', r'(\d+)(?:_|$)']
-                
-                extracted_num = None
-                for pattern in patterns:
-                    match = re.search(pattern, output_file)
-                    if match:
-                        extracted_num = int(match.group(1))
-                        break
-                
-                if extracted_num is None:
-                    try:
-                        if 'actual_num' in chapter_info:
-                            extracted_num = int(chapter_info['actual_num'])
-                        elif 'chapter_idx' in chapter_info:
-                            extracted_num = int(chapter_info['chapter_idx']) + 1
-                        else:
-                            extracted_num = int(chapter_key) + 1
-                    except:
-                        extracted_num = 0
-                
-                all_extracted_nums.append(extracted_num)
-            else:
-                # Check actual_num even if no output_file
+            # FIXED: First try to get actual_num directly from chapter_info
+            extracted_num = None
+            
+            # Priority 1: Use actual_num if available
+            if 'actual_num' in chapter_info:
                 try:
-                    if 'actual_num' in chapter_info:
-                        extracted_num = int(chapter_info['actual_num'])
-                    elif 'chapter_idx' in chapter_info:
-                        extracted_num = int(chapter_info['chapter_idx']) + 1
-                    else:
-                        extracted_num = int(chapter_key) + 1 if chapter_key.isdigit() else 0
+                    extracted_num = int(chapter_info['actual_num'])
                 except:
-                    extracted_num = 0
-                all_extracted_nums.append(extracted_num)
+                    extracted_num = None
+            
+            # Priority 2: Extract from output filename
+            if extracted_num is None:
+                output_file = chapter_info.get("output_file", "")
+                if output_file:
+                    patterns = [
+                        r'response_(\d+)_',      # Standard pattern: response_001_
+                        r'response_(\d+)\.',     # Pattern: response_001.
+                        r'(\d{4})[_\.]',         # 4-digit pattern
+                        r'(\d{3})[_\.]',         # 3-digit pattern
+                        r'No(\d+)Chapter',       # NoXChapter pattern
+                        r'^(\d+)[_\.]',          # Starting with number
+                        r'_(\d+)(?:_|\.|$)'      # Any number before _ or . or end
+                    ]
+                    
+                    for pattern in patterns:
+                        match = re.search(pattern, output_file)
+                        if match:
+                            extracted_num = int(match.group(1))
+                            break
+            
+            # Priority 3: Use chapter_idx
+            if extracted_num is None and 'chapter_idx' in chapter_info:
+                try:
+                    extracted_num = int(chapter_info['chapter_idx']) + 1
+                except:
+                    extracted_num = None
+            
+            # Priority 4: If chapter_key is numeric (old format)
+            if extracted_num is None and chapter_key.isdigit():
+                try:
+                    extracted_num = int(chapter_key) + 1
+                except:
+                    extracted_num = None
+            
+            # Default to 0 if all else fails
+            if extracted_num is None:
+                extracted_num = 0
+                
+            all_extracted_nums.append(extracted_num)
         
         chapter_keys = list(prog.get("chapters", {}).keys())
         
@@ -1228,11 +1241,7 @@ class TranslatorGUI:
                         # Remove from content_hashes properly
                         content_hash = chapter_info.get("content_hash")
                         if content_hash and content_hash in prog.get("content_hashes", {}):
-                            # Only delete if it matches this chapter
-                            stored_hash_info = prog["content_hashes"].get(content_hash, {})
-                            stored_idx = stored_hash_info.get("chapter_idx")
-                            if stored_idx is None or stored_idx == chapter_info.get("chapter_idx", idx):
-                                del prog["content_hashes"][content_hash]
+                            del prog["content_hashes"][content_hash]
                         
                         if chapter_key in prog.get("chapter_chunks", {}):
                             del prog["chapter_chunks"][chapter_key]
@@ -1246,13 +1255,13 @@ class TranslatorGUI:
                 messagebox.showinfo("Success", f"Marked {count} chapters for retranslation.\nRun translation to process them.")
         
         tb.Button(button_frame, text="Select All", command=select_all,
-                 bootstyle="primary", width=8).pack(side=tk.LEFT, padx=5)
+                 bootstyle="primary", width=15).pack(side=tk.LEFT, padx=5)
         tb.Button(button_frame, text="Clear Selection", command=clear_selection,
-                 bootstyle="secondary", width=13).pack(side=tk.LEFT, padx=5)
+                 bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
         tb.Button(button_frame, text="Retranslate Selected", command=retranslate_selected, 
-                 bootstyle="danger", width=17.5).pack(side=tk.LEFT, padx=5)
+                 bootstyle="danger", width=20).pack(side=tk.LEFT, padx=5)
         tb.Button(button_frame, text="Cancel", command=dialog.destroy, 
-                 bootstyle="secondary", width=7).pack(side=tk.LEFT, padx=5)
+                 bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
         
         dialog.deiconify()
     
