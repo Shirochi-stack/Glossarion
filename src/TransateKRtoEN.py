@@ -4315,7 +4315,8 @@ def main(log_callback=None, stop_callback=None):
             config.PROFILE_NAME, 
             system, 
             config.TEMP,
-            log_callback 
+            log_callback ,
+            progress_manager
         )
         
         known_vision_models = [
