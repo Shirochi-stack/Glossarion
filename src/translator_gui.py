@@ -372,7 +372,7 @@ class TranslatorGUI:
         
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        master.title("Glossarion v2.7.4 — The AI Hunter Unleashed!!")
+        master.title("Glossarion v2.7.5 — The AI Hunter Unleashed!!")
         
         # Setup main window with responsive sizing
         self.wm.responsive_size(master, BASE_WIDTH, BASE_HEIGHT)
@@ -572,7 +572,7 @@ class TranslatorGUI:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v2.7.4 - Ready to use!")
+        self.append_log("🚀 Glossarion v2.7.5 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -1074,191 +1074,169 @@ class TranslatorGUI:
         dialog.deiconify()
 
     def force_retranslation(self):
-            """Force retranslation of specific chapters"""
-            input_path = self.entry_epub.get()
-            if not input_path or not os.path.isfile(input_path):
-                messagebox.showerror("Error", "Please select a valid EPUB or text file first.")
-                return
-            
-            epub_base = os.path.splitext(os.path.basename(input_path))[0]
-            output_dir = epub_base
-            
-            if not os.path.exists(output_dir):
-                messagebox.showinfo("Info", "No translation output found for this EPUB.")
-                return
-            
-            progress_file = os.path.join(output_dir, "translation_progress.json")
-            if not os.path.exists(progress_file):
-                messagebox.showinfo("Info", "No progress tracking found.")
-                return
-            
-            with open(progress_file, 'r', encoding='utf-8') as f:
-                prog = json.load(f)
-            
-            chapters_info_file = os.path.join(output_dir, "chapters_info.json")
-            chapters_info_map = {}
-            if os.path.exists(chapters_info_file):
-                try:
-                    with open(chapters_info_file, 'r', encoding='utf-8') as f:
-                        chapters_info = json.load(f)
-                        for ch_info in chapters_info:
-                            if 'num' in ch_info:
-                                chapters_info_map[ch_info['num']] = ch_info
-                except: pass
-            
-            dialog = self.wm.create_simple_dialog(
-                self.master,
-                "Force Retranslation",
-                width=660,
-                height=600
-            )
-            
-            tk.Label(dialog, text="Select chapters to retranslate:", font=('Arial', 12)).pack(pady=10)
-            
-            frame = tk.Frame(dialog)
-            frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-            
-            scrollbar = ttk.Scrollbar(frame)
-            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-            
-            listbox = tk.Listbox(frame, selectmode=tk.MULTIPLE, yscrollcommand=scrollbar.set)
-            listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-            scrollbar.config(command=listbox.yview)
-            
-            # Process chapters
-            all_extracted_nums = []
-            for chapter_key, chapter_info in prog.get("chapters", {}).items():
-                output_file = chapter_info.get("output_file", "")
-                if output_file:
-                    patterns = [r'(\d{4})[_\.]', r'(\d{3,4})[_\.]', r'No(\d+)Chapter',
-                               r'response_(\d+)[_\.]', r'chapter[_\s]*(\d+)', r'_(\d+)_']
-                    for pattern in patterns:
-                        match = re.search(pattern, output_file, re.IGNORECASE)
-                        if match:
-                            num = int(match.group(1))
-                            all_extracted_nums.append(num)
-                            break
-            
-            # Detect numbering system
-            uses_zero_based = False
-            for chapter_key, chapter_info in prog.get("chapters", {}).items():
-                if chapter_info.get("status") == "completed":
-                    output_file = chapter_info.get("output_file", "")
-                    stored_chapter_num = chapter_info.get("chapter_num", 0)
-                    if output_file:
-                        match = re.search(r'response_(\d+)', output_file)
-                        if match:
-                            file_num = int(match.group(1))
-                            if file_num == stored_chapter_num - 1:
-                                uses_zero_based = True
-                                break
-                            elif file_num == stored_chapter_num:
-                                uses_zero_based = False
-                                break
-            
-            if not uses_zero_based:
-                try:
-                    for file in os.listdir(output_dir):
-                        if re.search(r'_0+[_\.]', file):
-                            uses_zero_based = True
-                            break
-                except: pass
-            
-            chapter_keys = []
-            chapters_with_nums = []
-            
-            for chapter_key, chapter_info in prog.get("chapters", {}).items():
-                output_file = chapter_info.get("output_file", "")
-                stored_num = chapter_info.get("chapter_num", 0)
-                actual_num = stored_num
-                
-                sources_to_try = []
-                if output_file:
-                    sources_to_try.append(("output_file", output_file))
-                if "display_name" in chapter_info:
-                    sources_to_try.append(("display_name", chapter_info["display_name"]))
-                if "file_basename" in chapter_info:
-                    sources_to_try.append(("file_basename", chapter_info["file_basename"]))
-                
+        """Force retranslation of specific chapters"""
+        input_path = self.entry_epub.get()
+        if not input_path or not os.path.isfile(input_path):
+            messagebox.showerror("Error", "Please select a valid EPUB or text file first.")
+            return
+        
+        epub_base = os.path.splitext(os.path.basename(input_path))[0]
+        output_dir = epub_base
+        
+        if not os.path.exists(output_dir):
+            messagebox.showinfo("Info", "No translation output found for this EPUB.")
+            return
+        
+        progress_file = os.path.join(output_dir, "translation_progress.json")
+        if not os.path.exists(progress_file):
+            messagebox.showinfo("Info", "No progress tracking found.")
+            return
+        
+        with open(progress_file, 'r', encoding='utf-8') as f:
+            prog = json.load(f)
+        
+        chapters_info_file = os.path.join(output_dir, "chapters_info.json")
+        chapters_info_map = {}
+        if os.path.exists(chapters_info_file):
+            try:
+                with open(chapters_info_file, 'r', encoding='utf-8') as f:
+                    chapters_info = json.load(f)
+                    for ch_info in chapters_info:
+                        if 'num' in ch_info:
+                            chapters_info_map[ch_info['num']] = ch_info
+            except: pass
+        
+        dialog = self.wm.create_simple_dialog(
+            self.master,
+            "Force Retranslation",
+            width=699,
+            height=600
+        )
+        
+        tk.Label(dialog, text="Select chapters to retranslate:", font=('Arial', 12)).pack(pady=10)
+        
+        frame = tk.Frame(dialog)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        scrollbar = ttk.Scrollbar(frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        listbox = tk.Listbox(frame, selectmode=tk.MULTIPLE, yscrollcommand=scrollbar.set)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=listbox.yview)
+        
+        # Process chapters
+        all_extracted_nums = []
+        for chapter_key, chapter_info in prog.get("chapters", {}).items():
+            output_file = chapter_info.get("output_file", "")
+            if output_file:
                 patterns = [r'(\d{4})[_\.]', r'(\d{3,4})[_\.]', r'No(\d+)Chapter',
-                           r'response_(\d+)[_\.]', r'chapter[_\s]*(\d+)', r'ch[_\s]*(\d+)',
-                           r'_(\d+)_', r'(\d{3,4})[^\d]']
+                           r'response_(\d+)[_\.]', r'(\d+)(?:_|$)']
                 
-                found = False
-                for source_name, source in sources_to_try:
-                    if not source: continue
-                    for pattern in patterns:
-                        match = re.search(pattern, source, re.IGNORECASE)
-                        if match:
-                            extracted_num = int(match.group(1))
-                            if chapter_info.get("status") == "in_progress":
-                                actual_num = chapter_info.get("chapter_idx", stored_num)
-                                chapters_with_nums.append((chapter_key, chapter_info, actual_num))
-                                continue
-                            else:
-                                actual_num = extracted_num + 1 if uses_zero_based else extracted_num
-                            found = True
-                            break
-                    if found: break
+                extracted_num = None
+                for pattern in patterns:
+                    match = re.search(pattern, output_file)
+                    if match:
+                        extracted_num = int(match.group(1))
+                        break
                 
-                if not found and chapter_info.get("status") == "in_progress":
-                    final_num = chapter_info.get("actual_num", 0)
-                    if final_num == 0:
-                        chapter_idx = chapter_info.get("chapter_idx")
-                        final_num = chapter_idx if chapter_idx is not None else stored_num
-                    chapters_with_nums.append((chapter_key, chapter_info, final_num))
-                    continue
+                if extracted_num is None:
+                    try:
+                        if 'actual_num' in chapter_info:
+                            extracted_num = int(chapter_info['actual_num'])
+                        elif 'chapter_idx' in chapter_info:
+                            extracted_num = int(chapter_info['chapter_idx']) + 1
+                        else:
+                            extracted_num = int(chapter_key) + 1
+                    except:
+                        extracted_num = 0
                 
-                chapters_with_nums.append((chapter_key, chapter_info, actual_num))
+                all_extracted_nums.append(extracted_num)
+            else:
+                # Check actual_num even if no output_file
+                try:
+                    if 'actual_num' in chapter_info:
+                        extracted_num = int(chapter_info['actual_num'])
+                    elif 'chapter_idx' in chapter_info:
+                        extracted_num = int(chapter_info['chapter_idx']) + 1
+                    else:
+                        extracted_num = int(chapter_key) + 1 if chapter_key.isdigit() else 0
+                except:
+                    extracted_num = 0
+                all_extracted_nums.append(extracted_num)
+        
+        chapter_keys = list(prog.get("chapters", {}).keys())
+        
+        sorted_indices = sorted(range(len(all_extracted_nums)), key=lambda i: all_extracted_nums[i])
+        sorted_keys = [chapter_keys[i] for i in sorted_indices]
+        
+        for idx in sorted_indices:
+            chapter_key = chapter_keys[idx]
+            chapter_info = prog["chapters"][chapter_key]
+            output_file = chapter_info.get("output_file", "")
+            extracted_num = all_extracted_nums[idx]
             
-            # Remove duplicates
-            seen_chapter_indices = {}
-            final_chapters = []
-            for chapter_key, chapter_info, actual_num in chapters_with_nums:
-                chapter_idx = chapter_info.get("chapter_idx", actual_num)
-                if chapter_idx not in seen_chapter_indices:
-                    seen_chapter_indices[chapter_idx] = (chapter_key, chapter_info, actual_num)
-                    final_chapters.append((chapter_key, chapter_info, actual_num))
+            status = chapter_info.get("status", "unknown")
             
-            chapters_with_nums = sorted(final_chapters, key=lambda x: x[2])
+            # Check if file exists
+            file_exists = False
+            if output_file:
+                output_path = os.path.join(output_dir, output_file)
+                file_exists = os.path.exists(output_path)
             
-            # Populate listbox
-            for chapter_key, chapter_info, actual_num in chapters_with_nums:
-                status = chapter_info.get("status", "unknown")
-                output_file = chapter_info.get("output_file", "")
-                file_exists = "✓" if output_file and os.path.exists(os.path.join(output_dir, output_file)) else "✗"
-                display_text = f"Chapter {actual_num} - {status} - File: {file_exists}"
-                listbox.insert(tk.END, display_text)
-                chapter_keys.append(chapter_key)
+            file_indicator = "✓" if file_exists else "✗"
+            display_str = f"Chapter {extracted_num} - {status} - File: {file_indicator}"
+            listbox.insert(tk.END, display_str)
+        
+        button_frame = tk.Frame(dialog)
+        button_frame.pack(pady=10)
+        
+        def select_all():
+            listbox.select_set(0, tk.END)
+        
+        def clear_selection():
+            listbox.select_clear(0, tk.END)
+        
+        def retranslate_selected():
+            selected = listbox.curselection()
+            if not selected:
+                messagebox.showwarning("No Selection", "Please select at least one chapter.")
+                return
             
-            def retranslate_selected():
-                selected_indices = listbox.curselection()
-                if not selected_indices:
-                    messagebox.showwarning("Warning", "No chapters selected.")
-                    return
+            selected_indices = [sorted_indices[i] for i in selected]
+            
+            if messagebox.askyesno("Confirm", f"This will delete {len(selected)} translated chapters and mark them for retranslation.\n\nContinue?"):
+                dialog.destroy()
                 
                 count = 0
                 for idx in selected_indices:
                     chapter_key = chapter_keys[idx]
                     if chapter_key in prog["chapters"]:
                         chapter_info = prog["chapters"][chapter_key]
-                        del prog["chapters"][chapter_key]
                         
-                        content_hash = chapter_info.get("content_hash")
-                        if content_hash and content_hash in prog.get("content_hashes", {}):
-                            stored_hash_info = prog["content_hashes"].get(content_hash, {})
-                            if stored_hash_info.get("chapter_idx") == chapter_info.get("chapter_idx"):
-                                del prog["content_hashes"][content_hash]
-                        
-                        if chapter_key in prog.get("chapter_chunks", {}):
-                            del prog["chapter_chunks"][chapter_key]
-                        
+                        # Delete the output file BEFORE removing from tracking
                         output_file = chapter_info.get("output_file", "")
                         if output_file:
                             output_path = os.path.join(output_dir, output_file)
                             if os.path.exists(output_path):
                                 os.remove(output_path)
                                 self.append_log(f"🗑️ Deleted: {output_file}")
+                        
+                        # Now remove from tracking
+                        del prog["chapters"][chapter_key]
+                        
+                        # Remove from content_hashes properly
+                        content_hash = chapter_info.get("content_hash")
+                        if content_hash and content_hash in prog.get("content_hashes", {}):
+                            # Only delete if it matches this chapter
+                            stored_hash_info = prog["content_hashes"].get(content_hash, {})
+                            stored_idx = stored_hash_info.get("chapter_idx")
+                            if stored_idx is None or stored_idx == chapter_info.get("chapter_idx", idx):
+                                del prog["content_hashes"][content_hash]
+                        
+                        if chapter_key in prog.get("chapter_chunks", {}):
+                            del prog["chapter_chunks"][chapter_key]
+                        
                         count += 1
                 
                 with open(progress_file, 'w', encoding='utf-8') as f:
@@ -1266,22 +1244,18 @@ class TranslatorGUI:
                 
                 self.append_log(f"🔄 Marked {count} chapters for retranslation")
                 messagebox.showinfo("Success", f"Marked {count} chapters for retranslation.\nRun translation to process them.")
-                dialog.destroy()
-            
-            button_frame = tk.Frame(dialog)
-            button_frame.pack(pady=10)
-            
-            tk.Button(button_frame, text="Select All", 
-                     command=lambda: listbox.select_set(0, tk.END)).pack(side=tk.LEFT, padx=5)
-            tk.Button(button_frame, text="Clear Selection", 
-                     command=lambda: listbox.select_clear(0, tk.END)).pack(side=tk.LEFT, padx=5)
-            tk.Button(button_frame, text="Retranslate Selected", 
-                     command=retranslate_selected, bg="#ff6b6b", fg="white").pack(side=tk.LEFT, padx=5)
-            tk.Button(button_frame, text="Cancel", 
-                     command=dialog.destroy).pack(side=tk.LEFT, padx=5)
-            
-            dialog.deiconify()
-
+        
+        tb.Button(button_frame, text="Select All", command=select_all,
+                 bootstyle="primary", width=8).pack(side=tk.LEFT, padx=5)
+        tb.Button(button_frame, text="Clear Selection", command=clear_selection,
+                 bootstyle="secondary", width=13).pack(side=tk.LEFT, padx=5)
+        tb.Button(button_frame, text="Retranslate Selected", command=retranslate_selected, 
+                 bootstyle="danger", width=17.5).pack(side=tk.LEFT, padx=5)
+        tb.Button(button_frame, text="Cancel", command=dialog.destroy, 
+                 bootstyle="secondary", width=7).pack(side=tk.LEFT, padx=5)
+        
+        dialog.deiconify()
+    
     def glossary_manager(self):
        """Open comprehensive glossary management dialog"""
        # Create scrollable dialog (stays hidden)
@@ -4188,7 +4162,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v2.7.4...")
+    print("🚀 Starting Glossarion v2.7.5...")
     
     # Initialize splash screen
     splash_manager = None
