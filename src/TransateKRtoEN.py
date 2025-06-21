@@ -460,7 +460,7 @@ class ProgressManager:
                 return False, f"Chapter {actual_num} already translated: {output_file}", output_file
             else:
                 print(f"⚠️ Chapter {actual_num} marked as completed but file missing: {output_file}")
-                return True, None, None  # This triggers retranslation!
+                return True, None, None
         
         if status == "completed_empty":
             return False, f"Chapter {actual_num} is empty (no content to translate)", output_file
@@ -513,7 +513,7 @@ class ProgressManager:
                 if not os.path.exists(output_path):
                     print(f"🧹 Found missing file for chapter {chapter_info.get('actual_num', chapter_key)}: {output_file}")
                     
-                    # COMPLETELY REMOVE the chapter entry
+                    # COMPLETELY REMOVE the chapter entry instead of marking as file_deleted
                     del self.prog["chapters"][chapter_key]
                     
                     # Remove from content_hashes
@@ -4107,18 +4107,17 @@ def main(log_callback=None, stop_callback=None):
         os.remove(history_file)
         print(f"[DEBUG] Purged translation history → {history_file}")
 
-    # Scan for missing files AFTER we know what chapters exist
     print("🔍 Checking for deleted output files...")
     progress_manager.cleanup_missing_files(out)
     progress_manager.save()
 
-    if config.RESET_FAILED_CHAPTERS:
+    if os.getenv("RESET_FAILED_CHAPTERS", "1") == "1":
         reset_count = 0
         for chapter_key, chapter_info in list(progress_manager.prog["chapters"].items()):
             status = chapter_info.get("status")
             
-            # Include all non-successful statuses
-            if status in ["failed", "qa_failed", "file_missing", "error", "file_deleted", "in_progress", None]:
+            # Include all failure states for reset
+            if status in ["failed", "qa_failed", "file_missing", "error", "file_deleted", "in_progress"]:
                 del progress_manager.prog["chapters"][chapter_key]
                 
                 content_hash = chapter_info.get("content_hash")
@@ -4131,7 +4130,7 @@ def main(log_callback=None, stop_callback=None):
                 reset_count += 1
         
         if reset_count > 0:
-            print(f"🔄 Reset {reset_count} failed/incomplete chapters for re-translation")
+            print(f"🔄 Reset {reset_count} failed/deleted/incomplete chapters for re-translation")
             progress_manager.save()
 
     if check_stop():
