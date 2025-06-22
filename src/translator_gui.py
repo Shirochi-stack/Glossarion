@@ -3942,6 +3942,7 @@ class TranslatorGUI:
 
         # Function to update AI Hunter visibility based on detection mode
         def update_ai_hunter_visibility():
+            """Update AI Hunter section visibility based on selection"""
             # Clear existing widgets
             for widget in self.ai_hunter_container.winfo_children():
                 widget.destroy()
@@ -3949,6 +3950,10 @@ class TranslatorGUI:
             # Show AI Hunter config for both ai-hunter and cascading modes
             if self.duplicate_detection_mode_var.get() in ['ai-hunter', 'cascading']:
                 self.create_ai_hunter_section(self.ai_hunter_container)
+            
+            # Update status if label exists
+            if hasattr(self, 'ai_hunter_status_label'):
+                self.ai_hunter_status_label.config(text=self._get_ai_hunter_status_text())
 
         # Add trace to detection mode variable
         self.duplicate_detection_mode_var.trace('w', lambda *args: update_ai_hunter_visibility())
@@ -4040,7 +4045,7 @@ class TranslatorGUI:
             fg='gray', 
             justify=tk.LEFT
         ).pack(anchor=tk.W, padx=20, pady=(0, 10))
-    
+
     def _get_ai_hunter_status_text(self):
         """Get status text for AI Hunter configuration"""
         ai_config = self.config.get('ai_hunter_config', {})
