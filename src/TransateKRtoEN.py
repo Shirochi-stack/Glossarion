@@ -4662,7 +4662,7 @@ def main(log_callback=None, stop_callback=None):
             
             # Get actual number with config awareness
             raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
-            print(f"[DEBUG] Extracted raw_num={raw_num} from {c.get('original_basename', 'unknown')}")
+            #print(f"[DEBUG] Extracted raw_num={raw_num} from {c.get('original_basename', 'unknown')}")
 
             
             if config.DISABLE_ZERO_DETECTION:
@@ -4798,7 +4798,7 @@ def main(log_callback=None, stop_callback=None):
         # First pass: set actual chapter numbers respecting the config
         for idx, c in enumerate(chapters):
             raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
-            print(f"[DEBUG] Extracted raw_num={raw_num} from {c.get('original_basename', 'unknown')}")
+            #print(f"[DEBUG] Extracted raw_num={raw_num} from {c.get('original_basename', 'unknown')}")
 
             
             # Apply offset if configured
@@ -4828,7 +4828,7 @@ def main(log_callback=None, stop_callback=None):
             content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
             
             if start is not None and not (start <= actual_num <= end):
-                print(f"[SKIP] Chapter {actual_num} (file: {c.get('original_basename', 'unknown')}) outside range {start}-{end}")
+                #print(f"[SKIP] Chapter {actual_num} (file: {c.get('original_basename', 'unknown')}) outside range {start}-{end}")
                 continue
             
             needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
