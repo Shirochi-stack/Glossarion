@@ -3924,14 +3924,36 @@ class TranslatorGUI:
            ("cascading", "Cascading - Basic first, then AI Hunter")
         ]
 
+        # Container for AI Hunter config that can be shown/hidden
+        self.ai_hunter_container = tk.Frame(section_frame)
+        
+        def on_detection_mode_changed(*args):
+            """Update AI Hunter section visibility based on selection"""
+            # Clear the container
+            for widget in self.ai_hunter_container.winfo_children():
+                widget.destroy()
+            
+            # Only show AI Hunter config if AI Hunter is selected
+            if self.duplicate_detection_mode_var.get() == 'ai-hunter':
+                self.create_ai_hunter_section(self.ai_hunter_container)
+            
+            # Update status if label exists
+            if hasattr(self, 'ai_hunter_status_label'):
+                self.ai_hunter_status_label.config(text=self._get_ai_hunter_status_text())
+        
+        # Add trace to update when selection changes
+        self.duplicate_detection_mode_var.trace('w', on_detection_mode_changed)
+
         for value, text in methods:
            rb = tb.Radiobutton(section_frame, text=text, variable=self.duplicate_detection_mode_var, 
                               value=value, bootstyle="primary")
            rb.pack(anchor=tk.W, padx=40, pady=2)
 
-        # Call the new AI Hunter section method
-        self.create_ai_hunter_section(section_frame)
-
+        # Pack the container after radio buttons
+        self.ai_hunter_container.pack(fill='x')
+        
+        # Initial update
+        on_detection_mode_changed()
         # Retry Slow
         tb.Checkbutton(section_frame, text="Auto-retry Slow Chunks", 
                       variable=self.retry_timeout_var,
@@ -3947,56 +3969,50 @@ class TranslatorGUI:
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
 
     def create_ai_hunter_section(self, section_frame):
-        """Create the AI Hunter configuration section"""
-        # AI Hunter Configuration
-        config_frame = tk.Frame(section_frame)
-        config_frame.pack(anchor=tk.W, padx=20, pady=(10, 5))
-        
-        # Status label
-        ai_config = self.config.get('ai_hunter_config', {})
-        self.ai_hunter_status_label = tk.Label(
-            config_frame, 
-            text=self._get_ai_hunter_status_text(),
-            font=('TkDefaultFont', 10)
-        )
-        self.ai_hunter_status_label.pack(side=tk.LEFT)
-        
-        # Configure button
-        tb.Button(
-            config_frame, 
-            text="Configure AI Hunter", 
-            command=self.show_ai_hunter_settings,
-            bootstyle="info"
-        ).pack(side=tk.LEFT, padx=(10, 0))
-        
-        # Quick enable/disable toggle
-        self.ai_hunter_enabled_var = tk.BooleanVar(
-            value=ai_config.get('enabled', True)
-        )
-        tb.Checkbutton(
-            config_frame,
-            text="Enable AI Hunter",
-            variable=self.ai_hunter_enabled_var,
-            command=self.toggle_ai_hunter,
-            bootstyle="round-toggle"
-        ).pack(side=tk.LEFT, padx=(20, 0))
-        
-        # Info text
-        tk.Label(
-            section_frame, 
-            text="AI Hunter uses multiple detection methods to identify duplicate content\n"
-                 "with configurable thresholds and detection modes",
-            font=('TkDefaultFont', 10), 
-            fg='gray', 
-            justify=tk.LEFT
-        ).pack(anchor=tk.W, padx=20, pady=(0, 10))
+        """Create the AI Hunter configuration section - without redundant toggle"""
+        # Only show the configuration when AI Hunter is selected
+        if self.duplicate_detection_mode_var.get() == 'ai-hunter':
+            # AI Hunter Configuration
+            config_frame = tk.Frame(section_frame)
+            config_frame.pack(anchor=tk.W, padx=20, pady=(10, 5))
+            
+            # Status label
+            ai_config = self.config.get('ai_hunter_config', {})
+            self.ai_hunter_status_label = tk.Label(
+                config_frame, 
+                text=self._get_ai_hunter_status_text(),
+                font=('TkDefaultFont', 10)
+            )
+            self.ai_hunter_status_label.pack(side=tk.LEFT)
+            
+            # Configure button
+            tb.Button(
+                config_frame, 
+                text="Configure AI Hunter", 
+                command=self.show_ai_hunter_settings,
+                bootstyle="info"
+            ).pack(side=tk.LEFT, padx=(10, 0))
+            
+            # Info text
+            tk.Label(
+                section_frame, 
+                text="AI Hunter uses multiple detection methods to identify duplicate content\n"
+                     "with configurable thresholds and detection modes",
+                font=('TkDefaultFont', 10), 
+                fg='gray', 
+                justify=tk.LEFT
+            ).pack(anchor=tk.W, padx=20, pady=(0, 10))
 
     def _get_ai_hunter_status_text(self):
         """Get status text for AI Hunter configuration"""
         ai_config = self.config.get('ai_hunter_config', {})
         
+        # AI Hunter is enabled when the detection mode is set to 'ai-hunter'
+        if self.duplicate_detection_mode_var.get() != 'ai-hunter':
+            return "AI Hunter: Not Selected"
+        
         if not ai_config.get('enabled', True):
-            return "AI Hunter: Disabled"
+            return "AI Hunter: Disabled in Config"
         
         mode_text = {
             'single_method': 'Single Method',
