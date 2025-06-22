@@ -63,6 +63,8 @@ class TranslationConfig:
                        os.getenv("OPENAI_API_KEY") or 
                        os.getenv("OPENAI_OR_Gemini_API_KEY") or
                        os.getenv("GEMINI_API_KEY"))
+        # NEW: Simple chapter number offset
+        self.CHAPTER_NUMBER_OFFSET = int(os.getenv("CHAPTER_NUMBER_OFFSET", "0"))       
 
 # =====================================================
 # UNIFIED PATTERNS AND CONSTANTS
@@ -4468,12 +4470,17 @@ def main(log_callback=None, stop_callback=None):
     chunks_per_chapter = {}
     chapters_to_process = 0
 
+    # When setting actual chapter numbers (in the main function)
     for idx, c in enumerate(chapters):
         chap_num = c["num"]
         content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
         
         # Pass config to respect DISABLE_ZERO_DETECTION
         actual_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
+        
+        # Apply the offset
+        offset = config.CHAPTER_NUMBER_OFFSET if hasattr(config, 'CHAPTER_NUMBER_OFFSET') else 0
+        actual_num += offset
         
         # When toggle is disabled, don't apply any 0-based adjustment
         if config.DISABLE_ZERO_DETECTION:
