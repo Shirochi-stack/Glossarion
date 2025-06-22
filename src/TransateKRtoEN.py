@@ -1900,17 +1900,21 @@ class TranslationProcessor:
                 with open(config_path, 'r', encoding='utf-8') as f:
                     main_config = json.load(f)
                 
-                # Create the improved AI Hunter
+                # Create the improved AI Hunter with the main config
                 from ai_hunter_enhanced import ImprovedAIHunterDetection
                 ai_hunter = ImprovedAIHunterDetection(main_config)
                 
                 print(f"    ✅ Using enhanced AI Hunter with configurable settings")
                 
-                # Use the enhanced detection
+                # The main_config now contains duplicate_lookback_chapters from the GUI
                 return ai_hunter.detect_duplicate_ai_hunter_enhanced(result, idx, prog, out)
             else:
                 # Fallback to original simple AI Hunter logic
                 print("    ⚠️ Config file not found, using original AI Hunter logic")
+                
+                # Get lookback from config if available, otherwise from env
+                lookback = getattr(self.config, 'DUPLICATE_LOOKBACK_CHAPTERS', 
+                                 int(os.getenv('DUPLICATE_LOOKBACK_CHAPTERS', '5')))
                 
                 # Get threshold from environment or use default
                 env_threshold = os.getenv('AI_HUNTER_THRESHOLD')
