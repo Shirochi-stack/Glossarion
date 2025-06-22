@@ -1739,26 +1739,25 @@ class ChapterExtractor:
 # =====================================================
 # UNIFIED TRANSLATION PROCESSOR
 # =====================================================
-class TranslationProcessor:
-    """Handles the core translation processing logic"""
-    
+
 class TranslationProcessor:
     """Handles the translation of individual chapters"""
     
-    def __init__(self, config, client, output_dir, log_callback, check_stop_fn, uses_zero_based=False):
+    def __init__(self, config, client, out_dir, log_callback=None, stop_callback=None, uses_zero_based=False):
         self.config = config
         self.client = client
-        self.output_dir = output_dir
+        self.out_dir = out_dir
         self.log_callback = log_callback
-        self.check_stop_fn = check_stop_fn
+        self.stop_callback = stop_callback
+        self.chapter_splitter = ChapterSplitter(model_name=config.MODEL)
         self.uses_zero_based = uses_zero_based
+
         
     def check_stop(self):
         """Check if translation should stop"""
         if self.stop_callback and self.stop_callback():
             print("❌ Translation stopped by user request.")
             return True
-        return is_stop_requested()
     
     def check_duplicate_content(self, result, idx, prog, out):
         """Check if translated content is duplicate - with mode selection"""
@@ -4568,7 +4567,7 @@ def main(log_callback=None, stop_callback=None):
         batch_processor = BatchTranslationProcessor(
             config, client, base_msg, out, progress_lock,
             progress_manager.save, 
-            lambda idx, actual_num, content_hash, output_file=None, status="completed": progress_manager.update(idx, actual_num, content_hash, output_filename, status),
+            lambda idx, actual_num, content_hash, output_file=None, status="completed", **kwargs: progress_manager.update(idx, actual_num, content_hash, output_file, status, **kwargs),
             check_stop,
             image_translator
         )
