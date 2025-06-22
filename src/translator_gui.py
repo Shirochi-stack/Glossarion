@@ -372,7 +372,7 @@ class TranslatorGUI:
         
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        master.title("Glossarion v2.7.5 — The AI Hunter Unleashed!!")
+        master.title("Glossarion v2.7.7 — The AI Hunter Unleashed!!")
         
         # Setup main window with responsive sizing
         self.wm.responsive_size(master, BASE_WIDTH, BASE_HEIGHT)
@@ -572,7 +572,7 @@ class TranslatorGUI:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v2.7.5 - Ready to use!")
+        self.append_log("🚀 Glossarion v2.7.7 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -1125,8 +1125,42 @@ class TranslatorGUI:
         listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=listbox.yview)
         
+        # Check if 0-based detection is disabled from user settings
+        disable_zero_detection = self.disable_zero_detection_var.get()
+
+        # Detect numbering system (only if not disabled)
+        uses_zero_based = False
+        if not disable_zero_detection:
+            for chapter_key, chapter_info in prog.get("chapters", {}).items():
+                if chapter_info.get("status") == "completed":
+                    output_file = chapter_info.get("output_file", "")
+                    stored_chapter_num = chapter_info.get("chapter_num", 0)
+                    if output_file:
+                        match = re.search(r'response_(\d+)', output_file)
+                        if match:
+                            file_num = int(match.group(1))
+                            if file_num == stored_chapter_num - 1:
+                                uses_zero_based = True
+                                break
+                            elif file_num == stored_chapter_num:
+                                uses_zero_based = False
+                                break
+
+            if not uses_zero_based:
+                try:
+                    for file in os.listdir(output_dir):
+                        if re.search(r'_0+[_\.]', file):
+                            uses_zero_based = True
+                            break
+                except: pass
+        else:
+            # When toggle is disabled, always treat as 1-based
+            uses_zero_based = False
+            self.append_log("ℹ️ 0-based detection disabled - treating as 1-based novel")
+
         # Process chapters
         all_extracted_nums = []
+        
         for chapter_key, chapter_info in prog.get("chapters", {}).items():
             # FIXED: First try to get actual_num directly from chapter_info
             extracted_num = None
@@ -1161,7 +1195,11 @@ class TranslatorGUI:
             # Priority 3: Use chapter_idx
             if extracted_num is None and 'chapter_idx' in chapter_info:
                 try:
-                    extracted_num = int(chapter_info['chapter_idx']) + 1
+                    # Only add 1 if zero detection is enabled AND it's a 0-based novel
+                    if not disable_zero_detection and uses_zero_based:
+                        extracted_num = int(chapter_info['chapter_idx']) + 1
+                    else:
+                        extracted_num = int(chapter_info['chapter_idx'])
                 except:
                     extracted_num = None
             
@@ -4171,7 +4209,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v2.7.5...")
+    print("🚀 Starting Glossarion v2.7.7...")
     
     # Initialize splash screen
     splash_manager = None
