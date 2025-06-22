@@ -505,7 +505,8 @@ class TranslatorGUI:
             ('use_header_as_output_var', 'use_header_as_output', False),
             ('emergency_restore_var', 'emergency_paragraph_restore', True),
             ('contextual_var', 'contextual', True),
-            ('REMOVE_AI_ARTIFACTS_var', 'REMOVE_AI_ARTIFACTS', False)
+            ('REMOVE_AI_ARTIFACTS_var', 'REMOVE_AI_ARTIFACTS', False),
+            ('enable_decimal_chapters_var', 'enable_decimal_chapters', False)
         ]
         
         for var_name, key, default in bool_vars:
@@ -529,7 +530,7 @@ class TranslatorGUI:
             ('image_chunk_height_var', 'image_chunk_height', '1500'),
             ('chunk_timeout_var', 'chunk_timeout', '900'),
             ('batch_size_var', 'batch_size', '3'),
-            ('chapter_number_offset_var', 'chapter_number_offset', '0'),
+            ('chapter_number_offset_var', 'chapter_number_offset', '0')
         ]
         
         for var_name, key, default in str_vars:
@@ -1306,17 +1307,18 @@ class TranslatorGUI:
                 
             all_extracted_nums.append(extracted_num)
             
-            # FIXED: Determine the actual status correctly
+
+            # Determine status based on various factors
             status = chapter_info.get("status", "unknown")
             
-            # If status is not explicitly set, determine it based on other fields
-            if status == "unknown":
-                if chapter_info.get("output_file"):
-                    # Check if the output file exists
-                    output_path = os.path.join(output_dir, chapter_info["output_file"])
-                    if os.path.exists(output_path):
-                        status = "completed"
-                    else:
+            # Preserve failure statuses (qa_failed, failed, error, etc.)
+            failure_statuses = ["failed", "qa_failed", "file_missing", "error", "file_deleted"]
+            
+            if status not in failure_statuses:
+                # Only check file existence for non-failure statuses
+                if status == "completed" and output_file:
+                    output_path = os.path.join(output_dir, output_file)
+                    if not os.path.exists(output_path):
                         status = "failed"
                 else:
                     # Check if this chapter has incomplete chunks
@@ -1373,8 +1375,12 @@ class TranslatorGUI:
             elif status == 'in_progress':
                 status_indicator = "🔄 in_progress"
                 file_indicator = "✗"
-            elif status == 'failed':
-                status_indicator = "❌ failed"
+            elif status in ['failed', 'qa_failed', 'file_missing', 'error', 'file_deleted']:
+                # Handle all failure statuses
+                if status == 'qa_failed':
+                    status_indicator = "❌ qa_failed"
+                else:
+                    status_indicator = f"❌ {status}"
                 file_indicator = "✗"
             else:
                 status_indicator = "❓ unknown"
@@ -1437,9 +1443,17 @@ class TranslatorGUI:
         def select_status(status_to_select):
             """Select all chapters with a specific status"""
             listbox.select_clear(0, tk.END)
-            for idx in sorted_indices:
-                if chapter_display_info[idx]['status'] == status_to_select:
-                    listbox.select_set(sorted_indices.index(idx))
+            
+            # Handle 'failed' as a category that includes all failure types
+            if status_to_select == 'failed':
+                failure_statuses = ['failed', 'qa_failed', 'file_missing', 'error', 'file_deleted']
+                for idx in sorted_indices:
+                    if chapter_display_info[idx]['status'] in failure_statuses:
+                        listbox.select_set(sorted_indices.index(idx))
+            else:
+                for idx in sorted_indices:
+                    if chapter_display_info[idx]['status'] == status_to_select:
+                        listbox.select_set(sorted_indices.index(idx))
             update_selection_count()
         
         # Selection count label
@@ -2787,7 +2801,8 @@ class TranslatorGUI:
            'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var.get() else "0",
            'DUPLICATE_DETECTION_MODE': self.duplicate_detection_mode_var.get(),
            'CHAPTER_NUMBER_OFFSET': str(self.chapter_number_offset_var.get()), 
-           'USE_HEADER_AS_OUTPUT': "1" if self.use_header_as_output_var.get() else "0"
+           'USE_HEADER_AS_OUTPUT': "1" if self.use_header_as_output_var.get() else "0",
+           'ENABLE_DECIMAL_CHAPTERS': "1" if self.enable_decimal_chapters_var.get() else "0",
        }
 
     def run_glossary_extraction_thread(self):
@@ -4141,6 +4156,13 @@ class TranslatorGUI:
         
         tk.Label(section_frame, text="Fixes AI responses that lose paragraph\nstructure (wall of text)",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
+                
+        tb.Checkbutton(section_frame, text="Enable Decimal Chapter Detection (EPUBs)", 
+              variable=self.enable_decimal_chapters_var,
+              bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+
+        tk.Label(section_frame, text="Detect chapters like 1.1, 1.2 in EPUB files\n(Text files always use decimal chapters when split)",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
         
         tb.Checkbutton(section_frame, text="Reset Failed Chapters on Start", 
                       variable=self.reset_failed_chapters_var,
@@ -4174,7 +4196,7 @@ class TranslatorGUI:
                       variable=self.use_header_as_output_var,
                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
 
-        tk.Label(section_frame, text="Use chapter headers/titles as output filenames\ninstead of original file names",
+        tk.Label(section_frame, text="Use chapter headers/titles as output filenames",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
                 
 
@@ -4298,6 +4320,7 @@ class TranslatorGUI:
                     'hide_image_translation_label': self.hide_image_translation_label_var.get(),
                     'duplicate_detection_mode': self.duplicate_detection_mode_var.get(),
                     'chapter_number_offset': safe_int(self.chapter_number_offset_var.get(), 0),
+                    'enable_decimal_chapters': self.enable_decimal_chapters_var.get(),
                     'use_header_as_output': self.use_header_as_output_var.get()
                 })
                 
@@ -4348,7 +4371,8 @@ class TranslatorGUI:
                     "HIDE_IMAGE_TRANSLATION_LABEL": "1" if self.hide_image_translation_label_var.get() else "0",
                     "DISABLE_EPUB_GALLERY": "1" if self.disable_epub_gallery_var.get() else "0",
                     "DISABLE_ZERO_DETECTION": "1" if self.disable_zero_detection_var.get() else "0",
-                    "DUPLICATE_DETECTION_MODE": self.duplicate_detection_mode_var.get()
+                    "DUPLICATE_DETECTION_MODE": self.duplicate_detection_mode_var.get(),
+                    "ENABLE_DECIMAL_CHAPTERS": "1" if self.enable_decimal_chapters_var.get() else "0",
                 }
                 os.environ.update(env_updates)
                 
@@ -4586,6 +4610,8 @@ class TranslatorGUI:
             self.config['duplicate_detection_mode'] = self.duplicate_detection_mode_var.get()
             self.config['chapter_number_offset'] = safe_int(self.chapter_number_offset_var.get(), 0)
             self.config['use_header_as_output'] = self.use_header_as_output_var.get()
+            self.config['enable_decimal_chapters'] = self.enable_decimal_chapters_var.get()
+
 
             _tl = self.token_limit_entry.get().strip()
             if _tl.isdigit():
