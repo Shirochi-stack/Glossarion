@@ -500,7 +500,7 @@ class TranslatorGUI:
             ('retry_timeout_var', 'retry_timeout', True),
             ('batch_translation_var', 'batch_translation', False),
             ('disable_epub_gallery_var', 'disable_epub_gallery', False),
-            ('disable_zero_detection_var', 'disable_zero_detection', False),
+            ('disable_zero_detection_var', 'disable_zero_detection', True),
             ('use_header_as_output_var', 'use_header_as_output', False),
             ('emergency_restore_var', 'emergency_paragraph_restore', True),
             ('contextual_var', 'contextual', True),
@@ -1075,7 +1075,7 @@ class TranslatorGUI:
         dialog.deiconify()
 
     def force_retranslation(self):
-        """Force retranslation of specific chapters"""
+        """Force retranslation of specific chapters with improved display"""
         input_path = self.entry_epub.get()
         if not input_path or not os.path.isfile(input_path):
             messagebox.showerror("Error", "Please select a valid EPUB or text file first.")
@@ -1107,24 +1107,43 @@ class TranslatorGUI:
                             chapters_info_map[ch_info['num']] = ch_info
             except: pass
         
+        # Create dialog with increased width to accommodate longer chapter names
         dialog = self.wm.create_simple_dialog(
             self.master,
             "Force Retranslation",
-            width=699,
+            width=900,  # Increased from 699 to 900
             height=600
         )
         
-        tk.Label(dialog, text="Select chapters to retranslate:", font=('Arial', 12)).pack(pady=10)
+        # Add instructions label
+        instruction_text = "Select chapters to retranslate (scroll horizontally if needed):"
+        tk.Label(dialog, text=instruction_text, font=('Arial', 12)).pack(pady=10)
         
-        frame = tk.Frame(dialog)
-        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        # Create main frame for listbox and scrollbars
+        main_frame = tk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
-        scrollbar = ttk.Scrollbar(frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        # Create horizontal scrollbar
+        h_scrollbar = ttk.Scrollbar(main_frame, orient=tk.HORIZONTAL)
+        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
         
-        listbox = tk.Listbox(frame, selectmode=tk.MULTIPLE, yscrollcommand=scrollbar.set)
+        # Create vertical scrollbar
+        v_scrollbar = ttk.Scrollbar(main_frame, orient=tk.VERTICAL)
+        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Create listbox with both scrollbars
+        listbox = tk.Listbox(
+            main_frame, 
+            selectmode=tk.MULTIPLE, 
+            yscrollcommand=v_scrollbar.set,
+            xscrollcommand=h_scrollbar.set,
+            width=100  # Increased width to show more content
+        )
         listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.config(command=listbox.yview)
+        
+        # Configure scrollbars
+        v_scrollbar.config(command=listbox.yview)
+        h_scrollbar.config(command=listbox.xview)
         
         # Check if 0-based detection is disabled from user settings
         disable_zero_detection = self.disable_zero_detection_var.get()
@@ -1154,37 +1173,32 @@ class TranslatorGUI:
                             uses_zero_based = True
                             break
                 except: pass
-        else:
-            # When toggle is disabled, always treat as 1-based
-            uses_zero_based = False
-            self.append_log("ℹ️ 0-based detection disabled - treating as 1-based novel")
 
-        # Process chapters
+        # Extract chapter numbers with enhanced display
         all_extracted_nums = []
+        chapter_display_info = []  # Store additional info for display
         
         for chapter_key, chapter_info in prog.get("chapters", {}).items():
-            # FIXED: First try to get actual_num directly from chapter_info
             extracted_num = None
             
-            # Priority 1: Use actual_num if available
-            if 'actual_num' in chapter_info:
+            # Priority 1: Use stored chapter_num
+            if 'chapter_num' in chapter_info:
                 try:
-                    extracted_num = int(chapter_info['actual_num'])
+                    extracted_num = int(chapter_info['chapter_num'])
                 except:
                     extracted_num = None
             
-            # Priority 2: Extract from output filename
+            # Priority 2: Extract from output_file name
             if extracted_num is None:
                 output_file = chapter_info.get("output_file", "")
                 if output_file:
                     patterns = [
-                        r'response_(\d+)_',      # Standard pattern: response_001_
-                        r'response_(\d+)\.',     # Pattern: response_001.
-                        r'(\d{4})[_\.]',         # 4-digit pattern
-                        r'(\d{3})[_\.]',         # 3-digit pattern
-                        r'No(\d+)Chapter',       # NoXChapter pattern
-                        r'^(\d+)[_\.]',          # Starting with number
-                        r'_(\d+)(?:_|\.|$)'      # Any number before _ or . or end
+                        r'response_(\d+)',
+                        r'(\d{4})[_\.]',
+                        r'(\d{3})[_\.]',
+                        r'No(\d+)Chapter',
+                        r'^(\d+)[_\.]',
+                        r'_(\d+)(?:_|\.|$)'
                     ]
                     
                     for pattern in patterns:
@@ -1196,7 +1210,6 @@ class TranslatorGUI:
             # Priority 3: Use chapter_idx
             if extracted_num is None and 'chapter_idx' in chapter_info:
                 try:
-                    # Only add 1 if zero detection is enabled AND it's a 0-based novel
                     if not disable_zero_detection and uses_zero_based:
                         extracted_num = int(chapter_info['chapter_idx']) + 1
                     else:
@@ -1216,19 +1229,29 @@ class TranslatorGUI:
                 extracted_num = 0
                 
             all_extracted_nums.append(extracted_num)
-        
-        chapter_keys = list(prog.get("chapters", {}).keys())
-        
-        sorted_indices = sorted(range(len(all_extracted_nums)), key=lambda i: all_extracted_nums[i])
-        sorted_keys = [chapter_keys[i] for i in sorted_indices]
-        
-        for idx in sorted_indices:
-            chapter_key = chapter_keys[idx]
-            chapter_info = prog["chapters"][chapter_key]
-            output_file = chapter_info.get("output_file", "")
-            extracted_num = all_extracted_nums[idx]
             
-            status = chapter_info.get("status", "unknown")
+            # Store additional info for enhanced display
+            chapter_display_info.append({
+                'key': chapter_key,
+                'num': extracted_num,
+                'info': chapter_info,
+                'output_file': chapter_info.get("output_file", ""),
+                'status': chapter_info.get("status", "unknown"),
+                'original_basename': chapter_info.get("original_basename", "")
+            })
+        
+        # Sort chapters by number
+        sorted_indices = sorted(range(len(all_extracted_nums)), key=lambda i: all_extracted_nums[i])
+        
+        # Display chapters with enhanced information
+        for idx in sorted_indices:
+            display_data = chapter_display_info[idx]
+            chapter_key = display_data['key']
+            chapter_info = display_data['info']
+            output_file = display_data['output_file']
+            extracted_num = display_data['num']
+            status = display_data['status']
+            original_basename = display_data['original_basename']
             
             # Check if file exists
             file_exists = False
@@ -1236,18 +1259,86 @@ class TranslatorGUI:
                 output_path = os.path.join(output_dir, output_file)
                 file_exists = os.path.exists(output_path)
             
+            # Create status indicator with color coding
+            if status == "completed":
+                status_indicator = "✅ completed"
+            elif status == "in_progress":
+                status_indicator = "🔄 in_progress"
+            elif status == "failed":
+                status_indicator = "❌ failed"
+            else:
+                status_indicator = f"❓ {status}"
+            
             file_indicator = "✓" if file_exists else "✗"
-            display_str = f"Chapter {extracted_num} - {status} - File: {file_indicator}"
+            
+            # Enhanced display string with more information
+            display_parts = [
+                f"Chapter {extracted_num:04d}",  # Zero-padded for better sorting visibility
+                status_indicator,
+                f"File: {file_indicator}"
+            ]
+            
+            # Add filename if available (truncated if too long)
+            if output_file:
+                filename_display = output_file
+                if len(filename_display) > 50:
+                    filename_display = filename_display[:47] + "..."
+                display_parts.append(f"[{filename_display}]")
+            
+            # Add original basename if different from output file
+            if original_basename and original_basename != output_file:
+                basename_display = original_basename
+                if len(basename_display) > 30:
+                    basename_display = basename_display[:27] + "..."
+                display_parts.append(f"(from: {basename_display})")
+            
+            display_str = " - ".join(display_parts)
             listbox.insert(tk.END, display_str)
         
+        # Add summary label
+        summary_text = f"Total chapters: {len(chapter_display_info)}"
+        completed_count = sum(1 for d in chapter_display_info if d['status'] == 'completed')
+        in_progress_count = sum(1 for d in chapter_display_info if d['status'] == 'in_progress')
+        failed_count = sum(1 for d in chapter_display_info if d['status'] == 'failed')
+        
+        summary_text += f" | ✅ Completed: {completed_count}"
+        summary_text += f" | 🔄 In Progress: {in_progress_count}"
+        if failed_count > 0:
+            summary_text += f" | ❌ Failed: {failed_count}"
+        
+        summary_label = tk.Label(dialog, text=summary_text, font=('Arial', 10), fg='gray')
+        summary_label.pack(pady=(5, 10))
+        
+        # Button frame
         button_frame = tk.Frame(dialog)
         button_frame.pack(pady=10)
         
         def select_all():
             listbox.select_set(0, tk.END)
+            update_selection_count()
         
         def clear_selection():
             listbox.select_clear(0, tk.END)
+            update_selection_count()
+        
+        def select_status(status_to_select):
+            """Select all chapters with a specific status"""
+            listbox.select_clear(0, tk.END)
+            for idx in sorted_indices:
+                if chapter_display_info[idx]['status'] == status_to_select:
+                    listbox.select_set(sorted_indices.index(idx))
+            update_selection_count()
+        
+        # Selection count label
+        selection_count_label = tk.Label(button_frame, text="Selected: 0", font=('Arial', 10))
+        selection_count_label.grid(row=0, column=0, columnspan=5, pady=(0, 5))
+        
+        def update_selection_count(*args):
+            count = len(listbox.curselection())
+            selection_count_label.config(text=f"Selected: {count}")
+        
+        # Bind selection change event
+        listbox.bind('<<ListboxSelect>>', update_selection_count)
         
         def retranslate_selected():
             selected = listbox.curselection()
@@ -1257,12 +1348,30 @@ class TranslatorGUI:
             
             selected_indices = [sorted_indices[i] for i in selected]
             
-            if messagebox.askyesno("Confirm", f"This will delete {len(selected)} translated chapters and mark them for retranslation.\n\nContinue?"):
+            # Show detailed confirmation
+            selected_chapters = []
+            for idx in selected_indices:
+                display_data = chapter_display_info[idx]
+                selected_chapters.append(f"Chapter {display_data['num']} ({display_data['status']})")
+            
+            if len(selected_chapters) > 10:
+                chapter_list = "\n".join(selected_chapters[:5])
+                chapter_list += f"\n... and {len(selected_chapters) - 5} more"
+            else:
+                chapter_list = "\n".join(selected_chapters)
+            
+            confirm_msg = f"This will delete {len(selected)} translated chapters and mark them for retranslation:\n\n{chapter_list}\n\nContinue?"
+            
+            if messagebox.askyesno("Confirm", confirm_msg):
                 dialog.destroy()
                 
                 count = 0
+                chapter_keys = list(prog.get("chapters", {}).keys())
+                
                 for idx in selected_indices:
-                    chapter_key = chapter_keys[idx]
+                    display_data = chapter_display_info[idx]
+                    chapter_key = display_data['key']
+                    
                     if chapter_key in prog["chapters"]:
                         chapter_info = prog["chapters"][chapter_key]
                         
@@ -1293,16 +1402,23 @@ class TranslatorGUI:
                 self.append_log(f"🔄 Marked {count} chapters for retranslation")
                 messagebox.showinfo("Success", f"Marked {count} chapters for retranslation.\nRun translation to process them.")
         
+        # Create buttons with better layout
         tb.Button(button_frame, text="Select All", command=select_all,
-                 bootstyle="primary", width=15).pack(side=tk.LEFT, padx=5)
+                 bootstyle="primary", width=15).grid(row=1, column=0, padx=5)
         tb.Button(button_frame, text="Clear Selection", command=clear_selection,
-                 bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
+                 bootstyle="secondary", width=15).grid(row=1, column=1, padx=5)
+        tb.Button(button_frame, text="Select Completed", command=lambda: select_status("completed"),
+                 bootstyle="success", width=15).grid(row=1, column=2, padx=5)
+        tb.Button(button_frame, text="Select Failed", command=lambda: select_status("failed"),
+                 bootstyle="danger", width=15).grid(row=1, column=3, padx=5)
+        
         tb.Button(button_frame, text="Retranslate Selected", command=retranslate_selected, 
-                 bootstyle="danger", width=20).pack(side=tk.LEFT, padx=5)
+                 bootstyle="danger", width=20).grid(row=2, column=0, columnspan=2, padx=5, pady=(10, 0))
         tb.Button(button_frame, text="Cancel", command=dialog.destroy, 
-                 bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
+                 bootstyle="secondary", width=15).grid(row=2, column=2, columnspan=2, padx=5, pady=(10, 0))
         
         dialog.deiconify()
+        update_selection_count()
     
     def glossary_manager(self):
        """Open comprehensive glossary management dialog"""
