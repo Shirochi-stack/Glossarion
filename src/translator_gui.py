@@ -527,7 +527,8 @@ class TranslatorGUI:
             ('max_images_per_chapter_var', 'max_images_per_chapter', '1'),
             ('image_chunk_height_var', 'image_chunk_height', '1500'),
             ('chunk_timeout_var', 'chunk_timeout', '900'),
-            ('batch_size_var', 'batch_size', '3')
+            ('batch_size_var', 'batch_size', '3'),
+            ('chapter_number_offset_var', 'chapter_number_offset', '0'),
         ]
         
         for var_name, key, default in str_vars:
@@ -1074,6 +1075,75 @@ class TranslatorGUI:
         
         dialog.deiconify()
 
+    def detect_novel_numbering_unified(self, output_dir, progress_data):
+        """
+        Use the backend's detect_novel_numbering function for consistent detection
+        """
+        try:
+            # Try to load the backend detection function
+            if not self._lazy_load_modules():
+                # Fallback to current GUI logic if modules not loaded
+                return self._detect_novel_numbering_gui_fallback(output_dir, progress_data)
+            
+            # Import the detection function from backend
+            from TransateKRtoEN import detect_novel_numbering
+            
+            # Build a chapters list from progress data to pass to backend function
+            chapters = []
+            for chapter_key, chapter_info in progress_data.get("chapters", {}).items():
+                chapter_dict = {
+                    'original_basename': chapter_info.get('original_basename', ''),
+                    'filename': chapter_info.get('output_file', ''),
+                    'num': chapter_info.get('chapter_num', 0)
+                }
+                # Add the output file path if it exists
+                if chapter_dict['filename']:
+                    chapter_dict['filename'] = os.path.join(output_dir, chapter_dict['filename'])
+                
+                chapters.append(chapter_dict)
+            
+            # Use the backend detection logic
+            uses_zero_based = detect_novel_numbering(chapters)
+            
+            print(f"[GUI] Unified detection result: {'0-based' if uses_zero_based else '1-based'}")
+            return uses_zero_based
+            
+        except Exception as e:
+            print(f"[GUI] Error in unified detection: {e}")
+            # Fallback to GUI logic on error
+            return self._detect_novel_numbering_gui_fallback(output_dir, progress_data)
+
+    def _detect_novel_numbering_gui_fallback(self, output_dir, progress_data):
+        """
+        Fallback detection logic (current GUI implementation)
+        """
+        uses_zero_based = False
+        
+        for chapter_key, chapter_info in progress_data.get("chapters", {}).items():
+            if chapter_info.get("status") == "completed":
+                output_file = chapter_info.get("output_file", "")
+                stored_chapter_num = chapter_info.get("chapter_num", 0)
+                if output_file:
+                    match = re.search(r'response_(\d+)', output_file)
+                    if match:
+                        file_num = int(match.group(1))
+                        if file_num == stored_chapter_num - 1:
+                            uses_zero_based = True
+                            break
+                        elif file_num == stored_chapter_num:
+                            uses_zero_based = False
+                            break
+
+        if not uses_zero_based:
+            try:
+                for file in os.listdir(output_dir):
+                    if re.search(r'_0+[_\.]', file):
+                        uses_zero_based = True
+                        break
+            except: pass
+        
+        return uses_zero_based
+    
     def force_retranslation(self):
         """Force retranslation of specific chapters with improved display"""
         input_path = self.entry_epub.get()
@@ -1151,28 +1221,8 @@ class TranslatorGUI:
         # Detect numbering system (only if not disabled)
         uses_zero_based = False
         if not disable_zero_detection:
-            for chapter_key, chapter_info in prog.get("chapters", {}).items():
-                if chapter_info.get("status") == "completed":
-                    output_file = chapter_info.get("output_file", "")
-                    stored_chapter_num = chapter_info.get("chapter_num", 0)
-                    if output_file:
-                        match = re.search(r'response_(\d+)', output_file)
-                        if match:
-                            file_num = int(match.group(1))
-                            if file_num == stored_chapter_num - 1:
-                                uses_zero_based = True
-                                break
-                            elif file_num == stored_chapter_num:
-                                uses_zero_based = False
-                                break
-
-            if not uses_zero_based:
-                try:
-                    for file in os.listdir(output_dir):
-                        if re.search(r'_0+[_\.]', file):
-                            uses_zero_based = True
-                            break
-                except: pass
+            # NEW: Use unified detection
+            uses_zero_based = self.detect_novel_numbering_unified(output_dir, prog)
 
         # Extract chapter numbers with enhanced display
         all_extracted_nums = []
@@ -2718,6 +2768,7 @@ class TranslatorGUI:
            'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var.get() else "0",
            'DUPLICATE_DETECTION_MODE': self.duplicate_detection_mode_var.get(),
            'AI_HUNTER_THRESHOLD': self.ai_hunter_threshold_var.get(),
+           'CHAPTER_NUMBER_OFFSET': str(self.config.get('chapter_number_offset', 0)),
            'USE_HEADER_AS_OUTPUT': "1" if self.use_header_as_output_var.get() else "0"
        }
 
@@ -3975,6 +4026,29 @@ class TranslatorGUI:
 
         tk.Label(section_frame, text="Use chapter headers/titles as output filenames\ninstead of original file names",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+                
+
+         # NEW: Chapter number offset
+        ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
+        
+        offset_frame = tk.Frame(section_frame)
+        offset_frame.pack(anchor=tk.W, pady=5)
+        
+        tk.Label(offset_frame, text="Chapter Number Offset:").pack(side=tk.LEFT)
+        
+        # Create variable if not exists
+        if not hasattr(self, 'chapter_number_offset_var'):
+            self.chapter_number_offset_var = tk.StringVar(
+                value=str(self.config.get('chapter_number_offset', '0'))
+            )
+        
+        tb.Entry(offset_frame, width=6, textvariable=self.chapter_number_offset_var).pack(side=tk.LEFT, padx=5)
+        
+        tk.Label(offset_frame, text="(+/- adjustment)").pack(side=tk.LEFT)
+        
+        tk.Label(section_frame, text="Adjust all chapter numbers by this amount.\nUseful for matching file numbers to actual chapters.",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))               
+        
 
     def _create_image_translation_section(self, parent):
         """Create image translation section"""
@@ -4074,6 +4148,7 @@ class TranslatorGUI:
                     'hide_image_translation_label': self.hide_image_translation_label_var.get(),
                     'duplicate_detection_mode': self.duplicate_detection_mode_var.get(),
                     'ai_hunter_threshold': safe_int(self.ai_hunter_threshold_var.get(), 75),
+                    'chapter_number_offset': safe_int(self.chapter_number_offset_var.get(), 0),
                     'use_header_as_output': self.use_header_as_output_var.get()
                 })
                 
