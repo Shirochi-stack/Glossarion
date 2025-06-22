@@ -2786,7 +2786,6 @@ class TranslatorGUI:
            'COMPREHENSIVE_EXTRACTION': "1" if self.comprehensive_extraction_var.get() else "0",
            'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var.get() else "0",
            'DUPLICATE_DETECTION_MODE': self.duplicate_detection_mode_var.get(),
-           'AI_HUNTER_THRESHOLD': self.ai_hunter_threshold_var.get(),
            'CHAPTER_NUMBER_OFFSET': str(self.chapter_number_offset_var.get()), 
            'USE_HEADER_AS_OUTPUT': "1" if self.use_header_as_output_var.get() else "0"
        }
@@ -4243,7 +4242,6 @@ class TranslatorGUI:
                     'process_webnovel_images': self.process_webnovel_images_var.get(),
                     'hide_image_translation_label': self.hide_image_translation_label_var.get(),
                     'duplicate_detection_mode': self.duplicate_detection_mode_var.get(),
-                    'ai_hunter_threshold': safe_int(self.ai_hunter_threshold_var.get(), 75),
                     'chapter_number_offset': safe_int(self.chapter_number_offset_var.get(), 0),
                     'use_header_as_output': self.use_header_as_output_var.get()
                 })
@@ -4295,8 +4293,7 @@ class TranslatorGUI:
                     "HIDE_IMAGE_TRANSLATION_LABEL": "1" if self.hide_image_translation_label_var.get() else "0",
                     "DISABLE_EPUB_GALLERY": "1" if self.disable_epub_gallery_var.get() else "0",
                     "DISABLE_ZERO_DETECTION": "1" if self.disable_zero_detection_var.get() else "0",
-                    "DUPLICATE_DETECTION_MODE": self.duplicate_detection_mode_var.get(),
-                    "AI_HUNTER_THRESHOLD": self.ai_hunter_threshold_var.get()
+                    "DUPLICATE_DETECTION_MODE": self.duplicate_detection_mode_var.get()
                 }
                 os.environ.update(env_updates)
                 
@@ -4532,7 +4529,6 @@ class TranslatorGUI:
             self.config['disable_epub_gallery'] = self.disable_epub_gallery_var.get()
             self.config['enable_auto_glossary'] = self.enable_auto_glossary_var.get()
             self.config['duplicate_detection_mode'] = self.duplicate_detection_mode_var.get()
-            self.config['ai_hunter_threshold'] = safe_int(self.ai_hunter_threshold_var.get(), 75)
             self.config['chapter_number_offset'] = safe_int(self.chapter_number_offset_var.get(), 0)
             self.config['use_header_as_output'] = self.use_header_as_output_var.get()
 
