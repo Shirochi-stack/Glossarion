@@ -273,7 +273,7 @@ class FileUtilities:
             config: Optional config object to check DISABLE_ZERO_DETECTION
         
         Returns:
-            int: The actual chapter number (raw from file, no adjustments)
+            int or float: The actual chapter number (raw from file, no adjustments)
         """
         if patterns is None:
             patterns = PatternManager.FILENAME_EXTRACT_PATTERNS
@@ -285,6 +285,19 @@ class FileUtilities:
             basename = chapter['original_basename']
             
             #print(f"[DEBUG] Checking basename: {basename}")
+            
+            # Check if decimal chapters are enabled for EPUBs
+            enable_decimal = os.getenv('ENABLE_DECIMAL_CHAPTERS', '0') == '1'
+            
+            # For EPUBs, only check decimal patterns if the toggle is enabled
+            if enable_decimal:
+                # Check for decimal chapter numbers (e.g., Chapter_1.1, 1.2.html)
+                decimal_match = re.search(r'(\d+)\.(\d+)', basename)
+                if decimal_match:
+                    # Return as float for decimal chapters
+                    actual_num = float(f"{decimal_match.group(1)}.{decimal_match.group(2)}")
+                    #print(f"[DEBUG] DECIMAL pattern matched: {decimal_match.group(0)} -> extracted {actual_num}")
+                    return actual_num
             
             # FIRST: Check if this is a "XXXX_Y" format (like 0000_1, 0105_106)
             # This pattern MUST be checked before any other pattern
@@ -304,25 +317,17 @@ class FileUtilities:
                 match = re.search(pattern, basename, re.IGNORECASE)
                 if match:
                     actual_num = int(match.group(1))
-                    #print(f"[DEBUG] Pattern '{pattern}' matched -> extracted {actual_num}")
+                    #print(f"[DEBUG] Pattern matched in basename -> extracted {actual_num}")
                     break
         
-        # Fallback to other sources if needed
+        # If not found in basename, try filename
         if actual_num is None and 'filename' in chapter:
-            filename = os.path.basename(chapter['filename'])
+            filename = chapter['filename']
+            #print(f"[DEBUG] Checking filename: {filename}")
             
-            print(f"[DEBUG] Checking filename: {filename}")
-            
-            # Check prefix_suffix pattern for filename too
-            prefix_suffix_match = re.match(r'^(\d+)_(\d+)', filename)
-            if prefix_suffix_match:
-                actual_num = int(prefix_suffix_match.group(2))
-                #print(f"[DEBUG] PREFIX_SUFFIX pattern matched in filename -> extracted {actual_num}")
-                return actual_num
-            
-            # Check other patterns
             for pattern in patterns:
-                if pattern in [r'^(\d+)[_\.]', r'(\d{3,5})[_\.]', r'^(\d+)_']:
+                # Skip the XXXX_Y patterns for filename
+                if pattern in [r'^\d{4}_(\d+)\.x?html?$', r'^\d+_(\d+)[_\.]', r'(\d{3,5})[_\.]', r'^(\d+)_']:
                     continue
                     
                 match = re.search(pattern, filename, re.IGNORECASE)
@@ -350,15 +355,36 @@ class FileUtilities:
             if safe_title and safe_title != f"chapter_{actual_num or chapter.get('num', 0):03d}":
                 return f"response_{safe_title}.html"
         
-        # ALWAYS use original basename if available, without adding numbers
+        # Check if decimal chapters are enabled and this is an EPUB with decimal chapter
+        enable_decimal = os.getenv('ENABLE_DECIMAL_CHAPTERS', '0') == '1'
+        
+        # For EPUBs with decimal detection enabled
+        if enable_decimal and 'original_basename' in chapter and chapter['original_basename']:
+            basename = chapter['original_basename']
+            decimal_match = re.search(r'(\d+)\.(\d+)', basename)
+            if decimal_match:
+                # Create a modified basename that preserves the decimal
+                base = os.path.splitext(basename)[0]
+                # Replace dots with underscores for filesystem compatibility
+                base = base.replace('.', '_')
+                return f"response_{base}.html"
+        
+        # Standard EPUB handling - use original basename
         if 'original_basename' in chapter and chapter['original_basename']:
             base = os.path.splitext(chapter['original_basename'])[0]
             return f"response_{base}.html"
         else:
-            # Only use number if there's no original basename
+            # Text file handling (no original basename)
             if actual_num is None:
                 actual_num = chapter.get('actual_chapter_num', chapter.get('num', 0))
-            return f"response_{actual_num:04d}.html"
+            
+            # Handle decimal chapter numbers from text file splitting
+            if isinstance(actual_num, float):
+                major = int(actual_num)
+                minor = int(round((actual_num - major) * 10))
+                return f"response_{major:04d}_{minor}.html"
+            else:
+                return f"response_{actual_num:04d}.html"
 
 # =====================================================
 # UNIFIED PROGRESS MANAGER
