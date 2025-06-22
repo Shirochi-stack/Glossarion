@@ -22,6 +22,7 @@ from chapter_splitter import ChapterSplitter
 from image_translator import ImageTranslator
 from typing import Dict, List, Tuple 
 from txt_processor import TextFileProcessor
+from ai_hunter_enhanced import ImprovedAIHunterDetection
 
 # =====================================================
 # CONFIGURATION AND ENVIRONMENT MANAGEMENT
@@ -4791,9 +4792,34 @@ def main(log_callback=None, stop_callback=None):
         print(f"   Successful: {chapters_completed}")
         
         config.BATCH_TRANSLATION = False
-
+    
     if not config.BATCH_TRANSLATION:
         translation_processor = TranslationProcessor(config, client, out, log_callback, check_stop, uses_zero_based)
+        
+        # Inject improved AI Hunter if in AI Hunter mode
+        if config.DUPLICATE_DETECTION_MODE == 'ai-hunter':
+            # Load the main config to get AI Hunter settings
+            config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    main_config = json.load(f)
+                
+                # Create and inject the improved AI Hunter
+                ai_hunter = ImprovedAIHunterDetection(main_config)
+
+                # The TranslationProcessor class has a method that checks for duplicates
+                # We need to replace it with our enhanced AI Hunter
+                
+                # Create a wrapper to match the expected signature
+                def enhanced_duplicate_check(self, result, idx, prog, out):
+                    return ai_hunter.detect_duplicate_ai_hunter_enhanced(result, idx, prog, out)
+                
+                # Bind the enhanced method to the processor instance
+                translation_processor.check_duplicate_content = enhanced_duplicate_check.__get__(translation_processor, TranslationProcessor)
+                
+                print("🤖 AI Hunter: Using enhanced detection with configurable thresholds")
+            else:
+                print("⚠️ AI Hunter: Config file not found, using default detection")
         
         # First pass: set actual chapter numbers respecting the config
         for idx, c in enumerate(chapters):
