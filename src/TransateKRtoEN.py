@@ -3636,9 +3636,11 @@ def detect_novel_numbering(chapters):
     has_chapter_0 = False
     has_chapter_1 = False
     lowest_chapter = float('inf')
+    first_few_chapters = []  # Track first few chapter numbers
     
-    for idx, chapter in enumerate(chapters):
+    for idx, chapter in enumerate(chapters[:10]):  # Check first 10 chapters
         extracted_num = None
+        padded_num = None
         
         if 'original_basename' in chapter:
             basename = chapter['original_basename']
@@ -3647,8 +3649,21 @@ def detect_novel_numbering(chapters):
             for pattern in patterns:
                 match = re.search(pattern, basename)
                 if match:
-                    extracted_num = int(match.group(1))
-                    print(f"[DEBUG] Pattern '{pattern}' matched: {extracted_num}")
+                    padded_num = match.group(1)  # Keep the padded string
+                    extracted_num = int(padded_num)
+                    print(f"[DEBUG] Pattern '{pattern}' matched: {padded_num} -> {extracted_num}")
+                    
+                    # Special check for padded zeros (e.g., "00000", "00001")
+                    if len(padded_num) >= 3 and padded_num.startswith('0'):
+                        # If we see "00000" or similar, it's definitely 0-based
+                        if extracted_num == 0:
+                            has_chapter_0 = True
+                            print(f"[DEBUG] ✓ Found chapter 0 (padded: {padded_num})")
+                        # If we see "00001" with heavy padding, it's likely 0-based
+                        elif extracted_num == 1 and len(padded_num) >= 4:
+                            print(f"[DEBUG] 📌 Found heavily padded chapter 1: {padded_num} - likely 0-based")
+                            # Store this for later analysis
+                            first_few_chapters.append((idx, extracted_num, padded_num))
                     break
         
         if extracted_num is None and 'filename' in chapter:
@@ -3656,8 +3671,9 @@ def detect_novel_numbering(chapters):
             for pattern in patterns:
                 match = re.search(pattern, os.path.basename(filename))
                 if match:
-                    extracted_num = int(match.group(1))
-                    print(f"[DEBUG] Filename pattern '{pattern}' matched: {extracted_num}")
+                    padded_num = match.group(1)
+                    extracted_num = int(padded_num)
+                    print(f"[DEBUG] Filename pattern '{pattern}' matched: {padded_num} -> {extracted_num}")
                     break
         
         if extracted_num is not None:
@@ -3667,6 +3683,30 @@ def detect_novel_numbering(chapters):
             elif extracted_num == 1:
                 has_chapter_1 = True
             lowest_chapter = min(lowest_chapter, extracted_num)
+            
+            # Track first few chapters
+            if idx < 5:
+                first_few_chapters.append((idx, extracted_num, padded_num))
+    
+    # Additional check: if first chapter has heavy padding and starts at 1, 
+    # check if chapters are sequential from 1
+    if not has_chapter_0 and first_few_chapters:
+        # Check if we have sequential numbering starting from 0 or 1
+        sorted_nums = sorted([num for _, num, _ in first_few_chapters])
+        
+        # If first file is "00001" or similar with 4+ digits of padding
+        first_chapter_info = first_few_chapters[0] if first_few_chapters else None
+        if first_chapter_info:
+            _, first_num, first_padded = first_chapter_info
+            
+            # Heavy padding (4+ digits) starting at 1 suggests 0-based
+            if len(first_padded) >= 4 and first_num == 1:
+                print(f"[DEBUG] ⚠️ Heavy padding detected ({first_padded}) - checking for 0-based pattern")
+                
+                # Check if we have 1, 2, 3... (which would map to 0, 1, 2... in 0-based)
+                if sorted_nums == list(range(1, len(sorted_nums) + 1)):
+                    print(f"[DEBUG] ✅ Sequential numbering from 1 with heavy padding - treating as 0-based")
+                    return True
     
     if not has_chapter_0 and chapters:
         first_chapter = chapters[0]
