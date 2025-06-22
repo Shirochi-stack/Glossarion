@@ -30,7 +30,6 @@ class AIHunterConfigGUI:
         # Default AI Hunter settings structure
         self.default_ai_hunter = {
             'enabled': True,
-            'lookback_chapters': 5,
             'sample_size': 3000,
             'thresholds': {
                 'exact': 90,
@@ -516,11 +515,11 @@ class ImprovedAIHunterDetection:
             # Log configuration
             print(f"\n    🔧 Configuration:")
             print(f"       Detection mode: {config['detection_mode']}")
-            print(f"       Lookback chapters: {config['lookback_chapters']}")
+            print(f"       Lookback chapters: {int(os.getenv('DUPLICATE_LOOKBACK_CHAPTERS', '5'))}")
             print(f"       Sample size: {config['sample_size']}")
             
             # Check previous chapters
-            lookback = config['lookback_chapters']
+            lookback = int(os.getenv('DUPLICATE_LOOKBACK_CHAPTERS', '5'))
             all_similarities = []
             highest_similarity = 0.0
             detected_method = None
