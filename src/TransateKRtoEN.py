@@ -97,14 +97,20 @@ class PatternManager:
     ]
     
     FILENAME_EXTRACT_PATTERNS = [
-        r'^(\d+)[_\.]',          # "0249_" or "0249."
-        r'^(\d{3,4})$',          # "0249" (just numbers)
-        r'No(\d+)Chapter',       # "No249Chapter"
-        r'[Cc]hapter[_\s]*(\d+)', # "Chapter249" or "chapter_249"
-        r'[Cc]h[_\s]*(\d+)',     # "ch249" or "CH 249"
-        r'_(\d+)$',              # "text_249"
-        r'-(\d+)$',              # "text-249"
-        r'(\d+)$'                # "text249" (fallback: any number)
+        # IMPORTANT: More specific patterns MUST come first
+        r'^\d{4}_(\d+)\.x?html?$',  # "0000_1.xhtml" - extracts 1, not 0000
+        r'^\d+_(\d+)[_\.]',         # Any digits followed by underscore then capture next digits
+        r'^(\d+)[_\.]',             # Standard: "0249_" or "0249."
+        r'response_(\d+)_',         # Standard pattern: response_001_
+        r'response_(\d+)\.',        # Pattern: response_001.
+        r'(\d{3,5})[_\.]',          # 3-5 digit pattern with padding
+        r'[Cc]hapter[_\s]*(\d+)',   # Chapter word pattern
+        r'[Cc]h[_\s]*(\d+)',        # Ch abbreviation
+        r'No(\d+)',                 # No prefix
+        r'第(\d+)[章话回]',          # Chinese chapter markers
+        r'_(\d+)(?:_|\.|$)',        # Number between underscores or at end
+        r'^(\d+)(?:_|\.|$)',        # Starting with number
+        r'(\d+)',                   # Any number (fallback)
     ]
     
     CJK_HONORIFICS = {
@@ -270,23 +276,40 @@ class FileUtilities:
         
         actual_num = None
         
+        # Special handling for "0000_1" pattern
+        prefix_suffix_pattern = r'^(\d+)_(\d+)[_\.]'
+        
         # Try to extract from original basename first
         if chapter.get('original_basename'):
             basename = chapter['original_basename']
-            for pattern in patterns:
-                match = re.search(pattern, basename, re.IGNORECASE)
-                if match:
-                    actual_num = int(match.group(1))
-                    break
+            
+            # Check for prefix_suffix pattern first
+            prefix_match = re.search(prefix_suffix_pattern, basename, re.IGNORECASE)
+            if prefix_match:
+                # Use the number AFTER the underscore
+                actual_num = int(prefix_match.group(2))
+            else:
+                # Try standard patterns
+                for pattern in patterns:
+                    match = re.search(pattern, basename, re.IGNORECASE)
+                    if match:
+                        actual_num = int(match.group(1))
+                        break
         
         # Fallback to other sources if needed
         if actual_num is None and 'filename' in chapter:
             filename = os.path.basename(chapter['filename'])
-            for pattern in patterns:
-                match = re.search(pattern, filename, re.IGNORECASE)
-                if match:
-                    actual_num = int(match.group(1))
-                    break
+            
+            # Check prefix_suffix pattern
+            prefix_match = re.search(prefix_suffix_pattern, filename, re.IGNORECASE)
+            if prefix_match:
+                actual_num = int(prefix_match.group(2))
+            else:
+                for pattern in patterns:
+                    match = re.search(pattern, filename, re.IGNORECASE)
+                    if match:
+                        actual_num = int(match.group(1))
+                        break
         
         # Final fallback to chapter num
         if actual_num is None:
@@ -3636,45 +3659,55 @@ def detect_novel_numbering(chapters):
     has_chapter_0 = False
     has_chapter_1 = False
     lowest_chapter = float('inf')
-    first_few_chapters = []  # Track first few chapter numbers
+    
+    # Special check for prefix_suffix pattern like "0000_1.xhtml"
+    prefix_suffix_pattern = r'^(\d+)_(\d+)[_\.]'
+    uses_prefix_suffix = False
     
     for idx, chapter in enumerate(chapters[:10]):  # Check first 10 chapters
         extracted_num = None
-        padded_num = None
         
         if 'original_basename' in chapter:
             basename = chapter['original_basename']
             print(f"[DEBUG] Checking basename: {basename}")
             
-            for pattern in patterns:
-                match = re.search(pattern, basename)
-                if match:
-                    padded_num = match.group(1)  # Keep the padded string
-                    extracted_num = int(padded_num)
-                    print(f"[DEBUG] Pattern '{pattern}' matched: {padded_num} -> {extracted_num}")
-                    
-                    # Special check for padded zeros (e.g., "00000", "00001")
-                    if len(padded_num) >= 3 and padded_num.startswith('0'):
-                        # If we see "00000" or similar, it's definitely 0-based
-                        if extracted_num == 0:
-                            has_chapter_0 = True
-                            print(f"[DEBUG] ✓ Found chapter 0 (padded: {padded_num})")
-                        # If we see "00001" with heavy padding, it's likely 0-based
-                        elif extracted_num == 1 and len(padded_num) >= 4:
-                            print(f"[DEBUG] 📌 Found heavily padded chapter 1: {padded_num} - likely 0-based")
-                            # Store this for later analysis
-                            first_few_chapters.append((idx, extracted_num, padded_num))
-                    break
+            # Check for prefix_suffix pattern (e.g., "0000_1.xhtml")
+            prefix_match = re.search(prefix_suffix_pattern, basename)
+            if prefix_match:
+                prefix_num = int(prefix_match.group(1))
+                suffix_num = int(prefix_match.group(2))
+                print(f"[DEBUG] Found prefix_suffix pattern: {prefix_num}_{suffix_num}")
+                
+                uses_prefix_suffix = True
+                # Use the SUFFIX number for detection, not prefix
+                extracted_num = suffix_num
+                
+                # Don't let the prefix mislead us - check the actual chapter numbers
+            else:
+                # Try standard patterns
+                for pattern in patterns:
+                    match = re.search(pattern, basename)
+                    if match:
+                        extracted_num = int(match.group(1))
+                        print(f"[DEBUG] Pattern '{pattern}' matched: {extracted_num}")
+                        break
         
         if extracted_num is None and 'filename' in chapter:
             filename = chapter['filename']
-            for pattern in patterns:
-                match = re.search(pattern, os.path.basename(filename))
-                if match:
-                    padded_num = match.group(1)
-                    extracted_num = int(padded_num)
-                    print(f"[DEBUG] Filename pattern '{pattern}' matched: {padded_num} -> {extracted_num}")
-                    break
+            # Check prefix_suffix pattern on full filename
+            prefix_match = re.search(prefix_suffix_pattern, os.path.basename(filename))
+            if prefix_match:
+                prefix_num = int(prefix_match.group(1))
+                suffix_num = int(prefix_match.group(2))
+                extracted_num = suffix_num
+                uses_prefix_suffix = True
+            else:
+                for pattern in patterns:
+                    match = re.search(pattern, os.path.basename(filename))
+                    if match:
+                        extracted_num = int(match.group(1))
+                        print(f"[DEBUG] Filename pattern '{pattern}' matched: {extracted_num}")
+                        break
         
         if extracted_num is not None:
             if extracted_num == 0:
@@ -3682,31 +3715,13 @@ def detect_novel_numbering(chapters):
                 print(f"[DEBUG] ✓ Found chapter 0 at index {idx}")
             elif extracted_num == 1:
                 has_chapter_1 = True
+                print(f"[DEBUG] ✓ Found chapter 1 at index {idx}")
             lowest_chapter = min(lowest_chapter, extracted_num)
-            
-            # Track first few chapters
-            if idx < 5:
-                first_few_chapters.append((idx, extracted_num, padded_num))
     
-    # Additional check: if first chapter has heavy padding and starts at 1, 
-    # check if chapters are sequential from 1
-    if not has_chapter_0 and first_few_chapters:
-        # Check if we have sequential numbering starting from 0 or 1
-        sorted_nums = sorted([num for _, num, _ in first_few_chapters])
-        
-        # If first file is "00001" or similar with 4+ digits of padding
-        first_chapter_info = first_few_chapters[0] if first_few_chapters else None
-        if first_chapter_info:
-            _, first_num, first_padded = first_chapter_info
-            
-            # Heavy padding (4+ digits) starting at 1 suggests 0-based
-            if len(first_padded) >= 4 and first_num == 1:
-                print(f"[DEBUG] ⚠️ Heavy padding detected ({first_padded}) - checking for 0-based pattern")
-                
-                # Check if we have 1, 2, 3... (which would map to 0, 1, 2... in 0-based)
-                if sorted_nums == list(range(1, len(sorted_nums) + 1)):
-                    print(f"[DEBUG] ✅ Sequential numbering from 1 with heavy padding - treating as 0-based")
-                    return True
+    # Special case: if using prefix_suffix pattern and lowest chapter is 1, it's 1-based
+    if uses_prefix_suffix and lowest_chapter >= 1 and not has_chapter_0:
+        print(f"[DEBUG] ✅ 1-based novel detected (prefix_suffix pattern with chapters starting at {lowest_chapter})")
+        return False
     
     if not has_chapter_0 and chapters:
         first_chapter = chapters[0]
@@ -3723,7 +3738,6 @@ def detect_novel_numbering(chapters):
     else:
         print(f"[DEBUG] ✅ 1-based novel detected (no chapter 0, lowest chapter: {lowest_chapter})")
         return False
-
 def validate_chapter_continuity(chapters):
     """Validate chapter continuity and warn about issues"""
     if not chapters:
