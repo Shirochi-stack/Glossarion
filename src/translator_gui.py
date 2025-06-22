@@ -373,7 +373,7 @@ class TranslatorGUI:
         
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        master.title("Glossarion v2.7.7 — The AI Hunter Unleashed!!")
+        master.title("Glossarion v2.7.9 — The AI Hunter Unleashed!!")
         
         # Setup main window with responsive sizing
         self.wm.responsive_size(master, BASE_WIDTH, BASE_HEIGHT)
@@ -574,7 +574,7 @@ class TranslatorGUI:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v2.7.7 - Ready to use!")
+        self.append_log("🚀 Glossarion v2.7.9 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -3886,11 +3886,11 @@ class TranslatorGUI:
         """Create response handling section with AI Hunter additions"""
         section_frame = tk.LabelFrame(parent, text="Response Handling & Retry Logic", padx=10, pady=10)
         section_frame.grid(row=1, column=0, sticky="nsew", padx=(10, 5), pady=5)
-
+        
         # Retry Truncated
         tb.Checkbutton(section_frame, text="Auto-retry Truncated Responses", 
-                     variable=self.retry_truncated_var,
-                     bootstyle="round-toggle").pack(anchor=tk.W)
+                      variable=self.retry_truncated_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W)
 
         retry_frame = tk.Frame(section_frame)
         retry_frame.pack(anchor=tk.W, padx=20, pady=(5, 5))
@@ -3919,16 +3919,26 @@ class TranslatorGUI:
 
         # Function to show/hide detection options based on auto-retry toggle
         def update_detection_visibility():
-            if self.retry_duplicate_var.get():
-                self.detection_options_container.pack(fill='x', after=duplicate_frame)
-            else:
-                self.detection_options_container.pack_forget()
+            try:
+                # Check if widgets still exist before manipulating them
+                if (hasattr(self, 'detection_options_container') and 
+                    self.detection_options_container.winfo_exists() and
+                    duplicate_frame.winfo_exists()):
+                    
+                    if self.retry_duplicate_var.get():
+                        self.detection_options_container.pack(fill='x', after=duplicate_frame)
+                    else:
+                        self.detection_options_container.pack_forget()
+            except tk.TclError:
+                # Widget has been destroyed, ignore
+                pass
 
         # Add trace to update visibility when toggle changes
         self.retry_duplicate_var.trace('w', lambda *args: update_detection_visibility())
 
         # Detection Method subsection (now inside the container)
-        method_label = tk.Label(self.detection_options_container, text="Detection Method:", font=('TkDefaultFont', 10, 'bold'))
+        method_label = tk.Label(self.detection_options_container, text="Detection Method:", 
+                               font=('TkDefaultFont', 10, 'bold'))
         method_label.pack(anchor=tk.W, padx=20, pady=(10, 5))
 
         methods = [
@@ -3941,7 +3951,7 @@ class TranslatorGUI:
         self.ai_hunter_container = tk.Frame(self.detection_options_container)
 
         # Function to update AI Hunter visibility based on detection mode
-        def update_ai_hunter_visibility():
+        def update_ai_hunter_visibility(*args):
             """Update AI Hunter section visibility based on selection"""
             # Clear existing widgets
             for widget in self.ai_hunter_container.winfo_children():
@@ -3951,14 +3961,17 @@ class TranslatorGUI:
             if self.duplicate_detection_mode_var.get() in ['ai-hunter', 'cascading']:
                 self.create_ai_hunter_section(self.ai_hunter_container)
             
-            # Update status if label exists
+            # Update status if label exists and hasn't been destroyed
             if hasattr(self, 'ai_hunter_status_label'):
-                self.ai_hunter_status_label.config(text=self._get_ai_hunter_status_text())
+                try:
+                    # Check if the widget still exists before updating
+                    self.ai_hunter_status_label.winfo_exists()
+                    self.ai_hunter_status_label.config(text=self._get_ai_hunter_status_text())
+                except tk.TclError:
+                    # Widget has been destroyed, remove the reference
+                    delattr(self, 'ai_hunter_status_label')
 
-        # Add trace to detection mode variable
-        self.duplicate_detection_mode_var.trace('w', lambda *args: update_ai_hunter_visibility())
-
-        # Create radio buttons (inside detection container)
+        # Create radio buttons (inside detection container) - ONLY ONCE
         for value, text in methods:
            rb = tb.Radiobutton(self.detection_options_container, text=text, 
                               variable=self.duplicate_detection_mode_var, 
@@ -3968,37 +3981,13 @@ class TranslatorGUI:
         # Pack the AI Hunter container
         self.ai_hunter_container.pack(fill='x')
 
+        # Add trace to detection mode variable - ONLY ONCE
+        self.duplicate_detection_mode_var.trace('w', update_ai_hunter_visibility)
+
         # Initial visibility updates
         update_detection_visibility()
         update_ai_hunter_visibility()
         
-        def on_detection_mode_changed(*args):
-            """Update AI Hunter section visibility based on selection"""
-            # Clear the container
-            for widget in self.ai_hunter_container.winfo_children():
-                widget.destroy()
-            
-            # Only show AI Hunter config if AI Hunter is selected
-            if self.duplicate_detection_mode_var.get() == 'ai-hunter':
-                self.create_ai_hunter_section(self.ai_hunter_container)
-            
-            # Update status if label exists
-            if hasattr(self, 'ai_hunter_status_label'):
-                self.ai_hunter_status_label.config(text=self._get_ai_hunter_status_text())
-        
-        # Add trace to update when selection changes
-        self.duplicate_detection_mode_var.trace('w', on_detection_mode_changed)
-
-        for value, text in methods:
-           rb = tb.Radiobutton(section_frame, text=text, variable=self.duplicate_detection_mode_var, 
-                              value=value, bootstyle="primary")
-           rb.pack(anchor=tk.W, padx=40, pady=2)
-
-        # Pack the container after radio buttons
-        self.ai_hunter_container.pack(fill='x')
-        
-        # Initial update
-        on_detection_mode_changed()
         # Retry Slow
         tb.Checkbutton(section_frame, text="Auto-retry Slow Chunks", 
                       variable=self.retry_timeout_var,
@@ -4050,8 +4039,8 @@ class TranslatorGUI:
         """Get status text for AI Hunter configuration"""
         ai_config = self.config.get('ai_hunter_config', {})
         
-        # AI Hunter is enabled when the detection mode is set to 'ai-hunter'
-        if self.duplicate_detection_mode_var.get() != 'ai-hunter':
+        # AI Hunter is shown when the detection mode is set to 'ai-hunter' or 'cascading'
+        if self.duplicate_detection_mode_var.get() not in ['ai-hunter', 'cascading']:
             return "AI Hunter: Not Selected"
         
         if not ai_config.get('enabled', True):
@@ -4077,21 +4066,28 @@ class TranslatorGUI:
         """Open AI Hunter configuration window"""
         def on_config_saved():
             # Save the entire configuration
-            self.save_configuration()
-            # Update status label
-            self.ai_hunter_status_label.config(text=self._get_ai_hunter_status_text())
-            self.ai_hunter_enabled_var.set(self.config.get('ai_hunter_config', {}).get('enabled', True))
+            self.save_config()
+            # Update status label if it still exists
+            if hasattr(self, 'ai_hunter_status_label'):
+                try:
+                    self.ai_hunter_status_label.winfo_exists()
+                    self.ai_hunter_status_label.config(text=self._get_ai_hunter_status_text())
+                except tk.TclError:
+                    # Widget has been destroyed
+                    pass
+            if hasattr(self, 'ai_hunter_enabled_var'):
+                self.ai_hunter_enabled_var.set(self.config.get('ai_hunter_config', {}).get('enabled', True))
         
         gui = AIHunterConfigGUI(self.master, self.config, on_config_saved)
         gui.show_ai_hunter_config()
-
+    
     def toggle_ai_hunter(self):
         """Toggle AI Hunter enabled state"""
         if 'ai_hunter_config' not in self.config:
             self.config['ai_hunter_config'] = {}
         
         self.config['ai_hunter_config']['enabled'] = self.ai_hunter_enabled_var.get()
-        self.save_configuration()
+        self.save_config()
         self.ai_hunter_status_label.config(text=self._get_ai_hunter_status_text())
     
     def _create_prompt_management_section(self, parent):
@@ -4611,7 +4607,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v2.7.7...")
+    print("🚀 Starting Glossarion v2.7.9...")
     
     # Initialize splash screen
     splash_manager = None
