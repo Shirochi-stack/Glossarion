@@ -279,44 +279,61 @@ class FileUtilities:
         
         actual_num = None
         
-        # Special handling for "0000_1" pattern
-        prefix_suffix_pattern = r'^(\d+)_(\d+)[_\.]'
-        
         # Try to extract from original basename first
         if chapter.get('original_basename'):
             basename = chapter['original_basename']
             
-            # Check for prefix_suffix pattern first
-            prefix_match = re.search(prefix_suffix_pattern, basename, re.IGNORECASE)
-            if prefix_match:
-                # Use the number AFTER the underscore
-                actual_num = int(prefix_match.group(2))
-            else:
-                # Try standard patterns
-                for pattern in patterns:
-                    match = re.search(pattern, basename, re.IGNORECASE)
-                    if match:
-                        actual_num = int(match.group(1))
-                        break
+            #print(f"[DEBUG] Checking basename: {basename}")
+            
+            # FIRST: Check if this is a "XXXX_Y" format (like 0000_1, 0105_106)
+            # This pattern MUST be checked before any other pattern
+            prefix_suffix_match = re.match(r'^(\d+)_(\d+)', basename)
+            if prefix_suffix_match:
+                # Extract the number AFTER the underscore
+                actual_num = int(prefix_suffix_match.group(2))
+                #print(f"[DEBUG] PREFIX_SUFFIX pattern matched: {prefix_suffix_match.group(0)} -> extracted {actual_num} (after underscore)")
+                return actual_num
+            
+            # Only check other patterns if the prefix_suffix didn't match
+            for pattern in patterns:
+                # Skip patterns that would incorrectly match our XXXX_Y format
+                if pattern in [r'^(\d+)[_\.]', r'(\d{3,5})[_\.]', r'^(\d+)_']:
+                    continue
+                    
+                match = re.search(pattern, basename, re.IGNORECASE)
+                if match:
+                    actual_num = int(match.group(1))
+                    #print(f"[DEBUG] Pattern '{pattern}' matched -> extracted {actual_num}")
+                    break
         
         # Fallback to other sources if needed
         if actual_num is None and 'filename' in chapter:
             filename = os.path.basename(chapter['filename'])
             
-            # Check prefix_suffix pattern
-            prefix_match = re.search(prefix_suffix_pattern, filename, re.IGNORECASE)
-            if prefix_match:
-                actual_num = int(prefix_match.group(2))
-            else:
-                for pattern in patterns:
-                    match = re.search(pattern, filename, re.IGNORECASE)
-                    if match:
-                        actual_num = int(match.group(1))
-                        break
+            print(f"[DEBUG] Checking filename: {filename}")
+            
+            # Check prefix_suffix pattern for filename too
+            prefix_suffix_match = re.match(r'^(\d+)_(\d+)', filename)
+            if prefix_suffix_match:
+                actual_num = int(prefix_suffix_match.group(2))
+                #print(f"[DEBUG] PREFIX_SUFFIX pattern matched in filename -> extracted {actual_num}")
+                return actual_num
+            
+            # Check other patterns
+            for pattern in patterns:
+                if pattern in [r'^(\d+)[_\.]', r'(\d{3,5})[_\.]', r'^(\d+)_']:
+                    continue
+                    
+                match = re.search(pattern, filename, re.IGNORECASE)
+                if match:
+                    actual_num = int(match.group(1))
+                    #print(f"[DEBUG] Pattern matched in filename -> extracted {actual_num}")
+                    break
         
         # Final fallback to chapter num
         if actual_num is None:
             actual_num = chapter.get("num", 0)
+            #print(f"[DEBUG] No pattern matched, using chapter num: {actual_num}")
         
         # Return raw number - adjustments should be done by caller
         return actual_num
@@ -324,32 +341,22 @@ class FileUtilities:
     @staticmethod
     def create_chapter_filename(chapter, actual_num=None):
         """Create consistent chapter filename"""
-        if actual_num is None:
-            actual_num = FileUtilities.extract_actual_chapter_number(chapter)
-        
         # Check if we should use header as output name
         use_header_output = os.getenv("USE_HEADER_AS_OUTPUT", "0") == "1"
         
         if use_header_output and chapter.get('title'):
-            # Use the chapter title/header as the base for filename
-            safe_title = make_safe_filename(chapter['title'], actual_num)
-            # Ensure the title is meaningful
-            if safe_title and safe_title != f"chapter_{actual_num:03d}":
+            safe_title = make_safe_filename(chapter['title'], actual_num or chapter.get('num', 0))
+            if safe_title and safe_title != f"chapter_{actual_num or chapter.get('num', 0):03d}":
                 return f"response_{safe_title}.html"
         
-        # Check if zero detection is disabled globally
-        disable_zero = getattr(__builtins__, '_DISABLE_ZERO_DETECTION', False)
-        
-        # Fall back to original behavior
+        # ALWAYS use original basename if available, without adding numbers
         if 'original_basename' in chapter and chapter['original_basename']:
             base = os.path.splitext(chapter['original_basename'])[0]
-            # When zero detection is disabled, use the raw number
-            if disable_zero:
-                return f"response_{base}.html"
-            else:
-                # Original behavior
-                return f"response_{actual_num:04d}_{base}.html"
+            return f"response_{base}.html"
         else:
+            # Only use number if there's no original basename
+            if actual_num is None:
+                actual_num = chapter.get('actual_chapter_num', chapter.get('num', 0))
             return f"response_{actual_num:04d}.html"
 
 # =====================================================
@@ -2549,7 +2556,7 @@ class BatchTranslationProcessor:
         
         # Fallback if not set (shouldn't happen with proper refactoring)
         if actual_num is None:
-            raw_num = FileUtilities.extract_actual_chapter_number(chapter, patterns=None, config=self.config)
+            actual_num = chapter.get('actual_chapter_num')
             
             # Check if zero detection is disabled
             if hasattr(self.config, '_force_disable_zero_detection') and self.config._force_disable_zero_detection:
@@ -4545,6 +4552,8 @@ def main(log_callback=None, stop_callback=None):
         
         # Extract the raw chapter number from the file
         raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
+        #print(f"[DEBUG] Extracted raw_num={raw_num} from {c.get('original_basename', 'unknown')}")
+
         
         # Apply the offset
         offset = config.CHAPTER_NUMBER_OFFSET if hasattr(config, 'CHAPTER_NUMBER_OFFSET') else 0
@@ -4653,14 +4662,18 @@ def main(log_callback=None, stop_callback=None):
             
             # Get actual number with config awareness
             raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
+            print(f"[DEBUG] Extracted raw_num={raw_num} from {c.get('original_basename', 'unknown')}")
+
             
             if config.DISABLE_ZERO_DETECTION:
-                actual_num = raw_num
+                # Force minimum chapter 1 when detection is disabled
+                c['actual_chapter_num'] = max(1, raw_num)
             else:
+                # Apply 0-based adjustment if detected
                 if uses_zero_based:
-                    actual_num = raw_num + 1
+                    c['actual_chapter_num'] = raw_num + 1
                 else:
-                    actual_num = raw_num
+                    c['actual_chapter_num'] = raw_num
             
             # Store it in the chapter object for later use
             c['actual_chapter_num'] = actual_num
@@ -4785,6 +4798,8 @@ def main(log_callback=None, stop_callback=None):
         # First pass: set actual chapter numbers respecting the config
         for idx, c in enumerate(chapters):
             raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
+            print(f"[DEBUG] Extracted raw_num={raw_num} from {c.get('original_basename', 'unknown')}")
+
             
             # Apply offset if configured
             offset = config.CHAPTER_NUMBER_OFFSET if hasattr(config, 'CHAPTER_NUMBER_OFFSET') else 0
