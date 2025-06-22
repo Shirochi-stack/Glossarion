@@ -1105,9 +1105,9 @@ class ChapterExtractor:
         h1_count = 0
         h2_count = 0
         
-        chapter_num = 0
-        actual_num = 0
-        
+        chapter_num = 1
+        actual_num = 1
+
         for idx, file_path in enumerate(sorted(html_files)):
             try:
                 file_data = zf.read(file_path)
@@ -1230,7 +1230,7 @@ class ChapterExtractor:
                     detection_method = "comprehensive_sequential"
                 
                 if actual_num is None:
-                    actual_num = chapter_num
+                    actual_num = idx + 1  # Use 1-based numbering
                 
                 chapter_info = {
                     "num": actual_num,
@@ -3668,7 +3668,7 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
     return chapter_html, {}
 
 def detect_novel_numbering(chapters):
-    """Detect if the novel uses 0-based or 1-based chapter numbering"""
+    """Detect if the novel uses 0-based or 1-based chapter numbering with improved accuracy"""
     print("[DEBUG] Detecting novel numbering system...")
     
     if not chapters:
@@ -3680,88 +3680,122 @@ def detect_novel_numbering(chapters):
     
     patterns = PatternManager.FILENAME_EXTRACT_PATTERNS
     
-    has_chapter_0 = False
-    has_chapter_1 = False
-    lowest_chapter = float('inf')
-    
     # Special check for prefix_suffix pattern like "0000_1.xhtml"
     prefix_suffix_pattern = r'^(\d+)_(\d+)[_\.]'
-    uses_prefix_suffix = False
     
-    for idx, chapter in enumerate(chapters[:10]):  # Check first 10 chapters
+    # Track chapter numbers from different sources
+    filename_numbers = []
+    content_numbers = []
+    has_prefix_suffix = False
+    prefix_suffix_numbers = []
+    
+    for idx, chapter in enumerate(chapters):
         extracted_num = None
         
-        if 'original_basename' in chapter:
-            basename = chapter['original_basename']
-            print(f"[DEBUG] Checking basename: {basename}")
+        # Check filename patterns
+        if 'original_basename' in chapter and chapter['original_basename']:
+            filename = chapter['original_basename']
+        elif 'filename' in chapter:
+            filename = os.path.basename(chapter['filename'])
+        else:
+            continue
             
-            # Check for prefix_suffix pattern (e.g., "0000_1.xhtml")
-            prefix_match = re.search(prefix_suffix_pattern, basename)
-            if prefix_match:
-                prefix_num = int(prefix_match.group(1))
-                suffix_num = int(prefix_match.group(2))
-                print(f"[DEBUG] Found prefix_suffix pattern: {prefix_num}_{suffix_num}")
-                
-                uses_prefix_suffix = True
-                # Use the SUFFIX number for detection, not prefix
-                extracted_num = suffix_num
-                
-                # Don't let the prefix mislead us - check the actual chapter numbers
-            else:
-                # Try standard patterns
-                for pattern in patterns:
-                    match = re.search(pattern, basename)
-                    if match:
-                        extracted_num = int(match.group(1))
-                        print(f"[DEBUG] Pattern '{pattern}' matched: {extracted_num}")
-                        break
-        
-        if extracted_num is None and 'filename' in chapter:
-            filename = chapter['filename']
-            # Check prefix_suffix pattern on full filename
-            prefix_match = re.search(prefix_suffix_pattern, os.path.basename(filename))
-            if prefix_match:
-                prefix_num = int(prefix_match.group(1))
-                suffix_num = int(prefix_match.group(2))
-                extracted_num = suffix_num
-                uses_prefix_suffix = True
-            else:
-                for pattern in patterns:
-                    match = re.search(pattern, os.path.basename(filename))
-                    if match:
-                        extracted_num = int(match.group(1))
-                        print(f"[DEBUG] Filename pattern '{pattern}' matched: {extracted_num}")
-                        break
+        # First check for prefix_suffix pattern
+        prefix_match = re.search(prefix_suffix_pattern, filename, re.IGNORECASE)
+        if prefix_match:
+            has_prefix_suffix = True
+            # Use the SECOND number (after underscore)
+            suffix_num = int(prefix_match.group(2))
+            prefix_suffix_numbers.append(suffix_num)
+            extracted_num = suffix_num
+            print(f"[DEBUG] Prefix_suffix pattern matched: {filename} -> Chapter {suffix_num}")
+        else:
+            # Try other patterns
+            for pattern in patterns:
+                match = re.search(pattern, filename)
+                if match:
+                    extracted_num = int(match.group(1))
+                    print(f"[DEBUG] Pattern '{pattern}' matched: {filename} -> Chapter {extracted_num}")
+                    break
         
         if extracted_num is not None:
-            if extracted_num == 0:
-                has_chapter_0 = True
-                print(f"[DEBUG] ✓ Found chapter 0 at index {idx}")
-            elif extracted_num == 1:
-                has_chapter_1 = True
-                print(f"[DEBUG] ✓ Found chapter 1 at index {idx}")
-            lowest_chapter = min(lowest_chapter, extracted_num)
+            filename_numbers.append(extracted_num)
+        
+        # Also check chapter content for chapter declarations
+        if 'body' in chapter:
+            # Look for "Chapter N" in the first 1000 characters
+            content_preview = chapter['body'][:1000]
+            content_match = re.search(r'Chapter\s+(\d+)', content_preview, re.IGNORECASE)
+            if content_match:
+                content_num = int(content_match.group(1))
+                content_numbers.append(content_num)
+                print(f"[DEBUG] Found 'Chapter {content_num}' in content")
     
-    # Special case: if using prefix_suffix pattern and lowest chapter is 1, it's 1-based
-    if uses_prefix_suffix and lowest_chapter >= 1 and not has_chapter_0:
-        print(f"[DEBUG] ✅ 1-based novel detected (prefix_suffix pattern with chapters starting at {lowest_chapter})")
-        return False
+    # Decision logic with improved heuristics
     
-    if not has_chapter_0 and chapters:
-        first_chapter = chapters[0]
-        if first_chapter.get('num') == 0:
-            has_chapter_0 = True
-            print("[DEBUG] ✓ First chapter has num=0")
+    # 1. If using prefix_suffix pattern, trust those numbers exclusively
+    if has_prefix_suffix and prefix_suffix_numbers:
+        min_suffix = min(prefix_suffix_numbers)
+        if min_suffix >= 1:
+            print(f"[DEBUG] ✅ 1-based novel detected (prefix_suffix pattern starts at {min_suffix})")
+            return False
+        else:
+            print(f"[DEBUG] ✅ 0-based novel detected (prefix_suffix pattern starts at {min_suffix})")
+            return True
     
-    if has_chapter_0:
-        print(f"[DEBUG] ✅ 0-based novel detected (found chapter 0)")
-        return True
-    elif lowest_chapter == 0:
-        print(f"[DEBUG] ✅ 0-based novel detected (lowest chapter is 0)")
-        return True
-    else:
-        print(f"[DEBUG] ✅ 1-based novel detected (no chapter 0, lowest chapter: {lowest_chapter})")
-        return False
+    # 2. If we have content numbers, prefer those over filename numbers
+    if content_numbers:
+        min_content = min(content_numbers)
+        # Check if we have a good sequence starting from 0 or 1
+        if 0 in content_numbers and 1 in content_numbers:
+            print(f"[DEBUG] ✅ 0-based novel detected (found both Chapter 0 and Chapter 1 in content)")
+            return True
+        elif min_content == 1:
+            print(f"[DEBUG] ✅ 1-based novel detected (content chapters start at 1)")
+            return False
+    
+    # 3. Fall back to filename numbers
+    if filename_numbers:
+        min_filename = min(filename_numbers)
+        max_filename = max(filename_numbers)
+        
+        # Check for a proper sequence
+        # If we have 0,1,2,3... it's likely 0-based
+        # If we have 1,2,3,4... it's likely 1-based
+        
+        # Count how many chapters we have in sequence starting from 0
+        zero_sequence_count = 0
+        for i in range(len(chapters)):
+            if i in filename_numbers:
+                zero_sequence_count += 1
+            else:
+                break
+        
+        # Count how many chapters we have in sequence starting from 1
+        one_sequence_count = 0
+        for i in range(1, len(chapters) + 1):
+            if i in filename_numbers:
+                one_sequence_count += 1
+            else:
+                break
+        
+        print(f"[DEBUG] Zero-based sequence length: {zero_sequence_count}")
+        print(f"[DEBUG] One-based sequence length: {one_sequence_count}")
+        
+        # If we have a better sequence starting from 1, it's 1-based
+        if one_sequence_count > zero_sequence_count and min_filename >= 1:
+            print(f"[DEBUG] ✅ 1-based novel detected (better sequence match starting from 1)")
+            return False
+        
+        # If we have any 0 in filenames and it's part of a sequence
+        if 0 in filename_numbers and zero_sequence_count >= 3:
+            print(f"[DEBUG] ✅ 0-based novel detected (found 0 in sequence)")
+            return True
+    
+    # 4. Default to 1-based if uncertain
+    print(f"[DEBUG] ✅ Defaulting to 1-based novel (insufficient evidence for 0-based)")
+    return False
+    
 def validate_chapter_continuity(chapters):
     """Validate chapter continuity and warn about issues"""
     if not chapters:
