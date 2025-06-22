@@ -90,17 +90,33 @@ class AIHunterConfigGUI:
         return self.config.get('ai_hunter_config', self.default_ai_hunter)
     
     def show_ai_hunter_config(self):
-        """Display the AI Hunter configuration window"""
+        """Display the AI Hunter configuration window with scrollbar using WindowManager"""
         if self.window and self.window.winfo_exists():
             self.window.lift()
             return
-            
-        self.window = tk.Toplevel(self.parent)
-        self.window.title("AI Hunter Configuration")
-        self.window.geometry("800x900")
         
-        # Create notebook for tabs
-        notebook = ttk.Notebook(self.window)
+        # Import WindowManager if not already available
+        if not hasattr(self, 'wm'):
+            from translator_gui import WindowManager
+            import sys
+            import os
+            base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+            self.wm = WindowManager(base_dir)
+        
+        # Create scrollable dialog using WindowManager
+        dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
+            self.parent,
+            "AI Hunter Configuration",
+            width=820,
+            height=None,  # Will use default height
+            max_width_ratio=0.9,
+            max_height_ratio=0.85
+        )
+        
+        self.window = dialog
+        
+        # Create notebook inside scrollable frame
+        notebook = ttk.Notebook(scrollable_frame)
         notebook.pack(fill='both', expand=True, padx=10, pady=10)
         
         # Tab 1: Detection Thresholds
@@ -115,9 +131,9 @@ class AIHunterConfigGUI:
         # Tab 4: Advanced Settings
         self.create_advanced_tab(notebook)
         
-        # Buttons
-        button_frame = tk.Frame(self.window)
-        button_frame.pack(fill='x', padx=10, pady=(0, 10))
+        # Buttons at the bottom (inside scrollable frame)
+        button_frame = tk.Frame(scrollable_frame)
+        button_frame.pack(fill='x', padx=10, pady=(10, 20))
         
         tb.Button(button_frame, text="Save", command=self.apply_ai_hunter_settings, 
                  bootstyle="success").pack(side='right', padx=5)
@@ -125,6 +141,12 @@ class AIHunterConfigGUI:
                  bootstyle="secondary").pack(side='right')
         tb.Button(button_frame, text="Reset to Defaults", command=self.reset_defaults,
                  bootstyle="warning").pack(side='left')
+        
+        # Auto-resize and show
+        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.1)
+        
+        # Handle window close
+        dialog.protocol("WM_DELETE_WINDOW", lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
     
     def create_thresholds_tab(self, notebook):
         """Create the thresholds configuration tab"""
@@ -323,16 +345,6 @@ class AIHunterConfigGUI:
         
         ai_config = self.get_ai_config()
         
-        # Lookback chapters
-        lb_frame = tk.Frame(general_frame)
-        lb_frame.pack(fill='x', pady=5)
-        
-        tk.Label(lb_frame, text="Lookback chapters:", width=20, anchor='w').pack(side='left')
-        self.lookback_var = tk.IntVar(value=ai_config['lookback_chapters'])
-        tb.Spinbox(lb_frame, from_=1, to=20, textvariable=self.lookback_var,
-                  width=10).pack(side='left', padx=10)
-        tk.Label(lb_frame, text="(How many previous chapters to check)",
-                font=('TkDefaultFont', 9), fg='gray').pack(side='left', padx=10)
         
         # Sample size
         ss_frame = tk.Frame(general_frame)
@@ -402,7 +414,6 @@ class AIHunterConfigGUI:
         for key, var in self.prep_vars.items():
             ai_config['preprocessing'][key] = var.get()
         
-        ai_config['lookback_chapters'] = self.lookback_var.get()
         ai_config['sample_size'] = self.sample_size_var.get()
         
         ai_config['edge_filters']['min_text_length'] = self.min_length_var.get()
@@ -512,14 +523,17 @@ class ImprovedAIHunterDetection:
             print(f"    🔬 Extracting text features...")
             result_features = self._extract_text_features(result_clean)
             
+            # Get lookback from main config, then fall back to env var if not found
+            lookback = self.main_config.get('duplicate_lookback_chapters', 
+                                           int(os.getenv('DUPLICATE_LOOKBACK_CHAPTERS', '5')))
+            
             # Log configuration
             print(f"\n    🔧 Configuration:")
             print(f"       Detection mode: {config['detection_mode']}")
-            print(f"       Lookback chapters: {int(os.getenv('DUPLICATE_LOOKBACK_CHAPTERS', '5'))}")
+            print(f"       Lookback chapters: {lookback}")
             print(f"       Sample size: {config['sample_size']}")
             
             # Check previous chapters
-            lookback = int(os.getenv('DUPLICATE_LOOKBACK_CHAPTERS', '5'))
             all_similarities = []
             highest_similarity = 0.0
             detected_method = None
