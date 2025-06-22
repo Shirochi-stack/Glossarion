@@ -501,6 +501,7 @@ class TranslatorGUI:
             ('batch_translation_var', 'batch_translation', False),
             ('disable_epub_gallery_var', 'disable_epub_gallery', False),
             ('disable_zero_detection_var', 'disable_zero_detection', False),
+            ('use_header_as_output_var', 'use_header_as_output', False),
             ('emergency_restore_var', 'emergency_paragraph_restore', True),
             ('contextual_var', 'contextual', True),
             ('REMOVE_AI_ARTIFACTS_var', 'REMOVE_AI_ARTIFACTS', False)
@@ -2552,7 +2553,8 @@ class TranslatorGUI:
            'COMPREHENSIVE_EXTRACTION': "1" if self.comprehensive_extraction_var.get() else "0",
            'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var.get() else "0",
            'DUPLICATE_DETECTION_MODE': self.duplicate_detection_mode_var.get(),
-           'AI_HUNTER_THRESHOLD': self.ai_hunter_threshold_var.get()
+           'AI_HUNTER_THRESHOLD': self.ai_hunter_threshold_var.get(),
+           'USE_HEADER_AS_OUTPUT': "1" if self.use_header_as_output_var.get() else "0"
        }
 
     def run_glossary_extraction_thread(self):
@@ -3802,6 +3804,13 @@ class TranslatorGUI:
         
         tk.Label(section_frame, text="Always use chapter ranges as specified\n(don't adjust for 0-based novels)",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+                
+        tb.Checkbutton(section_frame, text="Use Header as Output Name", 
+                      variable=self.use_header_as_output_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+
+        tk.Label(section_frame, text="Use chapter headers/titles as output filenames\ninstead of original file names",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
 
     def _create_image_translation_section(self, parent):
         """Create image translation section"""
@@ -3900,7 +3909,8 @@ class TranslatorGUI:
                     'process_webnovel_images': self.process_webnovel_images_var.get(),
                     'hide_image_translation_label': self.hide_image_translation_label_var.get(),
                     'duplicate_detection_mode': self.duplicate_detection_mode_var.get(),
-                    'ai_hunter_threshold': safe_int(self.ai_hunter_threshold_var.get(), 75)
+                    'ai_hunter_threshold': safe_int(self.ai_hunter_threshold_var.get(), 75),
+                    'use_header_as_output': self.use_header_as_output_var.get()
                 })
                 
                 # Validate numeric fields
@@ -4188,6 +4198,7 @@ class TranslatorGUI:
             self.config['enable_auto_glossary'] = self.enable_auto_glossary_var.get()
             self.config['duplicate_detection_mode'] = self.duplicate_detection_mode_var.get()
             self.config['ai_hunter_threshold'] = safe_int(self.ai_hunter_threshold_var.get(), 75)
+            self.config['use_header_as_output'] = self.use_header_as_output_var.get()
 
             _tl = self.token_limit_entry.get().strip()
             if _tl.isdigit():
