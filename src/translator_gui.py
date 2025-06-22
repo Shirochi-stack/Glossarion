@@ -1181,14 +1181,21 @@ class TranslatorGUI:
         for chapter_key, chapter_info in prog.get("chapters", {}).items():
             extracted_num = None
             
-            # Priority 1: Use stored chapter_num
-            if 'chapter_num' in chapter_info:
+            # Priority 1: Use stored actual_num (most reliable)
+            if 'actual_num' in chapter_info:
+                try:
+                    extracted_num = int(chapter_info['actual_num'])
+                except:
+                    extracted_num = None
+            
+            # Priority 2: Use stored chapter_num
+            if extracted_num is None and 'chapter_num' in chapter_info:
                 try:
                     extracted_num = int(chapter_info['chapter_num'])
                 except:
                     extracted_num = None
             
-            # Priority 2: Extract from output_file name
+            # Priority 3: Extract from output_file name
             if extracted_num is None:
                 output_file = chapter_info.get("output_file", "")
                 if output_file:
@@ -1207,7 +1214,7 @@ class TranslatorGUI:
                             extracted_num = int(match.group(1))
                             break
             
-            # Priority 3: Use chapter_idx
+            # Priority 4: Use chapter_idx
             if extracted_num is None and 'chapter_idx' in chapter_info:
                 try:
                     if not disable_zero_detection and uses_zero_based:
@@ -1217,7 +1224,7 @@ class TranslatorGUI:
                 except:
                     extracted_num = None
             
-            # Priority 4: If chapter_key is numeric (old format)
+            # Priority 5: If chapter_key is numeric (old format)
             if extracted_num is None and chapter_key.isdigit():
                 try:
                     extracted_num = int(chapter_key) + 1
@@ -1230,50 +1237,83 @@ class TranslatorGUI:
                 
             all_extracted_nums.append(extracted_num)
             
+            # FIXED: Determine the actual status correctly
+            status = chapter_info.get("status", "unknown")
+            
+            # If status is not explicitly set, determine it based on other fields
+            if status == "unknown":
+                if chapter_info.get("output_file"):
+                    # Check if the output file exists
+                    output_path = os.path.join(output_dir, chapter_info["output_file"])
+                    if os.path.exists(output_path):
+                        status = "completed"
+                    else:
+                        status = "failed"
+                else:
+                    # Check if this chapter has incomplete chunks
+                    content_hash = chapter_info.get("content_hash")
+                    if content_hash and content_hash in prog.get("chapter_chunks", {}):
+                        chunk_info = prog["chapter_chunks"][content_hash]
+                        total_chunks = chunk_info.get("total", 0)
+                        completed_chunks = len(chunk_info.get("completed", []))
+                        if completed_chunks > 0 and completed_chunks < total_chunks:
+                            status = "in_progress"
+                    # Also check using old index-based key
+                    elif chapter_key in prog.get("chapter_chunks", {}):
+                        chunk_info = prog["chapter_chunks"][chapter_key]
+                        total_chunks = chunk_info.get("total", 0)
+                        completed_chunks = len(chunk_info.get("completed", []))
+                        if completed_chunks > 0 and completed_chunks < total_chunks:
+                            status = "in_progress"
+            
+            # Handle special statuses
+            if status == "completed_empty":
+                status = "completed"
+            
             # Store additional info for enhanced display
             chapter_display_info.append({
                 'key': chapter_key,
                 'num': extracted_num,
                 'info': chapter_info,
                 'output_file': chapter_info.get("output_file", ""),
-                'status': chapter_info.get("status", "unknown"),
-                'original_basename': chapter_info.get("original_basename", "")
+                'original_basename': chapter_info.get("original_basename", ""),
+                'status': status
             })
         
-        # Sort chapters by number
-        sorted_indices = sorted(range(len(all_extracted_nums)), key=lambda i: all_extracted_nums[i])
+        # Sort by chapter number
+        sorted_indices = sorted(range(len(chapter_display_info)), 
+                               key=lambda i: chapter_display_info[i]['num'])
         
-        # Display chapters with enhanced information
+        # Add chapters to listbox in sorted order
         for idx in sorted_indices:
             display_data = chapter_display_info[idx]
-            chapter_key = display_data['key']
+            chapter_num = display_data['num']
             chapter_info = display_data['info']
             output_file = display_data['output_file']
-            extracted_num = display_data['num']
             status = display_data['status']
-            original_basename = display_data['original_basename']
             
-            # Check if file exists
-            file_exists = False
-            if output_file:
-                output_path = os.path.join(output_dir, output_file)
-                file_exists = os.path.exists(output_path)
+            # Try to get original basename from chapters_info.json
+            original_basename = None
+            if chapter_num in chapters_info_map:
+                original_basename = chapters_info_map[chapter_num].get('original_basename')
             
-            # Create status indicator with color coding
-            if status == "completed":
+            # Create display string with status indicator
+            if status == 'completed':
                 status_indicator = "✅ completed"
-            elif status == "in_progress":
+                file_indicator = "✓" if output_file else "✗"
+            elif status == 'in_progress':
                 status_indicator = "🔄 in_progress"
-            elif status == "failed":
+                file_indicator = "✗"
+            elif status == 'failed':
                 status_indicator = "❌ failed"
+                file_indicator = "✗"
             else:
-                status_indicator = f"❓ {status}"
+                status_indicator = "❓ unknown"
+                file_indicator = "✗"
             
-            file_indicator = "✓" if file_exists else "✗"
-            
-            # Enhanced display string with more information
+            # Build display parts
             display_parts = [
-                f"Chapter {extracted_num:04d}",  # Zero-padded for better sorting visibility
+                f"Chapter {chapter_num:04d}",  # Zero-padded for better sorting visibility
                 status_indicator,
                 f"File: {file_indicator}"
             ]
@@ -1295,16 +1335,20 @@ class TranslatorGUI:
             display_str = " - ".join(display_parts)
             listbox.insert(tk.END, display_str)
         
-        # Add summary label
+        # Add summary label with accurate counts
         summary_text = f"Total chapters: {len(chapter_display_info)}"
         completed_count = sum(1 for d in chapter_display_info if d['status'] == 'completed')
         in_progress_count = sum(1 for d in chapter_display_info if d['status'] == 'in_progress')
         failed_count = sum(1 for d in chapter_display_info if d['status'] == 'failed')
+        unknown_count = sum(1 for d in chapter_display_info if d['status'] == 'unknown')
         
         summary_text += f" | ✅ Completed: {completed_count}"
-        summary_text += f" | 🔄 In Progress: {in_progress_count}"
+        if in_progress_count > 0:
+            summary_text += f" | 🔄 In Progress: {in_progress_count}"
         if failed_count > 0:
             summary_text += f" | ❌ Failed: {failed_count}"
+        if unknown_count > 0:
+            summary_text += f" | ❓ Unknown: {unknown_count}"
         
         summary_label = tk.Label(dialog, text=summary_text, font=('Arial', 10), fg='gray')
         summary_label.pack(pady=(5, 10))
@@ -1362,63 +1406,67 @@ class TranslatorGUI:
             
             confirm_msg = f"This will delete {len(selected)} translated chapters and mark them for retranslation:\n\n{chapter_list}\n\nContinue?"
             
-            if messagebox.askyesno("Confirm", confirm_msg):
-                dialog.destroy()
+            if not messagebox.askyesno("Confirm Retranslation", confirm_msg):
+                return
+            
+            # Clear selected chapters
+            deleted_count = 0
+            for idx in selected_indices:
+                chapter_key = chapter_display_info[idx]['key']
+                chapter_info = chapter_display_info[idx]['info']
+                output_file = chapter_info.get('output_file')
                 
-                count = 0
-                chapter_keys = list(prog.get("chapters", {}).keys())
+                # Delete the output file if it exists
+                if output_file:
+                    output_path = os.path.join(output_dir, output_file)
+                    try:
+                        if os.path.exists(output_path):
+                            os.remove(output_path)
+                            deleted_count += 1
+                    except Exception as e:
+                        print(f"Failed to delete {output_path}: {e}")
                 
-                for idx in selected_indices:
-                    display_data = chapter_display_info[idx]
-                    chapter_key = display_data['key']
-                    
-                    if chapter_key in prog["chapters"]:
-                        chapter_info = prog["chapters"][chapter_key]
-                        
-                        # Delete the output file BEFORE removing from tracking
-                        output_file = chapter_info.get("output_file", "")
-                        if output_file:
-                            output_path = os.path.join(output_dir, output_file)
-                            if os.path.exists(output_path):
-                                os.remove(output_path)
-                                self.append_log(f"🗑️ Deleted: {output_file}")
-                        
-                        # Now remove from tracking
-                        del prog["chapters"][chapter_key]
-                        
-                        # Remove from content_hashes properly
-                        content_hash = chapter_info.get("content_hash")
-                        if content_hash and content_hash in prog.get("content_hashes", {}):
-                            del prog["content_hashes"][content_hash]
-                        
-                        if chapter_key in prog.get("chapter_chunks", {}):
-                            del prog["chapter_chunks"][chapter_key]
-                        
-                        count += 1
+                # Clear the chapter from progress tracking
+                if chapter_key in prog["chapters"]:
+                    del prog["chapters"][chapter_key]
                 
-                with open(progress_file, 'w', encoding='utf-8') as f:
-                    json.dump(prog, f, ensure_ascii=False, indent=2)
+                # Clear from content hashes
+                content_hash = chapter_info.get("content_hash")
+                if content_hash and content_hash in prog.get("content_hashes", {}):
+                    del prog["content_hashes"][content_hash]
                 
-                self.append_log(f"🔄 Marked {count} chapters for retranslation")
-                messagebox.showinfo("Success", f"Marked {count} chapters for retranslation.\nRun translation to process them.")
+                # Clear from chapter chunks
+                if content_hash and content_hash in prog.get("chapter_chunks", {}):
+                    del prog["chapter_chunks"][content_hash]
+                if chapter_key in prog.get("chapter_chunks", {}):
+                    del prog["chapter_chunks"][chapter_key]
+            
+            # Save updated progress
+            with open(progress_file, 'w', encoding='utf-8') as f:
+                json.dump(prog, f, ensure_ascii=False, indent=2)
+            
+            messagebox.showinfo("Success", f"Deleted {deleted_count} files and cleared {len(selected_indices)} chapters from tracking.\n\nThey will be retranslated on the next run.")
+            dialog.destroy()
         
-        # Create buttons with better layout
-        tb.Button(button_frame, text="Select All", command=select_all,
-                 bootstyle="primary", width=15).grid(row=1, column=0, padx=5)
-        tb.Button(button_frame, text="Clear Selection", command=clear_selection,
-                 bootstyle="secondary", width=15).grid(row=1, column=1, padx=5)
-        tb.Button(button_frame, text="Select Completed", command=lambda: select_status("completed"),
-                 bootstyle="success", width=15).grid(row=1, column=2, padx=5)
-        tb.Button(button_frame, text="Select Failed", command=lambda: select_status("failed"),
-                 bootstyle="danger", width=15).grid(row=1, column=3, padx=5)
+        tb.Button(button_frame, text="Select All", command=select_all, 
+                 bootstyle="info", width=15).grid(row=1, column=0, padx=5, pady=5)
+        tb.Button(button_frame, text="Clear Selection", command=clear_selection, 
+                 bootstyle="secondary", width=15).grid(row=1, column=1, padx=5, pady=5)
+        tb.Button(button_frame, text="Select Completed", 
+                 command=lambda: select_status('completed'),
+                 bootstyle="success", width=15).grid(row=1, column=2, padx=5, pady=5)
+        tb.Button(button_frame, text="Select Failed", 
+                 command=lambda: select_status('failed'),
+                 bootstyle="danger", width=15).grid(row=1, column=3, padx=5, pady=5)
         
         tb.Button(button_frame, text="Retranslate Selected", command=retranslate_selected, 
-                 bootstyle="danger", width=20).grid(row=2, column=0, columnspan=2, padx=5, pady=(10, 0))
+                 bootstyle="warning", width=20).grid(row=2, column=0, columnspan=2, padx=5, pady=10)
         tb.Button(button_frame, text="Cancel", command=dialog.destroy, 
-                 bootstyle="secondary", width=15).grid(row=2, column=2, columnspan=2, padx=5, pady=(10, 0))
+                 bootstyle="secondary", width=20).grid(row=2, column=2, columnspan=2, padx=5, pady=10)
         
+        # Ensure dialog is properly displayed
+        dialog.update_idletasks()
         dialog.deiconify()
-        update_selection_count()
     
     def glossary_manager(self):
        """Open comprehensive glossary management dialog"""
