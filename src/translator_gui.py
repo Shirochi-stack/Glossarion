@@ -3914,8 +3914,21 @@ class TranslatorGUI:
         tk.Label(section_frame, text="Detects when AI returns same content\nfor different chapters",
                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(5, 10))
 
-        # Detection Method subsection
-        method_label = tk.Label(section_frame, text="Detection Method:", font=('TkDefaultFont', 10, 'bold'))
+        # Container for detection-related options (to show/hide based on toggle)
+        self.detection_options_container = tk.Frame(section_frame)
+
+        # Function to show/hide detection options based on auto-retry toggle
+        def update_detection_visibility():
+            if self.retry_duplicate_var.get():
+                self.detection_options_container.pack(fill='x', after=duplicate_frame)
+            else:
+                self.detection_options_container.pack_forget()
+
+        # Add trace to update visibility when toggle changes
+        self.retry_duplicate_var.trace('w', lambda *args: update_detection_visibility())
+
+        # Detection Method subsection (now inside the container)
+        method_label = tk.Label(self.detection_options_container, text="Detection Method:", font=('TkDefaultFont', 10, 'bold'))
         method_label.pack(anchor=tk.W, padx=20, pady=(10, 5))
 
         methods = [
@@ -3924,8 +3937,35 @@ class TranslatorGUI:
            ("cascading", "Cascading - Basic first, then AI Hunter")
         ]
 
-        # Container for AI Hunter config that can be shown/hidden
-        self.ai_hunter_container = tk.Frame(section_frame)
+        # Container for AI Hunter config (will be shown/hidden based on selection)
+        self.ai_hunter_container = tk.Frame(self.detection_options_container)
+
+        # Function to update AI Hunter visibility based on detection mode
+        def update_ai_hunter_visibility():
+            # Clear existing widgets
+            for widget in self.ai_hunter_container.winfo_children():
+                widget.destroy()
+            
+            # Show AI Hunter config for both ai-hunter and cascading modes
+            if self.duplicate_detection_mode_var.get() in ['ai-hunter', 'cascading']:
+                self.create_ai_hunter_section(self.ai_hunter_container)
+
+        # Add trace to detection mode variable
+        self.duplicate_detection_mode_var.trace('w', lambda *args: update_ai_hunter_visibility())
+
+        # Create radio buttons (inside detection container)
+        for value, text in methods:
+           rb = tb.Radiobutton(self.detection_options_container, text=text, 
+                              variable=self.duplicate_detection_mode_var, 
+                              value=value, bootstyle="primary")
+           rb.pack(anchor=tk.W, padx=40, pady=2)
+
+        # Pack the AI Hunter container
+        self.ai_hunter_container.pack(fill='x')
+
+        # Initial visibility updates
+        update_detection_visibility()
+        update_ai_hunter_visibility()
         
         def on_detection_mode_changed(*args):
             """Update AI Hunter section visibility based on selection"""
@@ -3968,41 +4008,39 @@ class TranslatorGUI:
         tk.Label(section_frame, text="Retry chunks/images that take too long\n(reduces tokens for faster response)",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
 
-    def create_ai_hunter_section(self, section_frame):
+    def create_ai_hunter_section(self, parent_frame):
         """Create the AI Hunter configuration section - without redundant toggle"""
-        # Only show the configuration when AI Hunter is selected
-        if self.duplicate_detection_mode_var.get() == 'ai-hunter':
-            # AI Hunter Configuration
-            config_frame = tk.Frame(section_frame)
-            config_frame.pack(anchor=tk.W, padx=20, pady=(10, 5))
-            
-            # Status label
-            ai_config = self.config.get('ai_hunter_config', {})
-            self.ai_hunter_status_label = tk.Label(
-                config_frame, 
-                text=self._get_ai_hunter_status_text(),
-                font=('TkDefaultFont', 10)
-            )
-            self.ai_hunter_status_label.pack(side=tk.LEFT)
-            
-            # Configure button
-            tb.Button(
-                config_frame, 
-                text="Configure AI Hunter", 
-                command=self.show_ai_hunter_settings,
-                bootstyle="info"
-            ).pack(side=tk.LEFT, padx=(10, 0))
-            
-            # Info text
-            tk.Label(
-                section_frame, 
-                text="AI Hunter uses multiple detection methods to identify duplicate content\n"
-                     "with configurable thresholds and detection modes",
-                font=('TkDefaultFont', 10), 
-                fg='gray', 
-                justify=tk.LEFT
-            ).pack(anchor=tk.W, padx=20, pady=(0, 10))
-
+        # AI Hunter Configuration
+        config_frame = tk.Frame(parent_frame)
+        config_frame.pack(anchor=tk.W, padx=20, pady=(10, 5))
+        
+        # Status label
+        ai_config = self.config.get('ai_hunter_config', {})
+        self.ai_hunter_status_label = tk.Label(
+            config_frame, 
+            text=self._get_ai_hunter_status_text(),
+            font=('TkDefaultFont', 10)
+        )
+        self.ai_hunter_status_label.pack(side=tk.LEFT)
+        
+        # Configure button
+        tb.Button(
+            config_frame, 
+            text="Configure AI Hunter", 
+            command=self.show_ai_hunter_settings,
+            bootstyle="info"
+        ).pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Info text
+        tk.Label(
+            parent_frame,  # Use parent_frame instead of section_frame
+            text="AI Hunter uses multiple detection methods to identify duplicate content\n"
+                 "with configurable thresholds and detection modes",
+            font=('TkDefaultFont', 10), 
+            fg='gray', 
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, padx=20, pady=(0, 10))
+    
     def _get_ai_hunter_status_text(self):
         """Get status text for AI Hunter configuration"""
         ai_config = self.config.get('ai_hunter_config', {})
