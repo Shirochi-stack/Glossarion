@@ -1267,9 +1267,11 @@ class TranslatorGUI:
             # Priority 4: Use chapter_idx
             if extracted_num is None and 'chapter_idx' in chapter_info:
                 try:
+                    # FIXED: Only apply +1 if zero detection is enabled AND it's a 0-based novel
                     if not disable_zero_detection and uses_zero_based:
                         extracted_num = int(chapter_info['chapter_idx']) + 1
                     else:
+                        # When disabled, use the raw index without any adjustment
                         extracted_num = int(chapter_info['chapter_idx'])
                 except:
                     extracted_num = None
@@ -1277,7 +1279,12 @@ class TranslatorGUI:
             # Priority 5: If chapter_key is numeric (old format)
             if extracted_num is None and chapter_key.isdigit():
                 try:
-                    extracted_num = int(chapter_key) + 1
+                    # FIXED: Only apply +1 if zero detection is enabled
+                    if not disable_zero_detection:
+                        extracted_num = int(chapter_key) + 1
+                    else:
+                        # When disabled, use the raw key value
+                        extracted_num = int(chapter_key)
                 except:
                     extracted_num = None
             
