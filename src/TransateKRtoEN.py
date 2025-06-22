@@ -301,6 +301,17 @@ class FileUtilities:
         if actual_num is None:
             actual_num = FileUtilities.extract_actual_chapter_number(chapter)
         
+        # Check if we should use header as output name
+        use_header_output = os.getenv("USE_HEADER_AS_OUTPUT", "0") == "1"
+        
+        if use_header_output and chapter.get('title'):
+            # Use the chapter title/header as the base for filename
+            safe_title = make_safe_filename(chapter['title'], actual_num)
+            # Ensure the title is meaningful
+            if safe_title and safe_title != f"chapter_{actual_num:03d}":
+                return f"response_{safe_title}.html"
+        
+        # Fall back to original behavior
         if 'original_basename' in chapter and chapter['original_basename']:
             return f"response_{chapter['original_basename']}.html"
         else:
@@ -4540,9 +4551,9 @@ def main(log_callback=None, stop_callback=None):
                 safe_title = make_safe_filename(c['title'], c['num'])
                 
                 if isinstance(c['num'], float):
-                    fname = f"response_{c['num']:06.1f}_{safe_title}.html"
+                    fname = FileUtilities.create_chapter_filename(c, c['num'])
                 else:
-                    fname = f"response_{c['num']:03d}_{safe_title}.html"
+                    fname = FileUtilities.create_chapter_filename(c, c['num'])
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
                     f.write(c["body"])
                 progress_manager.update(idx, chap_num, content_hash, fname, status="completed_empty")
@@ -4701,9 +4712,9 @@ def main(log_callback=None, stop_callback=None):
                 print(f"📄 Copying empty chapter as-is")
                 safe_title = make_safe_filename(c['title'], c['num'])
                 if isinstance(c['num'], float):
-                    fname = f"response_{c['num']:06.1f}_{safe_title}.html"
+                    fname = FileUtilities.create_chapter_filename(c, c['num'])
                 else:
-                    fname = f"response_{c['num']:03d}_{safe_title}.html"
+                    fname = FileUtilities.create_chapter_filename(c, c['num'])
                 
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
                     f.write(c["body"])
@@ -5048,7 +5059,7 @@ def main(log_callback=None, stop_callback=None):
 
             chunk_context_manager.clear()
 
-            fname = FileUtilities.create_chapter_filename(c, actual_num)
+            fname = FileUtilities.create_chapter_filename(c, actual_num))
 
             cleaned = re.sub(r"^```(?:html)?\s*\n?", "", merged_result, count=1, flags=re.MULTILINE)
             cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
@@ -5071,7 +5082,7 @@ def main(log_callback=None, stop_callback=None):
         try:
             translated_files = []
             for chapter in chapters:
-                fname = f"response_{chapter['num']:03d}_{make_safe_filename(chapter['title'], chapter['num'])}.html"
+                fname = FileUtilities.create_chapter_filename(chapter, chapter['num'])
                 if os.path.exists(os.path.join(out, fname)):
                     with open(os.path.join(out, fname), 'r', encoding='utf-8') as f:
                         content = f.read()
