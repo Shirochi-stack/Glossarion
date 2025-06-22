@@ -5,6 +5,7 @@ import shutil
 import threading
 import queue
 import os, sys, io, zipfile, time, re, mimetypes, subprocess, tiktoken
+import builtins
 import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup
@@ -336,15 +337,20 @@ class FileUtilities:
             if safe_title and safe_title != f"chapter_{actual_num:03d}":
                 return f"response_{safe_title}.html"
         
+        # Check if zero detection is disabled globally
+        disable_zero = getattr(__builtins__, '_DISABLE_ZERO_DETECTION', False)
+        
         # Fall back to original behavior
         if 'original_basename' in chapter and chapter['original_basename']:
-            return f"response_{chapter['original_basename']}.html"
-        else:
-            safe_title = make_safe_filename(chapter['title'], actual_num)   
-            if isinstance(actual_num, float):
-                return f"response_{actual_num:06.1f}_{safe_title}.html"
+            base = os.path.splitext(chapter['original_basename'])[0]
+            # When zero detection is disabled, use the raw number
+            if disable_zero:
+                return f"response_{base}.html"
             else:
-                return f"response_{actual_num:03d}_{safe_title}.html"
+                # Original behavior
+                return f"response_{actual_num:04d}_{base}.html"
+        else:
+            return f"response_{actual_num:04d}.html"
 
 # =====================================================
 # UNIFIED PROGRESS MANAGER
@@ -457,7 +463,7 @@ class ProgressManager:
                 except:
                     pass
     
-    def update(self, idx, actual_num, content_hash, output_file, status="in_progress", ai_features=None):
+    def update(self, idx, actual_num, content_hash, output_file, status="in_progress", ai_features=None, raw_num=None):
         """Update progress for a chapter"""
         chapter_key = str(idx)
         
@@ -468,6 +474,16 @@ class ProgressManager:
             "status": status,
             "last_updated": time.time()
         }
+        
+        # Add raw number tracking
+        if raw_num is not None:
+            chapter_info["raw_chapter_num"] = raw_num
+        
+        # Check if zero detection was disabled
+        if hasattr(builtins, '_DISABLE_ZERO_DETECTION') and builtins._DISABLE_ZERO_DETECTION:
+            chapter_info["zero_adjusted"] = False
+        else:
+            chapter_info["zero_adjusted"] = (raw_num != actual_num) if raw_num is not None else False
         
         # FIXED: Store AI features if provided
         if ai_features is not None:
@@ -2534,12 +2550,18 @@ class BatchTranslationProcessor:
         # Fallback if not set (shouldn't happen with proper refactoring)
         if actual_num is None:
             raw_num = FileUtilities.extract_actual_chapter_number(chapter, patterns=None, config=self.config)
-            if self.config.DISABLE_ZERO_DETECTION:
+            
+            # Check if zero detection is disabled
+            if hasattr(self.config, '_force_disable_zero_detection') and self.config._force_disable_zero_detection:
                 actual_num = raw_num
+            elif hasattr(self.config, 'DISABLE_ZERO_DETECTION') and self.config.DISABLE_ZERO_DETECTION:
+                actual_num = raw_num
+            elif hasattr(self.config, '_uses_zero_based') and self.config._uses_zero_based:
+                # This is a 0-based novel, adjust the number
+                actual_num = raw_num + 1
             else:
-                # Need to determine if this is a 0-based novel
-                # This info should be passed from main function
-                actual_num = raw_num  # Safe fallback
+                # Default to raw number (1-based or unknown)
+                actual_num = raw_num
         
         try:
             print(f"🔄 Starting #{idx+1} (Internal: Chapter {chap_num}, Actual: Chapter {actual_num})  (thread: {threading.current_thread().name}) [File: {chapter.get('original_basename', f'Chapter_{chap_num}')}]")
@@ -4129,6 +4151,17 @@ def main(log_callback=None, stop_callback=None):
     """Main translation function with enhanced duplicate detection and progress tracking"""
     
     config = TranslationConfig()
+    builtins._DISABLE_ZERO_DETECTION = config.DISABLE_ZERO_DETECTION
+    
+    if config.DISABLE_ZERO_DETECTION:
+        print("=" * 60)
+        print("⚠️  0-BASED DETECTION DISABLED BY USER")
+        print("⚠️  All chapter numbers will be used exactly as found")
+        print("=" * 60)
+    
+    args = None
+    chapters_completed = 0
+    chunks_completed = 0
     
     args = None
     chapters_completed = 0
@@ -4437,30 +4470,31 @@ def main(log_callback=None, stop_callback=None):
     if config.DISABLE_ZERO_DETECTION:
         print(f"📊 0-based detection disabled by user setting")
         uses_zero_based = False
+        # Important: Set a flag that can be checked throughout the codebase
+        config._force_disable_zero_detection = True
     else:
         if chapters:
             uses_zero_based = detect_novel_numbering(chapters)
+            print(f"📊 Novel numbering detected: {'0-based' if uses_zero_based else '1-based'}")
         else:
             uses_zero_based = False
+        config._force_disable_zero_detection = False
 
     # Store this for later use
     config._uses_zero_based = uses_zero_based
+
 
     rng = os.getenv("CHAPTER_RANGE", "")
     start = None
     end = None
     if rng and re.match(r"^\d+\s*-\s*\d+$", rng):
-        start, end = map(int, rng.split("-", 1))
-        
-        if uses_zero_based and not config.DISABLE_ZERO_DETECTION:
-            print(f"📊 0-based novel detected")
-            print(f"📊 User range {start}-{end} will map to files {start-1}-{end-1}")
-        else:
-            print(f"📊 Using range as specified: {start}-{end}")
-                
-            if uses_zero_based:
+            start, end = map(int, rng.split("-", 1))
+            
+            if config.DISABLE_ZERO_DETECTION:
+                print(f"📊 0-based detection disabled - using range as specified: {start}-{end}")
+            elif uses_zero_based:
                 print(f"📊 0-based novel detected")
-                print(f"📊 User range {start}-{end} will map to files {start-1}-{end-1}")
+                print(f"📊 User range {start}-{end} will be used as-is (chapters are already adjusted)")
             else:
                 print(f"📊 1-based novel detected")
                 print(f"📊 Using range as specified: {start}-{end}")
@@ -4475,22 +4509,33 @@ def main(log_callback=None, stop_callback=None):
         chap_num = c["num"]
         content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
         
-        # Pass config to respect DISABLE_ZERO_DETECTION
-        actual_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
+        # Extract the raw chapter number from the file
+        raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
         
         # Apply the offset
         offset = config.CHAPTER_NUMBER_OFFSET if hasattr(config, 'CHAPTER_NUMBER_OFFSET') else 0
-        actual_num += offset
+        raw_num += offset
         
-        # When toggle is disabled, don't apply any 0-based adjustment
+        # When toggle is disabled, use raw numbers without any 0-based adjustment
         if config.DISABLE_ZERO_DETECTION:
-            c['actual_chapter_num'] = actual_num
+            c['actual_chapter_num'] = raw_num
+            # Store raw number for consistency
+            c['raw_chapter_num'] = raw_num
+            c['zero_adjusted'] = False
         else:
+            # Store raw number
+            c['raw_chapter_num'] = raw_num
             # Apply adjustment only if this is a 0-based novel
             if uses_zero_based:
-                c['actual_chapter_num'] = actual_num + 1
+                c['actual_chapter_num'] = raw_num + 1
+                c['zero_adjusted'] = True
             else:
-                c['actual_chapter_num'] = actual_num
+                c['actual_chapter_num'] = raw_num
+                c['zero_adjusted'] = False
+        
+        # Now we can safely use actual_num
+        actual_num = c['actual_chapter_num']
+
 
         if start is not None:
             if not (start <= c['actual_chapter_num'] <= end):
@@ -4589,9 +4634,9 @@ def main(log_callback=None, stop_callback=None):
             if start is not None:
                 if not (start <= actual_num <= end):
                     continue
-            
+            actual_num = c['actual_chapter_num']  # Add this line before using actual_num
             needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
-                idx, chap_num, content_hash, out
+                idx, actual_num, content_hash, out
             )
             
             if not needs_translation:
@@ -4707,15 +4752,25 @@ def main(log_callback=None, stop_callback=None):
         for idx, c in enumerate(chapters):
             raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
             
+            # Apply offset if configured
+            offset = config.CHAPTER_NUMBER_OFFSET if hasattr(config, 'CHAPTER_NUMBER_OFFSET') else 0
+            raw_num += offset
+            
             if config.DISABLE_ZERO_DETECTION:
                 # Use raw numbers without adjustment
                 c['actual_chapter_num'] = raw_num
+                c['raw_chapter_num'] = raw_num
+                c['zero_adjusted'] = False
             else:
+                # Store raw number
+                c['raw_chapter_num'] = raw_num
                 # Apply 0-based adjustment if detected
                 if uses_zero_based:
                     c['actual_chapter_num'] = raw_num + 1
+                    c['zero_adjusted'] = True
                 else:
                     c['actual_chapter_num'] = raw_num
+                    c['zero_adjusted'] = False
 
         # Second pass: process chapters
         for idx, c in enumerate(chapters):
