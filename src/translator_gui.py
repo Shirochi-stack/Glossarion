@@ -590,7 +590,7 @@ class TranslatorGUI:
         self.model_var = tk.StringVar(value=default_model)
         models = ["gpt-4o","gpt-4o-mini","gpt-4-turbo","gpt-4.1-nano","gpt-4.1-mini","gpt-4.1",
                   "gpt-3.5-turbo","o4-mini","gemini-1.5-pro","gemini-1.5-flash", "gemini-2.0-flash",
-                  "gemini-2.0-flash-exp","gemini-2.5-flash-preview-05-20","gemini-2.5-pro-preview-06-05",
+                  "gemini-2.0-flash","gemini-2.5-flash","gemini-2.5-pro",
                   "deepseek-chat","claude-3-5-sonnet-20241022","claude-3-7-sonnet-20250219"]
         tb.Combobox(self.frame, textvariable=self.model_var, values=models, state="normal").grid(
             row=1, column=1, columnspan=2, sticky=tk.EW, padx=5, pady=5)
