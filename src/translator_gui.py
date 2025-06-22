@@ -1091,14 +1091,26 @@ class TranslatorGUI:
             # Build a chapters list from progress data to pass to backend function
             chapters = []
             for chapter_key, chapter_info in progress_data.get("chapters", {}).items():
+                # Get the output file, handling None values
+                output_file = chapter_info.get('output_file', '')
+                
                 chapter_dict = {
                     'original_basename': chapter_info.get('original_basename', ''),
-                    'filename': chapter_info.get('output_file', ''),
+                    'filename': output_file or '',  # Ensure it's never None
                     'num': chapter_info.get('chapter_num', 0)
                 }
-                # Add the output file path if it exists
-                if chapter_dict['filename']:
-                    chapter_dict['filename'] = os.path.join(output_dir, chapter_dict['filename'])
+                
+                # Only add the output file path if it exists and is not empty
+                if output_file and output_file.strip():
+                    chapter_dict['filename'] = os.path.join(output_dir, output_file)
+                else:
+                    # If no output file, try to construct from original basename
+                    if chapter_dict['original_basename']:
+                        chapter_dict['filename'] = os.path.join(output_dir, f"response_{chapter_dict['original_basename']}.html")
+                    else:
+                        # Last resort: use chapter number
+                        chapter_num = chapter_info.get('actual_num', chapter_info.get('chapter_num', 0))
+                        chapter_dict['filename'] = os.path.join(output_dir, f"response_{chapter_num:04d}.html")
                 
                 chapters.append(chapter_dict)
             
@@ -2775,7 +2787,7 @@ class TranslatorGUI:
            'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var.get() else "0",
            'DUPLICATE_DETECTION_MODE': self.duplicate_detection_mode_var.get(),
            'AI_HUNTER_THRESHOLD': self.ai_hunter_threshold_var.get(),
-           'CHAPTER_NUMBER_OFFSET': str(self.config.get('chapter_number_offset', 0)),
+           'CHAPTER_NUMBER_OFFSET': str(self.chapter_number_offset_var.get()), 
            'USE_HEADER_AS_OUTPUT': "1" if self.use_header_as_output_var.get() else "0"
        }
 
@@ -4444,6 +4456,7 @@ class TranslatorGUI:
             self.config['enable_auto_glossary'] = self.enable_auto_glossary_var.get()
             self.config['duplicate_detection_mode'] = self.duplicate_detection_mode_var.get()
             self.config['ai_hunter_threshold'] = safe_int(self.ai_hunter_threshold_var.get(), 75)
+            self.config['chapter_number_offset'] = safe_int(self.chapter_number_offset_var.get(), 0)
             self.config['use_header_as_output'] = self.use_header_as_output_var.get()
 
             _tl = self.token_limit_entry.get().strip()
