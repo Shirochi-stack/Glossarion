@@ -5059,7 +5059,7 @@ def main(log_callback=None, stop_callback=None):
 
             chunk_context_manager.clear()
 
-            fname = FileUtilities.create_chapter_filename(c, actual_num))
+            fname = FileUtilities.create_chapter_filename(c, actual_num)
 
             cleaned = re.sub(r"^```(?:html)?\s*\n?", "", merged_result, count=1, flags=re.MULTILINE)
             cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
