@@ -2,6 +2,7 @@
 import io, json, logging, math, os, shutil, sys, threading, time, re
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
+from ai_hunter_enhanced import AIHunterConfigGUI, ImprovedAIHunterDetection
 
 # Third-Party
 import ttkbootstrap as tb
@@ -545,7 +546,6 @@ class TranslatorGUI:
         
         # Detection mode
         self.duplicate_detection_mode_var = tk.StringVar(value=self.config.get('duplicate_detection_mode', 'basic'))
-        self.ai_hunter_threshold_var = tk.StringVar(value=str(self.config.get('ai_hunter_threshold', 75)))
 
     def _setup_gui(self):
         """Initialize all GUI components"""
@@ -3930,20 +3930,8 @@ class TranslatorGUI:
                               value=value, bootstyle="primary")
            rb.pack(anchor=tk.W, padx=40, pady=2)
 
-        # AI Hunter Custom Threshold
-        threshold_frame = tk.Frame(section_frame)
-        threshold_frame.pack(anchor=tk.W, padx=20, pady=(10, 5))
-
-        tk.Label(threshold_frame, text="AI Hunter Threshold:", font=('TkDefaultFont', 10, 'bold')).pack(side=tk.LEFT)
-
-        tb.Entry(threshold_frame, width=6, textvariable=self.ai_hunter_threshold_var).pack(side=tk.LEFT, padx=(10, 5))
-        tk.Label(threshold_frame, text="%").pack(side=tk.LEFT)
-
-        tk.Label(section_frame, text="Custom similarity threshold for AI Hunter detection\n"
-                "Lower = more sensitive (more duplicates found)\n"
-                "Higher = less sensitive (fewer false positives)\n"
-                "Recommended: 40-90%",
-                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+        # Call the new AI Hunter section method
+        self.create_ai_hunter_section(section_frame)
 
         # Retry Slow
         tb.Checkbutton(section_frame, text="Auto-retry Slow Chunks", 
@@ -3959,6 +3947,95 @@ class TranslatorGUI:
         tk.Label(section_frame, text="Retry chunks/images that take too long\n(reduces tokens for faster response)",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
 
+    def create_ai_hunter_section(self, section_frame):
+        """Create the AI Hunter configuration section"""
+        # AI Hunter Configuration
+        config_frame = tk.Frame(section_frame)
+        config_frame.pack(anchor=tk.W, padx=20, pady=(10, 5))
+        
+        # Status label
+        ai_config = self.config.get('ai_hunter_config', {})
+        self.ai_hunter_status_label = tk.Label(
+            config_frame, 
+            text=self._get_ai_hunter_status_text(),
+            font=('TkDefaultFont', 10)
+        )
+        self.ai_hunter_status_label.pack(side=tk.LEFT)
+        
+        # Configure button
+        tb.Button(
+            config_frame, 
+            text="Configure AI Hunter", 
+            command=self.show_ai_hunter_settings,
+            bootstyle="info"
+        ).pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Quick enable/disable toggle
+        self.ai_hunter_enabled_var = tk.BooleanVar(
+            value=ai_config.get('enabled', True)
+        )
+        tb.Checkbutton(
+            config_frame,
+            text="Enable AI Hunter",
+            variable=self.ai_hunter_enabled_var,
+            command=self.toggle_ai_hunter,
+            bootstyle="round-toggle"
+        ).pack(side=tk.LEFT, padx=(20, 0))
+        
+        # Info text
+        tk.Label(
+            section_frame, 
+            text="AI Hunter uses multiple detection methods to identify duplicate content\n"
+                 "with configurable thresholds and detection modes",
+            font=('TkDefaultFont', 10), 
+            fg='gray', 
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, padx=20, pady=(0, 10))
+
+    def _get_ai_hunter_status_text(self):
+        """Get status text for AI Hunter configuration"""
+        ai_config = self.config.get('ai_hunter_config', {})
+        
+        if not ai_config.get('enabled', True):
+            return "AI Hunter: Disabled"
+        
+        mode_text = {
+            'single_method': 'Single Method',
+            'multi_method': 'Multi-Method',
+            'weighted_average': 'Weighted Average'
+        }
+        
+        mode = mode_text.get(ai_config.get('detection_mode', 'multi_method'), 'Unknown')
+        thresholds = ai_config.get('thresholds', {})
+        
+        if thresholds:
+            avg_threshold = sum(thresholds.values()) / len(thresholds)
+        else:
+            avg_threshold = 85
+        
+        return f"AI Hunter: {mode} mode, Avg threshold: {int(avg_threshold)}%"
+
+    def show_ai_hunter_settings(self):
+        """Open AI Hunter configuration window"""
+        def on_config_saved():
+            # Save the entire configuration
+            self.save_configuration()
+            # Update status label
+            self.ai_hunter_status_label.config(text=self._get_ai_hunter_status_text())
+            self.ai_hunter_enabled_var.set(self.config.get('ai_hunter_config', {}).get('enabled', True))
+        
+        gui = AIHunterConfigGUI(self.master, self.config, on_config_saved)
+        gui.show_ai_hunter_config()
+
+    def toggle_ai_hunter(self):
+        """Toggle AI Hunter enabled state"""
+        if 'ai_hunter_config' not in self.config:
+            self.config['ai_hunter_config'] = {}
+        
+        self.config['ai_hunter_config']['enabled'] = self.ai_hunter_enabled_var.get()
+        self.save_configuration()
+        self.ai_hunter_status_label.config(text=self._get_ai_hunter_status_text())
+    
     def _create_prompt_management_section(self, parent):
         """Create meta data section (formerly prompt management)"""
         section_frame = tk.LabelFrame(parent, text="Meta Data", padx=10, pady=10)
