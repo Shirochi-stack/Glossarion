@@ -254,12 +254,23 @@ class FileUtilities:
     """Utilities for file and path operations"""
     
     @staticmethod
-    def extract_actual_chapter_number(chapter, patterns=None):
-        """Extract actual chapter number from filename"""
+    def extract_actual_chapter_number(chapter, patterns=None, config=None):
+        """Extract actual chapter number from filename
+        
+        Args:
+            chapter: Chapter dict containing metadata
+            patterns: Optional list of regex patterns to use
+            config: Optional config object to check DISABLE_ZERO_DETECTION
+        
+        Returns:
+            int: The actual chapter number (raw from file, no adjustments)
+        """
         if patterns is None:
             patterns = PatternManager.FILENAME_EXTRACT_PATTERNS
         
         actual_num = None
+        
+        # Try to extract from original basename first
         if chapter.get('original_basename'):
             basename = chapter['original_basename']
             for pattern in patterns:
@@ -268,9 +279,20 @@ class FileUtilities:
                     actual_num = int(match.group(1))
                     break
         
+        # Fallback to other sources if needed
+        if actual_num is None and 'filename' in chapter:
+            filename = os.path.basename(chapter['filename'])
+            for pattern in patterns:
+                match = re.search(pattern, filename, re.IGNORECASE)
+                if match:
+                    actual_num = int(match.group(1))
+                    break
+        
+        # Final fallback to chapter num
         if actual_num is None:
             actual_num = chapter.get("num", 0)
         
+        # Return raw number - adjustments should be done by caller
         return actual_num
     
     @staticmethod
@@ -1709,13 +1731,16 @@ class ChapterExtractor:
 class TranslationProcessor:
     """Handles the core translation processing logic"""
     
-    def __init__(self, config, client, out_dir, log_callback=None, stop_callback=None):
+class TranslationProcessor:
+    """Handles the translation of individual chapters"""
+    
+    def __init__(self, config, client, output_dir, log_callback, check_stop_fn, uses_zero_based=False):
         self.config = config
         self.client = client
-        self.out_dir = out_dir
+        self.output_dir = output_dir
         self.log_callback = log_callback
-        self.stop_callback = stop_callback
-        self.chapter_splitter = ChapterSplitter(model_name=config.MODEL)
+        self.check_stop_fn = check_stop_fn
+        self.uses_zero_based = uses_zero_based
         
     def check_stop(self):
         """Check if translation should stop"""
@@ -2468,7 +2493,18 @@ class BatchTranslationProcessor:
         idx, chapter = chapter_data
         chap_num = chapter["num"]
         
-        actual_num = FileUtilities.extract_actual_chapter_number(chapter)
+        # Use the pre-calculated actual_chapter_num from the main loop
+        actual_num = chapter.get('actual_chapter_num')
+        
+        # Fallback if not set (shouldn't happen with proper refactoring)
+        if actual_num is None:
+            raw_num = FileUtilities.extract_actual_chapter_number(chapter, patterns=None, config=self.config)
+            if self.config.DISABLE_ZERO_DETECTION:
+                actual_num = raw_num
+            else:
+                # Need to determine if this is a 0-based novel
+                # This info should be passed from main function
+                actual_num = raw_num  # Safe fallback
         
         try:
             print(f"🔄 Starting #{idx+1} (Internal: Chapter {chap_num}, Actual: Chapter {actual_num})  (thread: {threading.current_thread().name}) [File: {chapter.get('original_basename', f'Chapter_{chap_num}')}]")
@@ -4331,10 +4367,18 @@ def main(log_callback=None, stop_callback=None):
     
     total_chapters = len(chapters)
 
-    if chapters:
-        uses_zero_based = detect_novel_numbering(chapters)
-    else:
+    # Only detect numbering if the toggle is not disabled
+    if config.DISABLE_ZERO_DETECTION:
+        print(f"📊 0-based detection disabled by user setting")
         uses_zero_based = False
+    else:
+        if chapters:
+            uses_zero_based = detect_novel_numbering(chapters)
+        else:
+            uses_zero_based = False
+
+    # Store this for later use
+    config._uses_zero_based = uses_zero_based
 
     rng = os.getenv("CHAPTER_RANGE", "")
     start = None
@@ -4342,14 +4386,11 @@ def main(log_callback=None, stop_callback=None):
     if rng and re.match(r"^\d+\s*-\s*\d+$", rng):
         start, end = map(int, rng.split("-", 1))
         
-        if config.DISABLE_ZERO_DETECTION:
-            print(f"📊 0-based detection disabled - using range as specified: {start}-{end}")
-            uses_zero_based = False
+        if uses_zero_based and not config.DISABLE_ZERO_DETECTION:
+            print(f"📊 0-based novel detected")
+            print(f"📊 User range {start}-{end} will map to files {start-1}-{end-1}")
         else:
-            if chapters:
-                uses_zero_based = detect_novel_numbering(chapters)
-            else:
-                uses_zero_based = False
+            print(f"📊 Using range as specified: {start}-{end}")
                 
             if uses_zero_based:
                 print(f"📊 0-based novel detected")
@@ -4367,13 +4408,22 @@ def main(log_callback=None, stop_callback=None):
         chap_num = c["num"]
         content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
         
-        actual_num = FileUtilities.extract_actual_chapter_number(c)
+        # Pass config to respect DISABLE_ZERO_DETECTION
+        actual_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
         
-        c['actual_chapter_num'] = actual_num
+        # When toggle is disabled, don't apply any 0-based adjustment
+        if config.DISABLE_ZERO_DETECTION:
+            c['actual_chapter_num'] = actual_num
+        else:
+            # Apply adjustment only if this is a 0-based novel
+            if uses_zero_based:
+                c['actual_chapter_num'] = actual_num + 1
+            else:
+                c['actual_chapter_num'] = actual_num
 
         if start is not None:
-            if not (start <= actual_num <= end):
-                print(f"[SKIP] Chapter {actual_num} outside range {start}-{end}")
+            if not (start <= c['actual_chapter_num'] <= end):
+                print(f"[SKIP] Chapter {c['actual_chapter_num']} outside range {start}-{end}")
                 continue
                 
         needs_translation, skip_reason, _ = progress_manager.check_chapter_status(
@@ -4451,9 +4501,21 @@ def main(log_callback=None, stop_callback=None):
             chap_num = c["num"]
             content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
             
+            # Get actual number with config awareness
+            raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
+            
+            if config.DISABLE_ZERO_DETECTION:
+                actual_num = raw_num
+            else:
+                if uses_zero_based:
+                    actual_num = raw_num + 1
+                else:
+                    actual_num = raw_num
+            
+            # Store it in the chapter object for later use
+            c['actual_chapter_num'] = actual_num
+            
             if start is not None:
-                actual_num = FileUtilities.extract_actual_chapter_number(c)
-                
                 if not (start <= actual_num <= end):
                     continue
             
@@ -4568,12 +4630,23 @@ def main(log_callback=None, stop_callback=None):
         config.BATCH_TRANSLATION = False
 
     if not config.BATCH_TRANSLATION:
-        translation_processor = TranslationProcessor(config, client, out, log_callback, check_stop)
+        translation_processor = TranslationProcessor(config, client, out, log_callback, check_stop, uses_zero_based)
         
+        # First pass: set actual chapter numbers respecting the config
         for idx, c in enumerate(chapters):
-            actual_num = FileUtilities.extract_actual_chapter_number(c)
-            c['actual_chapter_num'] = actual_num
+            raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
+            
+            if config.DISABLE_ZERO_DETECTION:
+                # Use raw numbers without adjustment
+                c['actual_chapter_num'] = raw_num
+            else:
+                # Apply 0-based adjustment if detected
+                if uses_zero_based:
+                    c['actual_chapter_num'] = raw_num + 1
+                else:
+                    c['actual_chapter_num'] = raw_num
 
+        # Second pass: process chapters
         for idx, c in enumerate(chapters):
             chap_num = c["num"]
             actual_num = c['actual_chapter_num']
