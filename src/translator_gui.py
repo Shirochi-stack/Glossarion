@@ -1158,398 +1158,268 @@ class TranslatorGUI:
         return uses_zero_based
     
     def force_retranslation(self):
-        """Force retranslation of specific chapters with improved display"""
-        input_path = self.entry_epub.get()
-        if not input_path or not os.path.isfile(input_path):
-            messagebox.showerror("Error", "Please select a valid EPUB or text file first.")
-            return
-        
-        epub_base = os.path.splitext(os.path.basename(input_path))[0]
-        output_dir = epub_base
-        
-        if not os.path.exists(output_dir):
-            messagebox.showinfo("Info", "No translation output found for this EPUB.")
-            return
-        
-        progress_file = os.path.join(output_dir, "translation_progress.json")
-        if not os.path.exists(progress_file):
-            messagebox.showinfo("Info", "No progress tracking found.")
-            return
-        
-        with open(progress_file, 'r', encoding='utf-8') as f:
-            prog = json.load(f)
-        
-        chapters_info_file = os.path.join(output_dir, "chapters_info.json")
-        chapters_info_map = {}
-        if os.path.exists(chapters_info_file):
-            try:
-                with open(chapters_info_file, 'r', encoding='utf-8') as f:
-                    chapters_info = json.load(f)
-                    for ch_info in chapters_info:
-                        if 'num' in ch_info:
-                            chapters_info_map[ch_info['num']] = ch_info
-            except: pass
-        
-        # Create dialog with increased width to accommodate longer chapter names
-        dialog = self.wm.create_simple_dialog(
-            self.master,
-            "Force Retranslation",
-            width=900,  # Increased from 699 to 900
-            height=600
-        )
-        
-        # Add instructions label
-        instruction_text = "Select chapters to retranslate (scroll horizontally if needed):"
-        tk.Label(dialog, text=instruction_text, font=('Arial', 12)).pack(pady=10)
-        
-        # Create main frame for listbox and scrollbars
-        main_frame = tk.Frame(dialog)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        
-        # Create horizontal scrollbar
-        h_scrollbar = ttk.Scrollbar(main_frame, orient=tk.HORIZONTAL)
-        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
-        
-        # Create vertical scrollbar
-        v_scrollbar = ttk.Scrollbar(main_frame, orient=tk.VERTICAL)
-        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        # Create listbox with both scrollbars
-        listbox = tk.Listbox(
-            main_frame, 
-            selectmode=tk.MULTIPLE, 
-            yscrollcommand=v_scrollbar.set,
-            xscrollcommand=h_scrollbar.set,
-            width=100  # Increased width to show more content
-        )
-        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        # Configure scrollbars
-        v_scrollbar.config(command=listbox.yview)
-        h_scrollbar.config(command=listbox.xview)
-        
-        # Check if 0-based detection is disabled from user settings
-        disable_zero_detection = self.disable_zero_detection_var.get()
-
-        # Detect numbering system (only if not disabled)
-        uses_zero_based = False
-        if not disable_zero_detection:
-            # NEW: Use unified detection
-            uses_zero_based = self.detect_novel_numbering_unified(output_dir, prog)
-
-        # Extract chapter numbers with enhanced display
-        all_extracted_nums = []
-        chapter_display_info = []  # Store additional info for display
-        
-        for chapter_key, chapter_info in prog.get("chapters", {}).items():
-            extracted_num = None
+            """Force retranslation of specific chapters with improved display"""
+            input_path = self.entry_epub.get()
+            if not input_path or not os.path.isfile(input_path):
+                messagebox.showerror("Error", "Please select a valid EPUB or text file first.")
+                return
             
-            # Priority 1: Use stored actual_num (most reliable)
-            if 'actual_num' in chapter_info:
-                try:
-                    extracted_num = int(chapter_info['actual_num'])
-                except:
-                    extracted_num = None
+            epub_base = os.path.splitext(os.path.basename(input_path))[0]
+            output_dir = epub_base
             
-            # Priority 2: Use stored chapter_num
-            if extracted_num is None and 'chapter_num' in chapter_info:
-                try:
-                    extracted_num = int(chapter_info['chapter_num'])
-                except:
-                    extracted_num = None
+            if not os.path.exists(output_dir):
+                messagebox.showinfo("Info", "No translation output found for this EPUB.")
+                return
             
-            # Priority 3: Extract from output_file name
-            if extracted_num is None:
+            progress_file = os.path.join(output_dir, "translation_progress.json")
+            if not os.path.exists(progress_file):
+                messagebox.showinfo("Info", "No progress tracking found.")
+                return
+            
+            with open(progress_file, 'r', encoding='utf-8') as f:
+                prog = json.load(f)
+            
+            # Check if there are any chapters
+            if not prog.get("chapters"):
+                messagebox.showinfo("Info", "No chapters found in progress tracking.")
+                return
+            
+            # Group all entries by their output filename to handle duplicates
+            files_to_entries = {}
+            no_file_entries = []
+            
+            for chapter_key, chapter_info in prog.get("chapters", {}).items():
                 output_file = chapter_info.get("output_file", "")
-                if output_file:
-                    patterns = [
-                        r'response_(\d+)',
-                        r'(\d{4})[_\.]',
-                        r'(\d{3})[_\.]',
-                        r'No(\d+)Chapter',
-                        r'^(\d+)[_\.]',
-                        r'_(\d+)(?:_|\.|$)'
-                    ]
-                    
-                    for pattern in patterns:
-                        match = re.search(pattern, output_file)
-                        if match:
-                            extracted_num = int(match.group(1))
-                            break
-            
-            # Priority 4: Use chapter_idx
-            if extracted_num is None and 'chapter_idx' in chapter_info:
-                try:
-                    # FIXED: Only apply +1 if zero detection is enabled AND it's a 0-based novel
-                    if not disable_zero_detection and uses_zero_based:
-                        extracted_num = int(chapter_info['chapter_idx']) + 1
-                    else:
-                        # When disabled, use the raw index without any adjustment
-                        extracted_num = int(chapter_info['chapter_idx'])
-                except:
-                    extracted_num = None
-            
-            # Priority 5: If chapter_key is numeric (old format)
-            if extracted_num is None and chapter_key.isdigit():
-                try:
-                    # FIXED: Only apply +1 if zero detection is enabled
-                    if not disable_zero_detection:
-                        extracted_num = int(chapter_key) + 1
-                    else:
-                        # When disabled, use the raw key value
-                        extracted_num = int(chapter_key)
-                except:
-                    extracted_num = None
-            
-            # Default to 0 if all else fails
-            if extracted_num is None:
-                extracted_num = 0
                 
-            all_extracted_nums.append(extracted_num)
+                if output_file:
+                    if output_file not in files_to_entries:
+                        files_to_entries[output_file] = []
+                    files_to_entries[output_file].append((chapter_key, chapter_info))
+                else:
+                    no_file_entries.append((chapter_key, chapter_info))
             
-
-            # Determine status based on various factors
-            status = chapter_info.get("status", "unknown")
+            print(f"Found {len(files_to_entries)} unique files from {len(prog.get('chapters', {}))} total entries")
+        
+            # Load chapters info if available
+            chapters_info_file = os.path.join(output_dir, "chapters_info.json")
+            chapters_info_map = {}
+            if os.path.exists(chapters_info_file):
+                try:
+                    with open(chapters_info_file, 'r', encoding='utf-8') as f:
+                        chapters_info = json.load(f)
+                        for ch_info in chapters_info:
+                            if 'num' in ch_info:
+                                chapters_info_map[ch_info['num']] = ch_info
+                except: pass
             
-            # Preserve failure statuses (qa_failed, failed, error, etc.)
-            failure_statuses = ["failed", "qa_failed", "file_missing", "error", "file_deleted"]
+            # Create dialog using WindowManager
+            dialog = self.wm.create_simple_dialog(
+                self.master,
+                "Force Retranslation",
+                width=900,
+                height=600
+            )
             
-            if status not in failure_statuses:
-                # Only check file existence for non-failure statuses
-                if status == "completed" and output_file:
+            # Add instructions label
+            instruction_text = "Select chapters to retranslate (scroll horizontally if needed):"
+            tk.Label(dialog, text=instruction_text, font=('Arial', 12)).pack(pady=10)
+            
+            # Create main frame for listbox and scrollbars
+            main_frame = tk.Frame(dialog)
+            main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+            
+            # Create scrollbars
+            h_scrollbar = ttk.Scrollbar(main_frame, orient=tk.HORIZONTAL)
+            h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+            
+            v_scrollbar = ttk.Scrollbar(main_frame, orient=tk.VERTICAL)
+            v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            
+            # Create listbox
+            listbox = tk.Listbox(
+                main_frame, 
+                selectmode=tk.MULTIPLE, 
+                yscrollcommand=v_scrollbar.set,
+                xscrollcommand=h_scrollbar.set,
+                width=100
+            )
+            listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            
+            # Configure scrollbars
+            v_scrollbar.config(command=listbox.yview)
+            h_scrollbar.config(command=listbox.xview)
+            
+            # Build display info - ONE entry per unique file
+            chapter_display_info = []
+            
+            for output_file, entries in files_to_entries.items():
+                # Use the first entry for each file (they're duplicates anyway)
+                chapter_key, chapter_info = entries[0]
+                
+                # Extract chapter number from filename
+                chapter_num = 0
+                match = re.search(r'-h-(\d+)\.html', output_file)
+                if match:
+                    chapter_num = int(match.group(1)) + 1
+                else:
+                    match = re.search(r'response_(\d+)', output_file)
+                    if match:
+                        chapter_num = int(match.group(1))
+                
+                # Get status and validate
+                status = chapter_info.get("status", "unknown")
+                if status == "completed_empty":
+                    status = "completed"
+                
+                # Check file existence
+                if status == "completed":
                     output_path = os.path.join(output_dir, output_file)
                     if not os.path.exists(output_path):
-                        status = "failed"
+                        status = "file_missing"
+                
+                chapter_display_info.append({
+                    'key': chapter_key,
+                    'num': chapter_num,
+                    'info': chapter_info,
+                    'output_file': output_file,
+                    'status': status,
+                    'duplicate_count': len(entries)  # Track how many duplicates
+                })
+            
+            # Sort by chapter number
+            chapter_display_info.sort(key=lambda x: x['num'])
+            
+            # Populate listbox
+            for info in chapter_display_info:
+                chapter_num = info['num']
+                status = info['status']
+                output_file = info['output_file']
+                
+                # Status indicators
+                status_icons = {
+                    'completed': '✅',
+                    'failed': '❌',
+                    'qa_failed': '❌',
+                    'file_missing': '⚠️',
+                    'in_progress': '🔄',
+                    'unknown': '❓'
+                }
+                
+                icon = status_icons.get(status, '❓')
+                
+                # Build display string
+                display = f"Chapter {chapter_num:03d} | {icon} {status} | {output_file}"
+                
+                # Add duplicate count if more than 1
+                if info['duplicate_count'] > 1:
+                    display += f" | ({info['duplicate_count']} duplicate entries)"
+                
+                listbox.insert(tk.END, display)
+            
+            # Selection count label
+            selection_count_label = tk.Label(dialog, text="Selected: 0", font=('Arial', 10))
+            selection_count_label.pack(pady=(5, 10))
+            
+            def update_selection_count(*args):
+                count = len(listbox.curselection())
+                selection_count_label.config(text=f"Selected: {count}")
+            
+            listbox.bind('<<ListboxSelect>>', update_selection_count)
+            
+            # Button frame
+            button_frame = tk.Frame(dialog)
+            button_frame.pack(pady=10)
+            
+            def select_all():
+                listbox.select_set(0, tk.END)
+                update_selection_count()
+            
+            def clear_selection():
+                listbox.select_clear(0, tk.END)
+                update_selection_count()
+            
+            def select_status(status_to_select):
+                listbox.select_clear(0, tk.END)
+                for idx, info in enumerate(chapter_display_info):
+                    if info['status'] == status_to_select:
+                        listbox.select_set(idx)
+                update_selection_count()
+            
+            def retranslate_selected():
+                selected = listbox.curselection()
+                if not selected:
+                    messagebox.showwarning("No Selection", "Please select at least one chapter.")
+                    return
+                
+                # Confirm action
+                count = len(selected)
+                if count > 10:
+                    confirm_msg = f"This will delete {count} translated chapters and mark them for retranslation.\n\nContinue?"
                 else:
-                    # Check if this chapter has incomplete chunks
-                    content_hash = chapter_info.get("content_hash")
-                    if content_hash and content_hash in prog.get("chapter_chunks", {}):
-                        chunk_info = prog["chapter_chunks"][content_hash]
-                        total_chunks = chunk_info.get("total", 0)
-                        completed_chunks = len(chunk_info.get("completed", []))
-                        if completed_chunks > 0 and completed_chunks < total_chunks:
-                            status = "in_progress"
-                    # Also check using old index-based key
-                    elif chapter_key in prog.get("chapter_chunks", {}):
-                        chunk_info = prog["chapter_chunks"][chapter_key]
-                        total_chunks = chunk_info.get("total", 0)
-                        completed_chunks = len(chunk_info.get("completed", []))
-                        if completed_chunks > 0 and completed_chunks < total_chunks:
-                            status = "in_progress"
-            
-            # Handle special statuses
-            if status == "completed_empty":
-                status = "completed"
-            
-            # Store additional info for enhanced display
-            chapter_display_info.append({
-                'key': chapter_key,
-                'num': extracted_num,
-                'info': chapter_info,
-                'output_file': chapter_info.get("output_file", ""),
-                'original_basename': chapter_info.get("original_basename", ""),
-                'status': status
-            })
-        
-        # Sort by chapter number
-        sorted_indices = sorted(range(len(chapter_display_info)), 
-                               key=lambda i: chapter_display_info[i]['num'])
-        
-        # Add chapters to listbox in sorted order
-        for idx in sorted_indices:
-            display_data = chapter_display_info[idx]
-            chapter_num = display_data['num']
-            chapter_info = display_data['info']
-            output_file = display_data['output_file']
-            status = display_data['status']
-            
-            # Try to get original basename from chapters_info.json
-            original_basename = None
-            if chapter_num in chapters_info_map:
-                original_basename = chapters_info_map[chapter_num].get('original_basename')
-            
-            # Create display string with status indicator
-            if status == 'completed':
-                status_indicator = "✅ completed"
-                file_indicator = "✓" if output_file else "✗"
-            elif status == 'in_progress':
-                status_indicator = "🔄 in_progress"
-                file_indicator = "✗"
-            elif status in ['failed', 'qa_failed', 'file_missing', 'error', 'file_deleted']:
-                # Handle all failure statuses
-                if status == 'qa_failed':
-                    status_indicator = "❌ qa_failed"
-                else:
-                    status_indicator = f"❌ {status}"
-                file_indicator = "✗"
-            else:
-                status_indicator = "❓ unknown"
-                file_indicator = "✗"
-            
-            # Build display parts
-            display_parts = [
-                f"Chapter {chapter_num:04d}",  # Zero-padded for better sorting visibility
-                status_indicator,
-                f"File: {file_indicator}"
-            ]
-            
-            # Add filename if available (truncated if too long)
-            if output_file:
-                filename_display = output_file
-                if len(filename_display) > 50:
-                    filename_display = filename_display[:47] + "..."
-                display_parts.append(f"[{filename_display}]")
-            
-            # Add original basename if different from output file
-            if original_basename and original_basename != output_file:
-                basename_display = original_basename
-                if len(basename_display) > 30:
-                    basename_display = basename_display[:27] + "..."
-                display_parts.append(f"(from: {basename_display})")
-            
-            display_str = " - ".join(display_parts)
-            listbox.insert(tk.END, display_str)
-        
-        # Add summary label with accurate counts
-        summary_text = f"Total chapters: {len(chapter_display_info)}"
-        completed_count = sum(1 for d in chapter_display_info if d['status'] == 'completed')
-        in_progress_count = sum(1 for d in chapter_display_info if d['status'] == 'in_progress')
-        failed_count = sum(1 for d in chapter_display_info if d['status'] == 'failed')
-        unknown_count = sum(1 for d in chapter_display_info if d['status'] == 'unknown')
-        
-        summary_text += f" | ✅ Completed: {completed_count}"
-        if in_progress_count > 0:
-            summary_text += f" | 🔄 In Progress: {in_progress_count}"
-        if failed_count > 0:
-            summary_text += f" | ❌ Failed: {failed_count}"
-        if unknown_count > 0:
-            summary_text += f" | ❓ Unknown: {unknown_count}"
-        
-        summary_label = tk.Label(dialog, text=summary_text, font=('Arial', 10), fg='gray')
-        summary_label.pack(pady=(5, 10))
-        
-        # Button frame
-        button_frame = tk.Frame(dialog)
-        button_frame.pack(pady=10)
-        
-        def select_all():
-            listbox.select_set(0, tk.END)
-            update_selection_count()
-        
-        def clear_selection():
-            listbox.select_clear(0, tk.END)
-            update_selection_count()
-        
-        def select_status(status_to_select):
-            """Select all chapters with a specific status"""
-            listbox.select_clear(0, tk.END)
-            
-            # Handle 'failed' as a category that includes all failure types
-            if status_to_select == 'failed':
-                failure_statuses = ['failed', 'qa_failed', 'file_missing', 'error', 'file_deleted']
-                for idx in sorted_indices:
-                    if chapter_display_info[idx]['status'] in failure_statuses:
-                        listbox.select_set(sorted_indices.index(idx))
-            else:
-                for idx in sorted_indices:
-                    if chapter_display_info[idx]['status'] == status_to_select:
-                        listbox.select_set(sorted_indices.index(idx))
-            update_selection_count()
-        
-        # Selection count label
-        selection_count_label = tk.Label(button_frame, text="Selected: 0", font=('Arial', 10))
-        selection_count_label.grid(row=0, column=0, columnspan=5, pady=(0, 5))
-        
-        def update_selection_count(*args):
-            count = len(listbox.curselection())
-            selection_count_label.config(text=f"Selected: {count}")
-        
-        # Bind selection change event
-        listbox.bind('<<ListboxSelect>>', update_selection_count)
-        
-        def retranslate_selected():
-            selected = listbox.curselection()
-            if not selected:
-                messagebox.showwarning("No Selection", "Please select at least one chapter.")
-                return
-            
-            selected_indices = [sorted_indices[i] for i in selected]
-            
-            # Show detailed confirmation
-            selected_chapters = []
-            for idx in selected_indices:
-                display_data = chapter_display_info[idx]
-                selected_chapters.append(f"Chapter {display_data['num']} ({display_data['status']})")
-            
-            if len(selected_chapters) > 10:
-                chapter_list = "\n".join(selected_chapters[:5])
-                chapter_list += f"\n... and {len(selected_chapters) - 5} more"
-            else:
-                chapter_list = "\n".join(selected_chapters)
-            
-            confirm_msg = f"This will delete {len(selected)} translated chapters and mark them for retranslation:\n\n{chapter_list}\n\nContinue?"
-            
-            if not messagebox.askyesno("Confirm Retranslation", confirm_msg):
-                return
-            
-            # Clear selected chapters
-            deleted_count = 0
-            for idx in selected_indices:
-                chapter_key = chapter_display_info[idx]['key']
-                chapter_info = chapter_display_info[idx]['info']
-                output_file = chapter_info.get('output_file')
+                    chapters = [f"Chapter {chapter_display_info[i]['num']}" for i in selected]
+                    confirm_msg = f"This will delete and retranslate:\n\n{', '.join(chapters)}\n\nContinue?"
                 
-                # Delete the output file if it exists
-                if output_file:
-                    output_path = os.path.join(output_dir, output_file)
-                    try:
-                        if os.path.exists(output_path):
-                            os.remove(output_path)
-                            deleted_count += 1
-                    except Exception as e:
-                        print(f"Failed to delete {output_path}: {e}")
+                if not messagebox.askyesno("Confirm Retranslation", confirm_msg):
+                    return
                 
-                # Clear the chapter from progress tracking
-                if chapter_key in prog["chapters"]:
-                    del prog["chapters"][chapter_key]
+                # Process selected chapters
+                deleted_count = 0
+                for idx in selected:
+                    info = chapter_display_info[idx]
+                    output_file = info['output_file']
+                    
+                    # Delete the output file
+                    if output_file:
+                        output_path = os.path.join(output_dir, output_file)
+                        try:
+                            if os.path.exists(output_path):
+                                os.remove(output_path)
+                                deleted_count += 1
+                        except Exception as e:
+                            print(f"Failed to delete {output_path}: {e}")
+                    
+                    # Remove ALL duplicate entries for this file from progress
+                    if output_file in files_to_entries:
+                        for chapter_key, _ in files_to_entries[output_file]:
+                            if chapter_key in prog["chapters"]:
+                                # Get content hash before deleting
+                                content_hash = prog["chapters"][chapter_key].get("content_hash")
+                                
+                                # Delete from chapters
+                                del prog["chapters"][chapter_key]
+                                
+                                # Clean up related data
+                                if content_hash and content_hash in prog.get("content_hashes", {}):
+                                    del prog["content_hashes"][content_hash]
+                                
+                                if content_hash and content_hash in prog.get("chapter_chunks", {}):
+                                    del prog["chapter_chunks"][content_hash]
+                                
+                                if chapter_key in prog.get("chapter_chunks", {}):
+                                    del prog["chapter_chunks"][chapter_key]
                 
-                # Clear from content hashes
-                content_hash = chapter_info.get("content_hash")
-                if content_hash and content_hash in prog.get("content_hashes", {}):
-                    del prog["content_hashes"][content_hash]
+                # Save updated progress
+                with open(progress_file, 'w', encoding='utf-8') as f:
+                    json.dump(prog, f, ensure_ascii=False, indent=2)
                 
-                # Clear from chapter chunks
-                if content_hash and content_hash in prog.get("chapter_chunks", {}):
-                    del prog["chapter_chunks"][content_hash]
-                if chapter_key in prog.get("chapter_chunks", {}):
-                    del prog["chapter_chunks"][chapter_key]
+                messagebox.showinfo("Success", 
+                    f"Deleted {deleted_count} files and cleared {len(selected)} chapters from tracking.\n\n"
+                    "They will be retranslated on the next run.")
+                
+                dialog.destroy()
             
-            # Save updated progress
-            with open(progress_file, 'w', encoding='utf-8') as f:
-                json.dump(prog, f, ensure_ascii=False, indent=2)
+            # Add buttons
+            tb.Button(button_frame, text="Select All", command=select_all, bootstyle="info").grid(row=0, column=0, padx=5)
+            tb.Button(button_frame, text="Clear Selection", command=clear_selection, bootstyle="secondary").grid(row=0, column=1, padx=5)
+            tb.Button(button_frame, text="Select Completed", command=lambda: select_status('completed'), bootstyle="success").grid(row=0, column=2, padx=5)
+            tb.Button(button_frame, text="Select Failed", command=lambda: select_status('failed'), bootstyle="danger").grid(row=0, column=3, padx=5)
             
-            messagebox.showinfo("Success", f"Deleted {deleted_count} files and cleared {len(selected_indices)} chapters from tracking.\n\nThey will be retranslated on the next run.")
-            dialog.destroy()
-        
-        tb.Button(button_frame, text="Select All", command=select_all, 
-                 bootstyle="info", width=15).grid(row=1, column=0, padx=5, pady=5)
-        tb.Button(button_frame, text="Clear Selection", command=clear_selection, 
-                 bootstyle="secondary", width=15).grid(row=1, column=1, padx=5, pady=5)
-        tb.Button(button_frame, text="Select Completed", 
-                 command=lambda: select_status('completed'),
-                 bootstyle="success", width=15).grid(row=1, column=2, padx=5, pady=5)
-        tb.Button(button_frame, text="Select Failed", 
-                 command=lambda: select_status('failed'),
-                 bootstyle="danger", width=15).grid(row=1, column=3, padx=5, pady=5)
-        
-        tb.Button(button_frame, text="Retranslate Selected", command=retranslate_selected, 
-                 bootstyle="warning", width=20).grid(row=2, column=0, columnspan=2, padx=5, pady=10)
-        tb.Button(button_frame, text="Cancel", command=dialog.destroy, 
-                 bootstyle="secondary", width=20).grid(row=2, column=2, columnspan=2, padx=5, pady=10)
-        
-        # Ensure dialog is properly displayed
-        dialog.update_idletasks()
-        dialog.deiconify()
+            tb.Button(button_frame, text="Retranslate Selected", command=retranslate_selected, 
+                     bootstyle="warning").grid(row=1, column=0, columnspan=2, pady=10)
+            tb.Button(button_frame, text="Cancel", command=dialog.destroy, 
+                     bootstyle="secondary").grid(row=1, column=2, columnspan=2, pady=10)
+            
+
     
     def glossary_manager(self):
        """Open comprehensive glossary management dialog"""
