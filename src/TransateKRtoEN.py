@@ -2082,9 +2082,17 @@ class TranslationProcessor:
                                 # Add 1 to convert from 0-based to 1-based for display
                                 display_num = chapter_num + 1
                                 
+                                # Ensure chapter_num is an integer
+                                if isinstance(chapter_num, str):
+                                    try:
+                                        chapter_num = int(chapter_num)
+                                    except ValueError:
+                                        print(f"       ⚠️ Could not convert chapter_num '{chapter_num}' to int, skipping")
+                                        continue
+                                
                                 completed_chapters.append({
                                     'key': chapter_key,
-                                    'num': display_num,
+                                    'num': chapter_num,  # Now guaranteed to be int
                                     'file': chapter_info.get("output_file"),
                                     'ai_features': chapter_info.get("ai_features")
                                 })
@@ -2106,9 +2114,20 @@ class TranslationProcessor:
                     
                     # FIX: Check chapters by actual number, not index
                     chapters_checked = 0
+                    chapters_checked = 0
                     for completed_chapter in reversed(completed_chapters):
                         # Only check chapters that come before the current one
-                        if completed_chapter['num'] >= current_chapter_num:
+                        # Ensure both values are integers for comparison
+                        try:
+                            completed_chapter_num = int(completed_chapter['num'])
+                            current_num = int(current_chapter_num)
+                        except (ValueError, TypeError) as e:
+                            print(f"       ⚠️ Error converting chapter numbers to int: {e}")
+                            print(f"          completed_chapter['num']={completed_chapter['num']} (type: {type(completed_chapter['num'])})")
+                            print(f"          current_chapter_num={current_chapter_num} (type: {type(current_chapter_num)})")
+                            continue
+                        
+                        if completed_chapter_num >= current_num:
                             continue
                             
                         # Only check up to lookback number of chapters
@@ -5099,7 +5118,40 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Create a wrapper to match the expected signature
                 def enhanced_duplicate_check(self, result, idx, prog, out, content_hash=None):
-                    return ai_hunter.detect_duplicate_ai_hunter_enhanced(result, idx, prog, out, current_chapter_num=content_hash)
+                    # Extract the actual chapter number properly
+                    current_chapter_num = None
+                    
+                    # Method 1: If content hash provided, use it as key
+                    if content_hash and content_hash in prog["chapters"]:
+                        chapter_info = prog["chapters"][content_hash]
+                        current_chapter_num = chapter_info.get("actual_num")
+                    
+                    # Method 2: Search all chapters for matching index
+                    if current_chapter_num is None:
+                        for ch_key, ch_info in prog["chapters"].items():
+                            if ch_info.get("chapter_idx") == idx:
+                                current_chapter_num = ch_info.get("actual_num")
+                                break
+                    
+                    # Method 3: Legacy format - check by string index
+                    if current_chapter_num is None:
+                        chapter_key = str(idx)
+                        if chapter_key in prog["chapters"]:
+                            chapter_info = prog["chapters"][chapter_key]
+                            current_chapter_num = chapter_info.get("actual_num")
+                    
+                    # Final fallback - use index + 1
+                    if current_chapter_num is None:
+                        current_chapter_num = idx + 1
+                    else:
+                        # Ensure it's an integer
+                        current_chapter_num = int(current_chapter_num)
+                        # Convert from 0-based to 1-based if needed
+                        if current_chapter_num == idx:
+                            current_chapter_num = current_chapter_num + 1
+                    
+                    # Now call the AI Hunter with the correct chapter number
+                    return ai_hunter.detect_duplicate_ai_hunter_enhanced(result, idx, prog, out, current_chapter_num=current_chapter_num)
 
                 # Bind the enhanced method to the processor instance
                 translation_processor.check_duplicate_content = enhanced_duplicate_check.__get__(translation_processor, TranslationProcessor)
