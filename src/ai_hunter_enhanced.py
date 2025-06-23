@@ -495,6 +495,7 @@ class ImprovedAIHunterDetection:
         """Get AI Hunter configuration from main config"""
         return self.main_config.get('ai_hunter_config', self.default_ai_hunter)
 
+
     def detect_duplicate_ai_hunter_enhanced(self, result, idx, prog, out, current_chapter_num=None):
         """Enhanced AI Hunter duplicate detection with configurable parameters"""
         try:
@@ -583,7 +584,11 @@ class ImprovedAIHunterDetection:
                     print(f"    ⚠️ Using index-based chapter number: {current_chapter_num}")
             
             print(f"\n    📚 Found {len(completed_chapters)} completed chapters in progress")
-            print(f"    🎯 Checking against last {lookback} chapters before chapter {current_chapter_num}")
+            if completed_chapters:
+                chapter_nums = [ch['num'] for ch in completed_chapters]
+                print(f"    📊 Chapter numbers in progress: {sorted(chapter_nums)[:10]}{'...' if len(chapter_nums) > 10 else ''}")
+            print(f"    🎯 Current chapter number: {current_chapter_num}")
+            print(f"    🔍 Will check against last {lookback} chapters before chapter {current_chapter_num}")
             
             # Check previous chapters
             all_similarities = []
