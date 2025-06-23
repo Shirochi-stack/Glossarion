@@ -510,7 +510,7 @@ class ImprovedAIHunterDetection:
             if current_chapter_num is None:
                 current_chapter_num = idx + 1
             
-            print(f"    📖 Current chapter number: {current_chapter_num}")
+            print(f"    📖 Processing index {idx} (story chapter: {current_chapter_num})")
             
             # Get configuration
             config = self.get_ai_config()
