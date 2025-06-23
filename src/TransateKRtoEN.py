@@ -2727,14 +2727,17 @@ class BatchTranslationProcessor:
         # Use the pre-calculated actual_chapter_num from the main loop
         actual_num = chapter.get('actual_chapter_num')
         
-        # Fallback if not set (shouldn't happen with proper refactoring)
+        # Fallback if not set (common in batch mode where first pass might be skipped)
         if actual_num is None:
-            actual_num = chapter.get('actual_chapter_num')
+            # Try to extract it using the same logic as non-batch mode
+            raw_num = FileUtilities.extract_actual_chapter_number(chapter, patterns=None, config=self.config)
+            
+            # Apply offset if configured
+            offset = self.config.CHAPTER_NUMBER_OFFSET if hasattr(self.config, 'CHAPTER_NUMBER_OFFSET') else 0
+            raw_num += offset
             
             # Check if zero detection is disabled
-            if hasattr(self.config, '_force_disable_zero_detection') and self.config._force_disable_zero_detection:
-                actual_num = raw_num
-            elif hasattr(self.config, 'DISABLE_ZERO_DETECTION') and self.config.DISABLE_ZERO_DETECTION:
+            if hasattr(self.config, 'DISABLE_ZERO_DETECTION') and self.config.DISABLE_ZERO_DETECTION:
                 actual_num = raw_num
             elif hasattr(self.config, '_uses_zero_based') and self.config._uses_zero_based:
                 # This is a 0-based novel, adjust the number
@@ -2742,14 +2745,17 @@ class BatchTranslationProcessor:
             else:
                 # Default to raw number (1-based or unknown)
                 actual_num = raw_num
+            
+            print(f"    📖 Extracted actual chapter number: {actual_num} (from raw: {raw_num})")
         
         try:
+            # Rest of the processing logic...
             # Check if this is from a text file
             ai_features = None
             is_text_source = self.is_text_file or chapter.get('filename', '').endswith('.txt') or chapter.get('is_chunk', False)
             terminology = "Section" if is_text_source else "Chapter"
             print(f"🔄 Starting #{idx+1} (Internal: {terminology} {chap_num}, Actual: {terminology} {actual_num})  (thread: {threading.current_thread().name}) [File: {chapter.get('original_basename', f'{terminology}_{chap_num}')}]")
-                        
+                      
             content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
             with self.progress_lock:
                 self.update_progress_fn(idx, actual_num, content_hash, None, status="in_progress")
@@ -4868,32 +4874,48 @@ def main(log_callback=None, stop_callback=None):
         
         chapters_to_translate = []
         
+        # FIX: First pass to set actual chapter numbers for ALL chapters
+        # This ensures batch mode has the same chapter numbering as non-batch mode
+        print("📊 Setting chapter numbers...")
+        for idx, c in enumerate(chapters):
+            raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
+            
+            # Apply offset if configured
+            offset = config.CHAPTER_NUMBER_OFFSET if hasattr(config, 'CHAPTER_NUMBER_OFFSET') else 0
+            raw_num += offset
+            
+            if config.DISABLE_ZERO_DETECTION:
+                # Use raw numbers without adjustment
+                c['actual_chapter_num'] = raw_num
+                c['raw_chapter_num'] = raw_num
+                c['zero_adjusted'] = False
+            else:
+                # Store raw number
+                c['raw_chapter_num'] = raw_num
+                # Apply 0-based adjustment if detected
+                if uses_zero_based:
+                    c['actual_chapter_num'] = raw_num + 1
+                    c['zero_adjusted'] = True
+                else:
+                    c['actual_chapter_num'] = raw_num
+                    c['zero_adjusted'] = False
+        
+        # NOW continue with the existing batch processing loop
         for idx, c in enumerate(chapters):
             chap_num = c["num"]
             content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
             
-            # Get actual number with config awareness
-            raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
-            #print(f"[DEBUG] Extracted raw_num={raw_num} from {c.get('original_basename', 'unknown')}")
-
-            
-            if config.DISABLE_ZERO_DETECTION:
-                # Force minimum chapter 1 when detection is disabled
-                c['actual_chapter_num'] = max(1, raw_num)
+            # Check if this is a pre-split text chunk with decimal number
+            if (is_text_file and c.get('is_chunk', False) and isinstance(c['num'], float)):
+                actual_num = c['num']  # Preserve the decimal for text files only
             else:
-                # Apply 0-based adjustment if detected
-                if uses_zero_based:
-                    c['actual_chapter_num'] = raw_num + 1
-                else:
-                    c['actual_chapter_num'] = raw_num
+                actual_num = c.get('actual_chapter_num', c['num'])  # Now this will exist!
             
-            # Store it in the chapter object for later use
-            c['actual_chapter_num'] = actual_num
+            # Skip chapters outside the range
+            if start is not None and not (start <= actual_num <= end):
+                continue
             
-            if start is not None:
-                if not (start <= actual_num <= end):
-                    continue
-            actual_num = c['actual_chapter_num']  # Add this line before using actual_num
+            # Check if chapter needs translation
             needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
                 idx, actual_num, content_hash, out
             )
@@ -4906,8 +4928,10 @@ def main(log_callback=None, stop_callback=None):
                 # Replace "Chapter" with appropriate terminology in skip_reason
                 skip_reason_modified = skip_reason.replace("Chapter", terminology)
                 print(f"[SKIP] {skip_reason_modified}")
+                chapters_completed += 1
                 continue
             
+            # Check for empty or image-only chapters
             has_images = c.get('has_images', False)
             has_meaningful_text = ContentProcessor.is_meaningful_text_content(c["body"])
             text_size = c.get('file_size', 0)
@@ -4915,6 +4939,7 @@ def main(log_callback=None, stop_callback=None):
             is_empty_chapter = (not has_images and text_size < 50)
             is_image_only_chapter = (has_images and not has_meaningful_text)
             
+            # Handle empty chapters
             if is_empty_chapter:
                 print(f"📄 Empty chapter {chap_num} - will process individually")
                 
@@ -4926,15 +4951,17 @@ def main(log_callback=None, stop_callback=None):
                     fname = FileUtilities.create_chapter_filename(c, c['num'])
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
                     f.write(c["body"])
-                progress_manager.update(idx, chap_num, content_hash, fname, status="completed_empty")
+                progress_manager.update(idx, actual_num, content_hash, fname, status="completed_empty")
                 progress_manager.save()
                 chapters_completed += 1
                 continue
             
+            # Add to chapters to translate
             chapters_to_translate.append((idx, c))
         
         print(f"📊 Found {len(chapters_to_translate)} chapters to translate in parallel")
         
+        # Continue with the rest of the existing batch processing code...
         batch_processor = BatchTranslationProcessor(
             config, client, base_msg, out, progress_lock,
             progress_manager.save, 
