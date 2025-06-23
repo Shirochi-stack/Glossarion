@@ -494,9 +494,6 @@ class ImprovedAIHunterDetection:
     def get_ai_config(self):
         """Get AI Hunter configuration from main config"""
         return self.main_config.get('ai_hunter_config', self.default_ai_hunter)
-    
-
-
 
     def detect_duplicate_ai_hunter_enhanced(self, result, idx, prog, out, current_chapter_num=None):
         """Enhanced AI Hunter duplicate detection with configurable parameters"""
