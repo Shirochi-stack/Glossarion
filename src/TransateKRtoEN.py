@@ -5125,11 +5125,31 @@ def main(log_callback=None, stop_callback=None):
                 progress_manager.update(idx, chap_num, content_hash, output_file=None, status="in_progress")
                 progress_manager.save()
 
+
                 # Check if this chapter is already a chunk from text file splitting
                 if c.get('is_chunk', False):
-                    # This is already a pre-split chunk, don't split again
-                    chunks = [(c["body"], 1, 1)]
-                    print(f"📄 Section {c['num']} (pre-split from text file)")
+                    # This is already a pre-split chunk, but still check if it needs further splitting
+                    _tok_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
+                    max_tokens_limit, budget_str = parse_token_limit(_tok_env)
+                    
+                    system_tokens = chapter_splitter.count_tokens(system)
+                    history_tokens = config.HIST_LIMIT * 2 * 1000
+                    safety_margin = 1000
+                    
+                    if max_tokens_limit is not None:
+                        available_tokens = max_tokens_limit - system_tokens - history_tokens - safety_margin
+                        chapter_tokens = chapter_splitter.count_tokens(c["body"])
+                        
+                        if chapter_tokens > available_tokens:
+                            # Even pre-split chunks might need further splitting
+                            chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
+                            print(f"📄 Section {c['num']} (pre-split from text file) needs further splitting into {len(chunks)} chunks")
+                        else:
+                            chunks = [(c["body"], 1, 1)]
+                            print(f"📄 Section {c['num']} (pre-split from text file)")
+                    else:
+                        chunks = [(c["body"], 1, 1)]
+                        print(f"📄 Section {c['num']} (pre-split from text file)")
                 else:
                     # Normal splitting logic for non-text files
                     _tok_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
