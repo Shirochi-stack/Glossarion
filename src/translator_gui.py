@@ -503,7 +503,7 @@ class TranslatorGUI:
             ('disable_epub_gallery_var', 'disable_epub_gallery', False),
             ('disable_zero_detection_var', 'disable_zero_detection', True),
             ('use_header_as_output_var', 'use_header_as_output', False),
-            ('emergency_restore_var', 'emergency_paragraph_restore', True),
+            ('emergency_restore_var', 'emergency_paragraph_restore', False),
             ('contextual_var', 'contextual', True),
             ('REMOVE_AI_ARTIFACTS_var', 'REMOVE_AI_ARTIFACTS', False),
             ('enable_decimal_chapters_var', 'enable_decimal_chapters', False)
