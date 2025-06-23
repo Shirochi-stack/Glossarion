@@ -1846,7 +1846,7 @@ class ChapterExtractor:
 class TranslationProcessor:
     """Handles the translation of individual chapters"""
     
-    def __init__(self, config, client, out_dir, log_callback=None, stop_callback=None, uses_zero_based=False, is_text_file=False)):
+    def __init__(self, config, client, out_dir, log_callback=None, stop_callback=None, uses_zero_based=False, is_text_file=False):
         self.config = config
         self.client = client
         self.out_dir = out_dir
