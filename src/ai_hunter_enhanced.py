@@ -662,7 +662,7 @@ class ImprovedAIHunterDetection:
                         print(f"          {method}: {int(score*100)}%")
                 
                 # Check if duplicate based on configured mode
-                is_duplicate, confidence, methods_triggered = self._evaluate_detection(
+                is_duplicate, confidence, methods_triggered = self._evaluate_duplicate(
                     similarities, config
                 )
                 
