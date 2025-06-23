@@ -2010,7 +2010,7 @@ class TranslationProcessor:
                             current_chapter_num = current_chapter_num + 1
                             print(f"    📖 Adjusted to 1-based numbering: {current_chapter_num}")
                     
-                    print(f"    📖 Processing index {idx} (story chapter: {current_chapter_num})")
+                    print(f"    📖 Current chapter number: {current_chapter_num}")
                     
                     # The main_config now contains duplicate_lookback_chapters from the GUI
                     return ai_hunter.detect_duplicate_ai_hunter_enhanced(result, idx, prog, out, current_chapter_num)
@@ -2032,7 +2032,7 @@ class TranslationProcessor:
                     else:
                         current_chapter_num = idx + 1
                     
-                    print(f"    📖 Processing index {idx} (story chapter: {current_chapter_num})")
+                    print(f"    📖 Current chapter number: {current_chapter_num}")
                     
                     # Get threshold from environment or use default
                     env_threshold = os.getenv('AI_HUNTER_THRESHOLD')
@@ -2771,7 +2771,6 @@ class BatchTranslationProcessor:
         self.chapters_completed = 0
         self.chunks_completed = 0
         self.is_text_file = is_text_file
-        self.log_callback = log_callback
     
     def process_single_chapter(self, chapter_data):
         """Process a single chapter (runs in thread)"""
@@ -5022,10 +5021,8 @@ def main(log_callback=None, stop_callback=None):
             lambda idx, actual_num, content_hash, output_file=None, status="completed", **kwargs: progress_manager.update(idx, actual_num, content_hash, output_file, status, **kwargs),
             check_stop,
             image_translator,
-            is_text_file=is_text_file,
-            log_callback=log_callback
+            is_text_file=is_text_file
         )
-        batch_processor.total_chapters = len(chapters_to_translate) 
         
         total_to_process = len(chapters_to_translate)
         processed = 0
