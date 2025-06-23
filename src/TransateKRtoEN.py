@@ -66,10 +66,8 @@ class TranslationConfig:
                        os.getenv("OPENAI_OR_Gemini_API_KEY") or
                        os.getenv("GEMINI_API_KEY"))
         # NEW: Simple chapter number offset
-        self.CHAPTER_NUMBER_OFFSET = int(os.getenv("CHAPTER_NUMBER_OFFSET", "0"))   
-        if is_text_file:
-            os.environ["IS_TEXT_FILE_TRANSLATION"] = "1"        
-
+        self.CHAPTER_NUMBER_OFFSET = int(os.getenv("CHAPTER_NUMBER_OFFSET", "0")) 
+        
 # =====================================================
 # UNIFIED PATTERNS AND CONSTANTS
 # =====================================================
@@ -4307,6 +4305,9 @@ def main(log_callback=None, stop_callback=None):
     
     is_text_file = input_path.lower().endswith('.txt')
     
+    if is_text_file:
+        os.environ["IS_TEXT_FILE_TRANSLATION"] = "1"  
+        
     import json as _json
     _original_load = _json.load
       
