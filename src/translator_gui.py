@@ -373,7 +373,7 @@ class TranslatorGUI:
         
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        master.title("Glossarion v2.8.0 — The AI Hunter Unleashed!!")
+        master.title("Glossarion v2.8.1 — The AI Hunter Unleashed!!")
         
         # Setup main window with responsive sizing
         self.wm.responsive_size(master, BASE_WIDTH, BASE_HEIGHT)
@@ -575,7 +575,7 @@ class TranslatorGUI:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v2.8.0 - Ready to use!")
+        self.append_log("🚀 Glossarion v2.8.1 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -1256,15 +1256,20 @@ class TranslatorGUI:
                 # Use the first entry for each file (they're duplicates anyway)
                 chapter_key, chapter_info = entries[0]
                 
-                # Extract chapter number from filename
+                # Extract chapter number from filename using existing patterns
                 chapter_num = 0
-                match = re.search(r'-h-(\d+)\.html', output_file)
-                if match:
-                    chapter_num = int(match.group(1)) + 1
-                else:
-                    match = re.search(r'response_(\d+)', output_file)
-                    if match:
-                        chapter_num = int(match.group(1))
+                
+                # Import the pattern from TransateKRtoEN at the top of the method if not already imported
+                from TransateKRtoEN import extract_chapter_number_from_filename
+                
+                # Use the existing function that handles all the patterns
+                chapter_num, _ = extract_chapter_number_from_filename(output_file)
+                
+                # If still 0, try to get from chapter_info
+                if chapter_num == 0 and 'actual_num' in chapter_info:
+                    chapter_num = chapter_info['actual_num']
+                elif chapter_num == 0 and 'chapter_num' in chapter_info:
+                    chapter_num = chapter_info['chapter_num']
                 
                 # Get status and validate
                 status = chapter_info.get("status", "unknown")
@@ -4508,7 +4513,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v2.8.0...")
+    print("🚀 Starting Glossarion v2.8.1...")
     
     # Initialize splash screen
     splash_manager = None
