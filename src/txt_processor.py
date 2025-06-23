@@ -115,14 +115,23 @@ class TextFileProcessor:
         else:
             # Try to extract number from match
             match_groups = chapter_break['match'].groups()
-            if match_groups:
+            if match_groups and match_groups[0]:  # Check if group exists AND is not empty
                 try:
-                    chapter_num = int(match_groups[0])
-                    chapter_title = chapter_break['line'].strip()
-                except:
+                    # Strip whitespace and check if it's a valid number
+                    num_str = match_groups[0].strip()
+                    if num_str:  # Only try to convert if not empty
+                        chapter_num = int(num_str)
+                        chapter_title = chapter_break['line'].strip()
+                    else:
+                        # Empty match group, use index
+                        chapter_num = index + 1
+                        chapter_title = chapter_break['line'].strip()
+                except (ValueError, IndexError):
+                    # Failed to convert to int, use index
                     chapter_num = index + 1
                     chapter_title = chapter_break['line'].strip()
             else:
+                # No match groups or empty match
                 chapter_num = index + 1
                 chapter_title = chapter_break['line'].strip()
         
