@@ -1158,26 +1158,26 @@ class TranslatorGUI:
         return uses_zero_based
     
     def force_retranslation(self):
-            """Force retranslation of specific chapters with improved display"""
-            input_path = self.entry_epub.get()
-            if not input_path or not os.path.isfile(input_path):
-                messagebox.showerror("Error", "Please select a valid EPUB or text file first.")
-                return
-            
-            epub_base = os.path.splitext(os.path.basename(input_path))[0]
-            output_dir = epub_base
-            
-            if not os.path.exists(output_dir):
-                messagebox.showinfo("Info", "No translation output found for this EPUB.")
-                return
-            
-            progress_file = os.path.join(output_dir, "translation_progress.json")
-            if not os.path.exists(progress_file):
-                messagebox.showinfo("Info", "No progress tracking found.")
-                return
-            
-            with open(progress_file, 'r', encoding='utf-8') as f:
-                prog = json.load(f)
+        """Force retranslation of specific chapters with improved display"""
+        input_path = self.entry_epub.get()
+        if not input_path or not os.path.isfile(input_path):
+            messagebox.showerror("Error", "Please select a valid EPUB or text file first.")
+            return
+        
+        epub_base = os.path.splitext(os.path.basename(input_path))[0]
+        output_dir = epub_base  # KEEP THIS AS IS - it's relative to current working directory
+        
+        if not os.path.exists(output_dir):
+            messagebox.showinfo("Info", "No translation output found for this EPUB.")
+            return
+        
+        progress_file = os.path.join(output_dir, "translation_progress.json")
+        if not os.path.exists(progress_file):
+            messagebox.showinfo("Info", "No progress tracking found.")
+            return
+        
+        with open(progress_file, 'r', encoding='utf-8') as f:
+            prog = json.load(f)
             
             # Check if there are any chapters
             if not prog.get("chapters"):
