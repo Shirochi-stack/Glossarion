@@ -1937,15 +1937,8 @@ class TranslationProcessor:
             print(f"    📍 Current chapter index: {idx}")
             
             # Load the main config to get AI Hunter settings
-            # Handle both frozen (exe) and script environments
-            if getattr(sys, 'frozen', False):
-                # Running as compiled executable
-                base_path = os.path.dirname(sys.executable)
-            else:
-                # Running as script - config.json is in same folder as scripts
-                base_path = os.path.dirname(os.path.abspath(__file__))
-            
-            config_path = os.path.join(base_path, 'config.json')
+            # Config.json is in the same folder as this script
+            config_path = os.path.join(os.path.dirname(__file__), 'config.json')
             
             print(f"    🔍 Looking for config.json at: {config_path}")
             
