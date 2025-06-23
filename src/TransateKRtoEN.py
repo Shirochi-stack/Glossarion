@@ -1871,7 +1871,7 @@ class TranslationProcessor:
             print("❌ Translation stopped by user request.")
             return True
     
-    def check_duplicate_content(self, result, idx, prog, out):
+    def check_duplicate_content(self, result, idx, prog, out, content_hash=None):
         """Check if translated content is duplicate - with mode selection"""
         if not self.config.RETRY_DUPLICATE_BODIES:
             print("    ⚠️ DEBUG: Duplicate detection is DISABLED in config")
@@ -1882,23 +1882,34 @@ class TranslationProcessor:
         print(f"    🔍 DEBUG: Detection mode = '{detection_mode}'")
         print(f"    🔍 DEBUG: Lookback chapters = {self.config.DUPLICATE_LOOKBACK_CHAPTERS}")
         
-        # Extract content_hash if available from progress
-        content_hash = None
-        if detection_mode == 'ai-hunter':
-            # Try to get content_hash from the current chapter info
-            # The idx parameter represents the chapter index
-            chapter_key = str(idx)
-            if chapter_key in prog.get("chapters", {}):
-                chapter_info = prog["chapters"][chapter_key]
-                content_hash = chapter_info.get("content_hash")
-                print(f"    🔍 DEBUG: Found content_hash for chapter {idx}: {content_hash}")
+        # If content_hash not provided, try to extract it
+        if not content_hash and detection_mode in ['ai-hunter', 'cascading']:
+            # First try to find by index in the new format
+            for ch_key, ch_info in prog.get("chapters", {}).items():
+                if ch_info.get("chapter_idx") == idx:
+                    content_hash = ch_key  # In new format, the key IS the content hash
+                    print(f"    🔍 DEBUG: Found content_hash for chapter index {idx}: {content_hash}")
+                    break
+            
+            # If not found, try legacy format
+            if not content_hash:
+                chapter_key = str(idx)
+                if chapter_key in prog.get("chapters", {}):
+                    chapter_info = prog["chapters"][chapter_key]
+                    content_hash = chapter_info.get("content_hash")
+                    print(f"    🔍 DEBUG: Found content_hash in legacy format for chapter {idx}: {content_hash}")
+        
+        if content_hash:
+            print(f"    🔍 DEBUG: Using content_hash: {content_hash}")
+        else:
+            print(f"    ⚠️ DEBUG: No content_hash found for chapter index {idx}")
         
         if detection_mode == 'ai-hunter':
             print("    🤖 DEBUG: Routing to AI Hunter detection...")
             return self._check_duplicate_ai_hunter(result, idx, prog, out, content_hash)
         elif detection_mode == 'cascading':
             print("    🔄 DEBUG: Routing to Cascading detection...")
-            return self._check_duplicate_cascading(result, idx, prog, out)
+            return self._check_duplicate_cascading(result, idx, prog, out, content_hash)
         else:
             print("    📋 DEBUG: Routing to Basic detection...")
             return self._check_duplicate_basic(result, idx, prog, out)
@@ -2241,7 +2252,7 @@ class TranslationProcessor:
                 print(f"    🔄 Falling back to basic detection...")
                 return self._check_duplicate_basic(result, idx, prog, out)
         
-    def _check_duplicate_cascading(self, result, idx, prog, out):
+    def _check_duplicate_cascading(self, result, idx, prog, out, content_hash=None):
         """Cascading detection - basic first, then AI Hunter for borderline cases"""
         # Step 1: Basic detection
         is_duplicate_basic, similarity_basic = self._check_duplicate_basic(result, idx, prog, out)
@@ -2252,7 +2263,23 @@ class TranslationProcessor:
         # Step 2: If basic detection finds moderate similarity, use AI Hunter
         if similarity_basic >= 60:  # Configurable threshold
             print(f"    🤖 Moderate similarity ({similarity_basic}%) - running AI Hunter analysis...")
-            is_duplicate_ai, similarity_ai = self._check_duplicate_ai_hunter(result, idx, prog, out)
+            
+            # If content_hash not provided, try to find it
+            if not content_hash:
+                # First try to find by index in the new format
+                for ch_key, ch_info in prog.get("chapters", {}).items():
+                    if ch_info.get("chapter_idx") == idx:
+                        content_hash = ch_key
+                        break
+                
+                # If not found, try legacy format
+                if not content_hash:
+                    chapter_key = str(idx)
+                    if chapter_key in prog.get("chapters", {}):
+                        chapter_info = prog["chapters"][chapter_key]
+                        content_hash = chapter_info.get("content_hash")
+            
+            is_duplicate_ai, similarity_ai = self._check_duplicate_ai_hunter(result, idx, prog, out, content_hash)
             
             if is_duplicate_ai:
                 return True, similarity_ai
@@ -2575,7 +2602,8 @@ class TranslationProcessor:
                     if duplicate_retry_count < max_duplicate_retries:
                         idx = c.get('__index', 0)
                         prog = c.get('__progress', {})
-                        is_duplicate, similarity = self.check_duplicate_content(result, idx, prog, self.out_dir)
+                        content_hash = c.get('content_hash') or c.get('__content_hash')
+                        is_duplicate, similarity = self.check_duplicate_content(result, idx, prog, self.out_dir, content_hash)
                         
                         if is_duplicate:
                             retry_needed = True
@@ -5440,6 +5468,7 @@ def main(log_callback=None, stop_callback=None):
 
                 c['__index'] = idx
                 c['__progress'] = progress_manager.prog
+                c['__content_hash'] = content_hash
                 c['history_manager'] = history_manager
                 
                 result, finish_reason = translation_processor.translate_with_retry(
