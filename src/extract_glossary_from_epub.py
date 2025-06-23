@@ -685,11 +685,17 @@ def main(log_callback=None, stop_callback=None):
         if range_start is not None and range_end is not None:
             chapter_num = idx + 1  # 1-based chapter numbering
             if not (range_start <= chapter_num <= range_end):
-                print(f"[SKIP] Chapter {chapter_num} - outside range filter")
+                # Check if this is from a text file
+                is_text_chapter = hasattr(chap, 'filename') and chap.get('filename', '').endswith('.txt')
+                terminology = "Section" if is_text_chapter else "Chapter"
+                print(f"[SKIP] {terminology} {chapter_num} - outside range filter")
                 continue
             
         if idx in completed:
-            print(f"Skipping chapter {idx+1} (already processed)")
+            # Check if processing text file chapters
+            is_text_chapter = hasattr(chap, 'filename') and chap.get('filename', '').endswith('.txt')
+            terminology = "section" if is_text_chapter else "chapter"
+            print(f"Skipping {terminology} {idx+1} (already processed)")
             continue
                 
         print(f"🔄 Processing Chapter {idx+1}/{total_chapters}")
