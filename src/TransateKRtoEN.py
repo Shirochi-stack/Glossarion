@@ -3838,7 +3838,7 @@ def detect_novel_numbering(chapters):
                 match = re.search(pattern, filename)
                 if match:
                     extracted_num = int(match.group(1))
-                    print(f"[DEBUG] Pattern '{pattern}' matched: {filename} -> Chapter {extracted_num}")
+                    #print(f"[DEBUG] Pattern '{pattern}' matched: {filename} -> Chapter {extracted_num}")
                     break
         
         if extracted_num is not None:
