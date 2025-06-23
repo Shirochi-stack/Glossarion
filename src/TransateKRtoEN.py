@@ -1882,6 +1882,17 @@ class TranslationProcessor:
         print(f"    🔍 DEBUG: Detection mode = '{detection_mode}'")
         print(f"    🔍 DEBUG: Lookback chapters = {self.config.DUPLICATE_LOOKBACK_CHAPTERS}")
         
+        # Extract content_hash if available from progress
+        content_hash = None
+        if detection_mode == 'ai-hunter':
+            # Try to get content_hash from the current chapter info
+            # The idx parameter represents the chapter index
+            chapter_key = str(idx)
+            if chapter_key in prog.get("chapters", {}):
+                chapter_info = prog["chapters"][chapter_key]
+                content_hash = chapter_info.get("content_hash")
+                print(f"    🔍 DEBUG: Found content_hash for chapter {idx}: {content_hash}")
+        
         if detection_mode == 'ai-hunter':
             print("    🤖 DEBUG: Routing to AI Hunter detection...")
             return self._check_duplicate_ai_hunter(result, idx, prog, out, content_hash)
