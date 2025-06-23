@@ -143,7 +143,12 @@ class TextFileProcessor:
         final_chapters = []
         
         # Get token limit settings
-        max_input_tokens = int(os.getenv("MAX_INPUT_TOKENS", "1000000"))
+        max_input_tokens_str = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
+        if not max_input_tokens_str or max_input_tokens_str == "":
+            # Token limit disabled - use a very large number
+            max_input_tokens = 10000000  # 10M tokens
+        else:
+            max_input_tokens = int(max_input_tokens_str)
         safety_margin = 5000  # Leave room for system prompt and history
         available_tokens = max_input_tokens - safety_margin
         
