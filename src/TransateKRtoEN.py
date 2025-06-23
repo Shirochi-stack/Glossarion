@@ -1974,21 +1974,41 @@ class TranslationProcessor:
                     
                     print(f"    ✅ Using enhanced AI Hunter with configurable settings")
                     
-                    # FIX: Get current chapter number from progress using content hash
+                    # FIX: Get current chapter number from progress
                     current_chapter_num = None
                     
-                    # If content hash provided, look it up directly
+                    # Method 1: If content hash provided, it might be the key itself
                     if content_hash and content_hash in prog["chapters"]:
                         chapter_info = prog["chapters"][content_hash]
                         current_chapter_num = chapter_info.get("actual_num")
-                        if current_chapter_num is not None:
-                            # Add 1 because actual_num is 0-based but we want 1-based display
-                            current_chapter_num = current_chapter_num + 1
-                        print(f"    📂 Found in progress by hash: actual_num={chapter_info.get('actual_num')}")
-                    else:
-                        # Fallback: use index + 1
+                        print(f"    📂 Found chapter by content_hash key: actual_num={current_chapter_num}")
+                    
+                    # Method 2: Search all chapters for matching index
+                    if current_chapter_num is None:
+                        for ch_key, ch_info in prog["chapters"].items():
+                            if ch_info.get("chapter_idx") == idx:
+                                current_chapter_num = ch_info.get("actual_num")
+                                print(f"    📂 Found chapter by index search: actual_num={current_chapter_num}")
+                                break
+                    
+                    # Method 3: Legacy format - check by string index
+                    if current_chapter_num is None:
+                        chapter_key = str(idx)
+                        if chapter_key in prog["chapters"]:
+                            chapter_info = prog["chapters"][chapter_key]
+                            current_chapter_num = chapter_info.get("actual_num")
+                            print(f"    📂 Found chapter in legacy format: actual_num={current_chapter_num}")
+                    
+                    # Final fallback
+                    if current_chapter_num is None:
+                        # Use index as chapter number (0-based to 1-based)
                         current_chapter_num = idx + 1
-                        print(f"    ⚠️ No content hash provided, using index+1: {current_chapter_num}")
+                        print(f"    ⚠️ Chapter number not found in progress, using index+1: {current_chapter_num}")
+                    else:
+                        # actual_num might be 0-based, ensure it's 1-based for display
+                        if current_chapter_num == idx:
+                            current_chapter_num = current_chapter_num + 1
+                            print(f"    📖 Adjusted to 1-based numbering: {current_chapter_num}")
                     
                     print(f"    📖 Current chapter number: {current_chapter_num}")
                     
