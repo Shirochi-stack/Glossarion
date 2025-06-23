@@ -2600,7 +2600,7 @@ class BatchTranslationProcessor:
     
     def __init__(self, config, client, base_msg, out_dir, progress_lock, 
                  save_progress_fn, update_progress_fn, check_stop_fn, 
-                 image_translator=None, is_text_file=False):):
+                 image_translator=None, is_text_file=False):
         self.config = config
         self.client = client
         self.base_msg = base_msg
