@@ -16,7 +16,12 @@ def extract_chapters_from_txt(txt_path: str) -> List[str]:
     chapter_splitter = ChapterSplitter(model_name=model_name)
     
     # Get max tokens from environment
-    max_input_tokens = int(os.getenv("MAX_INPUT_TOKENS", "1000000"))
+    max_input_tokens_str = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
+    if not max_input_tokens_str or max_input_tokens_str == "":
+        # Token limit disabled - use a very large number
+        max_input_tokens = 10000000  # 10M tokens
+    else:
+        max_input_tokens = int(max_input_tokens_str)
     
     # Calculate available tokens (leaving room for system prompt and context)
     system_prompt_size = 2000  # Estimate for glossary system prompt
