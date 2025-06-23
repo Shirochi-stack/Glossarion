@@ -495,7 +495,6 @@ class ImprovedAIHunterDetection:
         """Get AI Hunter configuration from main config"""
         return self.main_config.get('ai_hunter_config', self.default_ai_hunter)
 
-
     def detect_duplicate_ai_hunter_enhanced(self, result, idx, prog, out, current_chapter_num=None):
         """Enhanced AI Hunter duplicate detection with configurable parameters"""
         try:
@@ -542,10 +541,10 @@ class ImprovedAIHunterDetection:
                 if chapter_info.get("status") == "completed" and chapter_info.get("output_file"):
                     # Handle both numeric and hash-based chapter keys
                     try:
-                        # Try to get actual_num first
+                        # Try to get actual_num first (this is what's stored in progress)
                         chapter_num = chapter_info.get("actual_num")
                         if chapter_num is None:
-                            # Try to get chapter_num
+                            # Try chapter_num as fallback
                             chapter_num = chapter_info.get("chapter_num")
                         if chapter_num is None:
                             # Try to parse from key if it's numeric
@@ -553,7 +552,6 @@ class ImprovedAIHunterDetection:
                                 chapter_num = int(chapter_key) + 1
                             except ValueError:
                                 # Skip chapters without valid numbers
-                                print(f"       ⚠️ Skipping chapter with non-numeric key: {chapter_key}")
                                 continue
                         
                         completed_chapters.append({
@@ -577,6 +575,7 @@ class ImprovedAIHunterDetection:
                     current_chapter_num = prog["chapters"][chapter_key].get("actual_num")
                     if current_chapter_num is None:
                         current_chapter_num = prog["chapters"][chapter_key].get("chapter_num")
+                    print(f"    🔍 Found in progress: chapter_key={chapter_key}, actual_num={prog['chapters'][chapter_key].get('actual_num')}, chapter_num={prog['chapters'][chapter_key].get('chapter_num')}")
                 
                 # If still None, use index + 1 as fallback
                 if current_chapter_num is None:
