@@ -1980,8 +1980,10 @@ class TranslationProcessor:
                 
                 print(f"    ✅ Using enhanced AI Hunter with configurable settings")
                 
+                current_chapter_num = self.chapters[idx].get('actual_num', idx + 1)
+                
                 # The main_config now contains duplicate_lookback_chapters from the GUI
-                return ai_hunter.detect_duplicate_ai_hunter_enhanced(result, idx, prog, out)
+                return ai_hunter.detect_duplicate_ai_hunter_enhanced(result, idx, prog, out, current_chapter_num)
             else:
                 # Fallback to original simple AI Hunter logic
                 print("    ⚠️ Config file not found, using original AI Hunter logic")
