@@ -496,6 +496,8 @@ class ImprovedAIHunterDetection:
         return self.main_config.get('ai_hunter_config', self.default_ai_hunter)
     
 
+
+
     def detect_duplicate_ai_hunter_enhanced(self, result, idx, prog, out, current_chapter_num=None):
         """Enhanced AI Hunter duplicate detection with configurable parameters"""
         try:
@@ -540,12 +542,31 @@ class ImprovedAIHunterDetection:
             completed_chapters = []
             for chapter_key, chapter_info in prog["chapters"].items():
                 if chapter_info.get("status") == "completed" and chapter_info.get("output_file"):
-                    completed_chapters.append({
-                        'key': chapter_key,
-                        'num': chapter_info.get("actual_num", int(chapter_key) + 1),
-                        'file': chapter_info.get("output_file"),
-                        'ai_features': chapter_info.get("ai_features")
-                    })
+                    # Handle both numeric and hash-based chapter keys
+                    try:
+                        # Try to get actual_num first
+                        chapter_num = chapter_info.get("actual_num")
+                        if chapter_num is None:
+                            # Try to get chapter_num
+                            chapter_num = chapter_info.get("chapter_num")
+                        if chapter_num is None:
+                            # Try to parse from key if it's numeric
+                            try:
+                                chapter_num = int(chapter_key) + 1
+                            except ValueError:
+                                # Skip chapters without valid numbers
+                                print(f"       ⚠️ Skipping chapter with non-numeric key: {chapter_key}")
+                                continue
+                        
+                        completed_chapters.append({
+                            'key': chapter_key,
+                            'num': chapter_num,
+                            'file': chapter_info.get("output_file"),
+                            'ai_features': chapter_info.get("ai_features")
+                        })
+                    except Exception as e:
+                        print(f"       ⚠️ Error processing chapter {chapter_key}: {e}")
+                        continue
             
             # Sort by actual chapter number
             completed_chapters.sort(key=lambda x: x['num'])
@@ -555,9 +576,14 @@ class ImprovedAIHunterDetection:
                 # Try to get from progress if this chapter is already partially processed
                 chapter_key = str(idx)
                 if chapter_key in prog["chapters"]:
-                    current_chapter_num = prog["chapters"][chapter_key].get("actual_num", idx + 1)
-                else:
+                    current_chapter_num = prog["chapters"][chapter_key].get("actual_num")
+                    if current_chapter_num is None:
+                        current_chapter_num = prog["chapters"][chapter_key].get("chapter_num")
+                
+                # If still None, use index + 1 as fallback
+                if current_chapter_num is None:
                     current_chapter_num = idx + 1
+                    print(f"    ⚠️ Using index-based chapter number: {current_chapter_num}")
             
             print(f"\n    📚 Found {len(completed_chapters)} completed chapters in progress")
             print(f"    🎯 Checking against last {lookback} chapters before chapter {current_chapter_num}")
