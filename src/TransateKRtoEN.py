@@ -5470,62 +5470,115 @@ def main(log_callback=None, stop_callback=None):
     if is_text_file:
         print("📄 Text file translation complete!")
         try:
-            translated_files = []
+            # Collect all translated chapters with their metadata
+            translated_chapters = []
+            
             for chapter in chapters:
                 # Look for .txt files instead of .html
                 fname_base = FileUtilities.create_chapter_filename(chapter, chapter['num'])
                 fname_txt = fname_base.replace('.html', '.txt')
+                
                 if os.path.exists(os.path.join(out, fname_txt)):
-                    translated_files.append(fname_txt)
+                    with open(os.path.join(out, fname_txt), 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    translated_chapters.append({
+                        'num': chapter['num'],
+                        'title': chapter['title'],
+                        'content': content,
+                        'is_chunk': chapter.get('is_chunk', False),
+                        'chunk_info': chapter.get('chunk_info', {})
+                    })
                 elif os.path.exists(os.path.join(out, fname_base)):
                     # Fallback to HTML if txt doesn't exist
-                    translated_files.append(fname_base)
+                    with open(os.path.join(out, fname_base), 'r', encoding='utf-8') as f:
+                        content = f.read()
+                        # Extract text from HTML
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(content, 'html.parser')
+                        text = soup.get_text(strip=True)
+                    
+                    translated_chapters.append({
+                        'num': chapter['num'],
+                        'title': chapter['title'],
+                        'content': text,
+                        'is_chunk': chapter.get('is_chunk', False),
+                        'chunk_info': chapter.get('chunk_info', {})
+                    })
             
-            print(f"✅ Translation complete! {len(translated_files)} chapter files created:")
-            for fname in translated_files:
-                print(f"   • {fname}")
+            print(f"✅ Translation complete! {len(translated_chapters)} section files created:")
+            for chapter_data in sorted(translated_chapters, key=lambda x: x['num']):
+                print(f"   • Section {chapter_data['num']}: {chapter_data['title']}")
             
-            # Create a combined file
+            # Create a combined file with proper section structure
             combined_path = os.path.join(out, f"{txt_processor.file_base}_translated.txt")
             with open(combined_path, 'w', encoding='utf-8') as combined:
-                for fname in sorted(translated_files):
-                    with open(os.path.join(out, fname), 'r', encoding='utf-8') as f:
-                        content = f.read()
+                current_main_chapter = None
+                
+                for i, chapter_data in enumerate(sorted(translated_chapters, key=lambda x: x['num'])):
+                    content = chapter_data['content']
+                    
+                    # Check if this is a chunk of a larger chapter
+                    if chapter_data.get('is_chunk'):
+                        chunk_info = chapter_data.get('chunk_info', {})
+                        original_chapter = chunk_info.get('original_chapter')
+                        chunk_idx = chunk_info.get('chunk_idx', 1)
+                        total_chunks = chunk_info.get('total_chunks', 1)
                         
-                        # Check if it's already plain text or needs extraction
-                        if fname.endswith('.html'):
-                            # Extract text from HTML
-                            from bs4 import BeautifulSoup
-                            soup = BeautifulSoup(content, 'html.parser')
-                            text = soup.get_text(strip=True)
-                        else:
-                            # Already plain text
-                            text = content
+                        # Only add the chapter header for the first chunk
+                        if original_chapter != current_main_chapter:
+                            current_main_chapter = original_chapter
+                            
+                            # Add separator if not first chapter
+                            if i > 0:
+                                combined.write(f"\n\n{'='*50}\n\n")
+                            
+                            # Write the original chapter title (without Part X/Y suffix)
+                            original_title = chapter_data['title']
+                            # Remove the (Part X/Y) suffix if present
+                            if ' (Part ' in original_title:
+                                original_title = original_title.split(' (Part ')[0]
+                            
+                            combined.write(f"{original_title}\n\n")
                         
-                        # Add chapter separator
-                        if translated_files.index(fname) > 0:
+                        # Add the chunk content
+                        combined.write(content)
+                        
+                        # Add spacing between chunks of the same chapter
+                        if chunk_idx < total_chunks:
+                            combined.write("\n\n")
+                    else:
+                        # This is a standalone chapter
+                        current_main_chapter = chapter_data['num']
+                        
+                        # Add separator if not first chapter
+                        if i > 0:
                             combined.write(f"\n\n{'='*50}\n\n")
                         
-                        # Extract chapter number from filename
-                        chapter_match = re.search(r'response_(\d+)', fname)
-                        if not chapter_match:
-                            chapter_match = re.search(r'ch(\d+)', fname)
+                        # Write the chapter title
+                        combined.write(f"{chapter_data['title']}\n\n")
                         
-                        combined.write(text)
+                        # Add the content
+                        combined.write(content)
             
-            print(f"   • Combined file: {combined_path}")
+            print(f"   • Combined file with preserved sections: {combined_path}")
             
             total_time = time.time() - translation_start_time
             hours = int(total_time // 3600)
             minutes = int((total_time % 3600) // 60)
             seconds = int(total_time % 60)
             
-            print(f"\n📊 Translation Statistics:")
-            print(f"   • Total chunks processed: {chunks_completed}")
-            print(f"   • Total time: {hours}h {minutes}m {seconds}s")
+            print(f"\n⏱️ Total translation time: {hours}h {minutes}m {seconds}s")
+            print(f"📊 Chapters completed: {chapters_completed}")
+            print(f"✅ Text file translation complete!")
+            
+            if log_callback:
+                log_callback(f"✅ Text file translation complete! Created {combined_path}")
             
         except Exception as e:
-            print("❌ Text file output build failed:", e)
+            print(f"❌ Error creating combined text file: {e}")
+            if log_callback:
+                log_callback(f"❌ Error creating combined text file: {e}")
     else:
         print("🔍 Checking for translated chapters...")
         response_files = [f for f in os.listdir(out) if f.startswith('response_') and f.endswith('.html')]
