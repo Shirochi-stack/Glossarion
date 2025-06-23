@@ -288,6 +288,14 @@ class FileUtilities:
         
         actual_num = None
         
+        # IMPORTANT: Check if this is a pre-split TEXT FILE chunk first
+        if (chapter.get('is_chunk', False) and 
+            'num' in chapter and 
+            isinstance(chapter['num'], float) and
+            chapter.get('filename', '').endswith('.txt')):
+            # For text file chunks only, preserve the decimal number
+            return chapter['num']  # This will be 1.1, 1.2, etc.
+        
         # Try to extract from original basename first
         if chapter.get('original_basename'):
             basename = chapter['original_basename']
@@ -4979,7 +4987,12 @@ def main(log_callback=None, stop_callback=None):
         # Second pass: process chapters
         for idx, c in enumerate(chapters):
             chap_num = c["num"]
-            actual_num = c['actual_chapter_num']
+            
+            # Check if this is a pre-split text chunk with decimal number
+            if (is_text_file and c.get('is_chunk', False) and isinstance(c['num'], float)):
+                actual_num = c['num']  # Preserve the decimal for text files only
+            else:
+                actual_num = c.get('actual_chapter_num', c['num'])
             content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
             
             if start is not None and not (start <= actual_num <= end):
@@ -5447,7 +5460,11 @@ def main(log_callback=None, stop_callback=None):
 
             chunk_context_manager.clear()
 
-            fname = FileUtilities.create_chapter_filename(c, actual_num)
+            # For text file chunks, ensure we pass the decimal number
+            if is_text_file and c.get('is_chunk', False) and isinstance(c.get('num'), float):
+                fname = FileUtilities.create_chapter_filename(c, c['num'])  # Use the decimal num directly
+            else:
+                fname = FileUtilities.create_chapter_filename(c, actual_num)
 
             cleaned = re.sub(r"^```(?:html)?\s*\n?", "", merged_result, count=1, flags=re.MULTILINE)
             cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
