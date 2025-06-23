@@ -5,6 +5,7 @@ import json
 from typing import List, Tuple, Dict
 from bs4 import BeautifulSoup
 from chapter_splitter import ChapterSplitter
+from decimal import Decimal
 import hashlib
 
 class TextFileProcessor:
