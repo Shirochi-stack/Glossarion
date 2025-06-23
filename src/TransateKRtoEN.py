@@ -2466,7 +2466,16 @@ class TranslationProcessor:
                 current_temp = self.config.TEMP
                 
                 total_tokens = sum(self.chapter_splitter.count_tokens(m["content"]) for m in msgs)
-                print(f"[DEBUG] Chunk {chunk_idx}/{total_chunks} tokens = {total_tokens:,} / {self.get_token_budget_str()} [File: {c['original_basename'] if 'original_basename' in c else 'Chapter_'+str(c['num'])}]")
+                # Determine file reference
+                if c.get('is_chunk', False):
+                    file_ref = f"Section_{c['num']}"
+                else:
+                    # Check if this is a text file - need to access from self
+                    is_text_source = self.is_text_file or c.get('filename', '').endswith('.txt')
+                    terminology = "Section" if is_text_source else "Chapter"
+                    file_ref = c.get('original_basename', f'{terminology}_{c["num"]}')
+
+                print(f"[DEBUG] Chunk {chunk_idx}/{total_chunks} tokens = {total_tokens:,} / {self.get_token_budget_str()} [File: {file_ref}]")            
                 
                 self.client.context = 'translation'
                 
@@ -4992,7 +5001,13 @@ def main(log_callback=None, stop_callback=None):
             is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
             terminology = "Section" if is_text_source else "Chapter"
 
-            print(f"\n🔄 Processing #{idx+1}/{total_chapters} (Actual: {terminology} {actual_num}) ({chapter_position} to translate): {c['title']} [File: {c.get('original_basename', f'{terminology}_{chap_num}')}]")
+            # Determine file reference based on type
+            if c.get('is_chunk', False):
+                file_ref = f"Section_{c['num']}"
+            else:
+                file_ref = c.get('original_basename', f'{terminology}_{actual_num}')
+
+            print(f"\n🔄 Processing #{idx+1}/{total_chapters} (Actual: {terminology} {actual_num}) ({chapter_position} to translate): {c['title']} [File: {file_ref}]")
 
             chunk_context_manager.start_chapter(chap_num, c['title'])
             
@@ -5104,31 +5119,43 @@ def main(log_callback=None, stop_callback=None):
                 print(f"📖 Translating text content ({text_size} characters)")
                 progress_manager.update(idx, chap_num, content_hash, output_file=None, status="in_progress")
                 progress_manager.save()
-                
-                _tok_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
-                max_tokens_limit, budget_str = parse_token_limit(_tok_env)
-                
-                system_tokens = chapter_splitter.count_tokens(system)
-                history_tokens = config.HIST_LIMIT * 2 * 1000
-                safety_margin = 1000
-                
-                if max_tokens_limit is not None:
-                    available_tokens = max_tokens_limit - system_tokens - history_tokens - safety_margin
-                    chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
-                else:
+
+                # Check if this chapter is already a chunk from text file splitting
+                if c.get('is_chunk', False):
+                    # This is already a pre-split chunk, don't split again
                     chunks = [(c["body"], 1, 1)]
-                
-                is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
-                terminology = "Section" if is_text_source else "Chapter"
-                print(f"📄 {terminology} will be processed in {len(chunks)} chunk(s)")
-            
+                    print(f"📄 Section {c['num']} (pre-split from text file)")
+                else:
+                    # Normal splitting logic for non-text files
+                    _tok_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
+                    max_tokens_limit, budget_str = parse_token_limit(_tok_env)
+                    
+                    system_tokens = chapter_splitter.count_tokens(system)
+                    history_tokens = config.HIST_LIMIT * 2 * 1000
+                    safety_margin = 1000
+                    
+                    if max_tokens_limit is not None:
+                        available_tokens = max_tokens_limit - system_tokens - history_tokens - safety_margin
+                        chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
+                    else:
+                        chunks = [(c["body"], 1, 1)]
+                    
+                    # Use consistent terminology
+                    is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
+                    terminology = "Section" if is_text_source else "Chapter"
+                    print(f"📄 {terminology} will be processed in {len(chunks)} chunk(s)")
+               
             if len(chunks) > 1:
                 chapter_tokens = chapter_splitter.count_tokens(c["body"])
-                print(f"   ℹ️ Chapter size: {chapter_tokens:,} tokens (limit: {available_tokens:,} tokens per chunk)")
+                is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
+                terminology = "Section" if is_text_source else "Chapter"
+                print(f"   ℹ️ {terminology} size: {chapter_tokens:,} tokens (limit: {available_tokens:,} tokens per chunk)")
             else:
                 chapter_tokens = chapter_splitter.count_tokens(c["body"])
                 if max_tokens_limit is not None:
-                    print(f"   ℹ️ Chapter size: {chapter_tokens:,} tokens (within limit of {available_tokens:,} tokens)")
+                    is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
+                    terminology = "Section" if is_text_source else "Chapter"
+                    print(f"   ℹ️ {terminology} size: {chapter_tokens:,} tokens (within limit of {available_tokens:,} tokens)")
             
             chapter_key_str = str(idx)
             if chapter_key_str not in progress_manager.prog["chapter_chunks"]:
@@ -5194,8 +5221,18 @@ def main(log_callback=None, stop_callback=None):
                     print(f"  🔄 Translating chunk {chunk_idx}/{total_chunks} for #{idx+1} (Overall: {current_chunk_number}/{total_chunks_needed} - {progress_percent:.1f}% - ETA: {eta_str})")
                     print(f"  ⏳ Chunk size: {len(chunk_html):,} characters (~{chapter_splitter.count_tokens(chunk_html):,} tokens)")
                 else:
-                    print(f"  📄 Translating chapter content (Overall: {current_chunk_number}/{total_chunks_needed} - {progress_percent:.1f}% - ETA: {eta_str}) [File: {c.get('original_basename', f'Chapter_{actual_num}')}]")
-                    print(f"  📊 Chapter {actual_num} size: {len(chunk_html):,} characters (~{chapter_splitter.count_tokens(chunk_html):,} tokens)")
+                    # Determine terminology and file reference
+                    is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
+                    terminology = "Section" if is_text_source else "Chapter"
+                    
+                    # Consistent file reference
+                    if c.get('is_chunk', False):
+                        file_ref = f"Section_{c['num']}"
+                    else:
+                        file_ref = c.get('original_basename', f'{terminology}_{actual_num}')
+                    
+                    print(f"  📄 Translating {terminology.lower()} content (Overall: {current_chunk_number}/{total_chunks_needed} - {progress_percent:.1f}% - ETA: {eta_str}) [File: {file_ref}]")
+                    print(f"  📊 {terminology} {actual_num} size: {len(chunk_html):,} characters (~{chapter_splitter.count_tokens(chunk_html):,} tokens)")
                 
                 print(f"  ℹ️ This may take 30-60 seconds. Stop will take effect after completion.")
                 
