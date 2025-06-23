@@ -677,7 +677,7 @@ class ProgressManager:
     def migrate_to_content_hash(self, chapters):
         """Migrate old index-based progress to content-hash-based"""
         if not self.prog.get("version") or self.prog["version"] < "3.0":
-            print("🔄 Migrating progress tracking to content-hash-based system...")
+            #print("🔄 Migrating progress tracking to content-hash-based system...")
             
             old_chapters = self.prog.get("chapters", {})
             new_chapters = {}
@@ -1276,8 +1276,8 @@ class ChapterExtractor:
                             original_num = chapter_num
                             while chapter_num in seen_chapters:
                                 chapter_num += 1
-                            print(f"[WARNING] Chapter {original_num} already exists with different content")
-                            print(f"[INFO] Reassigning {file_path} to chapter {chapter_num}")
+                            #print(f"[WARNING] Chapter {original_num} already exists with different content")
+                            #print(f"[INFO] Reassigning {file_path} to chapter {chapter_num}")
                             detection_method += "_reassigned"
                         else:
                             print(f"[DEBUG] Skipping duplicate chapter {chapter_num}: {file_path}")
