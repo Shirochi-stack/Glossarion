@@ -1958,7 +1958,18 @@ class TranslationProcessor:
             print(f"    📍 Current chapter index: {idx}")
             
             # Load the main config to get AI Hunter settings
-            config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+            # Handle both frozen (exe) and script environments
+            if getattr(sys, 'frozen', False):
+                # Running as compiled executable
+                base_path = os.path.dirname(sys.executable)
+            else:
+                # Running as script
+                base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            
+            config_path = os.path.join(base_path, 'config.json')
+            
+            print(f"    🔍 Looking for config.json at: {config_path}")
+            
             if os.path.exists(config_path):
                 with open(config_path, 'r', encoding='utf-8') as f:
                     main_config = json.load(f)
@@ -4933,10 +4944,18 @@ def main(log_callback=None, stop_callback=None):
     if not config.BATCH_TRANSLATION:
         translation_processor = TranslationProcessor(config, client, out, log_callback, check_stop, uses_zero_based, is_text_file)
         
-        # Inject improved AI Hunter if in AI Hunter mode
         if config.DUPLICATE_DETECTION_MODE == 'ai-hunter':
             # Load the main config to get AI Hunter settings
-            config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+            # Handle both frozen (exe) and script environments
+            if getattr(sys, 'frozen', False):
+                # Running as compiled executable
+                base_path = os.path.dirname(sys.executable)
+            else:
+                # Running as script
+                base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            
+            config_path = os.path.join(base_path, 'config.json')
+            
             if os.path.exists(config_path):
                 with open(config_path, 'r', encoding='utf-8') as f:
                     main_config = json.load(f)
@@ -4957,7 +4976,7 @@ def main(log_callback=None, stop_callback=None):
                 print("🤖 AI Hunter: Using enhanced detection with configurable thresholds")
             else:
                 print("⚠️ AI Hunter: Config file not found, using default detection")
-        
+                
         # First pass: set actual chapter numbers respecting the config
         for idx, c in enumerate(chapters):
             raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
