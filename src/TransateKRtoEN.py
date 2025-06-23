@@ -5312,18 +5312,32 @@ def main(log_callback=None, stop_callback=None):
             chapters_completed += 1
 
     if is_text_file:
-        print("📄 Building final text file…")
+        print("📄 Text file translation complete!")
         try:
             translated_files = []
             for chapter in chapters:
                 fname = FileUtilities.create_chapter_filename(chapter, chapter['num'])
                 if os.path.exists(os.path.join(out, fname)):
+                    translated_files.append(fname)
+            
+            print(f"✅ Translation complete! {len(translated_files)} chapter files created:")
+            for fname in translated_files:
+                print(f"   • {fname}")
+            
+            # Optionally create a combined file as well
+            combined_path = os.path.join(out, f"{txt_processor.file_base}_combined_translated.txt")
+            with open(combined_path, 'w', encoding='utf-8') as combined:
+                for fname in sorted(translated_files):
                     with open(os.path.join(out, fname), 'r', encoding='utf-8') as f:
                         content = f.read()
-                    translated_files.append((fname, content))
+                        # Extract text from HTML
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(content, 'html.parser')
+                        text = soup.get_text(strip=True)
+                        combined.write(f"\n\n{'='*50}\n{fname}\n{'='*50}\n\n")
+                        combined.write(text)
             
-            output_path = txt_processor.create_output_structure(translated_files)
-            print(f"✅ Translation complete! Output saved to: {output_path}")
+            print(f"   • Combined file: {combined_path}")
             
             total_time = time.time() - translation_start_time
             hours = int(total_time // 3600)
