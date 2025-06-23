@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
 Glossarion v2.8.2 - PyInstaller Specification File
-Enhanced Translation Tool with QA Scanner
+Enhanced Translation Tool with QA Scanner and AI Hunter
 """
 
 import sys
@@ -16,7 +16,7 @@ APP_NAME = 'Glossarion v2.8.2'
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
-ONE_FILE = True        # Single executable vs folder distribution
+ONE_FILE = True         # Single executable vs folder distribution
 
 # ============================================================================
 # BLOCK CIPHER (for code obfuscation - optional)
@@ -34,7 +34,7 @@ binaries = []
 hiddenimports = []
 
 # Collect data files from packages that need them
-for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap']:
+for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:
     try:
         data, bins, hidden = collect_all(package)
         datas.extend(data)
@@ -73,6 +73,9 @@ app_files = [
     ('check_epub_directory.py', '.'),
     ('direct_imports.py', '.'),
     
+    # AI Hunter Enhanced
+    ('ai_hunter_enhanced.py', '.'),
+    
     # Resources
     ('Halgakos.ico', '.'),
 ]
@@ -99,6 +102,7 @@ app_modules = [
     'check_epub_directory',
     'direct_imports',
     'splash_utils',
+    'ai_hunter_enhanced',  # AI Hunter Enhanced module
 ]
 
 # GUI Framework
@@ -124,6 +128,9 @@ gui_modules = [
     'ttkbootstrap.validation',
     'ttkbootstrap.scrolled',
     'ttkbootstrap.icons',
+    'ttkbootstrap.colorutils',
+    'ttkbootstrap.themes.standard',
+    'ttkbootstrap.themes.user',
 ]
 
 # EPUB/HTML Processing
@@ -136,6 +143,11 @@ epub_modules = [
     
     # BeautifulSoup
     'bs4',
+    'bs4.element',
+    'bs4.builder',
+    'bs4.builder._html5lib',
+    'bs4.builder._htmlparser',
+    'bs4.builder._lxml',
     'soupsieve',
     
     # LXML
@@ -149,6 +161,9 @@ epub_modules = [
     
     # HTML processing
     'html5lib',
+    'html5lib.treebuilders',
+    'html5lib.treewalkers',
+    'html5lib.serializer',
     'html',
     'html.parser',
     'html.entities',
@@ -158,6 +173,8 @@ epub_modules = [
     'xml.etree.ElementTree',
     'xml.dom',
     'xml.dom.minidom',
+    'xml.parsers',
+    'xml.parsers.expat',
 ]
 
 # Image Processing
@@ -198,9 +215,14 @@ image_modules = [
     'PIL.TiffImagePlugin',
     'PIL.WebPImagePlugin',
     'PIL.IcoImagePlugin',
-    'PIL.MicImagePlugin',
+    'PIL.ImImagePlugin',
     'PIL.Jpeg2KImagePlugin',
-    'PIL.IcnsImagePlugin',
+    'PIL.MspImagePlugin',
+    'PIL.PcxImagePlugin',
+    'PIL.SgiImagePlugin',
+    'PIL.TgaImagePlugin',
+    'PIL.XbmImagePlugin',
+    'PIL.XpmImagePlugin',
     'PIL.DdsImagePlugin',
     'PIL.BlpImagePlugin',
     'PIL.FtexImagePlugin',
@@ -218,11 +240,14 @@ api_modules = [
     'google.auth',
     'google.auth.transport',
     'google.auth.transport.requests',
+    'google.auth.transport.grpc',
     'google.auth.crypt',
     'google.auth.exceptions',
     'google.oauth2',
     'google.oauth2.credentials',
     'google.api_core',
+    'google.api_core.client_options',
+    'google.api_core.exceptions',
     'google.api_core.gapic_v1',
     'google.api_core.operations_v1',
     'google.api_core.protobuf_helpers',
@@ -230,9 +255,15 @@ api_modules = [
     'google.protobuf.message',
     'google.protobuf.descriptor',
     'google.protobuf.json_format',
+    'google.protobuf.internal',
+    'google.protobuf.reflection',
     'google.rpc',
+    'google.type',
     'proto',
     'proto.message',
+    'grpcio',
+    'grpcio_status',
+    'googleapis_common_protos',
     
     # OpenAI
     'openai',
@@ -240,18 +271,38 @@ api_modules = [
     'openai.error',
     'openai.util',
     'openai.version',
+    'openai.api_requestor',
+    'openai.openai_response',
     
     # Anthropic
     'anthropic',
+    'anthropic._client',
+    'anthropic._streaming',
+    'anthropic._exceptions',
+    'anthropic.types',
     'httpx',
+    'httpx._client',
+    'httpx._models',
+    'httpx._types',
+    'httpx._config',
     'httpcore',
+    'httpcore._sync',
+    'httpcore._async',
     'anyio',
+    'anyio._core',
     'sniffio',
+    'h11',
+    'h2',
+    'hpack',
+    'hyperframe',
+    'wsproto',
     
     # Token counting
     'tiktoken',
     'tiktoken_ext',
     'tiktoken_ext.openai_public',
+    'tiktoken.core',
+    'tiktoken.registry',
 ]
 
 # Text Processing & Analysis
@@ -263,6 +314,7 @@ text_modules = [
     'langdetect.language',
     'langdetect.detector_factory',
     'langdetect.utils',
+    'langdetect.profiles',
     
     # Text analysis
     'difflib',
@@ -352,18 +404,36 @@ network_modules = [
     'requests.exceptions',
     'requests.auth',
     'requests.api',
+    'requests.packages',
+    'requests.packages.urllib3',
     'chardet',
+    'chardet.universaldetector',
+    'chardet.enums',
     'charset_normalizer',
+    'charset_normalizer.api',
+    'charset_normalizer.md',
     'certifi',
     'urllib3',
     'urllib3.util',
+    'urllib3.util.retry',
+    'urllib3.util.timeout',
     'urllib3.poolmanager',
     'urllib3.connectionpool',
     'urllib3.connection',
+    'urllib3.response',
+    'urllib3.exceptions',
+    'urllib3.fields',
+    'urllib3.filepost',
+    'urllib3.contrib',
+    'urllib3.contrib.pyopenssl',
+    'urllib3.contrib.socks',
+    'urllib3.packages',
+    'urllib3.packages.ssl_match_hostname',
     'urllib',
     'urllib.parse',
     'urllib.request',
     'urllib.error',
+    'urllib.response',
     'idna',
     'ssl',
     'socket',
@@ -373,6 +443,7 @@ network_modules = [
     'http.client',
     'http.cookies',
     'http.cookiejar',
+    'http.server',
     'email',
     'email.utils',
     'email.message',
@@ -380,6 +451,9 @@ network_modules = [
     'email.mime',
     'email.mime.text',
     'email.parser',
+    'email.errors',
+    'email.charset',
+    'email.encoders',
 ]
 
 # Data Handling & Serialization
@@ -404,6 +478,10 @@ data_modules = [
     'typing',
     'typing_extensions',
     'types',
+    'pydantic',
+    'pydantic.main',
+    'pydantic.fields',
+    'pydantic.validators',
 ]
 
 # File & System Operations
@@ -428,11 +506,25 @@ system_modules = [
     'multiprocessing',
     'multiprocessing.freeze_support',
     'multiprocessing.connection',
+    'multiprocessing.pool',
+    'multiprocessing.process',
     'threading',
     'queue',
     'concurrent',
     'concurrent.futures',
+    'concurrent.futures._base',
     'asyncio',
+    'asyncio.base_events',
+    'asyncio.events',
+    'asyncio.futures',
+    'asyncio.tasks',
+    'asyncio.protocols',
+    'asyncio.streams',
+    'asyncio.subprocess',
+    'asyncio.queues',
+    'ctypes',
+    'ctypes.util',
+    'ctypes.wintypes',
 ]
 
 # Date & Time
@@ -447,6 +539,8 @@ datetime_modules = [
     'dateutil',
     'dateutil.parser',
     'dateutil.tz',
+    'dateutil.relativedelta',
+    'dateutil.rrule',
 ]
 
 # Utilities & Helpers
@@ -456,6 +550,8 @@ utility_modules = [
     'tqdm.std',
     'tqdm.gui',
     'tqdm.notebook',
+    'tqdm.utils',
+    'tqdm.cli',
     'logging',
     'logging.handlers',
     'logging.config',
@@ -479,6 +575,7 @@ utility_modules = [
     'fractions',
     'numbers',
     'cmath',
+    'statistics',
     'argparse',
     'getopt',
     'cmd',
@@ -488,11 +585,11 @@ utility_modules = [
     'dis',
     'inspect',
     'ast',
-    'imp',
     'importlib',
     'importlib.util',
     'importlib.machinery',
     'importlib.metadata',
+    'importlib.resources',
     'pkg_resources',
     'pkg_resources._vendor',
     'pkg_resources.extern',
@@ -502,6 +599,8 @@ utility_modules = [
     'site',
     'sitecustomize',
     'usercustomize',
+    'dotenv',
+    'python-dotenv',
 ]
 
 # Encoding support
@@ -521,6 +620,7 @@ encoding_modules = [
     'encodings.unicode_escape',
     'encodings.raw_unicode_escape',
     'encodings.idna',
+    'encodings.aliases',
     'codecs',
 ]
 
@@ -649,6 +749,8 @@ if ONE_FILE:
             'vcruntime140.dll',  # Don't compress Windows runtime
             'python*.dll',       # Don't compress Python DLLs
             'api-ms-win-*.dll',  # Don't compress Windows API DLLs
+            'ucrtbase.dll',      # Don't compress Universal CRT
+            'msvcp*.dll',        # Don't compress MSVC runtime
         ],
         runtime_tmpdir=None,
         console=ENABLE_CONSOLE,
@@ -691,6 +793,8 @@ else:
             'vcruntime140.dll',
             'python*.dll',
             'api-ms-win-*.dll',
+            'ucrtbase.dll',
+            'msvcp*.dll',
         ],
         name=APP_NAME.replace(' ', '_'),
     )
@@ -702,16 +806,21 @@ else:
 """
 Build Instructions:
 1. Install PyInstaller: pip install pyinstaller
-2. Install datasketch: pip install datasketch
+2. Install all dependencies: pip install -r requirements.txt
 3. Run: pyinstaller translator.spec
 
 Optimization Tips:
-- Set ENABLE_UPX = False for faster startup but larger file
+- Set ENABLE_UPX = True for smaller file size (but slower startup)
 - Set ONE_FILE = False for faster startup but folder distribution
+- Set ENABLE_CONSOLE = True for debugging
 
-This build includes datasketch for enhanced QA scanning performance.
-The executable will be larger (~100-150MB more) but will provide
-significantly faster duplicate detection on large datasets (50+ files).
+This build includes:
+- Datasketch for enhanced QA scanning performance
+- AI Hunter Enhanced for improved duplicate detection
+- Complete API client support (Google, OpenAI, Anthropic)
+- Full text processing and analysis capabilities
+
+The executable will be ~150-200MB due to included ML libraries.
 
 For version information:
 Create a version_info.txt file with Windows version resource information
