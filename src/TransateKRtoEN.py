@@ -24,6 +24,14 @@ from typing import Dict, List, Tuple
 from txt_processor import TextFileProcessor
 from ai_hunter_enhanced import ImprovedAIHunterDetection
 
+def get_chapter_terminology(is_text_file, chapter_data=None):
+    """Get appropriate terminology (Chapter/Section) based on source type"""
+    if is_text_file:
+        return "Section"
+    if chapter_data:
+        if chapter_data.get('filename', '').endswith('.txt') or chapter_data.get('is_chunk', False):
+            return "Section"
+    return "Chapter"
 # =====================================================
 # CONFIGURATION AND ENVIRONMENT MANAGEMENT
 # =====================================================
@@ -2637,8 +2645,11 @@ class BatchTranslationProcessor:
                 actual_num = raw_num
         
         try:
-            print(f"🔄 Starting #{idx+1} (Internal: Chapter {chap_num}, Actual: Chapter {actual_num})  (thread: {threading.current_thread().name}) [File: {chapter.get('original_basename', f'Chapter_{chap_num}')}]")
-            
+            # Check if this is from a text file
+            is_text_source = self.is_text_file or chapter.get('filename', '').endswith('.txt') or chapter.get('is_chunk', False)
+            terminology = "Section" if is_text_source else "Chapter"
+            print(f"🔄 Starting #{idx+1} (Internal: {terminology} {chap_num}, Actual: {terminology} {actual_num})  (thread: {threading.current_thread().name}) [File: {chapter.get('original_basename', f'{terminology}_{chap_num}')}]")
+                        
             content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
             with self.progress_lock:
                 self.update_progress_fn(idx, actual_num, content_hash, None, status="in_progress")
@@ -4676,7 +4687,7 @@ def main(log_callback=None, stop_callback=None):
 
         if start is not None:
             if not (start <= c['actual_chapter_num'] <= end):
-                print(f"[SKIP] Chapter {c['actual_chapter_num']} outside range {start}-{end}")
+                #print(f"[SKIP] Chapter {c['actual_chapter_num']} outside range {start}-{end}")
                 continue
                 
         needs_translation, skip_reason, _ = progress_manager.check_chapter_status(
@@ -4723,15 +4734,19 @@ def main(log_callback=None, stop_callback=None):
         
         total_chunks_needed += chunks_per_chapter[idx]
     
+    terminology = "Sections" if is_text_file else "Chapters"
     print(f"📊 Total chunks to translate: {total_chunks_needed}")
-    print(f"📚 Chapters to process: {chapters_to_process}")
+    print(f"📚 {terminology} to process: {chapters_to_process}")
     
     multi_chunk_chapters = [(idx, count) for idx, count in chunks_per_chapter.items() if count > 1]
     if multi_chunk_chapters:
-        print("📄 Chapters requiring multiple chunks:")
+        # Determine terminology based on file type
+        terminology = "Sections" if is_text_file else "Chapters"
+        print(f"📄 {terminology} requiring multiple chunks:")
         for idx, chunk_count in multi_chunk_chapters:
             chap = chapters[idx]
-            print(f"   • Chapter {idx+1} ({chap['title'][:30]}...): {chunk_count} chunks")
+            section_term = "Section" if is_text_file else "Chapter"
+            print(f"   • {section_term} {idx+1} ({chap['title'][:30]}...): {chunk_count} chunks")
     
     translation_start_time = time.time()
     chunks_completed = 0
@@ -4781,7 +4796,13 @@ def main(log_callback=None, stop_callback=None):
             )
             
             if not needs_translation:
-                print(f"[SKIP] {skip_reason}")
+                # Modify skip_reason to use appropriate terminology
+                is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
+                terminology = "Section" if is_text_source else "Chapter"
+                
+                # Replace "Chapter" with appropriate terminology in skip_reason
+                skip_reason_modified = skip_reason.replace("Chapter", terminology)
+                print(f"[SKIP] {skip_reason_modified}")
                 continue
             
             has_images = c.get('has_images', False)
@@ -4956,12 +4977,22 @@ def main(log_callback=None, stop_callback=None):
             )
             
             if not needs_translation:
-                print(f"[SKIP] {skip_reason}")
+                # Modify skip_reason to use appropriate terminology
+                is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
+                terminology = "Section" if is_text_source else "Chapter"
+                
+                # Replace "Chapter" with appropriate terminology in skip_reason
+                skip_reason_modified = skip_reason.replace("Chapter", terminology)
+                print(f"[SKIP] {skip_reason_modified}")
                 continue
 
             chapter_position = f"{chapters_completed + 1}/{chapters_to_process}"
           
-            print(f"\n🔄 Processing #{idx+1}/{total_chapters} (Actual: Chapter {actual_num}) ({chapter_position} to translate): {c['title']} [File: {c.get('original_basename', f'Chapter_{chap_num}')}]")
+            # Determine if this is a text file
+            is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
+            terminology = "Section" if is_text_source else "Chapter"
+
+            print(f"\n🔄 Processing #{idx+1}/{total_chapters} (Actual: {terminology} {actual_num}) ({chapter_position} to translate): {c['title']} [File: {c.get('original_basename', f'{terminology}_{chap_num}')}]")
 
             chunk_context_manager.start_chapter(chap_num, c['title'])
             
@@ -5087,7 +5118,9 @@ def main(log_callback=None, stop_callback=None):
                 else:
                     chunks = [(c["body"], 1, 1)]
                 
-                print(f"📄 Chapter will be processed in {len(chunks)} chunk(s)")
+                is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
+                terminology = "Section" if is_text_source else "Chapter"
+                print(f"📄 {terminology} will be processed in {len(chunks)} chunk(s)")
             
             if len(chunks) > 1:
                 chapter_tokens = chapter_splitter.count_tokens(c["body"])
@@ -5169,9 +5202,13 @@ def main(log_callback=None, stop_callback=None):
                 if log_callback:
                     if hasattr(log_callback, '__self__') and hasattr(log_callback.__self__, 'append_chunk_progress'):
                         if total_chunks == 1:
+                            # Determine terminology based on source type
+                            is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
+                            terminology = "Section" if is_text_source else "Chapter"
+
                             log_callback.__self__.append_chunk_progress(
                                 1, 1, "text", 
-                                f"Chapter {actual_num}",
+                                f"{terminology} {actual_num}",
                                 overall_current=current_chunk_number,
                                 overall_total=total_chunks_needed,
                                 extra_info=f"{len(chunk_html):,} chars"
@@ -5181,15 +5218,20 @@ def main(log_callback=None, stop_callback=None):
                                 chunk_idx, 
                                 total_chunks, 
                                 "text", 
-                                f"Chapter {actual_num}",
+                                f"{terminology} {actual_num}",
                                 overall_current=current_chunk_number,
                                 overall_total=total_chunks_needed
                             )
                     else:
+                        # Determine terminology based on source type
+                        is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
+                        terminology = "Section" if is_text_source else "Chapter"
+                        terminology_lower = "section" if is_text_source else "chapter"
+
                         if total_chunks == 1:
-                            log_callback(f"📄 Processing Chapter {actual_num} ({chapters_completed + 1}/{chapters_to_process}) - {progress_percent:.1f}% complete")
+                            log_callback(f"📄 Processing {terminology} {actual_num} ({chapters_completed + 1}/{chapters_to_process}) - {progress_percent:.1f}% complete")
                         else:
-                            log_callback(f"📄 processing chunk {chunk_idx}/{total_chunks} for chapter {actual_num} - {progress_percent:.1f}% complete")   
+                            log_callback(f"📄 processing chunk {chunk_idx}/{total_chunks} for {terminology_lower} {actual_num} - {progress_percent:.1f}% complete")
                         
                 if total_chunks > 1:
                     user_prompt = f"[PART {chunk_idx}/{total_chunks}]\n{chunk_html}"
