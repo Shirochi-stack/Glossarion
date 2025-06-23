@@ -373,7 +373,7 @@ class TranslatorGUI:
         
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        master.title("Glossarion v2.7.9 — The AI Hunter Unleashed!!")
+        master.title("Glossarion v2.8.0 — The AI Hunter Unleashed!!")
         
         # Setup main window with responsive sizing
         self.wm.responsive_size(master, BASE_WIDTH, BASE_HEIGHT)
@@ -575,7 +575,7 @@ class TranslatorGUI:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v2.7.9 - Ready to use!")
+        self.append_log("🚀 Glossarion v2.8.0 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -4508,7 +4508,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v2.7.9...")
+    print("🚀 Starting Glossarion v2.8.0...")
     
     # Initialize splash screen
     splash_manager = None
