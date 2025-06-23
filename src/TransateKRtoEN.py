@@ -350,10 +350,16 @@ class FileUtilities:
         # Check if we should use header as output name
         use_header_output = os.getenv("USE_HEADER_AS_OUTPUT", "0") == "1"
         
+        # Check if this is for a text file
+        is_text_file = chapter.get('filename', '').endswith('.txt') or chapter.get('is_chunk', False)
+        
         if use_header_output and chapter.get('title'):
             safe_title = make_safe_filename(chapter['title'], actual_num or chapter.get('num', 0))
             if safe_title and safe_title != f"chapter_{actual_num or chapter.get('num', 0):03d}":
-                return f"response_{safe_title}.html"
+                if is_text_file:
+                    return f"response_{safe_title}.txt"
+                else:
+                    return f"response_{safe_title}.html"
         
         # Check if decimal chapters are enabled and this is an EPUB with decimal chapter
         enable_decimal = os.getenv('ENABLE_DECIMAL_CHAPTERS', '0') == '1'
@@ -2578,7 +2584,7 @@ class BatchTranslationProcessor:
     
     def __init__(self, config, client, base_msg, out_dir, progress_lock, 
                  save_progress_fn, update_progress_fn, check_stop_fn, 
-                 image_translator=None):
+                 image_translator=None, is_text_file=False):):
         self.config = config
         self.client = client
         self.base_msg = base_msg
@@ -2590,6 +2596,7 @@ class BatchTranslationProcessor:
         self.image_translator = image_translator
         self.chapters_completed = 0
         self.chunks_completed = 0
+        self.is_text_file = is_text_file
     
     def process_single_chapter(self, chapter_data):
         """Process a single chapter (runs in thread)"""
@@ -4767,7 +4774,8 @@ def main(log_callback=None, stop_callback=None):
             progress_manager.save, 
             lambda idx, actual_num, content_hash, output_file=None, status="completed", **kwargs: progress_manager.update(idx, actual_num, content_hash, output_file, status, **kwargs),
             check_stop,
-            image_translator
+            image_translator,
+            is_text_file=is_text_file
         )
         
         total_to_process = len(chapters_to_translate)
@@ -5300,11 +5308,33 @@ def main(log_callback=None, stop_callback=None):
 
             cleaned = ContentProcessor.clean_ai_artifacts(cleaned, remove_artifacts=config.REMOVE_AI_ARTIFACTS)
 
-            with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                f.write(cleaned)
-            
-            final_title = c['title'] or make_safe_filename(c['title'], actual_num)
-            print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
+            if is_text_file:
+                # For text files, save as plain text instead of HTML
+                fname_txt = fname.replace('.html', '.txt')  # Change extension to .txt
+                
+                # Extract text from HTML
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(cleaned, 'html.parser')
+                text_content = soup.get_text(strip=True)
+                
+                # Write plain text file
+                with open(os.path.join(out, fname_txt), 'w', encoding='utf-8') as f:
+                    f.write(text_content)
+                
+                final_title = c['title'] or make_safe_filename(c['title'], actual_num)
+                print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
+                
+                # Update progress with .txt filename
+                progress_manager.update(idx, actual_num, content_hash, fname_txt, status="completed")
+            else:
+                # For EPUB files, keep original HTML behavior
+                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                    f.write(cleaned)
+                
+                final_title = c['title'] or make_safe_filename(c['title'], actual_num)
+                print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
+                
+                progress_manager.update(idx, actual_num, content_hash, fname, status="completed")
             
             progress_manager.update(idx, actual_num, content_hash, fname, status="completed")
             progress_manager.save()
@@ -5316,25 +5346,46 @@ def main(log_callback=None, stop_callback=None):
         try:
             translated_files = []
             for chapter in chapters:
-                fname = FileUtilities.create_chapter_filename(chapter, chapter['num'])
-                if os.path.exists(os.path.join(out, fname)):
-                    translated_files.append(fname)
+                # Look for .txt files instead of .html
+                fname_base = FileUtilities.create_chapter_filename(chapter, chapter['num'])
+                fname_txt = fname_base.replace('.html', '.txt')
+                if os.path.exists(os.path.join(out, fname_txt)):
+                    translated_files.append(fname_txt)
+                elif os.path.exists(os.path.join(out, fname_base)):
+                    # Fallback to HTML if txt doesn't exist
+                    translated_files.append(fname_base)
             
             print(f"✅ Translation complete! {len(translated_files)} chapter files created:")
             for fname in translated_files:
                 print(f"   • {fname}")
             
-            # Optionally create a combined file as well
-            combined_path = os.path.join(out, f"{txt_processor.file_base}_combined_translated.txt")
+            # Create a combined file
+            combined_path = os.path.join(out, f"{txt_processor.file_base}_translated.txt")
             with open(combined_path, 'w', encoding='utf-8') as combined:
                 for fname in sorted(translated_files):
                     with open(os.path.join(out, fname), 'r', encoding='utf-8') as f:
                         content = f.read()
-                        # Extract text from HTML
-                        from bs4 import BeautifulSoup
-                        soup = BeautifulSoup(content, 'html.parser')
-                        text = soup.get_text(strip=True)
-                        combined.write(f"\n\n{'='*50}\n{fname}\n{'='*50}\n\n")
+                        
+                        # Check if it's already plain text or needs extraction
+                        if fname.endswith('.html'):
+                            # Extract text from HTML
+                            from bs4 import BeautifulSoup
+                            soup = BeautifulSoup(content, 'html.parser')
+                            text = soup.get_text(strip=True)
+                        else:
+                            # Already plain text
+                            text = content
+                        
+                        # Add chapter separator
+                        if translated_files.index(fname) > 0:
+                            combined.write(f"\n\n{'='*50}\n\n")
+                        
+                        # Extract chapter info from filename for header
+                        chapter_match = re.search(r'ch(\d+)', fname)
+                        if chapter_match:
+                            chapter_num = chapter_match.group(1)
+                            combined.write(f"Chapter {chapter_num}\n\n")
+                        
                         combined.write(text)
             
             print(f"   • Combined file: {combined_path}")
