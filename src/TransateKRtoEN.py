@@ -2686,6 +2686,31 @@ class BatchTranslationProcessor:
             
             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
             
+            if self.is_text_file:
+                # For text files, save as plain text
+                fname_txt = fname.replace('.html', '.txt') if fname.endswith('.html') else fname
+                
+                # Extract text from HTML
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(cleaned, 'html.parser')
+                text_content = soup.get_text(strip=True)
+                
+                with open(os.path.join(self.out_dir, fname_txt), 'w', encoding='utf-8') as f:
+                    f.write(text_content)
+                
+                # Update with .txt filename
+                with self.progress_lock:
+                    self.update_progress_fn(idx, actual_num, content_hash, fname_txt, status="completed", ai_features=ai_features)
+                    self.save_progress_fn()
+            else:
+                # Original code for EPUB files
+                with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                    f.write(cleaned)
+                
+                with self.progress_lock:
+                    self.update_progress_fn(idx, actual_num, content_hash, fname, status="completed", ai_features=ai_features)
+                    self.save_progress_fn()            
+            
             with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
                 f.write(cleaned)
             
@@ -5350,7 +5375,7 @@ def main(log_callback=None, stop_callback=None):
                 final_title = c['title'] or make_safe_filename(c['title'], actual_num)
                 print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
                 
-                progress_manager.update(idx, actual_num, content_hash, fname, status="completed")
+    
             
             progress_manager.update(idx, actual_num, content_hash, fname, status="completed")
             progress_manager.save()
@@ -5396,11 +5421,10 @@ def main(log_callback=None, stop_callback=None):
                         if translated_files.index(fname) > 0:
                             combined.write(f"\n\n{'='*50}\n\n")
                         
-                        # Extract chapter info from filename for header
-                        chapter_match = re.search(r'ch(\d+)', fname)
-                        if chapter_match:
-                            chapter_num = chapter_match.group(1)
-                            combined.write(f"Chapter {chapter_num}\n\n")
+                        # Extract chapter number from filename
+                        chapter_match = re.search(r'response_(\d+)', fname)
+                        if not chapter_match:
+                            chapter_match = re.search(r'ch(\d+)', fname))
                         
                         combined.write(text)
             
