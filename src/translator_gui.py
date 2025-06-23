@@ -1341,8 +1341,13 @@ class TranslatorGUI:
             def select_status(status_to_select):
                 listbox.select_clear(0, tk.END)
                 for idx, info in enumerate(chapter_display_info):
-                    if info['status'] == status_to_select:
-                        listbox.select_set(idx)
+                    # Check for both 'failed' and 'qa_failed' statuses
+                    if status_to_select == 'failed':
+                        if info['status'] in ['failed', 'qa_failed']:
+                            listbox.select_set(idx)
+                    else:
+                        if info['status'] == status_to_select:
+                            listbox.select_set(idx)
                 update_selection_count()
             
             def retranslate_selected():
