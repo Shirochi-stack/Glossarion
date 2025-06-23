@@ -1871,7 +1871,7 @@ class TranslationProcessor:
             print("❌ Translation stopped by user request.")
             return True
     
-    def check_duplicate_content(self, result, idx, prog, out, content_hash=None):
+    def check_duplicate_content(self, result, idx, prog, out):
         """Check if translated content is duplicate - with mode selection"""
         if not self.config.RETRY_DUPLICATE_BODIES:
             print("    ⚠️ DEBUG: Duplicate detection is DISABLED in config")
@@ -1882,34 +1882,23 @@ class TranslationProcessor:
         print(f"    🔍 DEBUG: Detection mode = '{detection_mode}'")
         print(f"    🔍 DEBUG: Lookback chapters = {self.config.DUPLICATE_LOOKBACK_CHAPTERS}")
         
-        # If content_hash not provided, try to extract it
-        if not content_hash and detection_mode in ['ai-hunter', 'cascading']:
-            # First try to find by index in the new format
-            for ch_key, ch_info in prog.get("chapters", {}).items():
-                if ch_info.get("chapter_idx") == idx:
-                    content_hash = ch_key  # In new format, the key IS the content hash
-                    print(f"    🔍 DEBUG: Found content_hash for chapter index {idx}: {content_hash}")
-                    break
-            
-            # If not found, try legacy format
-            if not content_hash:
-                chapter_key = str(idx)
-                if chapter_key in prog.get("chapters", {}):
-                    chapter_info = prog["chapters"][chapter_key]
-                    content_hash = chapter_info.get("content_hash")
-                    print(f"    🔍 DEBUG: Found content_hash in legacy format for chapter {idx}: {content_hash}")
-        
-        if content_hash:
-            print(f"    🔍 DEBUG: Using content_hash: {content_hash}")
-        else:
-            print(f"    ⚠️ DEBUG: No content_hash found for chapter index {idx}")
+        # Extract content_hash if available from progress
+        content_hash = None
+        if detection_mode == 'ai-hunter':
+            # Try to get content_hash from the current chapter info
+            # The idx parameter represents the chapter index
+            chapter_key = str(idx)
+            if chapter_key in prog.get("chapters", {}):
+                chapter_info = prog["chapters"][chapter_key]
+                content_hash = chapter_info.get("content_hash")
+                print(f"    🔍 DEBUG: Found content_hash for chapter {idx}: {content_hash}")
         
         if detection_mode == 'ai-hunter':
             print("    🤖 DEBUG: Routing to AI Hunter detection...")
             return self._check_duplicate_ai_hunter(result, idx, prog, out, content_hash)
         elif detection_mode == 'cascading':
             print("    🔄 DEBUG: Routing to Cascading detection...")
-            return self._check_duplicate_cascading(result, idx, prog, out, content_hash)
+            return self._check_duplicate_cascading(result, idx, prog, out)
         else:
             print("    📋 DEBUG: Routing to Basic detection...")
             return self._check_duplicate_basic(result, idx, prog, out)
@@ -1974,41 +1963,21 @@ class TranslationProcessor:
                     
                     print(f"    ✅ Using enhanced AI Hunter with configurable settings")
                     
-                    # FIX: Get current chapter number from progress
+                    # FIX: Get current chapter number from progress using content hash
                     current_chapter_num = None
                     
-                    # Method 1: If content hash provided, it might be the key itself
+                    # If content hash provided, look it up directly
                     if content_hash and content_hash in prog["chapters"]:
                         chapter_info = prog["chapters"][content_hash]
                         current_chapter_num = chapter_info.get("actual_num")
-                        print(f"    📂 Found chapter by content_hash key: actual_num={current_chapter_num}")
-                    
-                    # Method 2: Search all chapters for matching index
-                    if current_chapter_num is None:
-                        for ch_key, ch_info in prog["chapters"].items():
-                            if ch_info.get("chapter_idx") == idx:
-                                current_chapter_num = ch_info.get("actual_num")
-                                print(f"    📂 Found chapter by index search: actual_num={current_chapter_num}")
-                                break
-                    
-                    # Method 3: Legacy format - check by string index
-                    if current_chapter_num is None:
-                        chapter_key = str(idx)
-                        if chapter_key in prog["chapters"]:
-                            chapter_info = prog["chapters"][chapter_key]
-                            current_chapter_num = chapter_info.get("actual_num")
-                            print(f"    📂 Found chapter in legacy format: actual_num={current_chapter_num}")
-                    
-                    # Final fallback
-                    if current_chapter_num is None:
-                        # Use index as chapter number (0-based to 1-based)
-                        current_chapter_num = idx + 1
-                        print(f"    ⚠️ Chapter number not found in progress, using index+1: {current_chapter_num}")
-                    else:
-                        # actual_num might be 0-based, ensure it's 1-based for display
-                        if current_chapter_num == idx:
+                        if current_chapter_num is not None:
+                            # Add 1 because actual_num is 0-based but we want 1-based display
                             current_chapter_num = current_chapter_num + 1
-                            print(f"    📖 Adjusted to 1-based numbering: {current_chapter_num}")
+                        print(f"    📂 Found in progress by hash: actual_num={chapter_info.get('actual_num')}")
+                    else:
+                        # Fallback: use index + 1
+                        current_chapter_num = idx + 1
+                        print(f"    ⚠️ No content hash provided, using index+1: {current_chapter_num}")
                     
                     print(f"    📖 Current chapter number: {current_chapter_num}")
                     
@@ -2082,17 +2051,9 @@ class TranslationProcessor:
                                 # Add 1 to convert from 0-based to 1-based for display
                                 display_num = chapter_num + 1
                                 
-                                # Ensure chapter_num is an integer
-                                if isinstance(chapter_num, str):
-                                    try:
-                                        chapter_num = int(chapter_num)
-                                    except ValueError:
-                                        print(f"       ⚠️ Could not convert chapter_num '{chapter_num}' to int, skipping")
-                                        continue
-                                
                                 completed_chapters.append({
                                     'key': chapter_key,
-                                    'num': chapter_num,  # Now guaranteed to be int
+                                    'num': display_num,
                                     'file': chapter_info.get("output_file"),
                                     'ai_features': chapter_info.get("ai_features")
                                 })
@@ -2114,20 +2075,9 @@ class TranslationProcessor:
                     
                     # FIX: Check chapters by actual number, not index
                     chapters_checked = 0
-                    chapters_checked = 0
                     for completed_chapter in reversed(completed_chapters):
                         # Only check chapters that come before the current one
-                        # Ensure both values are integers for comparison
-                        try:
-                            completed_chapter_num = int(completed_chapter['num'])
-                            current_num = int(current_chapter_num)
-                        except (ValueError, TypeError) as e:
-                            print(f"       ⚠️ Error converting chapter numbers to int: {e}")
-                            print(f"          completed_chapter['num']={completed_chapter['num']} (type: {type(completed_chapter['num'])})")
-                            print(f"          current_chapter_num={current_chapter_num} (type: {type(current_chapter_num)})")
-                            continue
-                        
-                        if completed_chapter_num >= current_num:
+                        if completed_chapter['num'] >= current_chapter_num:
                             continue
                             
                         # Only check up to lookback number of chapters
@@ -2291,7 +2241,7 @@ class TranslationProcessor:
                 print(f"    🔄 Falling back to basic detection...")
                 return self._check_duplicate_basic(result, idx, prog, out)
         
-    def _check_duplicate_cascading(self, result, idx, prog, out, content_hash=None):
+    def _check_duplicate_cascading(self, result, idx, prog, out):
         """Cascading detection - basic first, then AI Hunter for borderline cases"""
         # Step 1: Basic detection
         is_duplicate_basic, similarity_basic = self._check_duplicate_basic(result, idx, prog, out)
@@ -2302,23 +2252,7 @@ class TranslationProcessor:
         # Step 2: If basic detection finds moderate similarity, use AI Hunter
         if similarity_basic >= 60:  # Configurable threshold
             print(f"    🤖 Moderate similarity ({similarity_basic}%) - running AI Hunter analysis...")
-            
-            # If content_hash not provided, try to find it
-            if not content_hash:
-                # First try to find by index in the new format
-                for ch_key, ch_info in prog.get("chapters", {}).items():
-                    if ch_info.get("chapter_idx") == idx:
-                        content_hash = ch_key
-                        break
-                
-                # If not found, try legacy format
-                if not content_hash:
-                    chapter_key = str(idx)
-                    if chapter_key in prog.get("chapters", {}):
-                        chapter_info = prog["chapters"][chapter_key]
-                        content_hash = chapter_info.get("content_hash")
-            
-            is_duplicate_ai, similarity_ai = self._check_duplicate_ai_hunter(result, idx, prog, out, content_hash)
+            is_duplicate_ai, similarity_ai = self._check_duplicate_ai_hunter(result, idx, prog, out)
             
             if is_duplicate_ai:
                 return True, similarity_ai
@@ -2641,8 +2575,7 @@ class TranslationProcessor:
                     if duplicate_retry_count < max_duplicate_retries:
                         idx = c.get('__index', 0)
                         prog = c.get('__progress', {})
-                        content_hash = c.get('content_hash') or c.get('__content_hash')
-                        is_duplicate, similarity = self.check_duplicate_content(result, idx, prog, self.out_dir, content_hash)
+                        is_duplicate, similarity = self.check_duplicate_content(result, idx, prog, self.out_dir)
                         
                         if is_duplicate:
                             retry_needed = True
@@ -5117,42 +5050,9 @@ def main(log_callback=None, stop_callback=None):
                 # We need to replace it with our enhanced AI Hunter
                 
                 # Create a wrapper to match the expected signature
-                def enhanced_duplicate_check(self, result, idx, prog, out, content_hash=None):
-                    # Extract the actual chapter number properly
-                    current_chapter_num = None
-                    
-                    # Method 1: If content hash provided, use it as key
-                    if content_hash and content_hash in prog["chapters"]:
-                        chapter_info = prog["chapters"][content_hash]
-                        current_chapter_num = chapter_info.get("actual_num")
-                    
-                    # Method 2: Search all chapters for matching index
-                    if current_chapter_num is None:
-                        for ch_key, ch_info in prog["chapters"].items():
-                            if ch_info.get("chapter_idx") == idx:
-                                current_chapter_num = ch_info.get("actual_num")
-                                break
-                    
-                    # Method 3: Legacy format - check by string index
-                    if current_chapter_num is None:
-                        chapter_key = str(idx)
-                        if chapter_key in prog["chapters"]:
-                            chapter_info = prog["chapters"][chapter_key]
-                            current_chapter_num = chapter_info.get("actual_num")
-                    
-                    # Final fallback - use index + 1
-                    if current_chapter_num is None:
-                        current_chapter_num = idx + 1
-                    else:
-                        # Ensure it's an integer
-                        current_chapter_num = int(current_chapter_num)
-                        # Convert from 0-based to 1-based if needed
-                        if current_chapter_num == idx:
-                            current_chapter_num = current_chapter_num + 1
-                    
-                    # Now call the AI Hunter with the correct chapter number
-                    return ai_hunter.detect_duplicate_ai_hunter_enhanced(result, idx, prog, out, current_chapter_num=current_chapter_num)
-
+                def enhanced_duplicate_check(self, result, idx, prog, out):
+                    return ai_hunter.detect_duplicate_ai_hunter_enhanced(result, idx, prog, out)
+                
                 # Bind the enhanced method to the processor instance
                 translation_processor.check_duplicate_content = enhanced_duplicate_check.__get__(translation_processor, TranslationProcessor)
                 
@@ -5540,7 +5440,6 @@ def main(log_callback=None, stop_callback=None):
 
                 c['__index'] = idx
                 c['__progress'] = progress_manager.prog
-                c['__content_hash'] = content_hash
                 c['history_manager'] = history_manager
                 
                 result, finish_reason = translation_processor.translate_with_retry(
