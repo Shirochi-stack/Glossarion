@@ -1846,7 +1846,7 @@ class ChapterExtractor:
 class TranslationProcessor:
     """Handles the translation of individual chapters"""
     
-    def __init__(self, config, client, out_dir, log_callback=None, stop_callback=None, uses_zero_based=False):
+    def __init__(self, config, client, out_dir, log_callback=None, stop_callback=None, uses_zero_based=False, is_text_file=False)):
         self.config = config
         self.client = client
         self.out_dir = out_dir
@@ -1854,6 +1854,7 @@ class TranslationProcessor:
         self.stop_callback = stop_callback
         self.chapter_splitter = ChapterSplitter(model_name=config.MODEL)
         self.uses_zero_based = uses_zero_based
+        self.is_text_file = is_text_file
 
         
     def check_stop(self):
@@ -4918,7 +4919,7 @@ def main(log_callback=None, stop_callback=None):
         config.BATCH_TRANSLATION = False
     
     if not config.BATCH_TRANSLATION:
-        translation_processor = TranslationProcessor(config, client, out, log_callback, check_stop, uses_zero_based)
+        translation_processor = TranslationProcessor(config, client, out, log_callback, check_stop, uses_zero_based, is_text_file)
         
         # Inject improved AI Hunter if in AI Hunter mode
         if config.DUPLICATE_DETECTION_MODE == 'ai-hunter':
