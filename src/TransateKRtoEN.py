@@ -2656,6 +2656,7 @@ class BatchTranslationProcessor:
         
         try:
             # Check if this is from a text file
+            ai_features = None
             is_text_source = self.is_text_file or chapter.get('filename', '').endswith('.txt') or chapter.get('is_chunk', False)
             terminology = "Section" if is_text_source else "Chapter"
             print(f"🔄 Starting #{idx+1} (Internal: {terminology} {chap_num}, Actual: {terminology} {actual_num})  (thread: {threading.current_thread().name}) [File: {chapter.get('original_basename', f'{terminology}_{chap_num}')}]")
