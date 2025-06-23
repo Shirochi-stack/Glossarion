@@ -599,7 +599,15 @@ class ImprovedAIHunterDetection:
             chapters_checked = 0
             for completed_chapter in reversed(completed_chapters):
                 # Only check chapters that come before the current one
-                if completed_chapter['num'] >= current_chapter_num:
+                # Ensure both values are integers for comparison
+                try:
+                    completed_chapter_num = int(completed_chapter['num'])
+                    current_num = int(current_chapter_num)
+                except (ValueError, TypeError) as e:
+                    print(f"       ⚠️ Error converting chapter numbers to int: {e}")
+                    continue
+                
+                if completed_chapter_num >= current_num:
                     continue
                     
                 # Only check up to lookback number of chapters
