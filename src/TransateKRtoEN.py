@@ -2735,14 +2735,17 @@ class BatchTranslationProcessor:
             
             print(f"💾 Saved Chapter {actual_num}: {fname} ({len(cleaned)} chars)")
             
-            # FIXED: Extract and save AI features for future duplicate detection
+            # Initialize ai_features at the beginning to ensure it's always defined
             ai_features = None
+            
+            # Extract and save AI features for future duplicate detection
             if hasattr(self.config, 'DUPLICATE_DETECTION_MODE') and self.config.DUPLICATE_DETECTION_MODE in ['ai-hunter', 'cascading']:
                 try:
                     # Extract features from the translated content
                     cleaned_text = re.sub(r'<[^>]+>', '', cleaned).strip()
-                    ai_features = self.translator._extract_text_features(cleaned_text)
-                    print(f"    🔬 Extracted and cached AI features for Chapter {actual_num}")
+                    # Note: self.translator doesn't exist, so we can't extract features here
+                    # The features will need to be extracted during regular processing
+                    print(f"    ⚠️ AI features extraction not available in batch mode")
                 except Exception as e:
                     print(f"    ⚠️ Failed to extract AI features: {e}")
             
