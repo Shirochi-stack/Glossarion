@@ -1198,7 +1198,7 @@ class TranslatorGUI:
                 else:
                     no_file_entries.append((chapter_key, chapter_info))
             
-            print(f"Found {len(files_to_entries)} unique files from {len(prog.get('chapters', {}))} total entries")
+            #print(f"Found {len(files_to_entries)} unique files from {len(prog.get('chapters', {}))} total entries")
         
             # Load chapters info if available
             chapters_info_file = os.path.join(output_dir, "chapters_info.json")
@@ -1312,7 +1312,7 @@ class TranslatorGUI:
                 
                 # Add duplicate count if more than 1
                 if info['duplicate_count'] > 1:
-                    display += f" | ({info['duplicate_count']} duplicate entries)"
+                    display += f" | ({info['duplicate_count']} entries)"
                 
                 listbox.insert(tk.END, display)
             
