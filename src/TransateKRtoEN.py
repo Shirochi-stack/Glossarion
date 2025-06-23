@@ -5424,7 +5424,7 @@ def main(log_callback=None, stop_callback=None):
                         # Extract chapter number from filename
                         chapter_match = re.search(r'response_(\d+)', fname)
                         if not chapter_match:
-                            chapter_match = re.search(r'ch(\d+)', fname))
+                            chapter_match = re.search(r'ch(\d+)', fname)
                         
                         combined.write(text)
             
