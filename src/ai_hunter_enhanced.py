@@ -500,8 +500,17 @@ class ImprovedAIHunterDetection:
         try:
             print(f"\n    ========== AI HUNTER DEBUG START ==========")
             print(f"    📍 Current chapter index: {idx}")
-            if current_chapter_num:
-                print(f"    📖 Current chapter number: {current_chapter_num}")
+            
+            # Extract current chapter information from progress
+            for ch_key, ch_info in prog["chapters"].items():
+                if ch_info.get("chapter_idx") == idx:
+                    current_chapter_num = ch_info.get("actual_num", idx + 1)
+                    break
+            
+            if current_chapter_num is None:
+                current_chapter_num = idx + 1
+            
+            print(f"    📖 Current chapter number: {current_chapter_num}")
             
             # Get configuration
             config = self.get_ai_config()
@@ -525,7 +534,7 @@ class ImprovedAIHunterDetection:
             print(f"    🔬 Extracting text features...")
             result_features = self._extract_text_features(result_clean)
             
-            # Get lookback from main config, then fall back to env var if not found
+            # Get lookback from main config
             lookback = self.main_config.get('duplicate_lookback_chapters', 
                                            int(os.getenv('DUPLICATE_LOOKBACK_CHAPTERS', '5')))
             
@@ -535,18 +544,15 @@ class ImprovedAIHunterDetection:
             print(f"       Lookback chapters: {lookback}")
             print(f"       Sample size: {config['sample_size']}")
             
-            # FIX: Get all completed chapters with their indices
+            # FIX: Get completed chapters with indices
             completed_chapters = []
             for chapter_key, chapter_info in prog["chapters"].items():
                 if chapter_info.get("status") == "completed" and chapter_info.get("output_file"):
-                    # Get the chapter index - this is what we need for proper lookback
                     chapter_idx = chapter_info.get("chapter_idx")
-                    if chapter_idx is None:
-                        # Legacy format fallback
-                        try:
-                            chapter_idx = int(chapter_key)
-                        except:
-                            continue
+                    if chapter_idx is None and chapter_key.isdigit():
+                        chapter_idx = int(chapter_key)
+                    elif chapter_idx is None:
+                        continue
                     
                     completed_chapters.append({
                         'idx': chapter_idx,
@@ -555,28 +561,18 @@ class ImprovedAIHunterDetection:
                         'ai_features': chapter_info.get('ai_features')
                     })
             
-            # Sort by INDEX, not by chapter number
+            # FIX: Sort by INDEX and filter by INDEX range
             completed_chapters.sort(key=lambda x: x['idx'])
-            
-            # Find chapters that are within lookback range of current index
             chapters_to_check = [ch for ch in completed_chapters 
                                if ch['idx'] < idx and ch['idx'] >= idx - lookback]
             
-            # Log what we found
             print(f"    📚 Found {len(completed_chapters)} completed chapters in progress")
-            if completed_chapters:
-                indices = [ch['idx'] for ch in completed_chapters]
-                print(f"    📊 Chapter indices in progress: {sorted(indices)[:10]}{'...' if len(indices) > 10 else ''}")
             print(f"    🎯 Current chapter index: {idx}")
             print(f"    🔍 Will check against {len(chapters_to_check)} chapters (indices {idx-lookback} to {idx-1})")
             
             # Check previous chapters
             all_similarities = []
-            highest_similarity = 0.0
-            detected_method = None
-            detected_chapter = None
             
-            # Check chapters in reverse order (most recent first)
             for completed_chapter in reversed(chapters_to_check):
                 print(f"\n    📝 Checking against chapter at index {completed_chapter['idx']} (chapter {completed_chapter['num']})...")
                 
@@ -584,7 +580,6 @@ class ImprovedAIHunterDetection:
                 prev_features = completed_chapter.get('ai_features')
                 prev_clean = None
                 
-                # Try to get cached features first
                 if prev_features:
                     print(f"       ✅ Using cached features")
                 else:
@@ -632,7 +627,7 @@ class ImprovedAIHunterDetection:
                     if score > 0:
                         print(f"          {method}: {int(score*100)}%")
                 
-                # Check if duplicate based on configured mode
+                # Check if duplicate
                 is_duplicate, confidence, methods_triggered = self._evaluate_duplicate(
                     similarities, config
                 )
@@ -645,20 +640,10 @@ class ImprovedAIHunterDetection:
                     print(f"    ========== AI HUNTER DEBUG END ==========\n")
                     
                     return True, int(confidence * 100)
-                
-                # Track highest similarity
-                max_sim = max(similarities.values()) if similarities else 0
-                if max_sim > highest_similarity:
-                    highest_similarity = max_sim
-                    detected_method = max(similarities.items(), key=lambda x: x[1])[0]
-                    detected_chapter = completed_chapter
             
             # No duplicate found
             print(f"\n    ✅ No duplicate found")
-            if detected_chapter and highest_similarity > 0.5:
-                print(f"       Highest similarity: {detected_method} = {int(highest_similarity*100)}% with Chapter {detected_chapter['num']} (index {detected_chapter['idx']})")
             
-            # Report all similarities if verbose
             if all_similarities:
                 print(f"\n    📊 Similarity summary:")
                 for sim_data in all_similarities:
