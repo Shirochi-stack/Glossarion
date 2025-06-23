@@ -16,3 +16,11 @@ datasketch
 certifi
 chardet
 olefile
+numpy
+scipy
+httpx
+httpcore
+anyio
+sniffio
+regex
+python-dotenv
