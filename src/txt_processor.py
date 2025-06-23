@@ -164,7 +164,7 @@ class TextFileProcessor:
                         chunk_title = f"{chapter_data['title']} (Part {chunk_idx}/{total_chunks})"
                     
                     # Create float chapter numbers for chunks: 1.0, 1.1, 1.2, etc.
-                    chunk_num = chapter_data['num'] + (chunk_idx - 1) * 0.1
+                    chunk_num = round(chapter_data['num'] + (chunk_idx - 1) * 0.1, 1)
                     
                     final_chapters.append({
                         'num': chunk_num,
