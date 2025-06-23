@@ -1951,7 +1951,6 @@ class TranslationProcessor:
             print("    📋 DEBUG: Routing to Basic detection...")
             return self._check_duplicate_basic(result, idx, prog, out)
 
-
     def _check_duplicate_ai_hunter(self, result, idx, prog, out):
         """Enhanced AI Hunter duplicate detection - delegates to configurable version"""
         try:
@@ -1984,18 +1983,19 @@ class TranslationProcessor:
                 # FIX: Get the actual chapter number properly
                 current_chapter = self.chapters[idx] if idx < len(self.chapters) else None
                 if current_chapter:
+                    print(f"    🔍 Chapter data at index {idx}: {current_chapter}")
                     current_chapter_num = current_chapter.get('actual_num')
                     if current_chapter_num is None:
                         current_chapter_num = current_chapter.get('chapter_num')
                     if current_chapter_num is None:
                         # Use idx + 1 as last resort
                         current_chapter_num = idx + 1
-                        print(f"    ⚠️ Could not determine chapter number, using index: {current_chapter_num}")
+                        print(f"    ⚠️ Could not determine chapter number from data, using index: {current_chapter_num}")
                 else:
                     current_chapter_num = idx + 1
                     print(f"    ⚠️ Chapter not found in list, using index: {current_chapter_num}")
                 
-                print(f"    📖 Current chapter number: {current_chapter_num}")
+                print(f"    📖 Current chapter number determined as: {current_chapter_num}")
                 
                 # The main_config now contains duplicate_lookback_chapters from the GUI
                 return ai_hunter.detect_duplicate_ai_hunter_enhanced(result, idx, prog, out, current_chapter_num)
@@ -2054,6 +2054,7 @@ class TranslationProcessor:
                 for chapter_key, chapter_info in prog["chapters"].items():
                     if chapter_info.get("status") == "completed" and chapter_info.get("output_file"):
                         try:
+                            # Progress file uses actual_num
                             chapter_num = chapter_info.get("actual_num")
                             if chapter_num is None:
                                 chapter_num = chapter_info.get("chapter_num")
@@ -2062,7 +2063,6 @@ class TranslationProcessor:
                                     chapter_num = int(chapter_key) + 1
                                 except ValueError:
                                     # Skip chapters with non-numeric keys
-                                    print(f"       ⚠️ Skipping chapter with non-numeric key: {chapter_key}")
                                     continue
                             
                             completed_chapters.append({
