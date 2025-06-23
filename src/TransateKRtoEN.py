@@ -1930,27 +1930,6 @@ class TranslationProcessor:
             print(f"    Warning: Failed to check duplicate content: {e}")
             return False, 0
 
-    def check_duplicate_content(self, result, idx, prog, out):
-        """Check if translated content is duplicate - with mode selection"""
-        if not self.config.RETRY_DUPLICATE_BODIES:
-            print("    ⚠️ DEBUG: Duplicate detection is DISABLED in config")
-            return False, 0
-        
-        # Get detection mode from config
-        detection_mode = getattr(self.config, 'DUPLICATE_DETECTION_MODE', 'basic')
-        print(f"    🔍 DEBUG: Detection mode = '{detection_mode}'")
-        print(f"    🔍 DEBUG: Lookback chapters = {self.config.DUPLICATE_LOOKBACK_CHAPTERS}")
-        
-        if detection_mode == 'ai-hunter':
-            print("    🤖 DEBUG: Routing to AI Hunter detection...")
-            return self._check_duplicate_ai_hunter(result, idx, prog, out)
-        elif detection_mode == 'cascading':
-            print("    🔄 DEBUG: Routing to Cascading detection...")
-            return self._check_duplicate_cascading(result, idx, prog, out)
-        else:
-            print("    📋 DEBUG: Routing to Basic detection...")
-            return self._check_duplicate_basic(result, idx, prog, out)
-
     def _check_duplicate_ai_hunter(self, result, idx, prog, out):
         """Enhanced AI Hunter duplicate detection - delegates to configurable version"""
         try:
@@ -1980,22 +1959,24 @@ class TranslationProcessor:
                 
                 print(f"    ✅ Using enhanced AI Hunter with configurable settings")
                 
-                # FIX: Get the actual chapter number properly
-                current_chapter = self.chapters[idx] if idx < len(self.chapters) else None
-                if current_chapter:
-                    print(f"    🔍 Chapter data at index {idx}: {current_chapter}")
-                    current_chapter_num = current_chapter.get('actual_num')
-                    if current_chapter_num is None:
-                        current_chapter_num = current_chapter.get('chapter_num')
-                    if current_chapter_num is None:
-                        # Use idx + 1 as last resort
-                        current_chapter_num = idx + 1
-                        print(f"    ⚠️ Could not determine chapter number from data, using index: {current_chapter_num}")
-                else:
-                    current_chapter_num = idx + 1
-                    print(f"    ⚠️ Chapter not found in list, using index: {current_chapter_num}")
+                # FIX: Get current chapter number from progress if possible
+                current_chapter_num = None
                 
-                print(f"    📖 Current chapter number determined as: {current_chapter_num}")
+                # First try to get from progress
+                chapter_key = str(idx)
+                if chapter_key in prog["chapters"]:
+                    chapter_info = prog["chapters"][chapter_key]
+                    current_chapter_num = chapter_info.get("actual_num")
+                    if current_chapter_num is None:
+                        current_chapter_num = chapter_info.get("chapter_num")
+                    print(f"    📂 Found in progress: actual_num={chapter_info.get('actual_num')}, chapter_num={chapter_info.get('chapter_num')}")
+                
+                # If still None, use index + 1 as fallback
+                if current_chapter_num is None:
+                    current_chapter_num = idx + 1
+                    print(f"    ⚠️ Using index-based chapter number: {current_chapter_num}")
+                else:
+                    print(f"    📖 Current chapter number: {current_chapter_num}")
                 
                 # The main_config now contains duplicate_lookback_chapters from the GUI
                 return ai_hunter.detect_duplicate_ai_hunter_enhanced(result, idx, prog, out, current_chapter_num)
@@ -2007,14 +1988,12 @@ class TranslationProcessor:
                 lookback = getattr(self.config, 'DUPLICATE_LOOKBACK_CHAPTERS', 
                                  int(os.getenv('DUPLICATE_LOOKBACK_CHAPTERS', '5')))
                 
-                # FIX: Get current chapter number for fallback logic too
-                current_chapter = self.chapters[idx] if idx < len(self.chapters) else None
-                if current_chapter:
-                    current_chapter_num = current_chapter.get('actual_num')
-                    if current_chapter_num is None:
-                        current_chapter_num = current_chapter.get('chapter_num')
-                    if current_chapter_num is None:
-                        current_chapter_num = idx + 1
+                # Get current chapter number from progress
+                current_chapter_num = None
+                chapter_key = str(idx)
+                if chapter_key in prog["chapters"]:
+                    chapter_info = prog["chapters"][chapter_key]
+                    current_chapter_num = chapter_info.get("actual_num", chapter_info.get("chapter_num", idx + 1))
                 else:
                     current_chapter_num = idx + 1
                 
@@ -2246,9 +2225,9 @@ class TranslationProcessor:
                 return False, int(highest_similarity * 100) if highest_similarity > 0 else 0
                 
         except Exception as e:
-            print(f"    ❌ AI Hunter detection failed with error: {e}")
+            print(f"    ❌ AI Hunter detection failed: {e}")
             import traceback
-            print(f"    {traceback.format_exc()}")
+            traceback.print_exc()
             print(f"    ========== AI HUNTER DEBUG END ==========\n")
             
             # Fallback to basic detection
@@ -4900,7 +4879,7 @@ def main(log_callback=None, stop_callback=None):
                     c['actual_chapter_num'] = raw_num
                     c['zero_adjusted'] = False
         
-        # NOW continue with the existing batch processing loop
+        # NOW the existing loop continues...
         for idx, c in enumerate(chapters):
             chap_num = c["num"]
             content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
