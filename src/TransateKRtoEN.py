@@ -1942,8 +1942,8 @@ class TranslationProcessor:
                 # Running as compiled executable
                 base_path = os.path.dirname(sys.executable)
             else:
-                # Running as script
-                base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                # Running as script - config.json is in same folder as scripts
+                base_path = os.path.dirname(os.path.abspath(__file__))
             
             config_path = os.path.join(base_path, 'config.json')
             
