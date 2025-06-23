@@ -5098,9 +5098,9 @@ def main(log_callback=None, stop_callback=None):
                 # We need to replace it with our enhanced AI Hunter
                 
                 # Create a wrapper to match the expected signature
-                def enhanced_duplicate_check(self, result, idx, prog, out):
-                    return ai_hunter.detect_duplicate_ai_hunter_enhanced(result, idx, prog, out)
-                
+                def enhanced_duplicate_check(self, result, idx, prog, out, content_hash=None):
+                    return ai_hunter.detect_duplicate_ai_hunter_enhanced(result, idx, prog, out, current_chapter_num=content_hash)
+
                 # Bind the enhanced method to the processor instance
                 translation_processor.check_duplicate_content = enhanced_duplicate_check.__get__(translation_processor, TranslationProcessor)
                 
