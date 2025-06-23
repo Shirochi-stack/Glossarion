@@ -535,59 +535,40 @@ class ImprovedAIHunterDetection:
             print(f"       Lookback chapters: {lookback}")
             print(f"       Sample size: {config['sample_size']}")
             
-            # FIX: Get all completed chapters sorted by actual chapter number
+            # FIX: Get all completed chapters with their indices
             completed_chapters = []
             for chapter_key, chapter_info in prog["chapters"].items():
                 if chapter_info.get("status") == "completed" and chapter_info.get("output_file"):
-                    # Handle both numeric and hash-based chapter keys
-                    try:
-                        # Try to get actual_num first (this is what's stored in progress)
-                        chapter_num = chapter_info.get("actual_num")
-                        if chapter_num is None:
-                            # Try chapter_num as fallback
-                            chapter_num = chapter_info.get("chapter_num")
-                        if chapter_num is None:
-                            # Try to parse from key if it's numeric
-                            try:
-                                chapter_num = int(chapter_key) + 1
-                            except ValueError:
-                                # Skip chapters without valid numbers
-                                continue
-                        
-                        completed_chapters.append({
-                            'key': chapter_key,
-                            'num': chapter_num,
-                            'file': chapter_info.get("output_file"),
-                            'ai_features': chapter_info.get("ai_features")
-                        })
-                    except Exception as e:
-                        print(f"       ⚠️ Error processing chapter {chapter_key}: {e}")
-                        continue
+                    # Get the chapter index - this is what we need for proper lookback
+                    chapter_idx = chapter_info.get("chapter_idx")
+                    if chapter_idx is None:
+                        # Legacy format fallback
+                        try:
+                            chapter_idx = int(chapter_key)
+                        except:
+                            continue
+                    
+                    completed_chapters.append({
+                        'idx': chapter_idx,
+                        'num': chapter_info.get("actual_num", chapter_idx + 1),
+                        'file': chapter_info["output_file"],
+                        'ai_features': chapter_info.get('ai_features')
+                    })
             
-            # Sort by actual chapter number
-            completed_chapters.sort(key=lambda x: x['num'])
+            # Sort by INDEX, not by chapter number
+            completed_chapters.sort(key=lambda x: x['idx'])
             
-            # If no current chapter number provided, try to infer it
-            if current_chapter_num is None:
-                # Try to get from progress if this chapter is already partially processed
-                chapter_key = str(idx)
-                if chapter_key in prog["chapters"]:
-                    current_chapter_num = prog["chapters"][chapter_key].get("actual_num")
-                    if current_chapter_num is None:
-                        current_chapter_num = prog["chapters"][chapter_key].get("chapter_num")
-                    print(f"    🔍 Found in progress: chapter_key={chapter_key}, actual_num={prog['chapters'][chapter_key].get('actual_num')}, chapter_num={prog['chapters'][chapter_key].get('chapter_num')}")
-                
-                # If still None, use index + 1 as fallback
-                if current_chapter_num is None:
-                    current_chapter_num = idx + 1
-                    print(f"    ⚠️ Using index-based chapter number: {current_chapter_num}")
+            # Find chapters that are within lookback range of current index
+            chapters_to_check = [ch for ch in completed_chapters 
+                               if ch['idx'] < idx and ch['idx'] >= idx - lookback]
             
-            print(f"\n    📚 Found {len(completed_chapters)} completed chapters in progress")
+            # Log what we found
+            print(f"    📚 Found {len(completed_chapters)} completed chapters in progress")
             if completed_chapters:
-                chapter_nums = [ch['num'] for ch in completed_chapters]
-                print(f"    📊 Chapter numbers in progress: {sorted(chapter_nums)[:10]}{'...' if len(chapter_nums) > 10 else ''}")
-            print(f"    🎯 Current chapter number: {current_chapter_num}")
-            print(f"    🔍 Will check against last {lookback} chapters before chapter {current_chapter_num}")
+                indices = [ch['idx'] for ch in completed_chapters]
+                print(f"    📊 Chapter indices in progress: {sorted(indices)[:10]}{'...' if len(indices) > 10 else ''}")
+            print(f"    🎯 Current chapter index: {idx}")
+            print(f"    🔍 Will check against {len(chapters_to_check)} chapters (indices {idx-lookback} to {idx-1})")
             
             # Check previous chapters
             all_similarities = []
@@ -595,28 +576,9 @@ class ImprovedAIHunterDetection:
             detected_method = None
             detected_chapter = None
             
-            # FIX: Look at chapters by actual number, not index
-            chapters_checked = 0
-            for completed_chapter in reversed(completed_chapters):
-                # Only check chapters that come before the current one
-                # Ensure both values are integers for comparison
-                try:
-                    completed_chapter_num = int(completed_chapter['num'])
-                    current_num = int(current_chapter_num)
-                except (ValueError, TypeError) as e:
-                    print(f"       ⚠️ Error converting chapter numbers to int: {e}")
-                    continue
-                
-                if completed_chapter_num >= current_num:
-                    continue
-                    
-                # Only check up to lookback number of chapters
-                if chapters_checked >= lookback:
-                    break
-                    
-                chapters_checked += 1
-                
-                print(f"\n    📝 Checking against chapter {completed_chapter['num']}...")
+            # Check chapters in reverse order (most recent first)
+            for completed_chapter in reversed(chapters_to_check):
+                print(f"\n    📝 Checking against chapter at index {completed_chapter['idx']} (chapter {completed_chapter['num']})...")
                 
                 # Get previous chapter features
                 prev_features = completed_chapter.get('ai_features')
@@ -661,6 +623,7 @@ class ImprovedAIHunterDetection:
                 # Store for reporting
                 all_similarities.append({
                     'chapter': completed_chapter['num'],
+                    'chapter_idx': completed_chapter['idx'],
                     'similarities': similarities
                 })
                 
@@ -676,35 +639,33 @@ class ImprovedAIHunterDetection:
                 
                 if is_duplicate:
                     print(f"\n    🚨 DUPLICATE DETECTED!")
-                    print(f"       Detection mode: {config['detection_mode']}")
+                    print(f"       Duplicate of: Chapter {completed_chapter['num']} (index {completed_chapter['idx']})")
                     print(f"       Confidence: {int(confidence*100)}%")
-                    print(f"       Triggered methods: {', '.join(methods_triggered)}")
-                    print(f"       Match with: Chapter {completed_chapter['num']}")
+                    print(f"       Methods triggered: {', '.join(methods_triggered)}")
                     print(f"    ========== AI HUNTER DEBUG END ==========\n")
+                    
                     return True, int(confidence * 100)
                 
-                # Track highest for reporting
-                for method, sim in similarities.items():
-                    if sim > highest_similarity:
-                        highest_similarity = sim
-                        detected_method = method
-                        detected_chapter = completed_chapter['num']
+                # Track highest similarity
+                max_sim = max(similarities.values()) if similarities else 0
+                if max_sim > highest_similarity:
+                    highest_similarity = max_sim
+                    detected_method = max(similarities.items(), key=lambda x: x[1])[0]
+                    detected_chapter = completed_chapter
             
             # No duplicate found
             print(f"\n    ✅ No duplicate found")
-            if detected_method:
-                print(f"       Highest similarity: {int(highest_similarity*100)}% via {detected_method}")
-                print(f"       Closest match: Chapter {detected_chapter}")
+            if detected_chapter and highest_similarity > 0.5:
+                print(f"       Highest similarity: {detected_method} = {int(highest_similarity*100)}% with Chapter {detected_chapter['num']} (index {detected_chapter['idx']})")
             
-            # Show top 3 closest matches
+            # Report all similarities if verbose
             if all_similarities:
-                print(f"\n    📊 Top 3 closest matches:")
-                sorted_chapters = sorted(all_similarities, 
-                                       key=lambda x: self._get_chapter_score(x['similarities'], config), 
-                                       reverse=True)[:3]
-                for i, chapter_data in enumerate(sorted_chapters, 1):
-                    score = self._get_chapter_score(chapter_data['similarities'], config)
-                    print(f"       {i}. Chapter {chapter_data['chapter']}: {int(score*100)}%")
+                print(f"\n    📊 Similarity summary:")
+                for sim_data in all_similarities:
+                    best_method = max(sim_data['similarities'].items(), key=lambda x: x[1])
+                    score = best_method[1]
+                    if score > 0.5:
+                        print(f"       Chapter {sim_data['chapter']} (idx {sim_data['chapter_idx']}): {int(score*100)}%")
             
             print(f"    ========== AI HUNTER DEBUG END ==========\n")
             return False, 0
