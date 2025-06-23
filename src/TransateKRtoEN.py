@@ -66,7 +66,9 @@ class TranslationConfig:
                        os.getenv("OPENAI_OR_Gemini_API_KEY") or
                        os.getenv("GEMINI_API_KEY"))
         # NEW: Simple chapter number offset
-        self.CHAPTER_NUMBER_OFFSET = int(os.getenv("CHAPTER_NUMBER_OFFSET", "0"))       
+        self.CHAPTER_NUMBER_OFFSET = int(os.getenv("CHAPTER_NUMBER_OFFSET", "0"))   
+        if is_text_file:
+            os.environ["IS_TEXT_FILE_TRANSLATION"] = "1"        
 
 # =====================================================
 # UNIFIED PATTERNS AND CONSTANTS
@@ -373,12 +375,20 @@ class FileUtilities:
                 base = os.path.splitext(basename)[0]
                 # Replace dots with underscores for filesystem compatibility
                 base = base.replace('.', '_')
-                return f"response_{base}.html"
+                # Use .txt extension for text files
+                if is_text_file:
+                    return f"response_{base}.txt"
+                else:
+                    return f"response_{base}.html"
         
         # Standard EPUB handling - use original basename
         if 'original_basename' in chapter and chapter['original_basename']:
             base = os.path.splitext(chapter['original_basename'])[0]
-            return f"response_{base}.html"
+            # Use .txt extension for text files
+            if is_text_file:
+                return f"response_{base}.txt"
+            else:
+                return f"response_{base}.html"
         else:
             # Text file handling (no original basename)
             if actual_num is None:
@@ -388,9 +398,15 @@ class FileUtilities:
             if isinstance(actual_num, float):
                 major = int(actual_num)
                 minor = int(round((actual_num - major) * 10))
-                return f"response_{major:04d}_{minor}.html"
+                if is_text_file:
+                    return f"response_{major:04d}_{minor}.txt"
+                else:
+                    return f"response_{major:04d}_{minor}.html"
             else:
-                return f"response_{actual_num:04d}.html"
+                if is_text_file:
+                    return f"response_{actual_num:04d}.txt"
+                else:
+                    return f"response_{actual_num:04d}.html"          
 
 # =====================================================
 # UNIFIED PROGRESS MANAGER
