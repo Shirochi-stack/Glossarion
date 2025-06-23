@@ -2010,7 +2010,7 @@ class TranslationProcessor:
                             current_chapter_num = current_chapter_num + 1
                             print(f"    📖 Adjusted to 1-based numbering: {current_chapter_num}")
                     
-                    print(f"    📖 Current chapter number: {current_chapter_num}")
+                    print(f"    📖 Processing index {idx} (story chapter: {current_chapter_num})")
                     
                     # The main_config now contains duplicate_lookback_chapters from the GUI
                     return ai_hunter.detect_duplicate_ai_hunter_enhanced(result, idx, prog, out, current_chapter_num)
@@ -2032,7 +2032,7 @@ class TranslationProcessor:
                     else:
                         current_chapter_num = idx + 1
                     
-                    print(f"    📖 Current chapter number: {current_chapter_num}")
+                    print(f"    📖 Processing index {idx} (story chapter: {current_chapter_num})")
                     
                     # Get threshold from environment or use default
                     env_threshold = os.getenv('AI_HUNTER_THRESHOLD')
