@@ -46,7 +46,7 @@ class SplashManager:
             title_label.pack(pady=(10, 5))
             
             # Subtitle
-            subtitle_label = tk.Label(main_frame, text="Advanced EPUB Translation Suite", 
+            subtitle_label = tk.Label(main_frame, text="Advanced AI Translation Suite", 
                                      bg='#2b2b2b', fg='#cccccc', font=('Arial', 12))
             subtitle_label.pack(pady=(0, 15))
             
