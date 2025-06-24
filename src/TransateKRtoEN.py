@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 import json
 import logging
@@ -58,7 +59,7 @@ class TranslationConfig:
         self.DISABLE_AUTO_GLOSSARY = os.getenv("DISABLE_AUTO_GLOSSARY", "0") == "1"
         self.MANUAL_GLOSSARY = os.getenv("MANUAL_GLOSSARY")
         self.RETRY_TRUNCATED = os.getenv("RETRY_TRUNCATED", "0") == "1"
-        self.RETRY_DUPLICATE_BODIES = os.getenv("RETRY_DUPLICATE_BODIES", "0") == "1"
+        self.RETRY_DUPLICATE_BODIES = os.getenv("RETRY_DUPLICATE_BODIES", "1") == "1"
         self.RETRY_TIMEOUT = os.getenv("RETRY_TIMEOUT", "0") == "1"
         self.CHUNK_TIMEOUT = int(os.getenv("CHUNK_TIMEOUT", "900"))
         self.MAX_RETRY_TOKENS = int(os.getenv("MAX_RETRY_TOKENS", "16384"))
@@ -1873,9 +1874,6 @@ class TranslationProcessor:
     
     def check_duplicate_content(self, result, idx, prog, out):
         """Check if translated content is duplicate - with mode selection"""
-        if not self.config.RETRY_DUPLICATE_BODIES:
-            print("    ⚠️ DEBUG: Duplicate detection is DISABLED in config")
-            return False, 0
         
         # Get detection mode from config
         detection_mode = getattr(self.config, 'DUPLICATE_DETECTION_MODE', 'basic')
@@ -2272,10 +2270,14 @@ class TranslationProcessor:
                         self.config.MAX_OUTPUT_TOKENS = min(self.config.MAX_OUTPUT_TOKENS * 2, self.config.MAX_RETRY_TOKENS)
                         retry_count += 1
                 
-                if not retry_needed and self.config.RETRY_DUPLICATE_BODIES:
-                    if duplicate_retry_count < max_duplicate_retries:
+                if not retry_needed:
+                    # Force re-read the environment variable to ensure we have current setting
+                    duplicate_enabled = os.getenv("RETRY_DUPLICATE_BODIES", "0") == "1"
+                    
+                    if duplicate_enabled and duplicate_retry_count < max_duplicate_retries:
                         idx = c.get('__index', 0)
                         prog = c.get('__progress', {})
+                        print(f"    🔍 Checking for duplicate content...")
                         is_duplicate, similarity = self.check_duplicate_content(result, idx, prog, self.out_dir)
                         
                         if is_duplicate:
@@ -2311,6 +2313,8 @@ class TranslationProcessor:
                                 user_prompt = f"Chapter {c['num']}:\n{chunk_html}"
                             
                             msgs[-1] = {"role": "user", "content": user_prompt}
+                    elif not duplicate_enabled:
+                        print(f"    ⏭️ Duplicate detection is DISABLED - skipping check")
                 
                 if retry_needed:
                     if is_duplicate_retry:
