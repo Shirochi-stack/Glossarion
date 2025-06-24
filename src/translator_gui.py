@@ -160,36 +160,53 @@ class UIHelper:
         text_widget.bind("<Key>", block_editing)
 
 class WindowManager:
-    """Unified window geometry and dialog management"""
+    """Unified window geometry and dialog management - FULLY REFACTORED V2"""
     
     def __init__(self, base_dir):
         self.base_dir = base_dir
         self.ui = UIHelper()
+        self._stored_geometries = {}
+        self._pending_operations = {}
+        self._dpi_scale = None
+        self._topmost_protection_active = {}
+    
+    def get_dpi_scale(self, window):
+        """Get and cache DPI scaling factor"""
+        if self._dpi_scale is None:
+            try:
+                self._dpi_scale = window.tk.call('tk', 'scaling') / 1.333
+            except:
+                self._dpi_scale = 1.0
+        return self._dpi_scale
     
     def setup_window(self, window, width=None, height=None, 
                     center=True, icon=True, hide_initially=False,
-                    max_width_ratio=0.98, max_height_ratio=0.98,  # Changed to 98%
+                    max_width_ratio=0.98, max_height_ratio=0.98,
                     min_width=400, min_height=300):
-        """Universal window setup"""
+        """Universal window setup with proper deferral and DPI awareness"""
+        
         if hide_initially:
             window.withdraw()
         
-        if icon:
-            load_application_icon(window, self.base_dir)
+        # Always ensure not topmost
+        window.attributes('-topmost', False)
         
-        window.update_idletasks()
+        if icon:
+            window.after_idle(lambda: load_application_icon(window, self.base_dir))
         
         screen_width = window.winfo_screenwidth()
         screen_height = window.winfo_screenheight()
+        dpi_scale = self.get_dpi_scale(window)
         
-        # Always maximize height unless specified
         if width is None:
-            window.update()
-            width = window.winfo_reqwidth()
-        
+            width = min_width
+        else:
+            width = int(width / dpi_scale)
+            
         if height is None:
-            # Use almost all screen height by default
             height = int(screen_height * max_height_ratio)
+        else:
+            height = int(height / dpi_scale)
         
         max_width = int(screen_width * max_width_ratio)
         max_height = int(screen_height * max_height_ratio)
@@ -199,119 +216,198 @@ class WindowManager:
         
         if center:
             x = max(0, (screen_width - final_width) // 2)
-            y = 5  # Minimal top margin
-            window.geometry(f"{final_width}x{final_height}+{x}+{y}")
+            y = 5
+            geometry_str = f"{final_width}x{final_height}+{x}+{y}"
         else:
-            window.geometry(f"{final_width}x{final_height}")
+            geometry_str = f"{final_width}x{final_height}"
+        
+        window.geometry(geometry_str)
         
         if hide_initially:
-            window.after(50, window.deiconify)
+            window.after(10, window.deiconify)
         
         return final_width, final_height
+    
+    def get_monitor_from_coord(self, x, y):
+        """Get monitor info for coordinates (for multi-monitor support)"""
+        # This is a simplified version - returns primary monitor info
+        # For true multi-monitor, you'd need to use win32api or other libraries
+        monitors = []
+        
+        # Try to detect if window is on secondary monitor
+        # This is a heuristic - if x > screen_width, likely on second monitor
+        primary_width = self.root.winfo_screenwidth() if hasattr(self, 'root') else 1920
+        
+        if x > primary_width:
+            # Likely on second monitor
+            return {'x': primary_width, 'width': primary_width, 'height': 1080}
+        else:
+            # Primary monitor
+            return {'x': 0, 'width': primary_width, 'height': 1080}
     
     def responsive_size(self, window, base_width, base_height, 
                        scale_factor=None, center=True, use_full_height=True):
-        """Size window responsively based on screen size"""
+        """Size window responsively based on screen size - FIXED"""
+        
         screen_width = window.winfo_screenwidth()
         screen_height = window.winfo_screenheight()
         
-        # Force full screen usage
         if use_full_height:
-            # Use 98% of screen height always
+            # Maximize to 98% of screen
             width = min(int(base_width * 1.2), int(screen_width * 0.98))
             height = int(screen_height * 0.98)
         else:
-            if scale_factor is None:
-                scale_x = screen_width / 1920.0
-                scale_y = screen_height / 1080.0
-                scale_factor = min(scale_x, scale_y, 2.0)  # Allow 2x scaling
+            # Use base dimensions directly
+            width = base_width
+            height = base_height
             
-            width = int(base_width * scale_factor)
-            height = int(base_height * scale_factor)
-            
-            width = min(width, int(screen_width * 0.98))
-            height = min(height, int(screen_height * 0.98))
+            # Only scale down if window doesn't fit on screen
+            if width > screen_width * 0.9:
+                width = int(screen_width * 0.85)
+            if height > screen_height * 0.9:
+                height = int(screen_height * 0.85)
         
         if center:
             x = (screen_width - width) // 2
-            y = 5  # Almost at top
-            window.geometry(f"{width}x{height}+{x}+{y}")
+            y = (screen_height - height) // 2
+            geometry_str = f"{width}x{height}+{x}+{y}"
         else:
-            window.geometry(f"{width}x{height}")
+            geometry_str = f"{width}x{height}"
         
-        # Force window to update
-        window.update_idletasks()
+        window.geometry(geometry_str)
+        
+        # Ensure not topmost
+        window.attributes('-topmost', False)
         
         return width, height
     
-    def auto_resize_dialog(self, dialog, canvas=None, max_width_ratio=0.9, max_height_ratio=0.95):
-        """Auto-resize dialog WIDTH ONLY based on content"""
-        dialog.update()
-        if canvas:
-            canvas.update()
+    def _fix_maximize_behavior(self, window):
+        """Fix the standard Windows maximize button for multi-monitor"""
+        # Store original window protocol
+        original_state_change = None
         
-        was_hidden = dialog.winfo_viewable() == 0
+        def on_window_state_change(event):
+            """Intercept maximize from title bar button"""
+            if event.widget == window:
+                try:
+                    state = window.state()
+                    if state == 'zoomed':
+                        # Window was just maximized - fix it
+                        window.after(10, lambda: self._proper_maximize(window))
+                except:
+                    pass
         
-        # Get screen dimensions
-        screen_width = dialog.winfo_screenwidth()
-        screen_height = dialog.winfo_screenheight()
-        
-        # ALWAYS use maximum screen height for scrollable dialogs
-        final_height = int(screen_height * max_height_ratio)
-        
-        if canvas:
-            scrollable_frame = None
-            for child in canvas.winfo_children():
-                if isinstance(child, ttk.Frame):
-                    scrollable_frame = child
-                    break
+        # Bind to window state changes to intercept maximize
+        window.bind('<Configure>', on_window_state_change, add='+')
+    
+    def _proper_maximize(self, window):
+        """Properly maximize window to current monitor only"""
+        try:
+            # Get current position
+            x = window.winfo_x()
+            screen_width = window.winfo_screenwidth()
+            screen_height = window.winfo_screenheight()
             
-            if scrollable_frame:
-                scrollable_frame.update_idletasks()
-                window_width = scrollable_frame.winfo_reqwidth() + 20
-            else:
-                window_width = dialog.winfo_reqwidth()
-        else:
-            dialog.update_idletasks()
-            window_width = dialog.winfo_reqwidth()
+            # Check if on secondary monitor
+            if x > screen_width or x < -screen_width/2:
+                # Likely on a secondary monitor
+                # Force back to primary monitor for now
+                window.state('normal')
+                window.geometry(f"{screen_width-100}x{screen_height-100}+50+50")
+                window.state('zoomed')
+            
+            # The zoomed state should now respect monitor boundaries
+            
+        except Exception as e:
+            print(f"Error in proper maximize: {e}")
+    
+    def auto_resize_dialog(self, dialog, canvas=None, max_width_ratio=0.9, max_height_ratio=0.95):
+        """Auto-resize dialog based on content"""
         
-        max_width = int(screen_width * max_width_ratio)
-        final_width = min(window_width, max_width)
+        was_hidden = not dialog.winfo_viewable()
         
-        # Position near top of screen
-        x = (screen_width - final_width) // 2
-        y = max(20, (screen_height - final_height) // 2)
-        dialog.geometry(f"{final_width}x{final_height}+{x}+{y}")
+        def perform_resize():
+            try:
+                screen_width = dialog.winfo_screenwidth()
+                screen_height = dialog.winfo_screenheight()
+                dpi_scale = self.get_dpi_scale(dialog)
+                
+                final_height = int(screen_height * max_height_ratio)
+                
+                if canvas and canvas.winfo_exists():
+                    scrollable_frame = None
+                    for child in canvas.winfo_children():
+                        if isinstance(child, ttk.Frame):
+                            scrollable_frame = child
+                            break
+                    
+                    if scrollable_frame and scrollable_frame.winfo_exists():
+                        content_width = scrollable_frame.winfo_reqwidth()
+                        window_width = content_width + 40
+                    else:
+                        window_width = dialog.winfo_reqwidth()
+                else:
+                    window_width = dialog.winfo_reqwidth()
+                
+                window_width = int(window_width / dpi_scale)
+                
+                max_width = int(screen_width * max_width_ratio)
+                final_width = min(window_width, max_width)
+                final_width = max(final_width, 400)
+                
+                x = (screen_width - final_width) // 2
+                y = max(20, (screen_height - final_height) // 2)
+                
+                dialog.geometry(f"{final_width}x{final_height}+{x}+{y}")
+                
+                if was_hidden and dialog.winfo_exists():
+                    dialog.deiconify()
+                
+                return final_width, final_height
+                
+            except tk.TclError:
+                return None, None
         
-        if was_hidden:
-            dialog.deiconify()
-        
-        return final_width, final_height
+        dialog.after(20, perform_resize)
+        return None, None
     
     def setup_scrollable(self, parent_window, title, width=None, height=None,
-                        modal=True, resizable=True, max_width_ratio=0.9, max_height_ratio=0.95, **kwargs):
-        """Create a scrollable dialog with all standard setup"""
+                        modal=True, resizable=True, max_width_ratio=0.9, 
+                        max_height_ratio=0.95, **kwargs):
+        """Create a scrollable dialog with proper setup"""
+        
         dialog = tk.Toplevel(parent_window)
         dialog.title(title)
-        
         dialog.withdraw()
+        
+        # Ensure not topmost
+        dialog.attributes('-topmost', False)
         
         if not resizable:
             dialog.resizable(False, False)
         
         if modal:
             dialog.transient(parent_window)
+            # Don't grab - it blocks other windows
         
-        load_application_icon(dialog, self.base_dir)
+        dialog.after_idle(lambda: load_application_icon(dialog, self.base_dir))
         
-        # Auto-calculate height if not provided
         screen_width = dialog.winfo_screenwidth()
         screen_height = dialog.winfo_screenheight()
+        dpi_scale = self.get_dpi_scale(dialog)
         
         if height is None:
             height = int(screen_height * max_height_ratio)
+        else:
+            height = int(height / dpi_scale)
+            
         if width is None or width == 0:
             width = int(screen_width * 0.8)
+        else:
+            width = int(width / dpi_scale)
+        
+        width = min(width, int(screen_width * max_width_ratio))
+        height = min(height, int(screen_height * max_height_ratio))
         
         x = (screen_width - width) // 2
         y = max(20, (screen_height - height) // 2)
@@ -320,47 +416,197 @@ class WindowManager:
         main_container = tk.Frame(dialog)
         main_container.pack(fill=tk.BOTH, expand=True)
         
-        canvas = tk.Canvas(main_container, bg='white')
+        canvas = tk.Canvas(main_container, bg='white', highlightthickness=0)
         scrollbar = ttk.Scrollbar(main_container, orient="vertical", command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas)
         
-        scrollable_frame.bind("<Configure>", 
-                             lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        
+        def configure_scroll_region(event=None):
+            if canvas.winfo_exists():
+                canvas.configure(scrollregion=canvas.bbox("all"))
+                canvas_width = canvas.winfo_width()
+                if canvas_width > 1:
+                    canvas.itemconfig(canvas_window, width=canvas_width)
+        
+        scrollable_frame.bind("<Configure>", configure_scroll_region)
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(canvas_window, width=e.width))
+        
         canvas.configure(yscrollcommand=scrollbar.set)
         
-        canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
         
         cleanup_scrolling = self.ui.setup_dialog_scrolling(dialog, canvas)
         
-        
         dialog._cleanup_scrolling = cleanup_scrolling
         dialog._canvas = canvas
+        dialog._scrollable_frame = scrollable_frame
         dialog._kwargs = kwargs
+        
+        dialog.after(50, dialog.deiconify)
         
         return dialog, scrollable_frame, canvas
     
     def create_simple_dialog(self, parent, title, width=None, height=None, 
                            modal=True, hide_initially=True):
         """Create a simple non-scrollable dialog"""
+        
         dialog = tk.Toplevel(parent)
         dialog.title(title)
         
+        # Ensure not topmost
+        dialog.attributes('-topmost', False)
+        
         if modal:
             dialog.transient(parent)
+            # Don't grab - it blocks other windows
         
-        # Force full height for simple dialogs too
-        if height is None:
+        dpi_scale = self.get_dpi_scale(dialog)
+        
+        adjusted_width = None
+        adjusted_height = None
+        
+        if width is not None:
+            adjusted_width = int(width / dpi_scale)
+        
+        if height is not None:
+            adjusted_height = int(height / dpi_scale)
+        else:
             screen_height = dialog.winfo_screenheight()
-            height = int(screen_height * 0.98)
+            adjusted_height = int(screen_height * 0.98)
         
-        self.setup_window(dialog, width, height, hide_initially=hide_initially,
-                         max_width_ratio=0.98, max_height_ratio=0.98)
-        
+        final_width, final_height = self.setup_window(
+            dialog, 
+            width=adjusted_width, 
+            height=adjusted_height,
+            hide_initially=hide_initially,
+            max_width_ratio=0.98, 
+            max_height_ratio=0.98
+        )
         
         return dialog
-
+    
+    def setup_maximize_support(self, window):
+        """Setup F11 to maximize window - simple working version"""
+        
+        def toggle_maximize(event=None):
+            """F11 toggles maximize"""
+            current = window.state()
+            if current == 'zoomed':
+                window.state('normal')
+            else:
+                window.state('zoomed')
+            return "break"
+        
+        # Bind F11
+        window.bind('<F11>', toggle_maximize)
+        
+        # Bind Escape to exit maximize only
+        window.bind('<Escape>', lambda e: window.state('normal') if window.state() == 'zoomed' else None)
+        
+        return toggle_maximize
+    
+    def setup_fullscreen_support(self, window):
+        """Legacy method - just calls setup_maximize_support"""
+        return self.setup_maximize_support(window)
+    
+    def _setup_maximize_fix(self, window):
+        """Setup for Windows title bar maximize button"""
+        # For now, just let Windows handle maximize naturally
+        # Most modern Windows versions handle multi-monitor maximize correctly
+        pass
+    
+    def _fix_multi_monitor_maximize(self, window):
+        """No longer needed - Windows handles maximize correctly"""
+        pass
+    
+    def store_geometry(self, window, key):
+        """Store window geometry for later restoration"""
+        if window.winfo_exists():
+            self._stored_geometries[key] = window.geometry()
+    
+    def restore_geometry(self, window, key, delay=100):
+        """Restore previously stored geometry"""
+        if key in self._stored_geometries:
+            geometry = self._stored_geometries[key]
+            window.after(delay, lambda: window.geometry(geometry) if window.winfo_exists() else None)
+    
+    def toggle_window_maximize(self, window):
+        """Toggle maximize state for any window (multi-monitor safe)"""
+        try:
+            current_state = window.state()
+            
+            if current_state == 'zoomed':
+                # Restore to normal
+                window.state('normal')
+            else:
+                # Get current monitor
+                x = window.winfo_x()
+                screen_width = window.winfo_screenwidth()
+                
+                # Ensure window is fully on one monitor before maximizing
+                if x >= screen_width:
+                    # On second monitor
+                    window.geometry(f"+{screen_width}+0")
+                elif x + window.winfo_width() > screen_width:
+                    # Spanning monitors - move to primary
+                    window.geometry(f"+0+0")
+                
+                # Maximize to current monitor
+                window.state('zoomed')
+                
+        except Exception as e:
+            print(f"Error toggling maximize: {e}")
+            # Fallback method
+            self._manual_maximize(window)
+    
+    def _manual_maximize(self, window):
+        """Manual maximize implementation as fallback"""
+        if not hasattr(window, '_maximize_normal_geometry'):
+            window._maximize_normal_geometry = None
+        
+        if window._maximize_normal_geometry:
+            # Restore
+            window.geometry(window._maximize_normal_geometry)
+            window._maximize_normal_geometry = None
+        else:
+            # Store current
+            window._maximize_normal_geometry = window.geometry()
+            
+            # Get dimensions
+            x = window.winfo_x()
+            screen_width = window.winfo_screenwidth()
+            screen_height = window.winfo_screenheight()
+            
+            # Determine monitor
+            if x >= screen_width:
+                new_x = screen_width
+            else:
+                new_x = 0
+            
+            # Leave space for taskbar
+            taskbar_height = 40
+            usable_height = screen_height - taskbar_height
+            
+            window.geometry(f"{screen_width}x{usable_height}+{new_x}+0")
+            
+    def center_window(self, window):
+        """Center a window on screen"""
+        def do_center():
+            if window.winfo_exists():
+                window.update_idletasks()
+                width = window.winfo_width()
+                height = window.winfo_height()
+                screen_width = window.winfo_screenwidth()
+                screen_height = window.winfo_screenheight()
+                
+                x = (screen_width - width) // 2
+                y = (screen_height - height) // 2
+                
+                window.geometry(f"+{x}+{y}")
+        
+        window.after_idle(do_center)
 class TranslatorGUI:
     def __init__(self, master):
         master.configure(bg='#2b2b2b')
@@ -370,17 +616,21 @@ class TranslatorGUI:
         self.base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
         self.wm = WindowManager(self.base_dir)
         self.ui = UIHelper()
+        master.attributes('-topmost', False)
+        master.lift()
         
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        master.title("Glossarion v2.8.2 — The AI Hunter Unleashed!!")
+        master.title("Glossarion v2.8.4")
         
-        # Setup main window with responsive sizing
         self.wm.responsive_size(master, BASE_WIDTH, BASE_HEIGHT)
         master.minsize(1600, 1000)
+        self.wm.center_window(master)
         
-        master.bind('<F11>', self.toggle_fullscreen)
-        master.bind('<Escape>', lambda e: master.attributes('-fullscreen', False))
+        
+        # Setup fullscreen support
+        self.wm.setup_fullscreen_support(master)
+        
         self.payloads_dir = os.path.join(os.getcwd(), "Payloads")
         
         self._modules_loaded = self._modules_loading = False
@@ -575,7 +825,7 @@ class TranslatorGUI:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v2.8.2 - Ready to use!")
+        self.append_log("🚀 Glossarion v2.8.4 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -729,7 +979,6 @@ class TranslatorGUI:
             BASE_WIDTH,
             BASE_HEIGHT
         )
-        self.master.bind('<Configure>', self._resize_handler)
     
     def _create_log_section(self):
         """Create log text area with UIHelper"""
@@ -1265,11 +1514,23 @@ class TranslatorGUI:
                 # Use the existing function that handles all the patterns
                 chapter_num, _ = extract_chapter_number_from_filename(output_file)
                 
-                # If still 0, try to get from chapter_info
-                if chapter_num == 0 and 'actual_num' in chapter_info:
+                # Determine chapter number with proper None handling
+                chapter_num = 0
+                if 'actual_num' in chapter_info and chapter_info['actual_num'] is not None:
                     chapter_num = chapter_info['actual_num']
-                elif chapter_num == 0 and 'chapter_num' in chapter_info:
+                elif 'chapter_num' in chapter_info and chapter_info['chapter_num'] is not None:
                     chapter_num = chapter_info['chapter_num']
+                else:
+                    # Fallback: try to extract from output filename
+                    if output_file:
+                        match = re.search(r'response_(\d+)', output_file)
+                        if match:
+                            chapter_num = int(match.group(1))
+                        else:
+                            # Last resort: use a sequential number based on position
+                            chapter_num = len(chapter_display_info) + 1
+                    else:
+                        chapter_num = len(chapter_display_info) + 1
                 
                 # Get status and validate
                 status = chapter_info.get("status", "unknown")
@@ -1291,8 +1552,8 @@ class TranslatorGUI:
                     'duplicate_count': len(entries)  # Track how many duplicates
                 })
             
-            # Sort by chapter number
-            chapter_display_info.sort(key=lambda x: x['num'])
+            # Sort by chapter number with None handling
+            chapter_display_info.sort(key=lambda x: x['num'] if x['num'] is not None else 999999)
             
             # Populate listbox
             for info in chapter_display_info:
@@ -1478,6 +1739,8 @@ class TranslatorGUI:
                self.config['enable_auto_glossary'] = self.enable_auto_glossary_var.get()
                self.config['append_glossary'] = self.append_glossary_var.get()
                self.config['auto_glossary_prompt'] = self.auto_glossary_prompt
+               self.append_glossary_prompt = self.append_prompt_text.get('1.0', tk.END).strip()
+               self.config['append_glossary_prompt'] = self.append_glossary_prompt
                
                # Temperature and context limit
                try:
@@ -1678,106 +1941,163 @@ class TranslatorGUI:
                font=('TkDefaultFont', 11), fg='gray').grid(row=2, column=0, columnspan=4, sticky=tk.W, padx=20, pady=(0, 5))
 
     def _setup_auto_glossary_tab(self, parent):
-       """Setup automatic glossary tab"""
-       auto_container = tk.Frame(parent)
-       auto_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-       
-       master_toggle_frame = tk.Frame(auto_container)
-       master_toggle_frame.pack(fill=tk.X, pady=(0, 15))
-       
-       tb.Checkbutton(master_toggle_frame, text="Enable Automatic Glossary Generation", 
-                     variable=self.enable_auto_glossary_var,
-                     bootstyle="round-toggle").pack(side=tk.LEFT)
-       
-       tk.Label(master_toggle_frame, text="(Automatically extracts and translates character names/terms during translation)",
-               font=('TkDefaultFont', 10), fg='gray').pack(side=tk.LEFT, padx=(10, 0))
-       
-       append_frame = tk.Frame(auto_container)
-       append_frame.pack(fill=tk.X, pady=(0, 15))
-       
-       tb.Checkbutton(append_frame, text="Append Glossary to System Prompt", 
-                     variable=self.append_glossary_var,
-                     bootstyle="round-toggle").pack(side=tk.LEFT)
-       
-       tk.Label(append_frame, text="(Applies to ALL glossaries - manual and automatic)",
-               font=('TkDefaultFont', 10, 'italic'), fg='blue').pack(side=tk.LEFT, padx=(10, 0))
-       
-       tk.Label(auto_container, 
-               text="When enabled: Glossary entries are automatically added to your system prompt\n"
-               "When disabled: Glossary is loaded but not injected into prompts\n"
-               "This affects both translation and image processing",
-               font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 15))
-       
-       settings_container = tk.Frame(auto_container)
-       settings_container.pack(fill=tk.BOTH, expand=True)
-       
-       extraction_frame = tk.LabelFrame(settings_container, text="Targeted Extraction Settings", padx=10, pady=10)
-       extraction_frame.pack(fill=tk.X, pady=(0, 10))
-       
-       extraction_grid = tk.Frame(extraction_frame)
-       extraction_grid.pack(fill=tk.X)
-       for i in range(4):
-           extraction_grid.grid_columnconfigure(i, weight=1 if i % 2 else 0)
-       
-       settings = [
-           ("Min frequency:", self.glossary_min_frequency_var, 0, 0),
-           ("Max names:", self.glossary_max_names_var, 0, 2),
-           ("Max titles:", self.glossary_max_titles_var, 1, 0),
-           ("Translation batch:", self.glossary_batch_size_var, 1, 2)
-       ]
-       
-       for label, var, row, col in settings:
-           tk.Label(extraction_grid, text=label).grid(row=row, column=col, sticky=tk.W, padx=5, pady=5)
-           tb.Entry(extraction_grid, textvariable=var, width=8).grid(row=row, column=col+1, sticky=tk.W, padx=5, pady=5)
-       
-       help_frame = tk.Frame(extraction_frame)
-       help_frame.pack(fill=tk.X, pady=(10, 0))
-       
-       tk.Label(help_frame, text="💡 Settings Guide:", font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W)
-       help_texts = [
-           "• Min frequency: How many times a name must appear (lower = more terms)",
-           "• Max names/titles: Limits to prevent huge glossaries",
-           "• Translation batch: Terms per API call (larger = faster but may reduce quality)"
-       ]
-       for txt in help_texts:
-           tk.Label(help_frame, text=txt, font=('TkDefaultFont', 11), fg='gray').pack(anchor=tk.W, padx=20)
-       
-       auto_prompt_frame = tk.LabelFrame(settings_container, text="Extraction Prompt Template", padx=10, pady=10)
-       auto_prompt_frame.pack(fill=tk.BOTH, expand=True)
-       
-       tk.Label(auto_prompt_frame, text="Available placeholders: {language}, {min_frequency}, {max_names}, {max_titles}",
-               font=('TkDefaultFont', 9), fg='blue').pack(anchor=tk.W, pady=(0, 5))
-       
-       self.auto_prompt_text = self.ui.setup_scrollable_text(
-           auto_prompt_frame, height=12, wrap=tk.WORD
-       )
-       self.auto_prompt_text.pack(fill=tk.BOTH, expand=True)
-       self.auto_prompt_text.insert('1.0', self.auto_glossary_prompt)
-       self.auto_prompt_text.edit_reset()
-       
-       auto_prompt_controls = tk.Frame(settings_container)
-       auto_prompt_controls.pack(fill=tk.X, pady=(10, 0))
-       
-       def reset_auto_prompt():
-           if messagebox.askyesno("Reset Prompt", "Reset automatic glossary prompt to default?"):
-               self.auto_prompt_text.delete('1.0', tk.END)
-               self.auto_prompt_text.insert('1.0', self.default_auto_glossary_prompt)
-       
-       tb.Button(auto_prompt_controls, text="Reset to Default", command=reset_auto_prompt, 
-                bootstyle="warning").pack(side=tk.LEFT, padx=5)
-       
-       def update_auto_glossary_state():
-           state = tk.NORMAL if self.enable_auto_glossary_var.get() else tk.DISABLED
-           for widget in extraction_grid.winfo_children():
-               if isinstance(widget, (tb.Entry, ttk.Entry)):
-                   widget.config(state=state)
-           self.auto_prompt_text.config(state=state)
-           for widget in auto_prompt_controls.winfo_children():
-               if isinstance(widget, (tb.Button, ttk.Button)):
-                   widget.config(state=state)
-       
-       update_auto_glossary_state()
-       self.enable_auto_glossary_var.trace('w', lambda *args: update_auto_glossary_state())
+        """Setup automatic glossary tab"""
+        auto_container = tk.Frame(parent)
+        auto_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Master toggle
+        master_toggle_frame = tk.Frame(auto_container)
+        master_toggle_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        tb.Checkbutton(master_toggle_frame, text="Enable Automatic Glossary Generation", 
+                      variable=self.enable_auto_glossary_var,
+                      bootstyle="round-toggle").pack(side=tk.LEFT)
+        
+        tk.Label(master_toggle_frame, text="(Automatically extracts and translates character names/terms during translation)",
+                font=('TkDefaultFont', 10), fg='gray').pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Append glossary toggle
+        append_frame = tk.Frame(auto_container)
+        append_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        tb.Checkbutton(append_frame, text="Append Glossary to System Prompt", 
+                      variable=self.append_glossary_var,
+                      bootstyle="round-toggle").pack(side=tk.LEFT)
+        
+        tk.Label(append_frame, text="(Applies to ALL glossaries - manual and automatic)",
+                font=('TkDefaultFont', 10, 'italic'), fg='blue').pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Custom append prompt section
+        append_prompt_frame = tk.LabelFrame(auto_container, text="Glossary Append Format", padx=10, pady=10)
+        append_prompt_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        tk.Label(append_prompt_frame, text="This text will be added before the glossary entries:",
+                font=('TkDefaultFont', 10)).pack(anchor=tk.W, pady=(0, 5))
+        
+        self.append_prompt_text = self.ui.setup_scrollable_text(
+            append_prompt_frame, height=2, wrap=tk.WORD
+        )
+        self.append_prompt_text.pack(fill=tk.X)
+        
+        # Initialize append_glossary_prompt if not exists
+        if not hasattr(self, 'append_glossary_prompt'):
+            self.append_glossary_prompt = self.config.get('append_glossary_prompt', "Character/Term Glossary (use these translations consistently):")
+        
+        self.append_prompt_text.insert('1.0', self.append_glossary_prompt)
+        self.append_prompt_text.edit_reset()
+        
+        append_prompt_controls = tk.Frame(append_prompt_frame)
+        append_prompt_controls.pack(fill=tk.X, pady=(5, 0))
+        
+        def reset_append_prompt():
+            if messagebox.askyesno("Reset Prompt", "Reset to default glossary append format?"):
+                self.append_prompt_text.delete('1.0', tk.END)
+                self.append_prompt_text.insert('1.0', "Character/Term Glossary (use these translations consistently):")
+        
+        tb.Button(append_prompt_controls, text="Reset to Default", command=reset_append_prompt, 
+                 bootstyle="warning").pack(side=tk.LEFT, padx=5)
+        
+        # Extraction settings
+        settings_container = tk.Frame(auto_container)
+        settings_container.pack(fill=tk.BOTH, expand=True)
+        
+        settings_label_frame = tk.LabelFrame(settings_container, text="Targeted Extraction Settings", padx=10, pady=10)
+        settings_label_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        extraction_grid = tk.Frame(settings_label_frame)
+        extraction_grid.pack(fill=tk.X)
+        
+        # Row 1
+        tk.Label(extraction_grid, text="Min frequency:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        tb.Entry(extraction_grid, textvariable=self.glossary_min_frequency_var, width=10).grid(row=0, column=1, sticky=tk.W, padx=(0, 20))
+        
+        tk.Label(extraction_grid, text="Max names:").grid(row=0, column=2, sticky=tk.W, padx=(0, 5))
+        tb.Entry(extraction_grid, textvariable=self.glossary_max_names_var, width=10).grid(row=0, column=3, sticky=tk.W)
+        
+        # Row 2
+        tk.Label(extraction_grid, text="Max titles:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        tb.Entry(extraction_grid, textvariable=self.glossary_max_titles_var, width=10).grid(row=1, column=1, sticky=tk.W, padx=(0, 20), pady=(5, 0))
+        
+        tk.Label(extraction_grid, text="Translation batch:").grid(row=1, column=2, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        tb.Entry(extraction_grid, textvariable=self.glossary_batch_size_var, width=10).grid(row=1, column=3, sticky=tk.W, pady=(5, 0))
+        
+        # Help text
+        help_frame = tk.Frame(settings_container)
+        help_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        tk.Label(help_frame, text="💡 Settings Guide:", font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W)
+        help_texts = [
+            "• Min frequency: How many times a name must appear (lower = more terms)",
+            "• Max names/titles: Limits to prevent huge glossaries",
+            "• Translation batch: Terms per API call (larger = faster but may reduce quality)"
+        ]
+        for txt in help_texts:
+            tk.Label(help_frame, text=txt, font=('TkDefaultFont', 11), fg='gray').pack(anchor=tk.W, padx=20)
+        
+        # Auto prompt section
+        auto_prompt_frame = tk.LabelFrame(settings_container, text="Extraction Prompt Template", padx=10, pady=10)
+        auto_prompt_frame.pack(fill=tk.BOTH, expand=True)
+        
+        tk.Label(auto_prompt_frame, text="Available placeholders: {language}, {min_frequency}, {max_names}, {max_titles}",
+                font=('TkDefaultFont', 9), fg='blue').pack(anchor=tk.W, pady=(0, 5))
+        
+        self.auto_prompt_text = self.ui.setup_scrollable_text(
+            auto_prompt_frame, height=12, wrap=tk.WORD
+        )
+        self.auto_prompt_text.pack(fill=tk.BOTH, expand=True)
+        self.auto_prompt_text.insert('1.0', self.auto_glossary_prompt)
+        self.auto_prompt_text.edit_reset()
+        
+        auto_prompt_controls = tk.Frame(settings_container)
+        auto_prompt_controls.pack(fill=tk.X, pady=(10, 0))
+        
+        def reset_auto_prompt():
+            if messagebox.askyesno("Reset Prompt", "Reset automatic glossary prompt to default?"):
+                self.auto_prompt_text.delete('1.0', tk.END)
+                self.auto_prompt_text.insert('1.0', self.default_auto_glossary_prompt)
+        
+        tb.Button(auto_prompt_controls, text="Reset to Default", command=reset_auto_prompt, 
+                 bootstyle="warning").pack(side=tk.LEFT, padx=5)
+        
+        # Update states function with proper error handling
+        def update_auto_glossary_state():
+            try:
+                if not extraction_grid.winfo_exists():
+                    return
+                state = tk.NORMAL if self.enable_auto_glossary_var.get() else tk.DISABLED
+                for widget in extraction_grid.winfo_children():
+                    if isinstance(widget, (tb.Entry, ttk.Entry)):
+                        widget.config(state=state)
+                if self.auto_prompt_text.winfo_exists():
+                    self.auto_prompt_text.config(state=state)
+                for widget in auto_prompt_controls.winfo_children():
+                    if isinstance(widget, (tb.Button, ttk.Button)) and widget.winfo_exists():
+                        widget.config(state=state)
+            except tk.TclError:
+                # Widget was destroyed, ignore
+                pass
+        
+        def update_append_prompt_state():
+            try:
+                if not self.append_prompt_text.winfo_exists():
+                    return
+                state = tk.NORMAL if self.append_glossary_var.get() else tk.DISABLED
+                self.append_prompt_text.config(state=state)
+                for widget in append_prompt_controls.winfo_children():
+                    if isinstance(widget, (tb.Button, ttk.Button)) and widget.winfo_exists():
+                        widget.config(state=state)
+            except tk.TclError:
+                # Widget was destroyed, ignore
+                pass
+        
+        # Initialize states
+        update_auto_glossary_state()
+        update_append_prompt_state()
+        
+        # Add traces
+        self.enable_auto_glossary_var.trace('w', lambda *args: update_auto_glossary_state())
+        self.append_glossary_var.trace('w', lambda *args: update_append_prompt_state())
+
 
     def _setup_glossary_editor_tab(self, parent):
        """Set up the glossary editor/trimmer tab"""
@@ -2651,6 +2971,7 @@ class TranslatorGUI:
            'DISABLE_AUTO_GLOSSARY': "0" if self.enable_auto_glossary_var.get() else "1",
            'DISABLE_GLOSSARY_TRANSLATION': "0" if self.enable_auto_glossary_var.get() else "1",
            'APPEND_GLOSSARY': "1" if self.append_glossary_var.get() else "0",
+           'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt,
            'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var.get() else "0",
            'REINFORCEMENT_FREQUENCY': self.reinforcement_freq_var.get(),
            'RESET_FAILED_CHAPTERS': "1" if self.reset_failed_chapters_var.get() else "0",
@@ -3599,10 +3920,6 @@ class TranslatorGUI:
            if path.lower().endswith('.epub'):
                self.auto_load_glossary_for_file(path)
 
-    def toggle_fullscreen(self, event=None):
-       is_full = self.master.attributes('-fullscreen')
-       self.master.attributes('-fullscreen', not is_full)
-
     def toggle_api_visibility(self):
        show = self.api_key_entry.cget('show')
        self.api_key_entry.config(show='' if show == '*' else '*')
@@ -4513,7 +4830,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v2.8.2...")
+    print("🚀 Starting Glossarion v2.8.4...")
     
     # Initialize splash screen
     splash_manager = None
