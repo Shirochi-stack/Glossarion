@@ -58,7 +58,7 @@ class TranslationConfig:
         self.DISABLE_AUTO_GLOSSARY = os.getenv("DISABLE_AUTO_GLOSSARY", "0") == "1"
         self.MANUAL_GLOSSARY = os.getenv("MANUAL_GLOSSARY")
         self.RETRY_TRUNCATED = os.getenv("RETRY_TRUNCATED", "0") == "1"
-        self.RETRY_DUPLICATE_BODIES = os.getenv("RETRY_DUPLICATE_BODIES", "1") == "1"
+        self.RETRY_DUPLICATE_BODIES = os.getenv("RETRY_DUPLICATE_BODIES", "0") == "1"
         self.RETRY_TIMEOUT = os.getenv("RETRY_TIMEOUT", "0") == "1"
         self.CHUNK_TIMEOUT = int(os.getenv("CHUNK_TIMEOUT", "900"))
         self.MAX_RETRY_TOKENS = int(os.getenv("MAX_RETRY_TOKENS", "16384"))
