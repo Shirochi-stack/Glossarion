@@ -541,19 +541,16 @@ class ImprovedAIHunterDetection:
                 if chapter_info.get("status") == "completed" and chapter_info.get("output_file"):
                     # Handle both numeric and hash-based chapter keys
                     try:
-                        # Try to get actual_num first (this is what's stored in progress)
+                        # Get actual_num from progress (this is the real chapter number)
                         chapter_num = chapter_info.get("actual_num")
                         if chapter_num is None:
                             # Try chapter_num as fallback
                             chapter_num = chapter_info.get("chapter_num")
                         if chapter_num is None:
-                            # Try to parse from key if it's numeric
-                            try:
-                                chapter_num = int(chapter_key) + 1
-                            except ValueError:
-                                # Skip chapters without valid numbers
-                                continue
-                        
+                            # Skip chapters without valid numbers
+                            print(f"       ⚠️ No chapter number found for key {chapter_key}, skipping")
+                            continue
+
                         completed_chapters.append({
                             'key': chapter_key,
                             'num': chapter_num,
@@ -569,18 +566,19 @@ class ImprovedAIHunterDetection:
             
             # If no current chapter number provided, try to infer it
             if current_chapter_num is None:
-                # Try to get from progress if this chapter is already partially processed
-                chapter_key = str(idx)
-                if chapter_key in prog["chapters"]:
-                    current_chapter_num = prog["chapters"][chapter_key].get("actual_num")
-                    if current_chapter_num is None:
-                        current_chapter_num = prog["chapters"][chapter_key].get("chapter_num")
-                    print(f"    🔍 Found in progress: chapter_key={chapter_key}, actual_num={prog['chapters'][chapter_key].get('actual_num')}, chapter_num={prog['chapters'][chapter_key].get('chapter_num')}")
+                # The current chapter should be passed in, but if not, we need to find it
+                # Since we're using content hash keys, we can't use idx directly
+                print(f"    ⚠️ No current chapter number provided")
+                print(f"    📊 Current index: {idx}")
                 
-                # If still None, use index + 1 as fallback
-                if current_chapter_num is None:
-                    current_chapter_num = idx + 1
-                    print(f"    ⚠️ Using index-based chapter number: {current_chapter_num}")
+                # The current chapter number should have been passed from the wrapper
+                # If it wasn't, we have a problem
+                print(f"    ❌ ERROR: Current chapter number not provided to AI Hunter!")
+                print(f"    ❌ This indicates the wrapper function is not passing the chapter number correctly")
+                
+                # Emergency: just use a high number so we don't compare against anything
+                current_chapter_num = 999999
+                print(f"    ⚠️ Using index-based chapter number: {current_chapter_num}")
             
             print(f"\n    📚 Found {len(completed_chapters)} completed chapters in progress")
             if completed_chapters:
