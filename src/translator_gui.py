@@ -725,6 +725,7 @@ class TranslatorGUI:
         self.auto_glossary_prompt = self.config.get('auto_glossary_prompt', self.default_auto_glossary_prompt)
         self.rolling_summary_system_prompt = self.config.get('rolling_summary_system_prompt', self.default_rolling_summary_system_prompt)
         self.rolling_summary_user_prompt = self.config.get('rolling_summary_user_prompt', self.default_rolling_summary_user_prompt)
+        self.append_glossary_prompt = self.config.get('append_glossary_prompt', "Character/Term Glossary (use these translations consistently):")
         
         self.custom_glossary_fields = self.config.get('custom_glossary_fields', [])
         self.token_limit_disabled = self.config.get('token_limit_disabled', False)
@@ -1979,9 +1980,6 @@ class TranslatorGUI:
         )
         self.append_prompt_text.pack(fill=tk.X)
         
-        # Initialize append_glossary_prompt if not exists
-        if not hasattr(self, 'append_glossary_prompt'):
-            self.append_glossary_prompt = self.config.get('append_glossary_prompt', "Character/Term Glossary (use these translations consistently):")
         
         self.append_prompt_text.insert('1.0', self.append_glossary_prompt)
         self.append_prompt_text.edit_reset()
