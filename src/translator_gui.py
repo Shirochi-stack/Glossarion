@@ -2907,9 +2907,25 @@ class TranslatorGUI:
                else:
                    self.append_log("🖼️ Image translation disabled")
                
-               if hasattr(self, 'manual_glossary_path'):
-                   os.environ['MANUAL_GLOSSARY'] = self.manual_glossary_path
-                   self.append_log(f"📑 Manual Glossary: {os.path.basename(self.manual_glossary_path)}")
+               # Validate glossary path before passing to backend
+               if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path:
+                   # If this is an auto-loaded glossary, check if it matches the current file
+                   if (hasattr(self, 'auto_loaded_glossary_path') and 
+                       self.manual_glossary_path == self.auto_loaded_glossary_path):
+                       # This is an auto-loaded glossary
+                       if (hasattr(self, 'auto_loaded_glossary_for_file') and 
+                           hasattr(self, 'file_path') and 
+                           self.file_path == self.auto_loaded_glossary_for_file):
+                           # The glossary matches the current file
+                           os.environ['MANUAL_GLOSSARY'] = self.manual_glossary_path
+                           self.append_log(f"📑 Using auto-loaded glossary: {os.path.basename(self.manual_glossary_path)}")
+                       else:
+                           # The glossary is from a different file, don't use it
+                           self.append_log("📑 Skipping auto-loaded glossary (different novel)")
+                   else:
+                       # This is a manually loaded glossary, always use it
+                       os.environ['MANUAL_GLOSSARY'] = self.manual_glossary_path
+                       self.append_log(f"📑 Using manual glossary: {os.path.basename(self.manual_glossary_path)}")
                
                sys.argv = ['TransateKRtoEN.py', epub_path]
                
@@ -3918,20 +3934,39 @@ class TranslatorGUI:
         return False
 
     def browse_file(self):
-       path = filedialog.askopenfilename(
-           filetypes=[
-               ("Supported files", "*.epub;*.txt"),
-               ("EPUB files", "*.epub"),
-               ("Text files", "*.txt"),
-               ("All files", "*.*")
-           ]
-       )
-       if path:
-           self.entry_epub.delete(0, tk.END)
-           self.entry_epub.insert(0, path)
-           
-           if path.lower().endswith('.epub'):
-               self.auto_load_glossary_for_file(path)
+        path = filedialog.askopenfilename(
+            filetypes=[
+                ("Supported files", "*.epub;*.txt"),
+                ("EPUB files", "*.epub"),
+                ("Text files", "*.txt"),
+                ("All files", "*.*")
+            ]
+        )
+        if path:
+            self.entry_epub.delete(0, tk.END)
+            self.entry_epub.insert(0, path)
+            
+            # Store the selected file path for tracking
+            self.file_path = path
+            
+            # Clear previous auto-loaded glossary if switching files
+            if hasattr(self, 'auto_loaded_glossary_for_file') and path != self.auto_loaded_glossary_for_file:
+                if hasattr(self, 'auto_loaded_glossary_path') and self.manual_glossary_path == self.auto_loaded_glossary_path:
+                    self.manual_glossary_path = None
+                    self.append_log("📑 Cleared auto-loaded glossary from previous file")
+                self.auto_loaded_glossary_path = None
+                self.auto_loaded_glossary_for_file = None
+            
+            # Auto-load glossary for epub files
+            if path.lower().endswith('.epub'):
+                self.auto_load_glossary_for_file(path)
+            else:
+                # For non-epub files, clear any auto-loaded glossary
+                if hasattr(self, 'auto_loaded_glossary_path') and self.manual_glossary_path == self.auto_loaded_glossary_path:
+                    self.manual_glossary_path = None
+                    self.auto_loaded_glossary_path = None
+                    self.auto_loaded_glossary_for_file = None
+                    self.append_log("📑 Cleared auto-loaded glossary (non-EPUB file selected)")
 
     def toggle_api_visibility(self):
        show = self.api_key_entry.cget('show')
@@ -4742,6 +4777,11 @@ class TranslatorGUI:
         )
         if not path:
             return
+        
+        # Clear auto-loaded tracking when manually loading
+        self.auto_loaded_glossary_path = None
+        self.auto_loaded_glossary_for_file = None
+        
         self.manual_glossary_path = path
         self.append_log(f"📑 Loaded manual glossary: {path}")
         
