@@ -1944,7 +1944,7 @@ class TranslationProcessor:
        
     def _check_duplicate_cascading(self, result, idx, prog, out):
         """Cascading detection - basic first, then AI Hunter for borderline cases"""
-        # Step 1: Basic detection
+        # Step 1: Basic 
         is_duplicate_basic, similarity_basic = self._check_duplicate_basic(result, idx, prog, out)
         
         if is_duplicate_basic:
@@ -4018,14 +4018,17 @@ def build_system_prompt(user_prompt, glossary_path):
             formatted_entries = format_glossary_for_prompt(glossary_data)
             
             if formatted_entries:
-                if isinstance(formatted_entries, dict):
-                    glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
-                    if system:
-                        system += "\n\n"
-                    system += (
-                        "Character/Term Glossary (use these translations consistently):\n"
-                        f"{glossary_block}"
-                    )
+                glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
+                if system:
+                    system += "\n\n"
+                
+                # Get custom prompt, fallback to default if empty
+                custom_prompt = os.getenv("APPEND_GLOSSARY_PROMPT", "Character/Term Glossary (use these translations consistently):").strip()
+                if not custom_prompt:
+                    custom_prompt = "Character/Term Glossary (use these translations consistently):"
+                
+                system += f"{custom_prompt}\n{glossary_block}"
+                    
         except Exception as e:
             print(f"Warning: Could not load glossary: {e}")
     
