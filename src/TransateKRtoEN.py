@@ -4782,7 +4782,20 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Create a wrapper to match the expected signature
                 def enhanced_duplicate_check(self, result, idx, prog, out):
-                    return ai_hunter.detect_duplicate_ai_hunter_enhanced(result, idx, prog, out)
+                    # Try to get the actual chapter number from progress
+                    actual_num = None
+                    
+                    # Look for the chapter being processed
+                    for ch_key, ch_info in prog.get("chapters", {}).items():
+                        if ch_info.get("chapter_idx") == idx:
+                            actual_num = ch_info.get("actual_num", idx + 1)
+                            break
+                    
+                    # Fallback to idx+1 if not found
+                    if not actual_num:
+                        actual_num = idx + 1
+                    
+                    return ai_hunter.detect_duplicate_ai_hunter_enhanced(result, idx, prog, out, actual_num)
                 
                 # Bind the enhanced method to the processor instance
                 translation_processor.check_duplicate_content = enhanced_duplicate_check.__get__(translation_processor, TranslationProcessor)
