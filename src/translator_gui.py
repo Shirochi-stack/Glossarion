@@ -636,6 +636,11 @@ class TranslatorGUI:
         self._modules_loaded = self._modules_loading = False
         self.stop_requested = False
         self.translation_thread = self.glossary_thread = self.qa_thread = self.epub_thread = None
+
+        # Glossary tracking
+        self.manual_glossary_path = None
+        self.auto_loaded_glossary_path = None
+        self.auto_loaded_glossary_for_file = None
         
         self.master.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -3871,36 +3876,46 @@ class TranslatorGUI:
        self.log_text.see(tk.INSERT)
 
     def auto_load_glossary_for_file(self, file_path):
-       """Automatically load glossary if it exists in the output folder"""
-       if not file_path or not os.path.isfile(file_path):
-           return
-       
-       if not file_path.lower().endswith('.epub'):
-           return
-       
-       file_base = os.path.splitext(os.path.basename(file_path))[0]
-       output_dir = file_base
-       
-       glossary_candidates = [
-           os.path.join(output_dir, "glossary.json"),
-           os.path.join(output_dir, f"{file_base}_glossary.json"),
-           os.path.join(output_dir, "Glossary", f"{file_base}_glossary.json")
-       ]
-       
-       for glossary_path in glossary_candidates:
-           if os.path.exists(glossary_path):
-               try:
-                   with open(glossary_path, 'r', encoding='utf-8') as f:
-                       data = json.load(f)
-                   
-                   if data:
-                       self.manual_glossary_path = glossary_path
-                       self.append_log(f"📑 Auto-loaded glossary: {os.path.basename(glossary_path)}")
-                       return True
-               except Exception:
-                   continue
-       
-       return False
+        """Automatically load glossary if it exists in the output folder"""
+        # Clear previous auto-loaded glossary if switching files
+        if file_path != self.auto_loaded_glossary_for_file:
+            if self.auto_loaded_glossary_path and self.manual_glossary_path == self.auto_loaded_glossary_path:
+                self.manual_glossary_path = None
+                self.append_log("📑 Cleared auto-loaded glossary from previous novel")
+            self.auto_loaded_glossary_path = None
+            self.auto_loaded_glossary_for_file = None
+        
+        if not file_path or not os.path.isfile(file_path):
+            return
+        
+        if not file_path.lower().endswith('.epub'):
+            return
+        
+        file_base = os.path.splitext(os.path.basename(file_path))[0]
+        output_dir = file_base
+        
+        glossary_candidates = [
+            os.path.join(output_dir, "glossary.json"),
+            os.path.join(output_dir, f"{file_base}_glossary.json"),
+            os.path.join(output_dir, "Glossary", f"{file_base}_glossary.json")
+        ]
+        
+        for glossary_path in glossary_candidates:
+            if os.path.exists(glossary_path):
+                try:
+                    with open(glossary_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    
+                    if data:
+                        self.manual_glossary_path = glossary_path
+                        self.auto_loaded_glossary_path = glossary_path
+                        self.auto_loaded_glossary_for_file = file_path
+                        self.append_log(f"📑 Auto-loaded glossary for {file_base}: {os.path.basename(glossary_path)}")
+                        return True
+                except Exception:
+                    continue
+        
+        return False
 
     def browse_file(self):
        path = filedialog.askopenfilename(
