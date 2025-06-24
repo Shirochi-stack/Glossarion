@@ -4065,7 +4065,7 @@ class TranslatorGUI:
            "Other Settings",
            width=0,
            height=None,
-           max_width_ratio=0.7,
+           max_width_ratio=0.75,
            max_height_ratio=0.8
        )
        
