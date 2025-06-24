@@ -731,9 +731,7 @@ class TranslatorGUI:
         
         # Create all config variables with helper
         def create_var(var_type, key, default):
-            config_value = self.config.get(key, default)
-            print(f"🔍 DEBUG: Loading {key} = {config_value} (default: {default})")
-            return var_type(value=config_value)
+            return var_type(value=self.config.get(key, default))
                 
         # Boolean variables
         bool_vars = [
