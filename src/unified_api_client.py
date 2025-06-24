@@ -527,39 +527,99 @@ class UnifiedClient:
         return params
         
     def _send_openai(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to OpenAI API"""
-        try:
-            # Build parameters based on model type
-            params = self._build_openai_params(messages, temperature, max_tokens)
+        """Send request to OpenAI API with retry logic that respects GUI delay settings"""
+        max_retries = 3
+        
+        # Get the API delay from environment (set by GUI)
+        api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+        
+        for attempt in range(max_retries):
+            try:
+                # Build parameters based on model type
+                params = self._build_openai_params(messages, temperature, max_tokens)
+                
+                # Make API call
+                resp = openai.chat.completions.create(**params)
+                
+                # Check if response is None or invalid
+                if resp is None:
+                    if attempt < max_retries - 1:
+                        logger.warning(f"OpenAI API returned None response, retry {attempt + 1}/{max_retries}")
+                        # Use the GUI's configured delay for retries
+                        time.sleep(api_delay)
+                        continue
+                    else:
+                        raise UnifiedClientError("OpenAI API returned None response after all retries")
+                
+                if not hasattr(resp, 'choices') or not resp.choices:
+                    logger.error(f"OpenAI API returned invalid response: {resp}")
+                    raise UnifiedClientError(f"OpenAI API returned invalid response structure")
+                
+                choice = resp.choices[0]
+                
+                # Validate choice has required attributes
+                if not hasattr(choice, 'message') or not hasattr(choice.message, 'content'):
+                    logger.error(f"OpenAI API choice missing message or content: {choice}")
+                    raise UnifiedClientError(f"OpenAI API response missing message content")
+                
+                content = choice.message.content
+                finish_reason = choice.finish_reason
+                
+                # Extract usage if available
+                usage = None
+                if hasattr(resp, 'usage') and resp.usage:
+                    usage = {
+                        'prompt_tokens': resp.usage.prompt_tokens,
+                        'completion_tokens': resp.usage.completion_tokens,
+                        'total_tokens': resp.usage.total_tokens
+                    }
+                
+                self._save_response(content, response_name)
+                
+                return UnifiedResponse(
+                    content=content,
+                    finish_reason=finish_reason,
+                    usage=usage,
+                    raw_response=resp
+                )
+                
+            except OpenAIError as e:
+                # Specific OpenAI SDK errors
+                error_str = str(e)
+                
+                # Check for rate limiting
+                if "rate limit" in error_str.lower() or "429" in error_str:
+                    if attempt < max_retries - 1:
+                        # For rate limits, wait longer (10x the normal delay)
+                        wait_time = api_delay * 10
+                        logger.warning(f"OpenAI rate limit hit, waiting {wait_time}s before retry {attempt + 1}/{max_retries}")
+                        time.sleep(wait_time)
+                        continue
+                
+                # For other errors, use normal delay
+                if attempt < max_retries - 1:
+                    logger.warning(f"OpenAI SDK error (attempt {attempt + 1}/{max_retries}): {e}")
+                    time.sleep(api_delay)
+                    continue
+                    
+                logger.error(f"OpenAI SDK error after all retries: {e}")
+                raise UnifiedClientError(f"OpenAI SDK error: {e}")
+                
+            except UnifiedClientError:
+                # Re-raise our custom errors without retry
+                raise
+                
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"OpenAI API error (attempt {attempt + 1}/{max_retries}): {e}")
+                    time.sleep(api_delay)
+                    continue
+                logger.error(f"OpenAI API error after all retries: {e}")
+                raise UnifiedClientError(f"OpenAI API error: {e}")
+        
+        # Should never reach here, but just in case
+        raise UnifiedClientError("OpenAI API failed after all retry attempts")
             
-            # Make API call
-            resp = openai.chat.completions.create(**params)
-            
-            choice = resp.choices[0]
-            content = choice.message.content
-            finish_reason = choice.finish_reason
-            
-            # Extract usage if available
-            usage = None
-            if hasattr(resp, 'usage'):
-                usage = {
-                    'prompt_tokens': resp.usage.prompt_tokens,
-                    'completion_tokens': resp.usage.completion_tokens,
-                    'total_tokens': resp.usage.total_tokens
-                }
-            
-            self._save_response(content, response_name)
-            
-            return UnifiedResponse(
-                content=content,
-                finish_reason=finish_reason,
-                usage=usage,
-                raw_response=resp
-            )
-            
-        except Exception as e:
-            logger.error(f"OpenAI API error: {e}")
-            raise UnifiedClientError(f"OpenAI API error: {e}")
     def _send_gemini(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to Gemini API with simple formatting (no complex restructuring)"""
         # Simple Gemini formatting - just concatenate messages
