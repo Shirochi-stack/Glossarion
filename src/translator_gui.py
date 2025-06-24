@@ -343,7 +343,7 @@ class WindowManager:
                     
                     if scrollable_frame and scrollable_frame.winfo_exists():
                         content_width = scrollable_frame.winfo_reqwidth()
-                        window_width = content_width + 40
+                        window_width = content_width + 120
                     else:
                         window_width = dialog.winfo_reqwidth()
                 else:
@@ -4065,7 +4065,7 @@ class TranslatorGUI:
            "Other Settings",
            width=0,
            height=None,
-           max_width_ratio=0.75,
+           max_width_ratio=0.7,
            max_height_ratio=0.8
        )
        
