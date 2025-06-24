@@ -2526,7 +2526,9 @@ class BatchTranslationProcessor:
             ai_features = None
             
             # Extract and save AI features for future duplicate detection
-            if hasattr(self.config, 'DUPLICATE_DETECTION_MODE') and self.config.DUPLICATE_DETECTION_MODE in ['ai-hunter', 'cascading']:
+            if (self.config.RETRY_DUPLICATE_BODIES and 
+                hasattr(self.config, 'DUPLICATE_DETECTION_MODE') and 
+                self.config.DUPLICATE_DETECTION_MODE in ['ai-hunter', 'cascading']):
                 try:
                     # Extract features from the translated content
                     cleaned_text = re.sub(r'<[^>]+>', '', cleaned).strip()
