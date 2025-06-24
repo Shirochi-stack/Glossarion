@@ -1,5538 +1,5000 @@
-# -*- coding: utf-8 -*-
-import json
-import logging
-import shutil
-import threading
-import queue
-import os, sys, io, zipfile, time, re, mimetypes, subprocess, tiktoken
-import builtins
-import ebooklib
-from ebooklib import epub
-from bs4 import BeautifulSoup
-from collections import Counter
-from unified_api_client import UnifiedClient, UnifiedClientError
-import hashlib
-import unicodedata
-from difflib import SequenceMatcher
-import unicodedata
-import re
-import time
-from history_manager import HistoryManager
-from chapter_splitter import ChapterSplitter
-from image_translator import ImageTranslator
-from typing import Dict, List, Tuple 
-from txt_processor import TextFileProcessor
-from ai_hunter_enhanced import ImprovedAIHunterDetection
+# Standard Library
+import io, json, logging, math, os, shutil, sys, threading, time, re
+import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
+from ai_hunter_enhanced import AIHunterConfigGUI, ImprovedAIHunterDetection
 
-def get_chapter_terminology(is_text_file, chapter_data=None):
-    """Get appropriate terminology (Chapter/Section) based on source type"""
-    if is_text_file:
-        return "Section"
-    if chapter_data:
-        if chapter_data.get('filename', '').endswith('.txt') or chapter_data.get('is_chunk', False):
-            return "Section"
-    return "Chapter"
-# =====================================================
-# CONFIGURATION AND ENVIRONMENT MANAGEMENT
-# =====================================================
-class TranslationConfig:
-    """Centralized configuration management"""
-    def __init__(self):
-        self.MODEL = os.getenv("MODEL", "gemini-1.5-flash")
-        self.input_path = os.getenv("input_path", "default.epub")
-        self.PROFILE_NAME = os.getenv("PROFILE_NAME", "korean").lower()
-        self.CONTEXTUAL = os.getenv("CONTEXTUAL", "1") == "1"
-        self.DELAY = int(os.getenv("SEND_INTERVAL_SECONDS", "2"))
-        self.SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "").strip()
-        self.REMOVE_AI_ARTIFACTS = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
-        self.TEMP = float(os.getenv("TRANSLATION_TEMPERATURE", "0.3"))
-        self.HIST_LIMIT = int(os.getenv("TRANSLATION_HISTORY_LIMIT", "20"))
-        self.MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
-        self.EMERGENCY_RESTORE = os.getenv("EMERGENCY_PARAGRAPH_RESTORE", "1") == "1"
-        self.BATCH_TRANSLATION = os.getenv("BATCH_TRANSLATION", "0") == "1"  
-        self.BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
-        self.ENABLE_IMAGE_TRANSLATION = os.getenv("ENABLE_IMAGE_TRANSLATION", "1") == "1"
-        self.TRANSLATE_BOOK_TITLE = os.getenv("TRANSLATE_BOOK_TITLE", "1") == "1"
-        self.DISABLE_ZERO_DETECTION = os.getenv("DISABLE_ZERO_DETECTION", "0") == "1"
-        self.COMPREHENSIVE_EXTRACTION = os.getenv("COMPREHENSIVE_EXTRACTION", "0") == "1"
-        self.DISABLE_AUTO_GLOSSARY = os.getenv("DISABLE_AUTO_GLOSSARY", "0") == "1"
-        self.MANUAL_GLOSSARY = os.getenv("MANUAL_GLOSSARY")
-        self.RETRY_TRUNCATED = os.getenv("RETRY_TRUNCATED", "0") == "1"
-        self.RETRY_DUPLICATE_BODIES = os.getenv("RETRY_DUPLICATE_BODIES", "0") == "1"
-        self.RETRY_TIMEOUT = os.getenv("RETRY_TIMEOUT", "0") == "1"
-        self.CHUNK_TIMEOUT = int(os.getenv("CHUNK_TIMEOUT", "900"))
-        self.MAX_RETRY_TOKENS = int(os.getenv("MAX_RETRY_TOKENS", "16384"))
-        self.DUPLICATE_LOOKBACK_CHAPTERS = int(os.getenv("DUPLICATE_LOOKBACK_CHAPTERS", "3"))
-        self.USE_ROLLING_SUMMARY = os.getenv("USE_ROLLING_SUMMARY", "0") == "1"
-        self.ROLLING_SUMMARY_EXCHANGES = int(os.getenv("ROLLING_SUMMARY_EXCHANGES", "5"))
-        self.ROLLING_SUMMARY_MODE = os.getenv("ROLLING_SUMMARY_MODE", "append")
-        self.DUPLICATE_DETECTION_MODE = os.getenv("DUPLICATE_DETECTION_MODE", "basic")
-        self.AI_HUNTER_THRESHOLD = int(os.getenv("AI_HUNTER_THRESHOLD", "75"))
-        self.TRANSLATION_HISTORY_ROLLING = os.getenv("TRANSLATION_HISTORY_ROLLING", "0") == "1"
-        self.API_KEY = (os.getenv("API_KEY") or 
-                       os.getenv("OPENAI_API_KEY") or 
-                       os.getenv("OPENAI_OR_Gemini_API_KEY") or
-                       os.getenv("GEMINI_API_KEY"))
-        # NEW: Simple chapter number offset
-        self.CHAPTER_NUMBER_OFFSET = int(os.getenv("CHAPTER_NUMBER_OFFSET", "0")) 
-        
-# =====================================================
-# UNIFIED PATTERNS AND CONSTANTS
-# =====================================================
-class PatternManager:
-    """Centralized pattern management"""
-    
-    CHAPTER_PATTERNS = [
-        # English patterns
-        (r'chapter[\s_-]*(\d+)', re.IGNORECASE, 'english_chapter'),
-        (r'\bch\.?\s*(\d+)\b', re.IGNORECASE, 'english_ch'),
-        (r'part[\s_-]*(\d+)', re.IGNORECASE, 'english_part'),
-        (r'episode[\s_-]*(\d+)', re.IGNORECASE, 'english_episode'),
-        # Chinese patterns
-        (r'第\s*(\d+)\s*[章节話话回]', 0, 'chinese_chapter'),
-        (r'第\s*([一二三四五六七八九十百千万]+)\s*[章节話话回]', 0, 'chinese_chapter_cn'),
-        (r'(\d+)[章节話话回]', 0, 'chinese_short'),
-        # Japanese patterns
-        (r'第\s*(\d+)\s*話', 0, 'japanese_wa'),
-        (r'第\s*(\d+)\s*章', 0, 'japanese_chapter'),
-        (r'その\s*(\d+)', 0, 'japanese_sono'),
-        (r'(\d+)話目', 0, 'japanese_wame'),
-        # Korean patterns
-        (r'제\s*(\d+)\s*[장화권부편]', 0, 'korean_chapter'),
-        (r'(\d+)\s*[장화권부편]', 0, 'korean_short'),
-        (r'에피소드\s*(\d+)', 0, 'korean_episode'),
-        # Generic numeric patterns
-        (r'^\s*(\d+)\s*[-–—.\:]', re.MULTILINE, 'generic_numbered'),
-        (r'_(\d+)\.x?html?$', re.IGNORECASE, 'filename_number'),
-        (r'/(\d+)\.x?html?$', re.IGNORECASE, 'path_number'),
-        (r'(\d+)', 0, 'any_number'),
-    ]
-    
-    FILENAME_EXTRACT_PATTERNS = [
-        # IMPORTANT: More specific patterns MUST come first
-        r'^\d{4}_(\d+)\.x?html?$',  # "0000_1.xhtml" - extracts 1, not 0000
-        r'^\d+_(\d+)[_\.]',         # Any digits followed by underscore then capture next digits
-        r'^(\d+)[_\.]',             # Standard: "0249_" or "0249."
-        r'response_(\d+)_',         # Standard pattern: response_001_
-        r'response_(\d+)\.',        # Pattern: response_001.
-        r'(\d{3,5})[_\.]',          # 3-5 digit pattern with padding
-        r'[Cc]hapter[_\s]*(\d+)',   # Chapter word pattern
-        r'[Cc]h[_\s]*(\d+)',        # Ch abbreviation
-        r'No(\d+)',                 # No prefix
-        r'第(\d+)[章话回]',          # Chinese chapter markers
-        r'_(\d+)(?:_|\.|$)',        # Number between underscores or at end
-        r'^(\d+)(?:_|\.|$)',        # Starting with number
-        r'(\d+)',                   # Any number (fallback)
-    ]
-    
-    CJK_HONORIFICS = {
-        'korean': ['님', '씨', '선배', '형', '누나', '언니', '오빠', '선생님', '교수님', '사장님', '회장님'],
-        'japanese': ['さん', 'ちゃん', '君', 'くん', '様', 'さま', '先生', 'せんせい', '殿', 'どの', '先輩', 'せんぱい'],
-        'chinese': ['先生', '小姐', '夫人', '公子', '大人', '老师', '师父', '师傅', '同志', '同学'],
-        'english': [
-            ' san', ' chan', ' kun', ' sama', ' sensei', ' senpai', ' dono', ' shi', ' tan', ' chin',
-            '-ssi', '-nim', '-ah', '-ya', '-hyung', '-hyungnim', '-oppa', '-unnie', '-noona', 
-            '-sunbae', '-sunbaenim', '-hubae', '-seonsaeng', '-seonsaengnim', '-gun', '-yang',
-            '-xiong', '-di', '-ge', '-gege', '-didi', '-jie', '-jiejie', '-meimei', '-shixiong',
-            '-shidi', '-shijie', '-shimei', '-gongzi', '-guniang', '-xiaojie', '-daren', '-qianbei',
-            '-daoyou', '-zhanglao', '-shibo', '-shishu', '-shifu', '-laoshi', '-xiansheng'
-        ]
-    }
-    
-    TITLE_PATTERNS = {
-        'korean': [
-            r'\b(왕|여왕|왕자|공주|황제|황후|대왕|대공|공작|백작|자작|남작|기사|장군|대장|원수|제독|함장|대신|재상|총리|대통령|시장|지사|검사|판사|변호사|의사|박사|교수|신부|목사|스님|도사)\b',
-            r'\b(폐하|전하|각하|예하|님|대감|영감|나리|도련님|아가씨|부인|선생)\b'
-        ],
-        'japanese': [
-            r'\b(王|女王|王子|姫|皇帝|皇后|天皇|皇太子|大王|大公|公爵|伯爵|子爵|男爵|騎士|将軍|大将|元帥|提督|艦長|大臣|宰相|総理|大統領|市長|知事|検事|裁判官|弁護士|医者|博士|教授|神父|牧師|僧侶|道士)\b',
-            r'\b(陛下|殿下|閣下|猊下|様|大人|殿|卿|君|氏)\b'
-        ],
-        'chinese': [
-            r'\b(王|女王|王子|公主|皇帝|皇后|大王|大公|公爵|伯爵|子爵|男爵|骑士|将军|大将|元帅|提督|舰长|大臣|宰相|总理|大总统|市长|知事|检察官|法官|律师|医生|博士|教授|神父|牧师|和尚|道士)\b',
-            r'\b(陛下|殿下|阁下|大人|老爷|夫人|小姐|公子|少爷|姑娘|先生)\b'
-        ],
-        'english': [
-            r'\b(King|Queen|Prince|Princess|Emperor|Empress|Duke|Duchess|Marquis|Marquess|Earl|Count|Countess|Viscount|Viscountess|Baron|Baroness|Knight|Lord|Lady|Sir|Dame|General|Admiral|Captain|Major|Colonel|Commander|Lieutenant|Sergeant|Minister|Chancellor|President|Mayor|Governor|Judge|Doctor|Professor|Father|Reverend|Master|Mistress)\b',
-            r'\b(His|Her|Your|Their)\s+(Majesty|Highness|Grace|Excellency|Honor|Worship|Lordship|Ladyship)\b'
-        ]
-    }
-    
-    CHINESE_NUMS = {
-        '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
-        '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
-        '十一': 11, '十二': 12, '十三': 13, '十四': 14, '十五': 15,
-        '十六': 16, '十七': 17, '十八': 18, '十九': 19, '二十': 20,
-        '二十一': 21, '二十二': 22, '二十三': 23, '二十四': 24, '二十五': 25,
-        '三十': 30, '四十': 40, '五十': 50, '六十': 60,
-        '七十': 70, '八十': 80, '九十': 90, '百': 100,
-    }
-    
-    COMMON_WORDS = {
-        '이', '그', '저', '우리', '너희', '자기', '당신', '여기', '거기', '저기',
-        '오늘', '내일', '어제', '지금', '아까', '나중', '먼저', '다음', '마지막',
-        '모든', '어떤', '무슨', '이런', '그런', '저런', '같은', '다른', '새로운',
-        '하다', '있다', '없다', '되다', '하는', '있는', '없는', '되는',
-        '것', '수', '때', '년', '월', '일', '시', '분', '초',
-        '은', '는', '이', '가', '을', '를', '에', '의', '와', '과', '도', '만',
-        '에서', '으로', '로', '까지', '부터', '에게', '한테', '께', '께서',
-        'この', 'その', 'あの', 'どの', 'これ', 'それ', 'あれ', 'どれ',
-        'わたし', 'あなた', 'かれ', 'かのじょ', 'わたしたち', 'あなたたち',
-        'きょう', 'あした', 'きのう', 'いま', 'あとで', 'まえ', 'つぎ',
-        'の', 'は', 'が', 'を', 'に', 'で', 'と', 'も', 'や', 'から', 'まで',
-        '这', '那', '哪', '这个', '那个', '哪个', '这里', '那里', '哪里',
-        '我', '你', '他', '她', '它', '我们', '你们', '他们', '她们',
-        '今天', '明天', '昨天', '现在', '刚才', '以后', '以前', '后来',
-        '的', '了', '在', '是', '有', '和', '与', '或', '但', '因为', '所以',
-        '一', '二', '三', '四', '五', '六', '七', '八', '九', '十',
-        '1', '2', '3', '4', '5', '6', '7', '8', '9', '0',
-    }
+# Third-Party
+import ttkbootstrap as tb
+from ttkbootstrap.constants import *
+from splash_utils import SplashManager
 
-# =====================================================
-# CHUNK CONTEXT MANAGER (unchanged - already optimal)
-# =====================================================
-class ChunkContextManager:
-    """Manage context within a chapter separate from history"""
-    def __init__(self):
-        self.current_chunks = []
-        self.chapter_num = None
-        self.chapter_title = None
-        
-    def start_chapter(self, chapter_num, chapter_title):
-        """Start a new chapter context"""
-        self.current_chunks = []
-        self.chapter_num = chapter_num
-        self.chapter_title = chapter_title
-        
-    def add_chunk(self, user_content, assistant_content, chunk_idx, total_chunks):
-        """Add a chunk to the current chapter context"""
-        self.current_chunks.append({
-            "user": user_content,
-            "assistant": assistant_content,
-            "chunk_idx": chunk_idx,
-            "total_chunks": total_chunks
-        })
-    
-    def get_context_messages(self, limit=3):
-        """Get last N chunks as messages for API context"""
-        context = []
-        for chunk in self.current_chunks[-limit:]:
-            context.extend([
-                {"role": "user", "content": chunk["user"]},
-                {"role": "assistant", "content": chunk["assistant"]}
-            ])
-        return context
-    
-    def get_summary_for_history(self):
-        """Create a summary representation for the history"""
-        if not self.current_chunks:
-            return None, None
-            
-        total_chunks = len(self.current_chunks)
-        
-        user_summary = f"[Chapter {self.chapter_num}: {self.chapter_title}]\n"
-        user_summary += f"[{total_chunks} chunks processed]\n"
-        if self.current_chunks:
-            first_chunk = self.current_chunks[0]['user']
-            if len(first_chunk) > 500:
-                user_summary += first_chunk[:500] + "..."
-            else:
-                user_summary += first_chunk
-        
-        assistant_summary = f"[Chapter {self.chapter_num} Translation Complete]\n"
-        assistant_summary += f"[Translated in {total_chunks} chunks]\n"
-        if self.current_chunks:
-            samples = []
-            first_trans = self.current_chunks[0]['assistant']
-            samples.append(f"Beginning: {first_trans[:200]}..." if len(first_trans) > 200 else f"Beginning: {first_trans}")
-            
-            if total_chunks > 2:
-                mid_idx = total_chunks // 2
-                mid_trans = self.current_chunks[mid_idx]['assistant']
-                samples.append(f"Middle: {mid_trans[:200]}..." if len(mid_trans) > 200 else f"Middle: {mid_trans}")
-            
-            if total_chunks > 1:
-                last_trans = self.current_chunks[-1]['assistant']
-                samples.append(f"End: {last_trans[:200]}..." if len(last_trans) > 200 else f"End: {last_trans}")
-            
-            assistant_summary += "\n".join(samples)
-        
-        return user_summary, assistant_summary
-    
-    def clear(self):
-        """Clear the current chapter context"""
-        self.current_chunks = []
-        self.chapter_num = None 
-        self.chapter_title = None
+if getattr(sys, 'frozen', False):
+    try:
+        import multiprocessing
+        multiprocessing.freeze_support()
+    except: pass
 
-# =====================================================
-# UNIFIED UTILITIES
-# =====================================================
-class FileUtilities:
-    """Utilities for file and path operations"""
-    
-    @staticmethod
-    def extract_actual_chapter_number(chapter, patterns=None, config=None):
-        """Extract actual chapter number from filename
-        
-        Args:
-            chapter: Chapter dict containing metadata
-            patterns: Optional list of regex patterns to use
-            config: Optional config object to check DISABLE_ZERO_DETECTION
-        
-        Returns:
-            int or float: The actual chapter number (raw from file, no adjustments)
-        """
-        if patterns is None:
-            patterns = PatternManager.FILENAME_EXTRACT_PATTERNS
-        
-        actual_num = None
-        
-        # IMPORTANT: Check if this is a pre-split TEXT FILE chunk first
-        if (chapter.get('is_chunk', False) and 
-            'num' in chapter and 
-            isinstance(chapter['num'], float) and
-            chapter.get('filename', '').endswith('.txt')):
-            # For text file chunks only, preserve the decimal number
-            return chapter['num']  # This will be 1.1, 1.2, etc.
-        
-        # Try to extract from original basename first
-        if chapter.get('original_basename'):
-            basename = chapter['original_basename']
-            
-            #print(f"[DEBUG] Checking basename: {basename}")
-            
-            # Check if decimal chapters are enabled for EPUBs
-            enable_decimal = os.getenv('ENABLE_DECIMAL_CHAPTERS', '0') == '1'
-            
-            # For EPUBs, only check decimal patterns if the toggle is enabled
-            if enable_decimal:
-                # Check for decimal chapter numbers (e.g., Chapter_1.1, 1.2.html)
-                decimal_match = re.search(r'(\d+)\.(\d+)', basename)
-                if decimal_match:
-                    # Return as float for decimal chapters
-                    actual_num = float(f"{decimal_match.group(1)}.{decimal_match.group(2)}")
-                    #print(f"[DEBUG] DECIMAL pattern matched: {decimal_match.group(0)} -> extracted {actual_num}")
-                    return actual_num
-            
-            # FIRST: Check if this is a "XXXX_Y" format (like 0000_1, 0105_106)
-            # This pattern MUST be checked before any other pattern
-            prefix_suffix_match = re.match(r'^(\d+)_(\d+)', basename)
-            if prefix_suffix_match:
-                # Extract the number AFTER the underscore
-                actual_num = int(prefix_suffix_match.group(2))
-                #print(f"[DEBUG] PREFIX_SUFFIX pattern matched: {prefix_suffix_match.group(0)} -> extracted {actual_num} (after underscore)")
-                return actual_num
-            
-            # Only check other patterns if the prefix_suffix didn't match
-            for pattern in patterns:
-                # Skip patterns that would incorrectly match our XXXX_Y format
-                if pattern in [r'^(\d+)[_\.]', r'(\d{3,5})[_\.]', r'^(\d+)_']:
-                    continue
-                    
-                match = re.search(pattern, basename, re.IGNORECASE)
-                if match:
-                    actual_num = int(match.group(1))
-                    #print(f"[DEBUG] Pattern matched in basename -> extracted {actual_num}")
-                    break
-        
-        # If not found in basename, try filename
-        if actual_num is None and 'filename' in chapter:
-            filename = chapter['filename']
-            #print(f"[DEBUG] Checking filename: {filename}")
-            
-            for pattern in patterns:
-                # Skip the XXXX_Y patterns for filename
-                if pattern in [r'^\d{4}_(\d+)\.x?html?$', r'^\d+_(\d+)[_\.]', r'(\d{3,5})[_\.]', r'^(\d+)_']:
-                    continue
-                    
-                match = re.search(pattern, filename, re.IGNORECASE)
-                if match:
-                    actual_num = int(match.group(1))
-                    #print(f"[DEBUG] Pattern matched in filename -> extracted {actual_num}")
-                    break
-        
-        # Final fallback to chapter num
-        if actual_num is None:
-            actual_num = chapter.get("num", 0)
-            #print(f"[DEBUG] No pattern matched, using chapter num: {actual_num}")
-        
-        # Return raw number - adjustments should be done by caller
-        return actual_num
-    
-    @staticmethod
-    def create_chapter_filename(chapter, actual_num=None):
-        """Create consistent chapter filename"""
-        # Check if we should use header as output name
-        use_header_output = os.getenv("USE_HEADER_AS_OUTPUT", "0") == "1"
-        
-        # Check if this is for a text file
-        is_text_file = chapter.get('filename', '').endswith('.txt') or chapter.get('is_chunk', False)
-        
-        if use_header_output and chapter.get('title'):
-            safe_title = make_safe_filename(chapter['title'], actual_num or chapter.get('num', 0))
-            if safe_title and safe_title != f"chapter_{actual_num or chapter.get('num', 0):03d}":
-                if is_text_file:
-                    return f"response_{safe_title}.txt"
-                else:
-                    return f"response_{safe_title}.html"
-        
-        # Check if decimal chapters are enabled and this is an EPUB with decimal chapter
-        enable_decimal = os.getenv('ENABLE_DECIMAL_CHAPTERS', '0') == '1'
-        
-        # For EPUBs with decimal detection enabled
-        if enable_decimal and 'original_basename' in chapter and chapter['original_basename']:
-            basename = chapter['original_basename']
-            decimal_match = re.search(r'(\d+)\.(\d+)', basename)
-            if decimal_match:
-                # Create a modified basename that preserves the decimal
-                base = os.path.splitext(basename)[0]
-                # Replace dots with underscores for filesystem compatibility
-                base = base.replace('.', '_')
-                # Use .txt extension for text files
-                if is_text_file:
-                    return f"response_{base}.txt"
-                else:
-                    return f"response_{base}.html"
-        
-        # Standard EPUB handling - use original basename
-        if 'original_basename' in chapter and chapter['original_basename']:
-            base = os.path.splitext(chapter['original_basename'])[0]
-            # Use .txt extension for text files
-            if is_text_file:
-                return f"response_{base}.txt"
-            else:
-                return f"response_{base}.html"
-        else:
-            # Text file handling (no original basename)
-            if actual_num is None:
-                actual_num = chapter.get('actual_chapter_num', chapter.get('num', 0))
-            
-            # Handle decimal chapter numbers from text file splitting
-            if isinstance(actual_num, float):
-                major = int(actual_num)
-                minor = int(round((actual_num - major) * 10))
-                if is_text_file:
-                    return f"response_{major:04d}_{minor}.txt"
-                else:
-                    return f"response_{major:04d}_{minor}.html"
-            else:
-                if is_text_file:
-                    return f"response_{actual_num:04d}.txt"
-                else:
-                    return f"response_{actual_num:04d}.html"          
+# Deferred modules
+translation_main = translation_stop_flag = translation_stop_check = None
+glossary_main = glossary_stop_flag = glossary_stop_check = None
+fallback_compile_epub = scan_html_folder = None
 
-# =====================================================
-# UNIFIED PROGRESS MANAGER
-# =====================================================
-class ProgressManager:
-    """Unified progress management"""
-    
-    def __init__(self, payloads_dir):
-        self.payloads_dir = payloads_dir
-        self.PROGRESS_FILE = os.path.join(payloads_dir, "translation_progress.json")
-        self.prog = self._init_or_load()
-        
-    def _init_or_load(self):
-        """Initialize or load progress tracking with improved structure"""
-        if os.path.exists(self.PROGRESS_FILE):
-            try:
-                with open(self.PROGRESS_FILE, "r", encoding="utf-8") as pf:
-                    prog = json.load(pf)
-            except json.JSONDecodeError as e:
-                print(f"⚠️ Warning: Progress file is corrupted: {e}")
-                print("🔧 Attempting to fix JSON syntax...")
-                
-                try:
-                    with open(self.PROGRESS_FILE, "r", encoding="utf-8") as pf:
-                        content = pf.read()
-                    
-                    content = re.sub(r',\s*\]', ']', content)
-                    content = re.sub(r',\s*\}', '}', content)
-                    
-                    prog = json.loads(content)
-                    
-                    with open(self.PROGRESS_FILE, "w", encoding="utf-8") as pf:
-                        json.dump(prog, pf, ensure_ascii=False, indent=2)
-                    print("✅ Successfully fixed and saved progress file")
-                    
-                except Exception as fix_error:
-                    print(f"❌ Could not fix progress file: {fix_error}")
-                    print("🔄 Creating backup and starting fresh...")
-                    
-                    backup_name = f"translation_progress_backup_{int(time.time())}.json"
-                    backup_path = os.path.join(self.payloads_dir, backup_name)
-                    try:
-                        shutil.copy(self.PROGRESS_FILE, backup_path)
-                        print(f"📁 Backup saved to: {backup_name}")
-                    except:
-                        pass
-                    
-                    prog = {
-                        "chapters": {},
-                        "content_hashes": {},
-                        "chapter_chunks": {},
-                        "version": "2.0"
-                    }
-            
-            if "chapters" not in prog:
-                prog["chapters"] = {}
-                
-                for idx in prog.get("completed", []):
-                    prog["chapters"][str(idx)] = {
-                        "status": "completed",
-                        "timestamp": None
-                    }
-            
-            if "content_hashes" not in prog:
-                prog["content_hashes"] = {}
-            if "chapter_chunks" not in prog:
-                prog["chapter_chunks"] = {}
-                
-        else:
-            prog = {
-                "chapters": {},
-                "content_hashes": {},
-                "chapter_chunks": {},
-                "image_chunks": {},
-                "version": "2.1"
-            }
-        
-        return prog
-    
-    def save(self):
-        """Save progress to file"""
+# Constants
+CONFIG_FILE = "config.json"
+BASE_WIDTH, BASE_HEIGHT = 1550, 1000
+
+def load_application_icon(window, base_dir):
+    """Load application icon with fallback handling"""
+    ico_path = os.path.join(base_dir, 'Halgakos.ico')
+    if os.path.isfile(ico_path):
         try:
-            self.prog["completed_list"] = []
-            for chapter_key, chapter_info in self.prog.get("chapters", {}).items():
-                if chapter_info.get("status") == "completed" and chapter_info.get("output_file"):
-                    self.prog["completed_list"].append({
-                        "num": chapter_info.get("chapter_num", 0),
-                        "idx": chapter_info.get("chapter_idx", 0),
-                        "title": f"Chapter {chapter_info.get('chapter_num', 0)}",
-                        "file": chapter_info.get("output_file", ""),
-                        "key": chapter_key
-                    })
-            
-            if self.prog.get("completed_list"):
-                self.prog["completed_list"].sort(key=lambda x: x["num"])
-            
-            temp_file = self.PROGRESS_FILE + '.tmp'
-            with open(temp_file, "w", encoding="utf-8") as pf:
-                json.dump(self.prog, pf, ensure_ascii=False, indent=2)
-            
-            if os.path.exists(self.PROGRESS_FILE):
-                os.remove(self.PROGRESS_FILE)
-            os.rename(temp_file, self.PROGRESS_FILE)
+            window.iconbitmap(ico_path)
         except Exception as e:
-            print(f"⚠️ Warning: Failed to save progress: {e}")
-            temp_file = self.PROGRESS_FILE + '.tmp'
-            if os.path.exists(temp_file):
+            logging.warning(f"Could not set window icon: {e}")
+    try:
+        from PIL import Image, ImageTk
+        if os.path.isfile(ico_path):
+            icon_image = Image.open(ico_path)
+            if icon_image.mode != 'RGBA':
+                icon_image = icon_image.convert('RGBA')
+            icon_photo = ImageTk.PhotoImage(icon_image)
+            window.iconphoto(False, icon_photo)
+            return icon_photo
+    except (ImportError, Exception) as e:
+        logging.warning(f"Could not load icon image: {e}")
+    return None
+
+class UIHelper:
+    """Consolidated UI utility functions"""
+    
+    @staticmethod
+    def setup_text_undo_redo(text_widget):
+        """Set up undo/redo bindings for a text widget"""
+        def handle_undo(event):
+            try: 
+                text_widget.edit_undo()
+            except tk.TclError: 
+                pass
+            return "break"
+        
+        def handle_redo(event):
+            try: 
+                text_widget.edit_redo()
+            except tk.TclError: 
+                pass
+            return "break"
+        
+        # Windows/Linux bindings
+        text_widget.bind('<Control-z>', handle_undo)
+        text_widget.bind('<Control-y>', handle_redo)
+        # macOS bindings
+        text_widget.bind('<Command-z>', handle_undo)
+        text_widget.bind('<Command-Shift-z>', handle_redo)
+    
+    @staticmethod
+    def setup_dialog_scrolling(dialog_window, canvas):
+        """Setup mouse wheel scrolling for dialogs"""
+        def on_mousewheel(event):
+            try: 
+                canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            except: 
+                pass
+        
+        def on_mousewheel_linux(event, direction):
+            try:
+                if canvas.winfo_exists():
+                    canvas.yview_scroll(direction, "units")
+            except tk.TclError: 
+                pass
+        
+        # Bind events
+        wheel_handler = lambda e: on_mousewheel(e)
+        wheel_up = lambda e: on_mousewheel_linux(e, -1)
+        wheel_down = lambda e: on_mousewheel_linux(e, 1)
+        
+        dialog_window.bind_all("<MouseWheel>", wheel_handler)
+        dialog_window.bind_all("<Button-4>", wheel_up)
+        dialog_window.bind_all("<Button-5>", wheel_down)
+        
+        # Return cleanup function
+        def cleanup_bindings():
+            try:
+                dialog_window.unbind_all("<MouseWheel>")
+                dialog_window.unbind_all("<Button-4>")
+                dialog_window.unbind_all("<Button-5>")
+            except: 
+                pass
+        
+        return cleanup_bindings
+    
+    @staticmethod
+    def create_button_resize_handler(button, base_width, base_height, 
+                                   master_window, reference_width, reference_height):
+        """Create a resize handler for dynamic button scaling"""
+        def on_resize(event):
+            if event.widget is master_window:
+                sx = event.width / reference_width
+                sy = event.height / reference_height
+                s = min(sx, sy)
+                new_w = int(base_width * s)
+                new_h = int(base_height * s)
+                ipadx = max(0, (new_w - base_width) // 2)
+                ipady = max(0, (new_h - base_height) // 2)
+                button.grid_configure(ipadx=ipadx, ipady=ipady)
+        
+        return on_resize
+    
+    @staticmethod
+    def setup_scrollable_text(parent, **text_kwargs):
+        """Create a scrolled text widget with undo/redo support"""
+        text_widget = scrolledtext.ScrolledText(parent, 
+                                               undo=True, 
+                                               autoseparators=True, 
+                                               maxundo=-1,
+                                               **text_kwargs)
+        UIHelper.setup_text_undo_redo(text_widget)
+        return text_widget
+    
+    @staticmethod
+    def block_text_editing(text_widget):
+        """Make a text widget read-only but allow selection and copying"""
+        def block_editing(event):
+            # Allow copy
+            if event.state & 0x4 and event.keysym.lower() == 'c':
+                return None
+            # Allow select all
+            if event.state & 0x4 and event.keysym.lower() == 'a':
+                text_widget.tag_add(tk.SEL, "1.0", tk.END)
+                text_widget.mark_set(tk.INSERT, "1.0")
+                text_widget.see(tk.INSERT)
+                return "break"
+            # Allow navigation
+            if event.keysym in ['Left', 'Right', 'Up', 'Down', 'Home', 'End', 'Prior', 'Next']:
+                return None
+            # Allow shift selection
+            if event.state & 0x1:
+                return None
+            return "break"
+        
+        text_widget.bind("<Key>", block_editing)
+
+class WindowManager:
+    """Unified window geometry and dialog management - FULLY REFACTORED V2"""
+    
+    def __init__(self, base_dir):
+        self.base_dir = base_dir
+        self.ui = UIHelper()
+        self._stored_geometries = {}
+        self._pending_operations = {}
+        self._dpi_scale = None
+        self._topmost_protection_active = {}
+    
+    def get_dpi_scale(self, window):
+        """Get and cache DPI scaling factor"""
+        if self._dpi_scale is None:
+            try:
+                self._dpi_scale = window.tk.call('tk', 'scaling') / 1.333
+            except:
+                self._dpi_scale = 1.0
+        return self._dpi_scale
+    
+    def setup_window(self, window, width=None, height=None, 
+                    center=True, icon=True, hide_initially=False,
+                    max_width_ratio=0.98, max_height_ratio=0.98,
+                    min_width=400, min_height=300):
+        """Universal window setup with proper deferral and DPI awareness"""
+        
+        if hide_initially:
+            window.withdraw()
+        
+        # Always ensure not topmost
+        window.attributes('-topmost', False)
+        
+        if icon:
+            window.after_idle(lambda: load_application_icon(window, self.base_dir))
+        
+        screen_width = window.winfo_screenwidth()
+        screen_height = window.winfo_screenheight()
+        dpi_scale = self.get_dpi_scale(window)
+        
+        if width is None:
+            width = min_width
+        else:
+            width = int(width / dpi_scale)
+            
+        if height is None:
+            height = int(screen_height * max_height_ratio)
+        else:
+            height = int(height / dpi_scale)
+        
+        max_width = int(screen_width * max_width_ratio)
+        max_height = int(screen_height * max_height_ratio)
+        
+        final_width = max(min_width, min(width, max_width))
+        final_height = max(min_height, min(height, max_height))
+        
+        if center:
+            x = max(0, (screen_width - final_width) // 2)
+            y = 5
+            geometry_str = f"{final_width}x{final_height}+{x}+{y}"
+        else:
+            geometry_str = f"{final_width}x{final_height}"
+        
+        window.geometry(geometry_str)
+        
+        if hide_initially:
+            window.after(10, window.deiconify)
+        
+        return final_width, final_height
+    
+    def get_monitor_from_coord(self, x, y):
+        """Get monitor info for coordinates (for multi-monitor support)"""
+        # This is a simplified version - returns primary monitor info
+        # For true multi-monitor, you'd need to use win32api or other libraries
+        monitors = []
+        
+        # Try to detect if window is on secondary monitor
+        # This is a heuristic - if x > screen_width, likely on second monitor
+        primary_width = self.root.winfo_screenwidth() if hasattr(self, 'root') else 1920
+        
+        if x > primary_width:
+            # Likely on second monitor
+            return {'x': primary_width, 'width': primary_width, 'height': 1080}
+        else:
+            # Primary monitor
+            return {'x': 0, 'width': primary_width, 'height': 1080}
+    
+    def responsive_size(self, window, base_width, base_height, 
+                       scale_factor=None, center=True, use_full_height=True):
+        """Size window responsively based on screen size - FIXED"""
+        
+        screen_width = window.winfo_screenwidth()
+        screen_height = window.winfo_screenheight()
+        
+        if use_full_height:
+            # Maximize to 98% of screen
+            width = min(int(base_width * 1.2), int(screen_width * 0.98))
+            height = int(screen_height * 0.98)
+        else:
+            # Use base dimensions directly
+            width = base_width
+            height = base_height
+            
+            # Only scale down if window doesn't fit on screen
+            if width > screen_width * 0.9:
+                width = int(screen_width * 0.85)
+            if height > screen_height * 0.9:
+                height = int(screen_height * 0.85)
+        
+        if center:
+            x = (screen_width - width) // 2
+            y = (screen_height - height) // 2
+            geometry_str = f"{width}x{height}+{x}+{y}"
+        else:
+            geometry_str = f"{width}x{height}"
+        
+        window.geometry(geometry_str)
+        
+        # Ensure not topmost
+        window.attributes('-topmost', False)
+        
+        return width, height
+    
+    def _fix_maximize_behavior(self, window):
+        """Fix the standard Windows maximize button for multi-monitor"""
+        # Store original window protocol
+        original_state_change = None
+        
+        def on_window_state_change(event):
+            """Intercept maximize from title bar button"""
+            if event.widget == window:
                 try:
-                    os.remove(temp_file)
+                    state = window.state()
+                    if state == 'zoomed':
+                        # Window was just maximized - fix it
+                        window.after(10, lambda: self._proper_maximize(window))
                 except:
                     pass
+        
+        # Bind to window state changes to intercept maximize
+        window.bind('<Configure>', on_window_state_change, add='+')
     
-    def update(self, idx, actual_num, content_hash, output_file, status="in_progress", ai_features=None, raw_num=None):
-        """Update progress for a chapter"""
-        chapter_key = str(idx)
-        
-        chapter_info = {
-            "actual_num": actual_num,
-            "content_hash": content_hash,
-            "output_file": output_file,
-            "status": status,
-            "last_updated": time.time()
-        }
-        
-        # Add raw number tracking
-        if raw_num is not None:
-            chapter_info["raw_chapter_num"] = raw_num
-        
-        # Check if zero detection was disabled
-        if hasattr(builtins, '_DISABLE_ZERO_DETECTION') and builtins._DISABLE_ZERO_DETECTION:
-            chapter_info["zero_adjusted"] = False
-        else:
-            chapter_info["zero_adjusted"] = (raw_num != actual_num) if raw_num is not None else False
-        
-        # FIXED: Store AI features if provided
-        if ai_features is not None:
-            chapter_info["ai_features"] = ai_features
-        
-        # Preserve existing AI features if not overwriting
-        elif chapter_key in self.prog["chapters"] and "ai_features" in self.prog["chapters"][chapter_key]:
-            chapter_info["ai_features"] = self.prog["chapters"][chapter_key]["ai_features"]
-        
-        self.prog["chapters"][chapter_key] = chapter_info
-        
-        # Update content hash index
-        if content_hash and status == "completed":
-            self.prog["content_hashes"][content_hash] = {
-                "chapter_idx": idx,
-                "actual_num": actual_num,
-                "output_file": output_file
-            }
-    
-    def check_chapter_status(self, chapter_idx, actual_num, content_hash, output_dir):
-        """Check if a chapter needs translation with fallback"""
-        chapter_key = content_hash
-        
-        if chapter_key in self.prog["chapters"]:
-            chapter_info = self.prog["chapters"][chapter_key]
-        else:
-            old_key = str(chapter_idx)
-            if old_key in self.prog["chapters"]:
-                #print(f"[PROGRESS] Using legacy index-based tracking for chapter {actual_num}")
-                chapter_info = self.prog["chapters"][old_key]
-                self.prog["chapters"][chapter_key] = chapter_info
-                chapter_info["content_hash"] = content_hash
-                if old_key in self.prog.get("chapter_chunks", {}):
-                    self.prog["chapter_chunks"][chapter_key] = self.prog["chapter_chunks"][old_key]
-                    del self.prog["chapter_chunks"][old_key]
-                del self.prog["chapters"][old_key]
-                self.save()
-            else:
-                return True, None, None
-        
-        status = chapter_info.get("status")
-        output_file = chapter_info.get("output_file")
-        
-        # Check various conditions for skipping
-        if status == "completed" and output_file:
-            output_path = os.path.join(output_dir, output_file)
-            if os.path.exists(output_path):
-                return False, f"Chapter {actual_num} already translated: {output_file}", output_file
-            else:
-                print(f"⚠️ Chapter {actual_num} marked as completed but file missing: {output_file}")
-                return True, None, None
-        
-        if status == "completed_empty":
-            return False, f"Chapter {actual_num} is empty (no content to translate)", output_file
-        
-        if status == "completed_image_only":
-            return False, f"Chapter {actual_num} contains only images", output_file
-        
-        # Check for duplicate content
-        if content_hash and content_hash in self.prog.get("content_hashes", {}):
-            duplicate_info = self.prog["content_hashes"][content_hash]
-            duplicate_idx = duplicate_info.get("chapter_idx")
-            
-            if duplicate_idx != chapter_idx:
-                duplicate_output = duplicate_info.get("output_file")
-                if duplicate_output:
-                    duplicate_path = os.path.join(output_dir, duplicate_output)
-                    if os.path.exists(duplicate_path):
-                        print(f"📋 Copying duplicate content from chapter {duplicate_info.get('actual_num')}")
-                        
-                        safe_title = f"Chapter_{actual_num}"
-                        if 'num' in chapter_info:
-                            if isinstance(chapter_info['num'], float):
-                                fname = f"response_{chapter_info['num']:06.1f}_{safe_title}.html"
-                            else:
-                                fname = f"response_{chapter_info['num']:03d}_{safe_title}.html"
-                        else:
-                            fname = f"response_{actual_num:03d}_{safe_title}.html"
-                        
-                        output_path = os.path.join(output_dir, fname)
-                        shutil.copy2(duplicate_path, output_path)
-                        
-                        self.update(chapter_idx, actual_num, content_hash, fname, status="completed")
-                        self.save()
-                        
-                        return False, f"Chapter {actual_num} has same content as chapter {duplicate_info.get('actual_num')} (already translated)", None
-                    else:
-                        return True, None, None
-        
-        return True, None, None
-    
-    def cleanup_missing_files(self, output_dir):
-        """Scan progress tracking and clean up any references to missing files"""
-        cleaned_count = 0
-        
-        for chapter_key, chapter_info in list(self.prog["chapters"].items()):
-            output_file = chapter_info.get("output_file")
-            
-            if output_file:
-                output_path = os.path.join(output_dir, output_file)
-                if not os.path.exists(output_path):
-                    print(f"🧹 Found missing file for chapter {chapter_info.get('actual_num', chapter_key)}: {output_file}")
-                    
-                    # COMPLETELY REMOVE the chapter entry instead of marking as file_deleted
-                    del self.prog["chapters"][chapter_key]
-                    
-                    # Remove from content_hashes
-                    content_hash = chapter_info.get("content_hash")
-                    if content_hash and content_hash in self.prog["content_hashes"]:
-                        del self.prog["content_hashes"][content_hash]
-                    
-                    # Remove chunk data
-                    if chapter_key in self.prog.get("chapter_chunks", {}):
-                        del self.prog["chapter_chunks"][chapter_key]
-                    
-                    cleaned_count += 1
-        
-        if cleaned_count > 0:
-            print(f"🔄 Removed {cleaned_count} chapters with missing files from progress tracking")
-    
-    def migrate_to_content_hash(self, chapters):
-        """Migrate old index-based progress to content-hash-based"""
-        if not self.prog.get("version") or self.prog["version"] < "3.0":
-            #print("🔄 Migrating progress tracking to content-hash-based system...")
-            
-            old_chapters = self.prog.get("chapters", {})
-            new_chapters = {}
-            old_chunks = self.prog.get("chapter_chunks", {})
-            new_chunks = {}
-            
-            idx_to_hash = {}
-            for idx, chapter in enumerate(chapters):
-                content_hash = chapter.get("content_hash") or get_content_hash(chapter["body"])
-                idx_to_hash[str(idx)] = content_hash
-            
-            for old_key, chapter_info in old_chapters.items():
-                if old_key in idx_to_hash:
-                    new_key = idx_to_hash[old_key]
-                    new_chapters[new_key] = chapter_info
-                    chapter_info["chapter_idx"] = int(old_key)
-            
-            for old_key, chunk_info in old_chunks.items():
-                if old_key in idx_to_hash:
-                    new_key = idx_to_hash[old_key]
-                    new_chunks[new_key] = chunk_info
-            
-            self.prog["chapters"] = new_chapters
-            self.prog["chapter_chunks"] = new_chunks
-            self.prog["version"] = "3.0"
-            
-            #print(f"✅ Migrated {len(new_chapters)} chapters to new system")
-    
-    def get_stats(self, output_dir):
-        """Get statistics about translation progress"""
-        stats = {
-            "total_tracked": len(self.prog["chapters"]),
-            "completed": 0,
-            "missing_files": 0,
-            "in_progress": 0
-        }
-        
-        for chapter_info in self.prog["chapters"].values():
-            status = chapter_info.get("status")
-            output_file = chapter_info.get("output_file")
-            
-            if status == "completed" and output_file:
-                output_path = os.path.join(output_dir, output_file)
-                if os.path.exists(output_path):
-                    stats["completed"] += 1
-                else:
-                    stats["missing_files"] += 1
-            elif status == "in_progress":
-                stats["in_progress"] += 1
-            elif status == "file_missing":
-                stats["missing_files"] += 1
-        
-        return stats
-
-# =====================================================
-# UNIFIED CONTENT PROCESSOR
-# =====================================================
-class ContentProcessor:
-    """Unified content processing"""
-    
-    @staticmethod
-    def clean_ai_artifacts(text, remove_artifacts=True):
-        """Remove AI response artifacts from text - but ONLY when enabled"""
-        if not remove_artifacts:
-            return text
-        
-        lines = text.split('\n', 2)
-        
-        if len(lines) < 2:
-            return text
-        
-        first_line = lines[0].strip()
-        
-        if not first_line:
-            if len(lines) > 1:
-                first_line = lines[1].strip()
-                if not first_line:
-                    return text
-                lines = lines[1:]
-            else:
-                return text
-        
-        ai_patterns = [
-            r'^(?:Sure|Okay|Understood|Of course|Got it|Alright|Certainly|Here\'s|Here is)',
-            r'^(?:I\'ll|I will|Let me) (?:translate|help|assist)',
-            r'^(?:System|Assistant|AI|User|Human|Model)\s*:',
-            r'^\[PART\s+\d+/\d+\]',
-            r'^(?:Translation note|Note|Here\'s the translation|I\'ve translated)',
-            r'^```(?:html)?',
-            r'^<!DOCTYPE',
-        ]
-        
-        for pattern in ai_patterns:
-            if re.search(pattern, first_line, re.IGNORECASE):
-                remaining_text = '\n'.join(lines[1:]) if len(lines) > 1 else ''
-                
-                if remaining_text.strip():
-                    if (re.search(r'<h[1-6]', remaining_text, re.IGNORECASE) or 
-                        re.search(r'Chapter\s+\d+', remaining_text, re.IGNORECASE) or
-                        re.search(r'第\s*\d+\s*[章節話话回]', remaining_text) or
-                        re.search(r'제\s*\d+\s*[장화]', remaining_text) or
-                        len(remaining_text.strip()) > 100):
-                        
-                        print(f"✂️ Removed AI artifact: {first_line[:50]}...")
-                        return remaining_text.lstrip()
-        
-        if first_line.lower() in ['html', 'text', 'content', 'translation', 'output']:
-            remaining_text = '\n'.join(lines[1:]) if len(lines) > 1 else ''
-            if remaining_text.strip():
-                print(f"✂️ Removed single word artifact: {first_line}")
-                return remaining_text.lstrip()
-        
-        return text
-    
-    @staticmethod
-    def clean_memory_artifacts(text):
-        """Remove any memory/summary artifacts that leaked into the translation"""
-        text = re.sub(r'\[MEMORY\].*?\[END MEMORY\]', '', text, flags=re.DOTALL)
-        
-        lines = text.split('\n')
-        cleaned_lines = []
-        skip_next = False
-        
-        for line in lines:
-            if any(marker in line for marker in ['[MEMORY]', '[END MEMORY]', 'Previous context summary:', 
-                                                  'memory summary', 'context summary', '[Context]']):
-                skip_next = True
-                continue
-            
-            if skip_next and line.strip() == '':
-                skip_next = False
-                continue
-                
-            skip_next = False
-            cleaned_lines.append(line)
-        
-        return '\n'.join(cleaned_lines)
-    
-    @staticmethod
-    def emergency_restore_paragraphs(text, original_html=None, verbose=True):
-        """Emergency restoration when AI returns wall of text without proper paragraph tags"""
-        def log(message):
-            if verbose:
-                print(message)
-        
-        if text.count('</p>') >= 3:
-            return text
-        
-        if original_html:
-            original_para_count = original_html.count('<p>')
-            current_para_count = text.count('<p>')
-            
-            if current_para_count < original_para_count / 2:
-                log(f"⚠️ Paragraph mismatch! Original: {original_para_count}, Current: {current_para_count}")
-                log("🔧 Attempting emergency paragraph restoration...")
-        
-        if '</p>' not in text and len(text) > 300:
-            log("❌ No paragraph tags found - applying emergency restoration")
-            
-            if '\n\n' in text:
-                parts = text.split('\n\n')
-                paragraphs = ['<p>' + part.strip() + '</p>' for part in parts if part.strip()]
-                return '\n'.join(paragraphs)
-            
-            dialogue_pattern = r'(?<=[.!?])\s+(?=[""\u201c\u201d])'
-            if re.search(dialogue_pattern, text):
-                parts = re.split(dialogue_pattern, text)
-                paragraphs = []
-                for part in parts:
-                    part = part.strip()
-                    if part:
-                        if not part.startswith('<p>'):
-                            part = '<p>' + part
-                        if not part.endswith('</p>'):
-                            part = part + '</p>'
-                        paragraphs.append(part)
-                return '\n'.join(paragraphs)
-            
-            sentence_boundary = r'(?<=[.!?])\s+(?=[A-Z\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af])'
-            sentences = re.split(sentence_boundary, text)
-            
-            if len(sentences) > 1:
-                paragraphs = []
-                current_para = []
-                
-                for sentence in sentences:
-                    sentence = sentence.strip()
-                    if not sentence:
-                        continue
-                        
-                    current_para.append(sentence)
-                    
-                    should_break = (
-                        len(current_para) >= 3 or
-                        sentence.rstrip().endswith(('"', '"', '"')) or
-                        '* * *' in sentence or
-                        '***' in sentence or
-                        '---' in sentence
-                    )
-                    
-                    if should_break:
-                        para_text = ' '.join(current_para)
-                        if not para_text.startswith('<p>'):
-                            para_text = '<p>' + para_text
-                        if not para_text.endswith('</p>'):
-                            para_text = para_text + '</p>'
-                        paragraphs.append(para_text)
-                        current_para = []
-                
-                if current_para:
-                    para_text = ' '.join(current_para)
-                    if not para_text.startswith('<p>'):
-                        para_text = '<p>' + para_text
-                    if not para_text.endswith('</p>'):
-                        para_text = para_text + '</p>'
-                    paragraphs.append(para_text)
-                
-                result = '\n'.join(paragraphs)
-                log(f"✅ Restored {len(paragraphs)} paragraphs from wall of text")
-                return result
-            
-            words = text.split()
-            if len(words) > 100:
-                paragraphs = []
-                words_per_para = max(100, len(words) // 10)
-                
-                for i in range(0, len(words), words_per_para):
-                    chunk = ' '.join(words[i:i + words_per_para])
-                    if chunk.strip():
-                        paragraphs.append('<p>' + chunk.strip() + '</p>')
-                
-                return '\n'.join(paragraphs)
-        
-        elif '<p>' in text and text.count('<p>') < 3 and len(text) > 1000:
-            log("⚠️ Very few paragraphs for long text - checking if more breaks needed")
-            
-            soup = BeautifulSoup(text, 'html.parser')
-            existing_paras = soup.find_all('p')
-            
-            new_paragraphs = []
-            for para in existing_paras:
-                para_text = para.get_text()
-                if len(para_text) > 500:
-                    sentences = re.split(r'(?<=[.!?])\s+', para_text)
-                    if len(sentences) > 5:
-                        chunks = []
-                        current = []
-                        for sent in sentences:
-                            current.append(sent)
-                            if len(current) >= 3:
-                                chunks.append('<p>' + ' '.join(current) + '</p>')
-                                current = []
-                        if current:
-                            chunks.append('<p>' + ' '.join(current) + '</p>')
-                        new_paragraphs.extend(chunks)
-                    else:
-                        new_paragraphs.append(str(para))
-                else:
-                    new_paragraphs.append(str(para))
-            
-            return '\n'.join(new_paragraphs)
-        
-        return text
-    
-    @staticmethod
-    def get_content_hash(html_content):
-        """Create a stable hash of content"""
+    def _proper_maximize(self, window):
+        """Properly maximize window to current monitor only"""
         try:
-            soup = BeautifulSoup(html_content, 'html.parser')
+            # Get current position
+            x = window.winfo_x()
+            screen_width = window.winfo_screenwidth()
+            screen_height = window.winfo_screenheight()
             
-            for tag in soup(['script', 'style', 'meta', 'link']):
-                tag.decompose()
+            # Check if on secondary monitor
+            if x > screen_width or x < -screen_width/2:
+                # Likely on a secondary monitor
+                # Force back to primary monitor for now
+                window.state('normal')
+                window.geometry(f"{screen_width-100}x{screen_height-100}+50+50")
+                window.state('zoomed')
             
-            text_content = soup.get_text(separator=' ', strip=True)
-            text_content = ' '.join(text_content.split())
-            
-            return hashlib.md5(text_content.encode('utf-8')).hexdigest()
+            # The zoomed state should now respect monitor boundaries
             
         except Exception as e:
-            print(f"[WARNING] Failed to create hash: {e}")
-            return hashlib.md5(html_content.encode('utf-8')).hexdigest()
+            print(f"Error in proper maximize: {e}")
     
-    @staticmethod
-    def is_meaningful_text_content(html_content):
-        """Check if chapter has meaningful text beyond just structure"""
-        try:
-            soup = BeautifulSoup(html_content, 'html.parser')
-            
-            soup_copy = BeautifulSoup(str(soup), 'html.parser')
-            
-            for img in soup_copy.find_all('img'):
-                img.decompose()
-            
-            text_elements = soup_copy.find_all(['p', 'div', 'span'])
-            text_content = ' '.join(elem.get_text(strip=True) for elem in text_elements)
-            
-            headers = soup_copy.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
-            header_text = ' '.join(h.get_text(strip=True) for h in headers)
-            
-            if headers and len(text_content.strip()) > 1:
-                return True
-            
-            if len(text_content.strip()) > 200:
-                return True
-            
-            if len(header_text.strip()) > 100:
-                return True
-                
-            return False
-            
-        except Exception as e:
-            print(f"Warning: Error checking text content: {e}")
-            return True
-
-# =====================================================
-# UNIFIED CHAPTER EXTRACTOR
-# =====================================================
-class ChapterExtractor:
-    """Unified chapter extraction"""
-    
-    def __init__(self):
-        self.pattern_manager = PatternManager()
+    def auto_resize_dialog(self, dialog, canvas=None, max_width_ratio=0.9, max_height_ratio=0.95):
+        """Auto-resize dialog based on content"""
         
-    def extract_chapters(self, zf, output_dir):
-        """Extract chapters and all resources from EPUB"""
-        print("🚀 Starting comprehensive EPUB extraction...")
-        print("✅ Using enhanced extraction with full resource handling")
+        was_hidden = not dialog.winfo_viewable()
         
-        extracted_resources = self._extract_all_resources(zf, output_dir)
-        
-        metadata_path = os.path.join(output_dir, 'metadata.json')
-        if os.path.exists(metadata_path):
-            print("📋 Loading existing metadata...")
-            with open(metadata_path, 'r', encoding='utf-8') as f:
-                metadata = json.load(f)
-        else:
-            print("📋 Extracting fresh metadata...")
-            metadata = self._extract_epub_metadata(zf)
-            print(f"📋 Extracted metadata: {list(metadata.keys())}")
-        
-        chapters, detected_language = self._extract_chapters_universal(zf)
-        
-        if not chapters:
-            print("❌ No chapters could be extracted!")
-            return []
-        
-        chapters_info_path = os.path.join(output_dir, 'chapters_info.json')
-        chapters_info = []
-        
-        for c in chapters:
-            info = {
-                'num': c['num'],
-                'title': c['title'],
-                'original_filename': c.get('filename', ''),
-                'has_images': c.get('has_images', False),
-                'image_count': c.get('image_count', 0),
-                'text_length': c.get('file_size', len(c.get('body', ''))),
-                'detection_method': c.get('detection_method', 'unknown'),
-                'content_hash': c.get('content_hash', '')
-            }
-            
-            if c.get('has_images'):
-                try:
-                    soup = BeautifulSoup(c.get('body', ''), 'html.parser')
-                    images = soup.find_all('img')
-                    info['images'] = [img.get('src', '') for img in images]
-                except:
-                    info['images'] = []
-            
-            chapters_info.append(info)
-        
-        with open(chapters_info_path, 'w', encoding='utf-8') as f:
-            json.dump(chapters_info, f, ensure_ascii=False, indent=2)
-        
-        print(f"💾 Saved detailed chapter info to: chapters_info.json")
-        
-        metadata.update({
-            'chapter_count': len(chapters),
-            'detected_language': detected_language,
-            'extracted_resources': extracted_resources,
-            'extraction_summary': {
-                'total_chapters': len(chapters),
-                'chapter_range': f"{chapters[0]['num']}-{chapters[-1]['num']}",
-                'resources_extracted': sum(len(files) for files in extracted_resources.values())
-            }
-        })
-        
-        metadata['chapter_titles'] = {
-            str(c['num']): c['title'] for c in chapters
-        }
-        
-        with open(metadata_path, 'w', encoding='utf-8') as f:
-            json.dump(metadata, f, ensure_ascii=False, indent=2)
-        
-        print(f"💾 Saved comprehensive metadata to: {metadata_path}")
-        
-        self._create_extraction_report(output_dir, metadata, chapters, extracted_resources)
-        self._log_extraction_summary(chapters, extracted_resources, detected_language)
-        
-        print("🔍 VERIFICATION: Comprehensive chapter extraction completed successfully")
-        
-        return chapters
-    
-    def _extract_all_resources(self, zf, output_dir):
-        """Extract all resources with duplicate prevention"""
-        extracted_resources = {
-            'css': [],
-            'fonts': [],
-            'images': [],
-            'epub_structure': [],
-            'other': []
-        }
-        
-        extraction_marker = os.path.join(output_dir, '.resources_extracted')
-        if os.path.exists(extraction_marker):
-            print("📦 Resources already extracted, skipping resource extraction...")
-            return self._count_existing_resources(output_dir, extracted_resources)
-        
-        self._cleanup_old_resources(output_dir)
-        
-        for resource_type in ['css', 'fonts', 'images']:
-            os.makedirs(os.path.join(output_dir, resource_type), exist_ok=True)
-        
-        print(f"📦 Extracting all resources from EPUB...")
-        
-        for file_path in zf.namelist():
-            if file_path.endswith('/') or not os.path.basename(file_path):
-                continue
-                
+        def perform_resize():
             try:
-                file_data = zf.read(file_path)
-                resource_info = self._categorize_resource(file_path, os.path.basename(file_path))
+                screen_width = dialog.winfo_screenwidth()
+                screen_height = dialog.winfo_screenheight()
+                dpi_scale = self.get_dpi_scale(dialog)
                 
-                if resource_info:
-                    resource_type, target_dir, safe_filename = resource_info
-                    target_path = os.path.join(output_dir, target_dir, safe_filename) if target_dir else os.path.join(output_dir, safe_filename)
-                    
-                    with open(target_path, 'wb') as f:
-                        f.write(file_data)
-                    
-                    extracted_resources[resource_type].append(safe_filename)
-                    
-                    if resource_type == 'epub_structure':
-                        print(f"   📋 Extracted EPUB structure: {safe_filename}")
-                    else:
-                        print(f"   📄 Extracted {resource_type}: {safe_filename}")
-                    
-            except Exception as e:
-                print(f"[WARNING] Failed to extract {file_path}: {e}")
-        
-        with open(extraction_marker, 'w') as f:
-            f.write(f"Resources extracted at {time.time()}")
-        
-        self._validate_critical_files(output_dir, extracted_resources)
-        
-        return extracted_resources
-    
-    def _extract_chapters_universal(self, zf, comprehensive_mode=None):
-        """Universal chapter extraction with mode toggle"""
-        if comprehensive_mode is None:
-            comprehensive_mode = os.getenv("COMPREHENSIVE_EXTRACTION", "0") == "1"
-        
-        chapters = []
-        sample_texts = []
-        
-        html_files = []
-        for name in zf.namelist():
-            if name.lower().endswith(('.xhtml', '.html', '.htm')):
-                if not comprehensive_mode:
-                    lower_name = name.lower()
-                    if any(skip in lower_name for skip in [
-                        'nav', 'toc', 'contents', 'cover', 'title', 'index',
-                        'copyright', 'acknowledgment', 'dedication'
-                    ]):
-                        continue
-                else:
-                    skip_keywords = ['nav.', 'toc.', 'contents.', 'copyright.', 'cover.']
-                    basename = os.path.basename(name.lower())
-                    should_skip = False
-                    for skip in skip_keywords:
-                        if basename == skip + 'xhtml' or basename == skip + 'html' or basename == skip + 'htm':
-                            should_skip = True
+                final_height = int(screen_height * max_height_ratio)
+                
+                if canvas and canvas.winfo_exists():
+                    scrollable_frame = None
+                    for child in canvas.winfo_children():
+                        if isinstance(child, ttk.Frame):
+                            scrollable_frame = child
                             break
-                    if should_skip:
-                        print(f"[SKIP] Navigation/TOC file: {name}")
-                        continue
-                
-                html_files.append(name)
-        
-        print(f"📚 Found {len(html_files)} {'HTML files' if comprehensive_mode else 'potential content files'} in EPUB")
-        
-        content_hashes = {}
-        seen_chapters = {}
-        file_size_groups = {}
-        h1_count = 0
-        h2_count = 0
-        
-        chapter_num = 1
-        actual_num = 1
-
-        for idx, file_path in enumerate(sorted(html_files)):
-            try:
-                file_data = zf.read(file_path)
-                
-                html_content = None
-                for encoding in ['utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr', 'gbk', 'big5']:
-                    try:
-                        html_content = file_data.decode(encoding)
-                        break
-                    except UnicodeDecodeError:
-                        continue
-                
-                if not html_content:
-                    print(f"[WARNING] Could not decode {file_path}")
-                    continue
-                
-                soup = BeautifulSoup(html_content, 'html.parser')
-                
-                if soup.body:
-                    content_html = str(soup.body)
-                    content_text = soup.body.get_text(strip=True)
-                else:
-                    content_html = html_content
-                    content_text = soup.get_text(strip=True)
-                
-                if comprehensive_mode:
-                    actual_chapter_num = None
-                    filename_base = os.path.basename(file_path)
                     
-                    print(f"[EXTRACT DEBUG] Trying to extract number from: {filename_base}")
-
-                    for pattern in self.pattern_manager.FILENAME_EXTRACT_PATTERNS:
-                        match = re.search(pattern, filename_base, re.IGNORECASE)
-                        if match:
-                            actual_chapter_num = int(match.group(1))
-                            break
-
-                    if actual_chapter_num is not None:
-                        chapter_num = actual_chapter_num
+                    if scrollable_frame and scrollable_frame.winfo_exists():
+                        content_width = scrollable_frame.winfo_reqwidth()
+                        window_width = content_width + 40
                     else:
-                        chapter_num += 1
+                        window_width = dialog.winfo_reqwidth()
                 else:
-                    h1_tags = soup.find_all('h1')
-                    h2_tags = soup.find_all('h2')
-                    if h1_tags:
-                        h1_count += 1
-                    if h2_tags:
-                        h2_count += 1
+                    window_width = dialog.winfo_reqwidth()
                 
-                images = soup.find_all('img')
-                has_images = len(images) > 0
+                window_width = int(window_width / dpi_scale)
                 
-                is_image_only_chapter = has_images and len(content_text.strip()) < 500
+                max_width = int(screen_width * max_width_ratio)
+                final_width = min(window_width, max_width)
+                final_width = max(final_width, 400)
                 
-                if not comprehensive_mode:
-                    if len(content_text.strip()) < 10 and not has_images:
-                        print(f"[DEBUG] Skipping empty file: {file_path} (no text, no images)")
-                        continue
-                    
-                    if is_image_only_chapter:
-                        print(f"[DEBUG] Image-only chapter detected: {file_path} ({len(images)} images, {len(content_text)} chars)")
+                x = (screen_width - final_width) // 2
+                y = max(20, (screen_height - final_height) // 2)
                 
-                content_hash = ContentProcessor.get_content_hash(content_html)
+                dialog.geometry(f"{final_width}x{final_height}+{x}+{y}")
                 
-                if not comprehensive_mode:
-                    file_size = len(content_text)
-                    if file_size not in file_size_groups:
-                        file_size_groups[file_size] = []
-                    file_size_groups[file_size].append(file_path)
-                    
-                    if content_hash in content_hashes:
-                        duplicate_info = content_hashes[content_hash]
-                        print(f"[DEBUG] Skipping duplicate content: {file_path} (matches {duplicate_info['filename']})")
-                        continue
-                    
-                    if len(sample_texts) < 5:
-                        sample_texts.append(content_text[:1000])
+                if was_hidden and dialog.winfo_exists():
+                    dialog.deiconify()
                 
-                if not comprehensive_mode:
-                    chapter_num, chapter_title, detection_method = self._extract_chapter_info(
-                        soup, file_path, content_text, html_content
-                    )
-                    
-                    if chapter_num is None:
-                        chapter_num = len(chapters) + 1
-                        while chapter_num in seen_chapters:
-                            chapter_num += 1
-                        detection_method = "sequential_fallback"
-                        print(f"[DEBUG] No chapter number found in {file_path}, assigning: {chapter_num}")
-                    
-                    if chapter_num in seen_chapters:
-                        existing_info = seen_chapters[chapter_num]
-                        existing_hash = existing_info['content_hash']
-                        
-                        if existing_hash != content_hash:
-                            original_num = chapter_num
-                            while chapter_num in seen_chapters:
-                                chapter_num += 1
-                            #print(f"[WARNING] Chapter {original_num} already exists with different content")
-                            #print(f"[INFO] Reassigning {file_path} to chapter {chapter_num}")
-                            detection_method += "_reassigned"
-                        else:
-                            print(f"[DEBUG] Skipping duplicate chapter {chapter_num}: {file_path}")
-                            continue
-                else:
-                    chapter_title = None
-                    if soup.title and soup.title.string:
-                        chapter_title = soup.title.string.strip()
-                    
-                    if not chapter_title:
-                        for header_tag in ['h1', 'h2', 'h3']:
-                            header = soup.find(header_tag)
-                            if header:
-                                chapter_title = header.get_text(strip=True)
-                                break
-                    
-                    if not chapter_title:
-                        chapter_title = os.path.splitext(os.path.basename(file_path))[0]
-                    
-                    detection_method = "comprehensive_sequential"
+                return final_width, final_height
                 
-                if actual_num is None:
-                    actual_num = idx + 1  # Use 1-based numbering
-                
-                chapter_info = {
-                    "num": actual_num,
-                    "title": chapter_title or f"Chapter {actual_num}",
-                    "body": content_html,
-                    "filename": file_path,
-                    "original_basename": os.path.splitext(os.path.basename(file_path))[0],
-                    "content_hash": content_hash,
-                    "detection_method": detection_method,
-                    "file_size": len(content_text),
-                    "has_images": has_images,
-                    "image_count": len(images),
-                    "is_empty": len(content_text.strip()) == 0,
-                    "is_image_only": is_image_only_chapter
-                }
-                
-                if not comprehensive_mode:
-                    chapter_info["language_sample"] = content_text[:500]
-                
-                chapters.append(chapter_info)
-                
-                if not comprehensive_mode:
-                    content_hashes[content_hash] = {
-                        'filename': file_path,
-                        'chapter_num': chapter_num
-                    }
-                    seen_chapters[chapter_num] = {
-                        'content_hash': content_hash,
-                        'filename': file_path
-                    }
-                
-                if comprehensive_mode:
-                    if is_image_only_chapter:
-                        print(f"[{actual_num:04d}] 📸 Image-only chapter: {chapter_title} ({len(images)} images)")
-                    elif len(images) > 0 and len(content_text) >= 500:
-                        print(f"[{actual_num:04d}] 📖📸 Mixed chapter: {chapter_title} ({len(content_text)} chars, {len(images)} images)")
-                    elif len(content_text) < 50:
-                        print(f"[{actual_num:04d}] 📄 Empty/placeholder: {chapter_title}")
-                    else:
-                        print(f"[{actual_num:04d}] 📖 Text chapter: {chapter_title} ({len(content_text)} chars)")
-                else:
-                    if is_image_only_chapter:
-                        print(f"[DEBUG] ✅ Chapter {chapter_num}: {chapter_title[:50]}... (IMAGE-ONLY, {detection_method})")
-                    else:
-                        print(f"[DEBUG] ✅ Chapter {chapter_num}: {chapter_title[:50]}... ({detection_method})")
-                    
-            except Exception as e:
-                print(f"[ERROR] Failed to process {file_path}: {e}")
-                continue
+            except tk.TclError:
+                return None, None
         
-        chapters.sort(key=lambda x: x["num"])
-        
-        if not comprehensive_mode and h2_count > h1_count:
-            print(f"📊 Note: This EPUB uses primarily <h2> tags ({h2_count} files) vs <h1> tags ({h1_count} files)")
-        
-        combined_sample = ' '.join(sample_texts) if not comprehensive_mode else ''
-        detected_language = self._detect_content_language(combined_sample) if combined_sample else 'unknown'
-        
-        if chapters:
-            self._print_extraction_summary(chapters, detected_language, comprehensive_mode, 
-                                         h1_count if not comprehensive_mode else 0, 
-                                         h2_count if not comprehensive_mode else 0,
-                                         file_size_groups if not comprehensive_mode else {})
-        
-        return chapters, detected_language
-    
-    def _extract_chapter_info(self, soup, file_path, content_text, html_content):
-        """Extract chapter number and title from various sources"""
-        chapter_num = None
-        chapter_title = None
-        detection_method = None
-        
-        # Try filename first
-        for pattern, flags, method in self.pattern_manager.CHAPTER_PATTERNS:
-            if method.endswith('_number'):
-                match = re.search(pattern, file_path, flags)
-                if match:
-                    try:
-                        num_str = match.group(1)
-                        if num_str.isdigit():
-                            chapter_num = int(num_str)
-                            detection_method = f"filename_{method}"
-                            break
-                        elif method == 'chinese_chapter_cn':
-                            converted = self._convert_chinese_number(num_str)
-                            if converted:
-                                chapter_num = converted
-                                detection_method = f"filename_{method}"
-                                break
-                    except (ValueError, IndexError):
-                        continue
-        
-        # Try content if not found in filename
-        if not chapter_num:
-            # Check title tag
-            if soup.title and soup.title.string:
-                title_text = soup.title.string.strip()
-                chapter_num, detection_method = self._extract_from_text(title_text, "title")
-                if chapter_num:
-                    chapter_title = title_text
-            
-            # Check headers
-            if not chapter_num:
-                for header_tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
-                    headers = soup.find_all(header_tag)
-                    for header in headers:
-                        header_text = header.get_text(strip=True)
-                        if header_text:
-                            chapter_num, method = self._extract_from_text(header_text, f"header_{header_tag}")
-                            if chapter_num:
-                                chapter_title = header_text
-                                detection_method = method
-                                break
-                    if chapter_num:
-                        break
-            
-            # Check first paragraphs
-            if not chapter_num:
-                first_elements = soup.find_all(['p', 'div'])[:5]
-                for elem in first_elements:
-                    elem_text = elem.get_text(strip=True)
-                    if elem_text:
-                        chapter_num, detection_method = self._extract_from_text(elem_text, "content")
-                        if chapter_num:
-                            break
-            
-            # Final fallback to filename
-            if not chapter_num:
-                filename_base = os.path.basename(file_path)
-                for pattern in self.pattern_manager.FILENAME_EXTRACT_PATTERNS:
-                    match = re.search(pattern, filename_base, re.IGNORECASE)
-                    if match:
-                        chapter_num = int(match.group(1))
-                        detection_method = "filename_number"
-                        break
-        
-        # Extract title if not already found
-        if not chapter_title:
-            if soup.title and soup.title.string:
-                chapter_title = soup.title.string.strip()
-            else:
-                for header_tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
-                    header = soup.find(header_tag)
-                    if header:
-                        chapter_title = header.get_text(strip=True)
-                        break
-            
-            if not chapter_title:
-                chapter_title = f"Chapter {chapter_num}" if chapter_num else None
-        
-        chapter_title = re.sub(r'\s+', ' ', chapter_title).strip() if chapter_title else None
-        
-        return chapter_num, chapter_title, detection_method
-    
-    def _extract_from_text(self, text, source_type):
-        """Extract chapter number from text using patterns"""
-        for pattern, flags, method in self.pattern_manager.CHAPTER_PATTERNS:
-            if method.endswith('_number'):
-                continue
-            match = re.search(pattern, text, flags)
-            if match:
-                try:
-                    num_str = match.group(1)
-                    if num_str.isdigit():
-                        return int(num_str), f"{source_type}_{method}"
-                    elif method == 'chinese_chapter_cn':
-                        converted = self._convert_chinese_number(num_str)
-                        if converted:
-                            return converted, f"{source_type}_{method}"
-                except (ValueError, IndexError):
-                    continue
+        dialog.after(20, perform_resize)
         return None, None
     
-    def _convert_chinese_number(self, cn_num):
-        """Convert Chinese number to integer"""
-        if cn_num in self.pattern_manager.CHINESE_NUMS:
-            return self.pattern_manager.CHINESE_NUMS[cn_num]
+    def setup_scrollable(self, parent_window, title, width=None, height=None,
+                        modal=True, resizable=True, max_width_ratio=0.9, 
+                        max_height_ratio=0.95, **kwargs):
+        """Create a scrollable dialog with proper setup"""
         
-        if '十' in cn_num:
-            parts = cn_num.split('十')
-            if len(parts) == 2:
-                tens = self.pattern_manager.CHINESE_NUMS.get(parts[0], 1) if parts[0] else 1
-                ones = self.pattern_manager.CHINESE_NUMS.get(parts[1], 0) if parts[1] else 0
-                return tens * 10 + ones
+        dialog = tk.Toplevel(parent_window)
+        dialog.title(title)
+        dialog.withdraw()
         
-        return None
+        # Ensure not topmost
+        dialog.attributes('-topmost', False)
+        
+        if not resizable:
+            dialog.resizable(False, False)
+        
+        if modal:
+            dialog.transient(parent_window)
+            # Don't grab - it blocks other windows
+        
+        dialog.after_idle(lambda: load_application_icon(dialog, self.base_dir))
+        
+        screen_width = dialog.winfo_screenwidth()
+        screen_height = dialog.winfo_screenheight()
+        dpi_scale = self.get_dpi_scale(dialog)
+        
+        if height is None:
+            height = int(screen_height * max_height_ratio)
+        else:
+            height = int(height / dpi_scale)
+            
+        if width is None or width == 0:
+            width = int(screen_width * 0.8)
+        else:
+            width = int(width / dpi_scale)
+        
+        width = min(width, int(screen_width * max_width_ratio))
+        height = min(height, int(screen_height * max_height_ratio))
+        
+        x = (screen_width - width) // 2
+        y = max(20, (screen_height - height) // 2)
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+        
+        main_container = tk.Frame(dialog)
+        main_container.pack(fill=tk.BOTH, expand=True)
+        
+        canvas = tk.Canvas(main_container, bg='white', highlightthickness=0)
+        scrollbar = ttk.Scrollbar(main_container, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+        
+        canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        
+        def configure_scroll_region(event=None):
+            if canvas.winfo_exists():
+                canvas.configure(scrollregion=canvas.bbox("all"))
+                canvas_width = canvas.winfo_width()
+                if canvas_width > 1:
+                    canvas.itemconfig(canvas_window, width=canvas_width)
+        
+        scrollable_frame.bind("<Configure>", configure_scroll_region)
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(canvas_window, width=e.width))
+        
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        
+        cleanup_scrolling = self.ui.setup_dialog_scrolling(dialog, canvas)
+        
+        dialog._cleanup_scrolling = cleanup_scrolling
+        dialog._canvas = canvas
+        dialog._scrollable_frame = scrollable_frame
+        dialog._kwargs = kwargs
+        
+        dialog.after(50, dialog.deiconify)
+        
+        return dialog, scrollable_frame, canvas
     
-    def _detect_content_language(self, text_sample):
-        """Detect the primary language of content"""
-        scripts = {
-            'korean': 0,
-            'japanese_hiragana': 0,
-            'japanese_katakana': 0,
-            'chinese': 0,
-            'latin': 0
+    def create_simple_dialog(self, parent, title, width=None, height=None, 
+                           modal=True, hide_initially=True):
+        """Create a simple non-scrollable dialog"""
+        
+        dialog = tk.Toplevel(parent)
+        dialog.title(title)
+        
+        # Ensure not topmost
+        dialog.attributes('-topmost', False)
+        
+        if modal:
+            dialog.transient(parent)
+            # Don't grab - it blocks other windows
+        
+        dpi_scale = self.get_dpi_scale(dialog)
+        
+        adjusted_width = None
+        adjusted_height = None
+        
+        if width is not None:
+            adjusted_width = int(width / dpi_scale)
+        
+        if height is not None:
+            adjusted_height = int(height / dpi_scale)
+        else:
+            screen_height = dialog.winfo_screenheight()
+            adjusted_height = int(screen_height * 0.98)
+        
+        final_width, final_height = self.setup_window(
+            dialog, 
+            width=adjusted_width, 
+            height=adjusted_height,
+            hide_initially=hide_initially,
+            max_width_ratio=0.98, 
+            max_height_ratio=0.98
+        )
+        
+        return dialog
+    
+    def setup_maximize_support(self, window):
+        """Setup F11 to maximize window - simple working version"""
+        
+        def toggle_maximize(event=None):
+            """F11 toggles maximize"""
+            current = window.state()
+            if current == 'zoomed':
+                window.state('normal')
+            else:
+                window.state('zoomed')
+            return "break"
+        
+        # Bind F11
+        window.bind('<F11>', toggle_maximize)
+        
+        # Bind Escape to exit maximize only
+        window.bind('<Escape>', lambda e: window.state('normal') if window.state() == 'zoomed' else None)
+        
+        return toggle_maximize
+    
+    def setup_fullscreen_support(self, window):
+        """Legacy method - just calls setup_maximize_support"""
+        return self.setup_maximize_support(window)
+    
+    def _setup_maximize_fix(self, window):
+        """Setup for Windows title bar maximize button"""
+        # For now, just let Windows handle maximize naturally
+        # Most modern Windows versions handle multi-monitor maximize correctly
+        pass
+    
+    def _fix_multi_monitor_maximize(self, window):
+        """No longer needed - Windows handles maximize correctly"""
+        pass
+    
+    def store_geometry(self, window, key):
+        """Store window geometry for later restoration"""
+        if window.winfo_exists():
+            self._stored_geometries[key] = window.geometry()
+    
+    def restore_geometry(self, window, key, delay=100):
+        """Restore previously stored geometry"""
+        if key in self._stored_geometries:
+            geometry = self._stored_geometries[key]
+            window.after(delay, lambda: window.geometry(geometry) if window.winfo_exists() else None)
+    
+    def toggle_window_maximize(self, window):
+        """Toggle maximize state for any window (multi-monitor safe)"""
+        try:
+            current_state = window.state()
+            
+            if current_state == 'zoomed':
+                # Restore to normal
+                window.state('normal')
+            else:
+                # Get current monitor
+                x = window.winfo_x()
+                screen_width = window.winfo_screenwidth()
+                
+                # Ensure window is fully on one monitor before maximizing
+                if x >= screen_width:
+                    # On second monitor
+                    window.geometry(f"+{screen_width}+0")
+                elif x + window.winfo_width() > screen_width:
+                    # Spanning monitors - move to primary
+                    window.geometry(f"+0+0")
+                
+                # Maximize to current monitor
+                window.state('zoomed')
+                
+        except Exception as e:
+            print(f"Error toggling maximize: {e}")
+            # Fallback method
+            self._manual_maximize(window)
+    
+    def _manual_maximize(self, window):
+        """Manual maximize implementation as fallback"""
+        if not hasattr(window, '_maximize_normal_geometry'):
+            window._maximize_normal_geometry = None
+        
+        if window._maximize_normal_geometry:
+            # Restore
+            window.geometry(window._maximize_normal_geometry)
+            window._maximize_normal_geometry = None
+        else:
+            # Store current
+            window._maximize_normal_geometry = window.geometry()
+            
+            # Get dimensions
+            x = window.winfo_x()
+            screen_width = window.winfo_screenwidth()
+            screen_height = window.winfo_screenheight()
+            
+            # Determine monitor
+            if x >= screen_width:
+                new_x = screen_width
+            else:
+                new_x = 0
+            
+            # Leave space for taskbar
+            taskbar_height = 40
+            usable_height = screen_height - taskbar_height
+            
+            window.geometry(f"{screen_width}x{usable_height}+{new_x}+0")
+            
+    def center_window(self, window):
+        """Center a window on screen"""
+        def do_center():
+            if window.winfo_exists():
+                window.update_idletasks()
+                width = window.winfo_width()
+                height = window.winfo_height()
+                screen_width = window.winfo_screenwidth()
+                screen_height = window.winfo_screenheight()
+                
+                x = (screen_width - width) // 2
+                y = (screen_height - height) // 2
+                
+                window.geometry(f"+{x}+{y}")
+        
+        window.after_idle(do_center)
+class TranslatorGUI:
+    def __init__(self, master):
+        master.configure(bg='#2b2b2b')
+        self.master = master
+        
+        # Initialize managers
+        self.base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+        self.wm = WindowManager(self.base_dir)
+        self.ui = UIHelper()
+        master.attributes('-topmost', False)
+        master.lift()
+        
+        self.max_output_tokens = 8192
+        self.proc = self.glossary_proc = None
+        master.title("Glossarion v2.8.4")
+        
+        self.wm.responsive_size(master, BASE_WIDTH, BASE_HEIGHT)
+        master.minsize(1600, 1000)
+        self.wm.center_window(master)
+        
+        
+        # Setup fullscreen support
+        self.wm.setup_fullscreen_support(master)
+        
+        self.payloads_dir = os.path.join(os.getcwd(), "Payloads")
+        
+        self._modules_loaded = self._modules_loading = False
+        self.stop_requested = False
+        self.translation_thread = self.glossary_thread = self.qa_thread = self.epub_thread = None
+        
+        self.master.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        # Load icon
+        ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+        if os.path.isfile(ico_path):
+            try: master.iconbitmap(ico_path)
+            except: pass
+        
+        self.logo_img = None
+        try:
+            from PIL import Image, ImageTk
+            self.logo_img = ImageTk.PhotoImage(Image.open(ico_path)) if os.path.isfile(ico_path) else None
+            if self.logo_img: master.iconphoto(False, self.logo_img)
+        except Exception as e:
+            logging.error(f"Failed to load logo: {e}")
+        
+        
+        # Load config
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                self.config = json.load(f)
+        except: self.config = {}
+        
+        self.max_output_tokens = self.config.get('max_output_tokens', self.max_output_tokens)
+        
+        # Default prompts
+        self.default_prompts = {
+            "korean": "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title> ,<h1>, <h2>, <p>, <br>, <div>, etc.",
+            "japanese": "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags text while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics like -san, -sama, -chan, -kun.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- retain onomatopoeia in Romaji.\n- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title> ,<h1>, <h2>, <p>, <br>, <div>, etc.",
+            "chinese": "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title> ,<h1>, <h2>, <p>, <br>, <div>, etc.",
+            "korean_OCR": "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- Add HTML tags for proper formatting as expected of a novel.",
+            "japanese_OCR": "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags text while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics like -san, -sama, -chan, -kun.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- Add HTML tags for proper formatting as expected of a novel.",
+            "chinese_OCR": "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- Add HTML tags for proper formatting as expected of a novel.",
+            "Original": "Return text and html tags exactly as they appear on the source."
         }
         
-        for char in text_sample:
-            code = ord(char)
-            if 0xAC00 <= code <= 0xD7AF:
-                scripts['korean'] += 1
-            elif 0x3040 <= code <= 0x309F:
-                scripts['japanese_hiragana'] += 1
-            elif 0x30A0 <= code <= 0x30FF:
-                scripts['japanese_katakana'] += 1
-            elif 0x4E00 <= code <= 0x9FFF:
-                scripts['chinese'] += 1
-            elif 0x0020 <= code <= 0x007F:
-                scripts['latin'] += 1
-        
-        total_cjk = scripts['korean'] + scripts['japanese_hiragana'] + scripts['japanese_katakana'] + scripts['chinese']
-        
-        if scripts['korean'] > total_cjk * 0.3:
-            return 'korean'
-        elif scripts['japanese_hiragana'] + scripts['japanese_katakana'] > total_cjk * 0.2:
-            return 'japanese'
-        elif scripts['chinese'] > total_cjk * 0.3:
-            return 'chinese'
-        elif scripts['latin'] > len(text_sample) * 0.7:
-            return 'english'
-        else:
-            return 'unknown'
+        self._init_default_prompts()
+        self._init_variables()
+        self._setup_gui()
     
-    def _print_extraction_summary(self, chapters, detected_language, comprehensive_mode, h1_count, h2_count, file_size_groups):
-        """Print extraction summary"""
-        print(f"\n📊 Chapter Extraction Summary:")
-        print(f"   • Total chapters extracted: {len(chapters)}")
-        print(f"   • Chapter range: {chapters[0]['num']} to {chapters[-1]['num']}")
-        print(f"   • Detected language: {detected_language}")
-        
-        if not comprehensive_mode:
-            print(f"   • Primary header type: {'<h2>' if h2_count > h1_count else '<h1>'}")
-        
-        image_only_count = sum(1 for c in chapters if c.get('is_image_only', False))
-        text_only_count = sum(1 for c in chapters if not c.get('has_images', False) and c.get('file_size', 0) >= 500)
-        mixed_count = sum(1 for c in chapters if c.get('has_images', False) and c.get('file_size', 0) >= 500)
-        
-        print(f"   • Text-only chapters: {text_only_count}")
-        print(f"   • Image-only chapters: {image_only_count}")
-        print(f"   • Mixed content chapters: {mixed_count}")
-        
-        expected_chapters = set(range(chapters[0]['num'], chapters[-1]['num'] + 1))
-        actual_chapters = set(c['num'] for c in chapters)
-        missing = expected_chapters - actual_chapters
-        if missing:
-            print(f"   ⚠️ Missing chapter numbers: {sorted(missing)}")
-        
-        if not comprehensive_mode:
-            method_stats = Counter(c['detection_method'] for c in chapters)
-            print(f"   📈 Detection methods used:")
-            for method, count in method_stats.most_common():
-                print(f"      • {method}: {count} chapters")
-            
-            large_groups = [size for size, files in file_size_groups.items() if len(files) > 1]
-            if large_groups:
-                print(f"   ⚠️ Found {len(large_groups)} file size groups with potential duplicates")
-        else:
-            empty_chapters = sum(1 for c in chapters if c.get('is_empty'))
-            print(f"   • Empty/placeholder: {empty_chapters}")
-    
-    def _extract_epub_metadata(self, zf):
-        """Extract comprehensive metadata from EPUB file"""
-        meta = {}
-        try:
-            for name in zf.namelist():
-                if name.lower().endswith('.opf'):
-                    opf_content = zf.read(name)
-                    soup = BeautifulSoup(opf_content, 'xml')
-                    
-                    for tag in ['title', 'creator', 'language', 'publisher', 'date', 'subject']:
-                        element = soup.find(tag)
-                        if element:
-                            meta[tag] = element.get_text(strip=True)
-                    
-                    description = soup.find('description')
-                    if description:
-                        meta['description'] = description.get_text(strip=True)
-                    
-                    meta_tags = soup.find_all('meta')
-                    for meta_tag in meta_tags:
-                        name = meta_tag.get('name', '').lower()
-                        content = meta_tag.get('content', '')
-                        if 'series' in name and content:
-                            meta['series'] = content
-                        elif 'calibre:series' in name and content:
-                            meta['series'] = content
-                    
-                    break
-        except Exception as e:
-            print(f"[WARNING] Failed to extract metadata: {e}")
-        
-        return meta
-    
-    def _categorize_resource(self, file_path, file_name):
-        """Categorize a file and return (resource_type, target_dir, safe_filename)"""
-        file_path_lower = file_path.lower()
-        file_name_lower = file_name.lower()
-        
-        if file_path_lower.endswith('.css'):
-            return 'css', 'css', sanitize_resource_filename(file_name)
-        elif file_path_lower.endswith(('.ttf', '.otf', '.woff', '.woff2', '.eot')):
-            return 'fonts', 'fonts', sanitize_resource_filename(file_name)
-        elif file_path_lower.endswith(('.jpg', '.jpeg', '.png', '.gif', '.svg', '.bmp', '.webp')):
-            return 'images', 'images', sanitize_resource_filename(file_name)
-        elif (file_path_lower.endswith(('.opf', '.ncx')) or 
-              file_name_lower == 'container.xml' or
-              'container.xml' in file_path_lower):
-            if 'container.xml' in file_path_lower:
-                safe_filename = 'container.xml'
-            else:
-                safe_filename = file_name
-            return 'epub_structure', None, safe_filename
-        elif file_path_lower.endswith(('.js', '.xml', '.txt')):
-            return 'other', None, sanitize_resource_filename(file_name)
-        
-        return None
-    
-    def _cleanup_old_resources(self, output_dir):
-        """Clean up old resource directories and EPUB structure files"""
-        print("🧹 Cleaning up any existing resource directories...")
-        
-        cleanup_success = True
-        
-        for resource_type in ['css', 'fonts', 'images']:
-            resource_dir = os.path.join(output_dir, resource_type)
-            if os.path.exists(resource_dir):
-                try:
-                    shutil.rmtree(resource_dir)
-                    print(f"   🗑️ Removed old {resource_type} directory")
-                except PermissionError as e:
-                    print(f"   ⚠️ Cannot remove {resource_type} directory (permission denied) - will merge with existing files")
-                    cleanup_success = False
-                except Exception as e:
-                    print(f"   ⚠️ Error removing {resource_type} directory: {e} - will merge with existing files")
-                    cleanup_success = False
-        
-        epub_structure_files = ['container.xml', 'content.opf', 'toc.ncx']
-        for epub_file in epub_structure_files:
-            input_path = os.path.join(output_dir, epub_file)
-            if os.path.exists(input_path):
-                try:
-                    os.remove(input_path)
-                    print(f"   🗑️ Removed old {epub_file}")
-                except PermissionError:
-                    print(f"   ⚠️ Cannot remove {epub_file} (permission denied) - will use existing file")
-                except Exception as e:
-                    print(f"   ⚠️ Error removing {epub_file}: {e}")
-        
-        try:
-            for file in os.listdir(output_dir):
-                if file.lower().endswith(('.opf', '.ncx')):
-                    file_path = os.path.join(output_dir, file)
-                    try:
-                        os.remove(file_path)
-                        print(f"   🗑️ Removed old EPUB file: {file}")
-                    except PermissionError:
-                        print(f"   ⚠️ Cannot remove {file} (permission denied)")
-                    except Exception as e:
-                        print(f"   ⚠️ Error removing {file}: {e}")
-        except Exception as e:
-            print(f"⚠️ Error scanning for EPUB files: {e}")
-        
-        if not cleanup_success:
-            print("⚠️ Some cleanup operations failed due to file permissions")
-            print("   The program will continue and merge with existing files")
-        
-        return cleanup_success
-    
-    def _count_existing_resources(self, output_dir, extracted_resources):
-        """Count existing resources when skipping extraction"""
-        for resource_type in ['css', 'fonts', 'images', 'epub_structure']:
-            if resource_type == 'epub_structure':
-                epub_files = []
-                for file in ['container.xml', 'content.opf', 'toc.ncx']:
-                    if os.path.exists(os.path.join(output_dir, file)):
-                        epub_files.append(file)
-                try:
-                    for file in os.listdir(output_dir):
-                        if file.lower().endswith(('.opf', '.ncx')) and file not in epub_files:
-                            epub_files.append(file)
-                except:
-                    pass
-                extracted_resources[resource_type] = epub_files
-            else:
-                resource_dir = os.path.join(output_dir, resource_type)
-                if os.path.exists(resource_dir):
-                    try:
-                        files = [f for f in os.listdir(resource_dir) if os.path.isfile(os.path.join(resource_dir, f))]
-                        extracted_resources[resource_type] = files
-                    except:
-                        extracted_resources[resource_type] = []
-        
-        total_existing = sum(len(files) for files in extracted_resources.values())
-        print(f"✅ Found {total_existing} existing resource files")
-        return extracted_resources
-    
-    def _validate_critical_files(self, output_dir, extracted_resources):
-        """Validate that critical EPUB files were extracted"""
-        total_extracted = sum(len(files) for files in extracted_resources.values())
-        print(f"✅ Extracted {total_extracted} resource files:")
-        
-        for resource_type, files in extracted_resources.items():
-            if files:
-                if resource_type == 'epub_structure':
-                    print(f"   • EPUB Structure: {len(files)} files")
-                    for file in files:
-                        print(f"     - {file}")
-                else:
-                    print(f"   • {resource_type.title()}: {len(files)} files")
-        
-        critical_files = ['container.xml']
-        missing_critical = [f for f in critical_files if not os.path.exists(os.path.join(output_dir, f))]
-        
-        if missing_critical:
-            print(f"⚠️ WARNING: Missing critical EPUB files: {missing_critical}")
-            print("   This may prevent proper EPUB reconstruction!")
-        else:
-            print("✅ All critical EPUB structure files extracted successfully")
-        
-        opf_files = [f for f in extracted_resources['epub_structure'] if f.lower().endswith('.opf')]
-        if not opf_files:
-            print("⚠️ WARNING: No OPF file found! This will prevent EPUB reconstruction.")
-        else:
-            print(f"✅ Found OPF file(s): {opf_files}")
-    
-    def _create_extraction_report(self, output_dir, metadata, chapters, extracted_resources):
-        """Create comprehensive extraction report with HTML file tracking"""
-        report_path = os.path.join(output_dir, 'extraction_report.txt')
-        with open(report_path, 'w', encoding='utf-8') as f:
-            f.write("EPUB Extraction Report\n")
-            f.write("=" * 50 + "\n\n")
-            
-            f.write("METADATA:\n")
-            for key, value in metadata.items():
-                if key not in ['chapter_titles', 'extracted_resources']:
-                    f.write(f"  {key}: {value}\n")
-            
-            f.write(f"\nCHAPTERS ({len(chapters)}):\n")
-            
-            text_chapters = []
-            image_only_chapters = []
-            mixed_chapters = []
-            
-            for chapter in chapters:
-                if chapter.get('has_images') and chapter.get('file_size', 0) < 500:
-                    image_only_chapters.append(chapter)
-                elif chapter.get('has_images') and chapter.get('file_size', 0) >= 500:
-                    mixed_chapters.append(chapter)
-                else:
-                    text_chapters.append(chapter)
-            
-            if text_chapters:
-                f.write(f"\n  TEXT CHAPTERS ({len(text_chapters)}):\n")
-                for c in text_chapters:
-                    f.write(f"    {c['num']:3d}. {c['title']} ({c['detection_method']})\n")
-                    if c.get('original_html_file'):
-                        f.write(f"         → {c['original_html_file']}\n")
-            
-            if image_only_chapters:
-                f.write(f"\n  IMAGE-ONLY CHAPTERS ({len(image_only_chapters)}):\n")
-                for c in image_only_chapters:
-                    f.write(f"    {c['num']:3d}. {c['title']} (images: {c.get('image_count', 0)})\n")
-                    if c.get('original_html_file'):
-                        f.write(f"         → {c['original_html_file']}\n")
-                    if 'body' in c:
-                        try:
-                            soup = BeautifulSoup(c['body'], 'html.parser')
-                            images = soup.find_all('img')
-                            for img in images[:3]:
-                                src = img.get('src', 'unknown')
-                                f.write(f"         • Image: {src}\n")
-                            if len(images) > 3:
-                                f.write(f"         • ... and {len(images) - 3} more images\n")
-                        except:
-                            pass
-            
-            if mixed_chapters:
-                f.write(f"\n  MIXED CONTENT CHAPTERS ({len(mixed_chapters)}):\n")
-                for c in mixed_chapters:
-                    f.write(f"    {c['num']:3d}. {c['title']} (text: {c.get('file_size', 0)} chars, images: {c.get('image_count', 0)})\n")
-                    if c.get('original_html_file'):
-                        f.write(f"         → {c['original_html_file']}\n")
-            
-            f.write(f"\nRESOURCES EXTRACTED:\n")
-            for resource_type, files in extracted_resources.items():
-                if files:
-                    if resource_type == 'epub_structure':
-                        f.write(f"  EPUB Structure: {len(files)} files\n")
-                        for file in files:
-                            f.write(f"    - {file}\n")
-                    else:
-                        f.write(f"  {resource_type.title()}: {len(files)} files\n")
-                        for file in files[:5]:
-                            f.write(f"    - {file}\n")
-                        if len(files) > 5:
-                            f.write(f"    ... and {len(files) - 5} more\n")
-            
-            f.write(f"\nHTML FILES WRITTEN:\n")
-            html_files_written = metadata.get('html_files_written', 0)
-            f.write(f"  Total: {html_files_written} files\n")
-            f.write(f"  Location: Main directory and 'originals' subdirectory\n")
-            
-            f.write(f"\nPOTENTIAL ISSUES:\n")
-            issues = []
-            
-            if image_only_chapters:
-                issues.append(f"  • {len(image_only_chapters)} chapters contain only images (may need OCR)")
-            
-            missing_html = sum(1 for c in chapters if not c.get('original_html_file'))
-            if missing_html > 0:
-                issues.append(f"  • {missing_html} chapters failed to write HTML files")
-            
-            if not extracted_resources.get('epub_structure'):
-                issues.append("  • No EPUB structure files found (may affect reconstruction)")
-            
-            if not issues:
-                f.write("  None detected - extraction appears successful!\n")
-            else:
-                for issue in issues:
-                    f.write(issue + "\n")
-        
-        print(f"📄 Saved extraction report to: {report_path}")
-    
-    def _log_extraction_summary(self, chapters, extracted_resources, detected_language, html_files_written=0):
-        """Log final extraction summary with HTML file information"""
-        print(f"\n✅ Comprehensive extraction complete!")
-        print(f"   📚 Chapters: {len(chapters)}")
-        print(f"   📄 HTML files written: {html_files_written}")
-        print(f"   🎨 Resources: {sum(len(files) for files in extracted_resources.values())}")
-        print(f"   🌍 Language: {detected_language}")
-        
-        image_only_count = sum(1 for c in chapters if c.get('has_images') and c.get('file_size', 0) < 500)
-        if image_only_count > 0:
-            print(f"   📸 Image-only chapters: {image_only_count}")
-        
-        epub_files = extracted_resources.get('epub_structure', [])
-        if epub_files:
-            print(f"   📋 EPUB Structure: {len(epub_files)} files ({', '.join(epub_files)})")
-        else:
-            print(f"   ⚠️ No EPUB structure files extracted!")
-        
-        print(f"\n🔍 Pre-flight check readiness:")
-        print(f"   ✅ HTML files: {'READY' if html_files_written > 0 else 'NOT READY'}")
-        print(f"   ✅ Metadata: READY")
-        print(f"   ✅ Resources: READY")
+    def _init_default_prompts(self):
+        """Initialize all default prompt templates"""
+        self.default_manual_glossary_prompt = """Output exactly a JSON array of objects and nothing else.
+        You are a glossary extractor for Korean, Japanese, or Chinese novels.
+        - Extract character information (e.g., name, traits), locations (countries, regions, cities), and translate them into English (romanization or equivalent).
+        - Romanize all untranslated honorifics (e.g., 님 to '-nim', さん to '-san').
+        - all output must be in english, unless specified otherwise
+        For each character, provide JSON fields:
+        {fields}
+        Sort by appearance order; respond with a JSON array only.
 
-# =====================================================
-# UNIFIED TRANSLATION PROCESSOR
-# =====================================================
+        Text:
+        {chapter_text}"""
+        
+        self.default_auto_glossary_prompt = """You are extracting a targeted glossary from a {language} novel.
+        Focus on identifying:
+        1. Character names with their honorifics
+        2. Important titles and ranks
+        3. Frequently mentioned terms (min frequency: {min_frequency})
 
-class TranslationProcessor:
-    """Handles the translation of individual chapters"""
-    
-    def __init__(self, config, client, out_dir, log_callback=None, stop_callback=None, uses_zero_based=False, is_text_file=False):
-        self.config = config
-        self.client = client
-        self.out_dir = out_dir
-        self.log_callback = log_callback
-        self.stop_callback = stop_callback
-        self.chapter_splitter = ChapterSplitter(model_name=config.MODEL)
-        self.uses_zero_based = uses_zero_based
-        self.is_text_file = is_text_file
+        Extract up to {max_names} character names and {max_titles} titles.
+        Prioritize names that appear with honorifics or in important contexts.
+        Return the glossary in a simple key-value format."""
+        
+        self.default_rolling_summary_system_prompt = """You are a context summarization assistant. Create concise, informative summaries that preserve key story elements for translation continuity."""
+        
+        self.default_rolling_summary_user_prompt = """Analyze the recent translation exchanges and create a structured summary for context continuity.
 
-        
-    def check_stop(self):
-        """Check if translation should stop"""
-        if self.stop_callback and self.stop_callback():
-            print("❌ Translation stopped by user request.")
-            return True
-    
-    def check_duplicate_content(self, result, idx, prog, out):
-        """Check if translated content is duplicate - with mode selection"""
-        if not self.config.RETRY_DUPLICATE_BODIES:
-            print("    ⚠️ DEBUG: Duplicate detection is DISABLED in config")
-            return False, 0
-        
-        # Get detection mode from config
-        detection_mode = getattr(self.config, 'DUPLICATE_DETECTION_MODE', 'basic')
-        print(f"    🔍 DEBUG: Detection mode = '{detection_mode}'")
-        print(f"    🔍 DEBUG: Lookback chapters = {self.config.DUPLICATE_LOOKBACK_CHAPTERS}")
-        
-        # Extract content_hash if available from progress
-        content_hash = None
-        if detection_mode == 'ai-hunter':
-            # Try to get content_hash from the current chapter info
-            # The idx parameter represents the chapter index
-            chapter_key = str(idx)
-            if chapter_key in prog.get("chapters", {}):
-                chapter_info = prog["chapters"][chapter_key]
-                content_hash = chapter_info.get("content_hash")
-                print(f"    🔍 DEBUG: Found content_hash for chapter {idx}: {content_hash}")
-        
-        if detection_mode == 'ai-hunter':
-            print("    🤖 DEBUG: Routing to AI Hunter detection...")
-            return self._check_duplicate_ai_hunter(result, idx, prog, out, content_hash)
-        elif detection_mode == 'cascading':
-            print("    🔄 DEBUG: Routing to Cascading detection...")
-            return self._check_duplicate_cascading(result, idx, prog, out)
-        else:
-            print("    📋 DEBUG: Routing to Basic detection...")
-            return self._check_duplicate_basic(result, idx, prog, out)
+        Focus on extracting and preserving:
+        1. **Character Information**: Names (with original forms), relationships, roles, and important character developments
+        2. **Plot Points**: Key events, conflicts, and story progression
+        3. **Locations**: Important places and settings
+        4. **Terminology**: Special terms, abilities, items, or concepts (with original forms)
+        5. **Tone & Style**: Writing style, mood, and any notable patterns
+        6. **Unresolved Elements**: Questions, mysteries, or ongoing situations
 
-    def _check_duplicate_basic(self, result, idx, prog, out):
-        """Original basic duplicate detection"""
-        try:
-            result_clean = re.sub(r'<[^>]+>', '', result).strip().lower()
-            result_sample = result_clean[:1000]
-            
-            lookback_chapters = self.config.DUPLICATE_LOOKBACK_CHAPTERS
-            
-            for prev_idx in range(max(0, idx - lookback_chapters), idx):
-                prev_key = str(prev_idx)
-                if prev_key in prog["chapters"] and prog["chapters"][prev_key].get("output_file"):
-                    prev_file = prog["chapters"][prev_key]["output_file"]
-                    prev_path = os.path.join(out, prev_file)
-                    
-                    if os.path.exists(prev_path):
-                        try:
-                            with open(prev_path, 'r', encoding='utf-8') as f:
-                                prev_content = f.read()
-                                prev_clean = re.sub(r'<[^>]+>', '', prev_content).strip().lower()
-                                prev_sample = prev_clean[:1000]
-                                
-                                # Use SequenceMatcher for similarity comparison
-                                similarity = SequenceMatcher(None, result_sample, prev_sample).ratio()
-                                
-                                if similarity >= 0.85:  # 85% threshold
-                                    print(f"    🚀 Basic detection: Duplicate found ({int(similarity*100)}%)")
-                                    return True, int(similarity * 100)
-                                    
-                        except Exception as e:
-                            print(f"    Warning: Failed to read {prev_path}: {e}")
-                            continue
-            
-            return False, 0
-            
-        except Exception as e:
-            print(f"    Warning: Failed to check duplicate content: {e}")
-            return False, 0
+        Format the summary clearly with sections. Be concise but comprehensive.
 
-       
-    def _check_duplicate_cascading(self, result, idx, prog, out):
-        """Cascading detection - basic first, then AI Hunter for borderline cases"""
-        # Step 1: Basic 
-        is_duplicate_basic, similarity_basic = self._check_duplicate_basic(result, idx, prog, out)
-        
-        if is_duplicate_basic:
-            return True, similarity_basic
-        
-        # Step 2: If basic detection finds moderate similarity, use AI Hunter
-        if similarity_basic >= 60:  # Configurable threshold
-            print(f"    🤖 Moderate similarity ({similarity_basic}%) - running AI Hunter analysis...")
-            is_duplicate_ai, similarity_ai = self._check_duplicate_ai_hunter(result, idx, prog, out)
-            
-            if is_duplicate_ai:
-                return True, similarity_ai
-        
-        return False, max(similarity_basic, 0)
-
-    def _extract_text_features(self, text):
-        """Extract multiple features from text for AI Hunter analysis"""
-        features = {
-            'semantic': {},
-            'structural': {},
-            'characters': [],
-            'patterns': {}
-        }
-        
-        # Semantic fingerprint
-        lines = text.split('\n')
-        
-        # Character extraction (names that appear 3+ times)
-        words = re.findall(r'\b[A-Z][a-z]+\b', text)
-        word_freq = Counter(words)
-        features['characters'] = [name for name, count in word_freq.items() if count >= 3]
-        
-        # Dialogue patterns
-        dialogue_patterns = re.findall(r'"([^"]+)"', text)
-        features['semantic']['dialogue_count'] = len(dialogue_patterns)
-        features['semantic']['dialogue_lengths'] = [len(d) for d in dialogue_patterns[:10]]
-        
-        # Speaker patterns
-        speaker_patterns = re.findall(r'(\w+)\s+(?:said|asked|replied|shouted|whispered)', text.lower())
-        features['semantic']['speakers'] = list(set(speaker_patterns[:20]))
-        
-        # Number extraction
-        numbers = re.findall(r'\b\d+\b', text)
-        features['patterns']['numbers'] = numbers[:20]
-        
-        # Structural signature
-        para_lengths = []
-        dialogue_count = 0
-        for para in text.split('\n\n'):
-            if para.strip():
-                para_lengths.append(len(para))
-                if '"' in para:
-                    dialogue_count += 1
-        
-        features['structural']['para_count'] = len(para_lengths)
-        features['structural']['avg_para_length'] = sum(para_lengths) / max(1, len(para_lengths))
-        features['structural']['dialogue_ratio'] = dialogue_count / max(1, len(para_lengths))
-        
-        # Create structural pattern string
-        pattern = []
-        for para in text.split('\n\n')[:20]:  # First 20 paragraphs
-            if para.strip():
-                if '"' in para:
-                    pattern.append('D')  # Dialogue
-                elif len(para) > 300:
-                    pattern.append('L')  # Long
-                elif len(para) < 100:
-                    pattern.append('S')  # Short
-                else:
-                    pattern.append('M')  # Medium
-        features['structural']['pattern'] = ''.join(pattern)
-        
-        return features
-
-    def _calculate_exact_similarity(self, text1, text2):
-        """Calculate exact text similarity"""
-        return SequenceMatcher(None, text1.lower(), text2.lower()).ratio()
-
-    def _calculate_smart_similarity(self, text1, text2):
-        """Smart similarity with length-aware sampling"""
-        # Check length ratio first
-        len_ratio = len(text1) / max(1, len(text2))
-        if len_ratio < 0.7 or len_ratio > 1.3:
-            return 0.0
-        
-        # Smart sampling for large texts
-        if len(text1) > 10000:
-            sample_size = 3000
-            samples1 = [
-                text1[:sample_size],
-                text1[len(text1)//2 - sample_size//2:len(text1)//2 + sample_size//2],
-                text1[-sample_size:]
-            ]
-            samples2 = [
-                text2[:sample_size],
-                text2[len(text2)//2 - sample_size//2:len(text2)//2 + sample_size//2],
-                text2[-sample_size:]
-            ]
-            similarities = [SequenceMatcher(None, s1.lower(), s2.lower()).ratio() 
-                           for s1, s2 in zip(samples1, samples2)]
-            return sum(similarities) / len(similarities)
-        else:
-            # Use first 2000 chars for smaller texts
-            return SequenceMatcher(None, text1[:2000].lower(), text2[:2000].lower()).ratio()
-
-    def _calculate_semantic_similarity(self, sem1, sem2):
-        """Calculate semantic fingerprint similarity"""
-        score = 0.0
-        max_score = 0.0
-        
-        # Compare dialogue counts
-        if 'dialogue_count' in sem1 and 'dialogue_count' in sem2:
-            max_score += 1.0
-            ratio = min(sem1['dialogue_count'], sem2['dialogue_count']) / max(1, max(sem1['dialogue_count'], sem2['dialogue_count']))
-            score += ratio * 0.3
-        
-        # Compare speakers
-        if 'speakers' in sem1 and 'speakers' in sem2:
-            max_score += 1.0
-            if sem1['speakers'] and sem2['speakers']:
-                overlap = len(set(sem1['speakers']) & set(sem2['speakers']))
-                total = len(set(sem1['speakers']) | set(sem2['speakers']))
-                score += (overlap / max(1, total)) * 0.4
-        
-        # Compare dialogue lengths pattern
-        if 'dialogue_lengths' in sem1 and 'dialogue_lengths' in sem2:
-            max_score += 1.0
-            if sem1['dialogue_lengths'] and sem2['dialogue_lengths']:
-                # Compare dialogue length patterns
-                len1 = sem1['dialogue_lengths'][:10]
-                len2 = sem2['dialogue_lengths'][:10]
-                if len1 and len2:
-                    avg1 = sum(len1) / len(len1)
-                    avg2 = sum(len2) / len(len2)
-                    ratio = min(avg1, avg2) / max(1, max(avg1, avg2))
-                    score += ratio * 0.3
-        
-        return score / max(1, max_score)
-
-    def _calculate_structural_similarity(self, struct1, struct2):
-        """Calculate structural signature similarity"""
-        score = 0.0
-        
-        # Compare paragraph patterns
-        if 'pattern' in struct1 and 'pattern' in struct2:
-            pattern_sim = SequenceMatcher(None, struct1['pattern'], struct2['pattern']).ratio()
-            score += pattern_sim * 0.4
-        
-        # Compare paragraph statistics
-        if all(k in struct1 for k in ['para_count', 'avg_para_length', 'dialogue_ratio']) and \
-           all(k in struct2 for k in ['para_count', 'avg_para_length', 'dialogue_ratio']):
-            
-            # Paragraph count ratio
-            para_ratio = min(struct1['para_count'], struct2['para_count']) / max(1, max(struct1['para_count'], struct2['para_count']))
-            score += para_ratio * 0.2
-            
-            # Average length ratio
-            avg_ratio = min(struct1['avg_para_length'], struct2['avg_para_length']) / max(1, max(struct1['avg_para_length'], struct2['avg_para_length']))
-            score += avg_ratio * 0.2
-            
-            # Dialogue ratio similarity
-            dialogue_diff = abs(struct1['dialogue_ratio'] - struct2['dialogue_ratio'])
-            score += (1 - dialogue_diff) * 0.2
-        
-        return score
-
-    def _calculate_character_similarity(self, chars1, chars2):
-        """Calculate character name similarity"""
-        if not chars1 or not chars2:
-            return 0.0
-        
-        # Find overlapping characters
-        set1 = set(chars1)
-        set2 = set(chars2)
-        overlap = len(set1 & set2)
-        total = len(set1 | set2)
-        
-        return overlap / max(1, total)
-
-    def _calculate_pattern_similarity(self, pat1, pat2):
-        """Calculate pattern-based similarity"""
-        score = 0.0
-        
-        # Compare numbers (they rarely change in translations)
-        if 'numbers' in pat1 and 'numbers' in pat2:
-            nums1 = set(pat1['numbers'])
-            nums2 = set(pat2['numbers'])
-            if nums1 and nums2:
-                overlap = len(nums1 & nums2)
-                total = len(nums1 | nums2)
-                score = overlap / max(1, total)
-        
-        return score
-    
-    def generate_rolling_summary(self, history_manager, idx, chunk_idx):
-        """Generate rolling summary for context continuity"""
-        if not self.config.USE_ROLLING_SUMMARY or not self.config.CONTEXTUAL:
-            return None
-            
-        current_history = history_manager.load_history()
-        
-        messages_to_include = self.config.ROLLING_SUMMARY_EXCHANGES * 2
-        
-        if len(current_history) >= 4:
-            assistant_responses = []
-            recent_messages = current_history[-messages_to_include:] if messages_to_include > 0 else current_history
-            
-            for h in recent_messages:
-                if h.get("role") == "assistant":
-                    assistant_responses.append(h["content"])
-            
-            if assistant_responses:
-                system_prompt = os.getenv("ROLLING_SUMMARY_SYSTEM_PROMPT", 
-                                        "Create a concise summary for context continuity.")
-                user_prompt_template = os.getenv("ROLLING_SUMMARY_USER_PROMPT",
-                                                "Summarize the key events, characters, tone, and important details from these translations. "
-                                                "Focus on: character names/relationships, plot developments, and any special terminology used.\n\n"
-                                                "{translations}")
-                
-                translations_text = "\n---\n".join(assistant_responses)
-                user_prompt = user_prompt_template.replace("{translations}", translations_text)
-                
-                summary_msgs = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ]
-                
-                try:
-                    summary_resp, _ = send_with_interrupt(
-                        summary_msgs, self.client, self.config.TEMP, 
-                        min(2000, self.config.MAX_OUTPUT_TOKENS), 
-                        self.check_stop
-                    )
-                    
-                    summary_file = os.path.join(self.out_dir, "rolling_summary.txt")
-                    
-                    if self.config.ROLLING_SUMMARY_MODE == "append":
-                        mode = "a"
-                        with open(summary_file, mode, encoding="utf-8") as sf:
-                            sf.write(f"\n\n=== Summary before chapter {idx+1}, chunk {chunk_idx} ===\n")
-                            sf.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n")
-                            sf.write(summary_resp.strip())
-                    else:
-                        mode = "w"
-                        with open(summary_file, mode, encoding="utf-8") as sf:
-                            sf.write(f"=== Latest Summary (Chapter {idx+1}, chunk {chunk_idx}) ===\n")
-                            sf.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n")
-                            sf.write(summary_resp.strip())
-                    
-                    print(f"📝 Generated rolling summary ({self.config.ROLLING_SUMMARY_MODE} mode, {self.config.ROLLING_SUMMARY_EXCHANGES} exchanges)")
-                    
-                    if self.config.ROLLING_SUMMARY_MODE == "append" and os.path.exists(summary_file):
-                        try:
-                            with open(summary_file, 'r', encoding='utf-8') as sf:
-                                content = sf.read()
-                            summary_count = content.count("=== Summary")
-                            print(f"   📚 Total summaries in memory: {summary_count}")
-                        except:
-                            pass
-                    
-                    return summary_resp.strip()
-                    
-                except Exception as e:
-                    print(f"⚠️ Failed to generate rolling summary: {e}")
-                    return None
-        
-        return None
-    
-    def translate_with_retry(self, msgs, chunk_html, c, chunk_idx, total_chunks):
-        """Handle translation with retry logic"""
-        retry_count = 0
-        max_retries = 3
-        duplicate_retry_count = 0
-        max_duplicate_retries = 6
-        timeout_retry_count = 0
-        max_timeout_retries = 2
-        history_purged = False
-        
-        original_max_tokens = self.config.MAX_OUTPUT_TOKENS
-        original_temp = self.config.TEMP
-        original_user_prompt = msgs[-1]["content"]
-        
-        chunk_timeout = None
-        if self.config.RETRY_TIMEOUT:
-            chunk_timeout = self.config.CHUNK_TIMEOUT
-        
-        result = None
-        finish_reason = None
-        
-        while True:
-            if self.check_stop():
-                return None, None
-            
-            try:
-                current_max_tokens = self.config.MAX_OUTPUT_TOKENS
-                current_temp = self.config.TEMP
-                
-                total_tokens = sum(self.chapter_splitter.count_tokens(m["content"]) for m in msgs)
-                # Determine file reference
-                if c.get('is_chunk', False):
-                    file_ref = f"Section_{c['num']}"
-                else:
-                    # Check if this is a text file - need to access from self
-                    is_text_source = self.is_text_file or c.get('filename', '').endswith('.txt')
-                    terminology = "Section" if is_text_source else "Chapter"
-                    file_ref = c.get('original_basename', f'{terminology}_{c["num"]}')
-
-                print(f"[DEBUG] Chunk {chunk_idx}/{total_chunks} tokens = {total_tokens:,} / {self.get_token_budget_str()} [File: {file_ref}]")            
-                
-                self.client.context = 'translation'
-                
-                result, finish_reason = send_with_interrupt(
-                    msgs, self.client, current_temp, current_max_tokens, 
-                    self.check_stop, chunk_timeout
-                )
-                
-                retry_needed = False
-                retry_reason = ""
-                is_duplicate_retry = False
-                
-                if finish_reason == "length" and self.config.RETRY_TRUNCATED:
-                    if retry_count < max_retries:
-                        retry_needed = True
-                        retry_reason = "truncated output"
-                        self.config.MAX_OUTPUT_TOKENS = min(self.config.MAX_OUTPUT_TOKENS * 2, self.config.MAX_RETRY_TOKENS)
-                        retry_count += 1
-                
-                if not retry_needed and self.config.RETRY_DUPLICATE_BODIES:
-                    if duplicate_retry_count < max_duplicate_retries:
-                        idx = c.get('__index', 0)
-                        prog = c.get('__progress', {})
-                        is_duplicate, similarity = self.check_duplicate_content(result, idx, prog, self.out_dir)
-                        
-                        if is_duplicate:
-                            retry_needed = True
-                            is_duplicate_retry = True
-                            retry_reason = f"duplicate content (similarity: {similarity}%)"
-                            duplicate_retry_count += 1
-                            
-                            if duplicate_retry_count >= 3 and not history_purged:
-                                print(f"    🧹 Clearing history after 3 attempts...")
-                                if 'history_manager' in c:
-                                    c['history_manager'].save_history([])
-                                history_purged = True
-                                self.config.TEMP = original_temp
-                            
-                            elif duplicate_retry_count == 1:
-                                print(f"    🔄 First duplicate retry - same temperature")
-                            
-                            elif history_purged:
-                                attempts_since_purge = duplicate_retry_count - 3
-                                self.config.TEMP = min(original_temp + (0.1 * attempts_since_purge), 1.0)
-                                print(f"    🌡️ Post-purge temp: {self.config.TEMP}")
-                            
-                            else:
-                                self.config.TEMP = min(original_temp + (0.1 * (duplicate_retry_count - 1)), 1.0)
-                                print(f"    🌡️ Gradual temp increase: {self.config.TEMP}")
-                            
-                            if duplicate_retry_count == 1:
-                                user_prompt = f"[RETRY] Chapter {c['num']}: Ensure unique translation.\n{chunk_html}"
-                            elif duplicate_retry_count <= 3:
-                                user_prompt = f"[ATTEMPT {duplicate_retry_count}] Translate uniquely:\n{chunk_html}"
-                            else:
-                                user_prompt = f"Chapter {c['num']}:\n{chunk_html}"
-                            
-                            msgs[-1] = {"role": "user", "content": user_prompt}
-                
-                if retry_needed:
-                    if is_duplicate_retry:
-                        print(f"    🔄 Duplicate retry {duplicate_retry_count}/{max_duplicate_retries}")
-                    else:
-                        print(f"    🔄 Retry {retry_count}/{max_retries}: {retry_reason}")
-                    
-                    time.sleep(2)
-                    continue
-                
-                break
-                
-            except UnifiedClientError as e:
-                error_msg = str(e)
-                
-                if "stopped by user" in error_msg:
-                    print("❌ Translation stopped by user during API call")
-                    return None, None
-                
-                if "took" in error_msg and "timeout:" in error_msg:
-                    if timeout_retry_count < max_timeout_retries:
-                        timeout_retry_count += 1
-                        print(f"    ⏱️ Chunk took too long, retry {timeout_retry_count}/{max_timeout_retries}")
-                        print(f"    🔄 Retrying")
-                        time.sleep(2)
-                        continue
-                    else:
-                        print(f"    ❌ Max timeout retries reached")
-                        raise UnifiedClientError("Translation failed after timeout retries")
-                
-                elif "timed out" in error_msg and "timeout:" not in error_msg:
-                    print(f"⚠️ {error_msg}, retrying...")
-                    time.sleep(5)
-                    continue
-                
-                elif getattr(e, "http_status", None) == 429:
-                    print("⚠️ Rate limited, sleeping 60s…")
-                    for i in range(60):
-                        if self.check_stop():
-                            print("❌ Translation stopped during rate limit wait")
-                            return None, None
-                        time.sleep(1)
-                    continue
-                
-                else:
-                    raise
-            
-            except Exception as e:
-                print(f"❌ Unexpected error during API call: {e}")
-                raise
-        
-        self.config.MAX_OUTPUT_TOKENS = original_max_tokens
-        self.config.TEMP = original_temp
-        
-        if retry_count > 0 or duplicate_retry_count > 0 or timeout_retry_count > 0:
-            if duplicate_retry_count > 0:
-                print(f"    🔄 Restored original temperature: {self.config.TEMP} (after {duplicate_retry_count} duplicate retries)")
-            elif timeout_retry_count > 0:
-                print(f"    🔄 Restored original settings after {timeout_retry_count} timeout retries")
-            elif retry_count > 0:
-                print(f"    🔄 Restored original settings after {retry_count} retries")
-        
-        if duplicate_retry_count >= max_duplicate_retries:
-            print(f"    ⚠️ WARNING: Duplicate content issue persists after {max_duplicate_retries} attempts")
-        
-        return result, finish_reason
-    
-    def get_token_budget_str(self):
-        """Get token budget as string"""
-        _tok_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
-        max_tokens_limit, budget_str = parse_token_limit(_tok_env)
-        return budget_str
-
-# =====================================================
-# BATCH TRANSLATION PROCESSOR
-# =====================================================
-class BatchTranslationProcessor:
-    """Handles batch/parallel translation processing"""
-    
-    def __init__(self, config, client, base_msg, out_dir, progress_lock, 
-                 save_progress_fn, update_progress_fn, check_stop_fn, 
-                 image_translator=None, is_text_file=False):
-        self.config = config
-        self.client = client
-        self.base_msg = base_msg
-        self.out_dir = out_dir
-        self.progress_lock = progress_lock
-        self.save_progress_fn = save_progress_fn
-        self.update_progress_fn = update_progress_fn
-        self.check_stop_fn = check_stop_fn
-        self.image_translator = image_translator
-        self.chapters_completed = 0
-        self.chunks_completed = 0
-        self.is_text_file = is_text_file
-    
-    def process_single_chapter(self, chapter_data):
-        """Process a single chapter (runs in thread)"""
-        idx, chapter = chapter_data
-        chap_num = chapter["num"]
-        
-        # Use the pre-calculated actual_chapter_num from the main loop
-        actual_num = chapter.get('actual_chapter_num')
-        
-        # Fallback if not set (common in batch mode where first pass might be skipped)
-        if actual_num is None:
-            # Try to extract it using the same logic as non-batch mode
-            raw_num = FileUtilities.extract_actual_chapter_number(chapter, patterns=None, config=self.config)
-            
-            # Apply offset if configured
-            offset = self.config.CHAPTER_NUMBER_OFFSET if hasattr(self.config, 'CHAPTER_NUMBER_OFFSET') else 0
-            raw_num += offset
-            
-            # Check if zero detection is disabled
-            if hasattr(self.config, 'DISABLE_ZERO_DETECTION') and self.config.DISABLE_ZERO_DETECTION:
-                actual_num = raw_num
-            elif hasattr(self.config, '_uses_zero_based') and self.config._uses_zero_based:
-                # This is a 0-based novel, adjust the number
-                actual_num = raw_num + 1
-            else:
-                # Default to raw number (1-based or unknown)
-                actual_num = raw_num
-            
-            print(f"    📖 Extracted actual chapter number: {actual_num} (from raw: {raw_num})")
-        
-        try:
-            # Rest of the processing logic...
-            # Check if this is from a text file
-            ai_features = None
-            is_text_source = self.is_text_file or chapter.get('filename', '').endswith('.txt') or chapter.get('is_chunk', False)
-            terminology = "Section" if is_text_source else "Chapter"
-            print(f"🔄 Starting #{idx+1} (Internal: {terminology} {chap_num}, Actual: {terminology} {actual_num})  (thread: {threading.current_thread().name}) [File: {chapter.get('original_basename', f'{terminology}_{chap_num}')}]")
-                      
-            content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
-            with self.progress_lock:
-                self.update_progress_fn(idx, actual_num, content_hash, None, status="in_progress")
-                self.save_progress_fn()
-            
-            chapter_body = chapter["body"]
-            if chapter.get('has_images') and self.image_translator and self.config.ENABLE_IMAGE_TRANSLATION:
-                print(f"🖼️ Processing images for Chapter {actual_num}...")
-                self.image_translator.set_current_chapter(actual_num)
-                chapter_body, image_translations = process_chapter_images(
-                    chapter_body, 
-                    actual_num, 
-                    self.image_translator,
-                    self.check_stop_fn
-                )
-                if image_translations:
-                    print(f"✅ Processed {len(image_translations)} images for Chapter {actual_num}")
-            
-            chapter_msgs = self.base_msg + [{"role": "user", "content": chapter_body}]
-            
-            print(f"📤 Sending Chapter {actual_num} to API...")
-            result, finish_reason = send_with_interrupt(
-                chapter_msgs, self.client, self.config.TEMP, 
-                self.config.MAX_OUTPUT_TOKENS, self.check_stop_fn
-            )
-            
-            print(f"📥 Received Chapter {actual_num} response, finish_reason: {finish_reason}")
-            
-            if finish_reason in ["length", "max_tokens"]:
-                print(f"⚠️ Chapter {actual_num} response was TRUNCATED!")
-            
-            if self.config.REMOVE_AI_ARTIFACTS:
-                result = ContentProcessor.clean_ai_artifacts(result, True)
-                
-            result = ContentProcessor.clean_memory_artifacts(result)
-            
-            if self.config.EMERGENCY_RESTORE:
-                result = ContentProcessor.emergency_restore_paragraphs(result, chapter_body)
-            
-            cleaned = re.sub(r"^```(?:html)?\s*\n?", "", result, count=1, flags=re.MULTILINE)
-            cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
-            cleaned = ContentProcessor.clean_ai_artifacts(cleaned, remove_artifacts=self.config.REMOVE_AI_ARTIFACTS)
-            
-            fname = FileUtilities.create_chapter_filename(chapter, actual_num)
-            
-            if self.is_text_file:
-                # For text files, save as plain text
-                fname_txt = fname.replace('.html', '.txt') if fname.endswith('.html') else fname
-                
-                # Extract text from HTML
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(cleaned, 'html.parser')
-                text_content = soup.get_text(strip=True)
-                
-                with open(os.path.join(self.out_dir, fname_txt), 'w', encoding='utf-8') as f:
-                    f.write(text_content)
-                
-                # Update with .txt filename
-                with self.progress_lock:
-                    self.update_progress_fn(idx, actual_num, content_hash, fname_txt, status="completed", ai_features=ai_features)
-                    self.save_progress_fn()
-            else:
-                # Original code for EPUB files
-                with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
-                    f.write(cleaned)
-                
-                with self.progress_lock:
-                    self.update_progress_fn(idx, actual_num, content_hash, fname, status="completed", ai_features=ai_features)
-                    self.save_progress_fn()            
-            
-            with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
-                f.write(cleaned)
-            
-            print(f"💾 Saved Chapter {actual_num}: {fname} ({len(cleaned)} chars)")
-            
-            # Initialize ai_features at the beginning to ensure it's always defined
-            ai_features = None
-            
-            # Extract and save AI features for future duplicate detection
-            if hasattr(self.config, 'DUPLICATE_DETECTION_MODE') and self.config.DUPLICATE_DETECTION_MODE in ['ai-hunter', 'cascading']:
-                try:
-                    # Extract features from the translated content
-                    cleaned_text = re.sub(r'<[^>]+>', '', cleaned).strip()
-                    # Note: self.translator doesn't exist, so we can't extract features here
-                    # The features will need to be extracted during regular processing
-                    print(f"    ⚠️ AI features extraction not available in batch mode")
-                except Exception as e:
-                    print(f"    ⚠️ Failed to extract AI features: {e}")
-            
-            with self.progress_lock:
-                self.update_progress_fn(idx, actual_num, content_hash, fname, status="completed", ai_features=ai_features)
-                self.save_progress_fn()
-                
-                self.chapters_completed += 1
-                self.chunks_completed += 1
-            
-            print(f"✅ Chapter {actual_num} completed successfully")
-            return True, actual_num
-            
-        except Exception as e:
-            print(f"❌ Chapter {actual_num} failed: {e}")
-            with self.progress_lock:
-                self.update_progress_fn(idx, actual_num, content_hash, None, status="failed")
-                self.save_progress_fn()
-            return False, actual_num
-
-# =====================================================
-# GLOSSARY MANAGER
-# =====================================================
-class GlossaryManager:
-    """Unified glossary management"""
-    
-    def __init__(self):
-        self.pattern_manager = PatternManager()
-    
-    def save_glossary(self, output_dir, chapters, instructions, language="korean"):
-        """Targeted glossary generator - Focuses on titles and CJK names with honorifics"""
-        print("📑 Targeted Glossary Generator v4.0 (Enhanced)")
-        print("📑 Extracting complete names with honorifics and titles")
-        
-        manual_glossary_path = os.getenv("MANUAL_GLOSSARY")
-        if manual_glossary_path and os.path.exists(manual_glossary_path):
-            print(f"📑 Manual glossary detected: {os.path.basename(manual_glossary_path)}")
-            
-            target_path = os.path.join(output_dir, "glossary.json")
-            try:
-                shutil.copy2(manual_glossary_path, target_path)
-                print(f"📑 ✅ Manual glossary copied to: {target_path}")
-                print(f"📑 Skipping automatic glossary generation")
-                
-                with open(manual_glossary_path, 'r', encoding='utf-8') as f:
-                    manual_data = json.load(f)
-                
-                simple_entries = {}
-                if isinstance(manual_data, list):
-                    for char in manual_data:
-                        original = char.get('original_name', '')
-                        translated = char.get('name', original)
-                        if original and translated:
-                            simple_entries[original] = translated
-                
-                simple_path = os.path.join(output_dir, "glossary_simple.json")
-                with open(simple_path, 'w', encoding='utf-8') as f:
-                    json.dump(simple_entries, f, ensure_ascii=False, indent=2)
-                
-                return simple_entries
-                
-            except Exception as e:
-                print(f"⚠️ Could not copy manual glossary: {e}")
-                print(f"📑 Proceeding with automatic generation...")
-        
-        glossary_folder_path = os.path.join(output_dir, "Glossary")
-        existing_glossary = None
-        
-        if os.path.exists(glossary_folder_path):
-            for file in os.listdir(glossary_folder_path):
-                if file.endswith("_glossary.json"):
-                    existing_path = os.path.join(glossary_folder_path, file)
-                    try:
-                        with open(existing_path, 'r', encoding='utf-8') as f:
-                            existing_glossary = json.load(f)
-                        print(f"📑 Found existing glossary from manual extraction: {file}")
-                        break
-                    except Exception as e:
-                        print(f"⚠️ Could not load existing glossary: {e}")
-        
-        min_frequency = int(os.getenv("GLOSSARY_MIN_FREQUENCY", "2"))
-        max_names = int(os.getenv("GLOSSARY_MAX_NAMES", "50"))
-        max_titles = int(os.getenv("GLOSSARY_MAX_TITLES", "30"))
-        batch_size = int(os.getenv("GLOSSARY_BATCH_SIZE", "50"))
-        
-        print(f"📑 Settings: Min frequency: {min_frequency}, Max names: {max_names}, Max titles: {max_titles}")
-        
-        custom_prompt = os.getenv("AUTO_GLOSSARY_PROMPT", "").strip()
-        
-        def clean_html(html_text):
-            """Remove HTML tags to get clean text"""
-            soup = BeautifulSoup(html_text, 'html.parser')
-            return soup.get_text()
-        
-        all_text = ' '.join(clean_html(chapter["body"]) for chapter in chapters)
-        print(f"📑 Processing {len(all_text):,} characters of text")
-        
-        if custom_prompt:
-            return self._extract_with_custom_prompt(custom_prompt, all_text, language, 
-                                                   min_frequency, max_names, max_titles, 
-                                                   existing_glossary, output_dir)
-        else:
-            return self._extract_with_patterns(all_text, language, min_frequency, 
-                                             max_names, max_titles, batch_size, 
-                                             existing_glossary, output_dir)
-    
-    def _extract_with_custom_prompt(self, custom_prompt, all_text, language, 
-                                   min_frequency, max_names, max_titles, 
-                                   existing_glossary, output_dir):
-        """Extract glossary using custom AI prompt"""
-        print("📑 Using custom automatic glossary prompt")
-        
-        try:
-            MODEL = os.getenv("MODEL", "gemini-1.5-flash")
-            API_KEY = (os.getenv("API_KEY") or 
-                       os.getenv("OPENAI_API_KEY") or 
-                       os.getenv("OPENAI_OR_Gemini_API_KEY") or
-                       os.getenv("GEMINI_API_KEY"))
-            
-            if not API_KEY:
-                print(f"📑 No API key found, falling back to pattern-based extraction")
-                return self._extract_with_patterns(all_text, language, min_frequency, 
-                                                 max_names, max_titles, 50, 
-                                                 existing_glossary, output_dir)
-            else:
-                print(f"📑 Using AI-assisted extraction with custom prompt")
-                
-                from unified_api_client import UnifiedClient
-                client = UnifiedClient(model=MODEL, api_key=API_KEY)
-                
-                text_sample = all_text[:50000] if len(all_text) > 50000 else all_text
-                
-                prompt = custom_prompt.replace('{language}', language)
-                prompt = prompt.replace('{min_frequency}', str(min_frequency))
-                prompt = prompt.replace('{max_names}', str(max_names))
-                prompt = prompt.replace('{max_titles}', str(max_titles))
-                
-                messages = [
-                    {"role": "system", "content": "You are a glossary extraction assistant. Extract names and terms as requested."},
-                    {"role": "user", "content": f"{prompt}\n\nText sample:\n{text_sample}"}
-                ]
-                
-                try:
-                    response, _ = client.send(messages, temperature=0.3, max_tokens=4096)
-                    
-                    ai_extracted_terms = {}
-                    
-                    try:
-                        ai_data = json.loads(response)
-                        if isinstance(ai_data, dict):
-                            ai_extracted_terms = ai_data
-                        elif isinstance(ai_data, list):
-                            for item in ai_data:
-                                if isinstance(item, dict) and 'original' in item:
-                                    ai_extracted_terms[item['original']] = item.get('translation', item['original'])
-                    except:
-                        lines = response.strip().split('\n')
-                        for line in lines:
-                            if '->' in line or '→' in line or ':' in line:
-                                parts = re.split(r'->|→|:', line, 1)
-                                if len(parts) == 2:
-                                    original = parts[0].strip()
-                                    translation = parts[1].strip()
-                                    if original and translation:
-                                        ai_extracted_terms[original] = translation
-                    
-                    print(f"📑 AI extracted {len(ai_extracted_terms)} initial terms")
-                    
-                    verified_terms = {}
-                    for original, translation in ai_extracted_terms.items():
-                        count = all_text.count(original)
-                        if count >= min_frequency:
-                            verified_terms[original] = translation
-                    
-                    print(f"📑 Verified {len(verified_terms)} terms meet frequency threshold")
-                    
-                    if existing_glossary and isinstance(existing_glossary, list):
-                        print("📑 Merging with existing manual glossary...")
-                        merged_count = 0
-                        
-                        for char in existing_glossary:
-                            original = char.get('original_name', '')
-                            translated = char.get('name', original)
-                            
-                            if original and translated and original not in verified_terms:
-                                verified_terms[original] = translated
-                                merged_count += 1
-                        
-                        print(f"📑 Added {merged_count} entries from existing glossary")
-                    
-                    glossary_data = {
-                        "metadata": {
-                            "language": language,
-                            "extraction_method": "ai_custom_prompt",
-                            "total_entries": len(verified_terms),
-                            "min_frequency": min_frequency,
-                            "generation_date": time.strftime("%Y-%m-%d %H:%M:%S"),
-                            "merged_with_manual": existing_glossary is not None
-                        },
-                        "entries": verified_terms
-                    }
-                    
-                    glossary_path = os.path.join(output_dir, "glossary.json")
-                    with open(glossary_path, 'w', encoding='utf-8') as f:
-                        json.dump(glossary_data, f, ensure_ascii=False, indent=2)
-                    
-                    print(f"\n📑 ✅ AI-ASSISTED GLOSSARY SAVED!")
-                    print(f"📑 File: {glossary_path}")
-                    print(f"📑 Total entries: {len(verified_terms)}")
-                    
-                    simple_glossary_path = os.path.join(output_dir, "glossary_simple.json")
-                    with open(simple_glossary_path, 'w', encoding='utf-8') as f:
-                        json.dump(verified_terms, f, ensure_ascii=False, indent=2)
-                    
-                    return verified_terms
-                    
-                except Exception as e:
-                    print(f"⚠️ AI extraction failed: {e}")
-                    print("📑 Falling back to pattern-based extraction")
-                    return self._extract_with_patterns(all_text, language, min_frequency, 
-                                                     max_names, max_titles, 50, 
-                                                     existing_glossary, output_dir)
-                    
-        except Exception as e:
-            print(f"⚠️ Custom prompt processing failed: {e}")
-            return self._extract_with_patterns(all_text, language, min_frequency, 
-                                             max_names, max_titles, 50, 
-                                             existing_glossary, output_dir)
-    
-    def _extract_with_patterns(self, all_text, language, min_frequency, 
-                               max_names, max_titles, batch_size, 
-                               existing_glossary, output_dir):
-        """Extract glossary using pattern matching"""
-        print("📑 Using pattern-based extraction")
-        
-        def is_valid_name(name, language_hint='unknown'):
-            """Strict validation for proper names only"""
-            if not name or len(name.strip()) < 1:
-                return False
-                
-            name = name.strip()
-            
-            if name.lower() in self.pattern_manager.COMMON_WORDS or name in self.pattern_manager.COMMON_WORDS:
-                return False
-            
-            if language_hint == 'korean':
-                if not (2 <= len(name) <= 4):
-                    return False
-                if not all(0xAC00 <= ord(char) <= 0xD7AF for char in name):
-                    return False
-                if len(set(name)) == 1:
-                    return False
-                    
-            elif language_hint == 'japanese':
-                if not (2 <= len(name) <= 6):
-                    return False
-                has_kanji = any(0x4E00 <= ord(char) <= 0x9FFF for char in name)
-                has_kana = any((0x3040 <= ord(char) <= 0x309F) or (0x30A0 <= ord(char) <= 0x30FF) for char in name)
-                if not (has_kanji or has_kana):
-                    return False
-                    
-            elif language_hint == 'chinese':
-                if not (2 <= len(name) <= 4):
-                    return False
-                if not all(0x4E00 <= ord(char) <= 0x9FFF for char in name):
-                    return False
-                    
-            elif language_hint == 'english':
-                if not name[0].isupper():
-                    return False
-                if sum(1 for c in name if c.isalpha()) < len(name) * 0.8:
-                    return False
-                if not (2 <= len(name) <= 20):
-                    return False
-            
-            return True
-        
-        def detect_language_hint(text_sample):
-            """Quick language detection for validation purposes with enhanced debugging"""
-            # Only analyze first 1000 characters for performance
-            sample = text_sample[:1000]
-            sample_length = len(sample)
-            
-            # Count characters by script type
-            korean_chars = sum(1 for char in sample if 0xAC00 <= ord(char) <= 0xD7AF)
-            japanese_kana = sum(1 for char in sample if (0x3040 <= ord(char) <= 0x309F) or (0x30A0 <= ord(char) <= 0x30FF))
-            chinese_chars = sum(1 for char in sample if 0x4E00 <= ord(char) <= 0x9FFF)
-            latin_chars = sum(1 for char in sample if 0x0041 <= ord(char) <= 0x007A)
-            
-            # Calculate total CJK characters
-            total_cjk = korean_chars + japanese_kana + chinese_chars
-            
-            # Calculate percentages
-            korean_pct = (korean_chars / sample_length * 100) if sample_length > 0 else 0
-            japanese_pct = (japanese_kana / sample_length * 100) if sample_length > 0 else 0
-            chinese_pct = (chinese_chars / sample_length * 100) if sample_length > 0 else 0
-            latin_pct = (latin_chars / sample_length * 100) if sample_length > 0 else 0
-            
-            # Print detailed debugging information
-            print(f"\n🔍 LANGUAGE DETECTION DEBUG:")
-            print(f"   📊 Sample analyzed: {sample_length} characters")
-            print(f"   📈 Character counts:")
-            print(f"      • Korean (Hangul): {korean_chars} chars ({korean_pct:.1f}%)")
-            print(f"      • Japanese (Kana): {japanese_kana} chars ({japanese_pct:.1f}%)")
-            print(f"      • Chinese (Hanzi): {chinese_chars} chars ({chinese_pct:.1f}%)")
-            print(f"      • Latin/English:   {latin_chars} chars ({latin_pct:.1f}%)")
-            print(f"      • Total CJK:       {total_cjk} chars ({(total_cjk/sample_length*100):.1f}%)")
-            
-            # Show decision thresholds
-            print(f"   ⚖️ Decision thresholds:")
-            print(f"      • Korean threshold: 50 chars (current: {korean_chars})")
-            print(f"      • Japanese threshold: 20 chars (current: {japanese_kana})")
-            print(f"      • Chinese threshold: 50 chars + Japanese < 10 (current: {chinese_chars}, JP: {japanese_kana})")
-            print(f"      • English threshold: 100 chars (current: {latin_chars})")
-            
-            # Apply detection logic with detailed reasoning
-            if korean_chars > 50:
-                print(f"   ✅ DETECTED: Korean (Korean chars {korean_chars} > 50)")
-                result = 'korean'
-            elif japanese_kana > 20:
-                print(f"   ✅ DETECTED: Japanese (Japanese kana {japanese_kana} > 20)")
-                result = 'japanese'
-            elif chinese_chars > 50 and japanese_kana < 10:
-                print(f"   ✅ DETECTED: Chinese (Chinese chars {chinese_chars} > 50 AND Japanese kana {japanese_kana} < 10)")
-                result = 'chinese'
-            elif latin_chars > 100:
-                print(f"   ✅ DETECTED: English (Latin chars {latin_chars} > 100)")
-                result = 'english'
-            else:
-                print(f"   ❓ DETECTED: Unknown (no thresholds met)")
-                result = 'unknown'
-            
-            # Show first few characters as examples
-            if sample:
-                # Get first 20 characters for preview
-                preview = sample[:20].replace('\n', '\\n').replace('\r', '\\r')
-                print(f"   📝 Sample text preview: '{preview}{'...' if len(sample) > 20 else ''}'")
-                
-                # Show some example characters by type
-                korean_examples = [c for c in sample[:50] if 0xAC00 <= ord(c) <= 0xD7AF][:5]
-                japanese_examples = [c for c in sample[:50] if (0x3040 <= ord(c) <= 0x309F) or (0x30A0 <= ord(c) <= 0x30FF)][:5]
-                chinese_examples = [c for c in sample[:50] if 0x4E00 <= ord(c) <= 0x9FFF][:5]
-                
-                if korean_examples:
-                    print(f"   🇰🇷 Korean examples: {''.join(korean_examples)}")
-                if japanese_examples:
-                    print(f"   🇯🇵 Japanese examples: {''.join(japanese_examples)}")
-                if chinese_examples:
-                    print(f"   🇨🇳 Chinese examples: {''.join(chinese_examples)}")
-            
-            print(f"   🎯 FINAL RESULT: {result.upper()}")
-            
-            return result
-        
-        language_hint = detect_language_hint(all_text)
-        print(f"📑 Detected primary language: {language_hint}")
-        
-        honorifics_to_use = []
-        if language_hint in self.pattern_manager.CJK_HONORIFICS:
-            honorifics_to_use.extend(self.pattern_manager.CJK_HONORIFICS[language_hint])
-        honorifics_to_use.extend(self.pattern_manager.CJK_HONORIFICS['english'])
-        
-        print(f"📑 Using {len(honorifics_to_use)} honorifics for {language_hint}")
-        
-        names_with_honorifics = {}
-        standalone_names = {}
-        
-        print("📑 Scanning for names with honorifics...")
-        
-        # Extract names with honorifics
-        for honorific in honorifics_to_use:
-            self._extract_names_for_honorific(honorific, all_text, language_hint, 
-                                            min_frequency, names_with_honorifics, 
-                                            standalone_names, is_valid_name)
-        
-        # Also look for titles with honorifics
-        if language_hint == 'korean':
-            korean_titles = [
-                '사장', '회장', '부장', '과장', '대리', '팀장', '실장', '본부장',
-                '선생', '교수', '박사', '의사', '변호사', '검사', '판사',
-                '대통령', '총리', '장관', '시장', '지사', '의원',
-                '왕', '여왕', '왕자', '공주', '황제', '황후',
-                '장군', '대장', '원수', '제독', '함장',
-                '어머니', '아버지', '할머니', '할아버지',
-                '사모', '선배', '후배', '동료'
-            ]
-            
-            for title in korean_titles:
-                for honorific in ['님']:
-                    full_title = title + honorific
-                    count = len(re.findall(re.escape(full_title) + r'(?=\s|[,.\!?]|$)', all_text))
-                    
-                    if count >= min_frequency:
-                        names_with_honorifics[full_title] = count
-        
-        print(f"📑 Found {len(standalone_names)} unique names with honorifics")
-        print(f"[DEBUG] Sample text (first 500 chars): {all_text[:500]}")
-        print(f"[DEBUG] Text length: {len(all_text)}")
-        print(f"[DEBUG] Honorifics being used: {honorifics_to_use[:5]}")
-        
-        # Find titles
-        print("📑 Scanning for titles...")
-        found_titles = {}
-        
-        title_patterns_to_use = []
-        if language_hint in self.pattern_manager.TITLE_PATTERNS:
-            title_patterns_to_use.extend(self.pattern_manager.TITLE_PATTERNS[language_hint])
-        title_patterns_to_use.extend(self.pattern_manager.TITLE_PATTERNS['english'])
-        
-        for pattern in title_patterns_to_use:
-            matches = re.finditer(pattern, all_text, re.IGNORECASE if 'english' in pattern else 0)
-            
-            for match in matches:
-                title = match.group(0)
-                
-                if title in names_with_honorifics:
-                    continue
-                    
-                count = len(re.findall(re.escape(title) + r'(?=\s|[,.\!?、。，]|$)', all_text, re.IGNORECASE if 'english' in pattern else 0))
-                
-                if count >= min_frequency:
-                    if re.match(r'[A-Za-z]', title):
-                        title = title.title()
-                    
-                    if title not in found_titles:
-                        found_titles[title] = count
-        
-        print(f"📑 Found {len(found_titles)} unique titles")
-        
-        sorted_names = sorted(names_with_honorifics.items(), key=lambda x: x[1], reverse=True)[:max_names]
-        sorted_titles = sorted(found_titles.items(), key=lambda x: x[1], reverse=True)[:max_titles]
-        
-        all_terms = []
-        
-        for name, count in sorted_names:
-            all_terms.append(name)
-            
-        for title, count in sorted_titles:
-            all_terms.append(title)
-        
-        print(f"📑 Total terms to translate: {len(all_terms)}")
-        
-        if sorted_names:
-            print("\n📑 Sample names found:")
-            for name, count in sorted_names[:5]:
-                print(f"   • {name} ({count}x)")
-        
-        if sorted_titles:
-            print("\n📑 Sample titles found:")
-            for title, count in sorted_titles[:5]:
-                print(f"   • {title} ({count}x)")
-        
-        if os.getenv("DISABLE_GLOSSARY_TRANSLATION", "0") == "1":
-            print("📑 Translation disabled - keeping original terms")
-            translations = {term: term for term in all_terms}
-        else:
-            print(f"📑 Translating {len(all_terms)} terms...")
-            translations = self._translate_terms_batch(all_terms, language_hint, batch_size)
-        
-        glossary_entries = {}
-        
-        for name, _ in sorted_names:
-            if name in translations:
-                glossary_entries[name] = translations[name]
-        
-        for title, _ in sorted_titles:
-            if title in translations:
-                glossary_entries[title] = translations[title]
-        
-        if existing_glossary and isinstance(existing_glossary, list):
-            print("📑 Merging with existing manual glossary...")
-            merged_count = 0
-            
-            for char in existing_glossary:
-                original = char.get('original_name', '')
-                translated = char.get('name', original)
-                
-                if original and translated and original not in glossary_entries:
-                    glossary_entries[original] = translated
-                    merged_count += 1
-            
-            print(f"📑 Added {merged_count} entries from existing glossary")
-        
-        glossary_data = {
-            "metadata": {
-                "language": language_hint,
-                "extraction_method": "pattern_based",
-                "names_count": len(sorted_names),
-                "titles_count": len(sorted_titles),
-                "min_frequency": min_frequency,
-                "generation_date": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "merged_with_manual": existing_glossary is not None
-            },
-            "entries": glossary_entries
-        }
-        
-        glossary_path = os.path.join(output_dir, "glossary.json")
-        with open(glossary_path, 'w', encoding='utf-8') as f:
-            json.dump(glossary_data, f, ensure_ascii=False, indent=2)
-        
-        print(f"\n📑 ✅ TARGETED GLOSSARY SAVED!")
-        print(f"📑 File: {glossary_path}")
-        print(f"📑 Names: {len(sorted_names)}, Titles: {len(sorted_titles)}")
-        if existing_glossary:
-            print(f"📑 Total entries (including manual): {len(glossary_entries)}")
-        
-        simple_glossary_path = os.path.join(output_dir, "glossary_simple.json")
-        with open(simple_glossary_path, 'w', encoding='utf-8') as f:
-            json.dump(glossary_entries, f, ensure_ascii=False, indent=2)
-        
-        return glossary_entries
-    
-    def _extract_names_for_honorific(self, honorific, all_text, language_hint, 
-                                    min_frequency, names_with_honorifics, 
-                                    standalone_names, is_valid_name):
-        """Extract names for a specific honorific"""
-        if language_hint == 'korean' and not honorific.startswith('-'):
-            pattern = r'([\uac00-\ud7af]{2,4})(?=' + re.escape(honorific) + r'(?:\s|[,.\!?]|$))'
-            
-            for match in re.finditer(pattern, all_text):
-                potential_name = match.group(1)
-                
-                if is_valid_name(potential_name, 'korean'):
-                    full_form = potential_name + honorific
-                    
-                    count = len(re.findall(re.escape(full_form) + r'(?=\s|[,.\!?]|$)', all_text))
-                    
-                    if count >= min_frequency:
-                        context_patterns = [
-                            full_form + r'[은는이가]',
-                            full_form + r'[을를]',
-                            full_form + r'[에게한테]',
-                            r'["]' + full_form,
-                            full_form + r'[,]',
-                        ]
-                        
-                        context_count = 0
-                        for ctx_pattern in context_patterns:
-                            context_count += len(re.findall(ctx_pattern, all_text))
-                        
-                        if context_count > 0:
-                            names_with_honorifics[full_form] = count
-                            standalone_names[potential_name] = count
-                            
-        elif language_hint == 'japanese' and not honorific.startswith('-'):
-            pattern = r'([\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]{2,5})(?=' + re.escape(honorific) + r'(?:\s|[、。！？]|$))'
-            
-            for match in re.finditer(pattern, all_text):
-                potential_name = match.group(1)
-                
-                if is_valid_name(potential_name, 'japanese'):
-                    full_form = potential_name + honorific
-                    count = len(re.findall(re.escape(full_form) + r'(?=\s|[、。！？]|$)', all_text))
-                    
-                    if count >= min_frequency:
-                        names_with_honorifics[full_form] = count
-                        standalone_names[potential_name] = count
-                        
-        elif language_hint == 'chinese' and not honorific.startswith('-'):
-            pattern = r'([\u4e00-\u9fff]{2,4})(?=' + re.escape(honorific) + r'(?:\s|[，。！？]|$))'
-            
-            for match in re.finditer(pattern, all_text):
-                potential_name = match.group(1)
-                
-                if is_valid_name(potential_name, 'chinese'):
-                    full_form = potential_name + honorific
-                    count = len(re.findall(re.escape(full_form) + r'(?=\s|[，。！？]|$)', all_text))
-                    
-                    if count >= min_frequency:
-                        names_with_honorifics[full_form] = count
-                        standalone_names[potential_name] = count
-                        
-        elif honorific.startswith('-') or honorific.startswith(' '):
-            is_space_separated = honorific.startswith(' ')
-            
-            if is_space_separated:
-                pattern_english = r'\b([A-Z][a-zA-Z]+)' + re.escape(honorific) + r'(?=\s|[,.\!?]|$)'
-            else:
-                pattern_english = r'\b([A-Z][a-zA-Z]+)' + re.escape(honorific) + r'\b'
-            
-            matches = re.finditer(pattern_english, all_text)
-            
-            for match in matches:
-                potential_name = match.group(1)
-                
-                if is_valid_name(potential_name, 'english'):
-                    full_form = potential_name + honorific
-                    if is_space_separated:
-                        count = len(re.findall(re.escape(full_form) + r'(?=\s|[,.\!?]|$)', all_text))
-                    else:
-                        count = len(re.findall(re.escape(full_form) + r'\b', all_text))
-                    
-                    if count >= min_frequency:
-                        names_with_honorifics[full_form] = count
-                        standalone_names[potential_name] = count
-            
-            korean_family_names = r'(?:Kim|Lee|Park|Choi|Jung|Jeong|Kang|Cho|Jo|Yoon|Yun|Jang|Chang|Lim|Im|Han|Oh|Seo|Shin|Kwon|Hwang|Ahn|An|Song|Hong|Yoo|Yu|Ko|Go|Moon|Mun|Yang|Bae|Baek|Paek|Nam|Noh|No|Roh|Ha|Heo|Hur|Koo|Ku|Gu|Min|Sim|Shim)'
-            
-            if is_space_separated:
-                pattern_korean = r'\b(' + korean_family_names + r'(?:\s+[A-Z][a-z]+(?:-[A-Z][a-z]+)?)?|[A-Z][a-z]+(?:-[A-Z][a-z]+)+)' + re.escape(honorific) + r'(?=\s|[,.\!?]|$)'
-            else:
-                pattern_korean = r'\b(' + korean_family_names + r'(?:\s+[A-Z][a-z]+(?:-[A-Z][a-z]+)?)?|[A-Z][a-z]+(?:-[A-Z][a-z]+)+)' + re.escape(honorific) + r'\b'
-            
-            matches = re.finditer(pattern_korean, all_text, re.IGNORECASE)
-            
-            for match in matches:
-                potential_name = match.group(1)
-                potential_name = potential_name.strip()
-                
-                if 2 <= len(potential_name) <= 30:
-                    full_form = potential_name + honorific
-                    if is_space_separated:
-                        count = len(re.findall(re.escape(full_form) + r'(?=\s|[,.\!?]|$)', all_text, re.IGNORECASE))
-                    else:
-                        count = len(re.findall(re.escape(full_form) + r'\b', all_text, re.IGNORECASE))
-                    
-                    if count >= min_frequency:
-                        names_with_honorifics[full_form] = count
-                        standalone_names[potential_name] = count
-    
-    def _translate_terms_batch(self, term_list, profile_name, batch_size=50):
-        """Use GUI-controlled batch size for translation"""
-        if not term_list or os.getenv("DISABLE_GLOSSARY_TRANSLATION", "0") == "1":
-            print(f"📑 Glossary translation disabled or no terms to translate")
-            return {term: term for term in term_list}
-        
-        try:
-            MODEL = os.getenv("MODEL", "gemini-1.5-flash")
-            API_KEY = (os.getenv("API_KEY") or 
-                       os.getenv("OPENAI_API_KEY") or 
-                       os.getenv("OPENAI_OR_Gemini_API_KEY") or
-                       os.getenv("GEMINI_API_KEY"))
-            
-            if not API_KEY:
-                print(f"📑 No API key found, skipping translation")
-                return {term: term for term in term_list}
-            
-            print(f"📑 Translating {len(term_list)} {profile_name} terms to English using batch size {batch_size}...")
-            
-            from unified_api_client import UnifiedClient
-            client = UnifiedClient(model=MODEL, api_key=API_KEY)
-            
-            all_translations = {}
-            
-            for i in range(0, len(term_list), batch_size):
-                batch = term_list[i:i + batch_size]
-                batch_num = (i // batch_size) + 1
-                total_batches = (len(term_list) + batch_size - 1) // batch_size
-                
-                print(f"📑 Processing batch {batch_num}/{total_batches} ({len(batch)} terms)...")
-                
-                terms_text = ""
-                for idx, term in enumerate(batch, 1):
-                    terms_text += f"{idx}. {term}\n"
-                
-                system_prompt = (
-                    f"You are translating {profile_name} character names and important terms to English. "
-                    "For character names, provide English transliterations or keep as romanized. "
-                    "Retain honorifics/suffixes in romaji. "
-                    "Keep the same number format in your response."
-                )
-                
-                user_prompt = (
-                    f"Translate these {profile_name} character names and terms to English:\n\n"
-                    f"{terms_text}\n"
-                    "Respond with the same numbered format. For names, provide transliteration or keep romanized."
-                )
-                
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ]
-                
-                try:
-                    response, _ = client.send(messages, temperature=0.1, max_tokens=4096)
-                    
-                    batch_translations = self._parse_translation_response(response, batch)
-                    all_translations.update(batch_translations)
-                    
-                    print(f"📑 Batch {batch_num} completed: {len(batch_translations)} translations")
-                    
-                    if i + batch_size < len(term_list):
-                        time.sleep(0.5)
-                        
-                except Exception as e:
-                    print(f"⚠️ Translation failed for batch {batch_num}: {e}")
-                    for term in batch:
-                        all_translations[term] = term
-            
-            for term in term_list:
-                if term not in all_translations:
-                    all_translations[term] = term
-            
-            translated_count = sum(1 for term, translation in all_translations.items() 
-                                 if translation != term and translation.strip())
-            
-            print(f"📑 Successfully translated {translated_count}/{len(term_list)} terms")
-            return all_translations
-            
-        except Exception as e:
-            print(f"⚠️ Glossary translation failed: {e}")
-            return {term: term for term in term_list}
-    
-    def _parse_translation_response(self, response, original_terms):
-        """Parse translation response - handles numbered format"""
-        translations = {}
-        lines = response.strip().split('\n')
-        
-        for line in lines:
-            line = line.strip()
-            if not line or not line[0].isdigit():
-                continue
-                
-            try:
-                number_match = re.match(r'^(\d+)\.?\s*(.+)', line)
-                if number_match:
-                    num = int(number_match.group(1)) - 1
-                    content = number_match.group(2).strip()
-                    
-                    if 0 <= num < len(original_terms):
-                        original_term = original_terms[num]
-                        
-                        for separator in ['->', '→', ':', '-', '—', '=']:
-                            if separator in content:
-                                parts = content.split(separator, 1)
-                                if len(parts) == 2:
-                                    translation = parts[1].strip()
-                                    translation = translation.strip('"\'()[]')
-                                    if translation and translation != original_term:
-                                        translations[original_term] = translation
-                                        break
-                        else:
-                            if content != original_term:
-                                translations[original_term] = content
-                                
-            except (ValueError, IndexError):
-                continue
-        
-        return translations
-
-# =====================================================
-# UNIFIED UTILITIES
-# =====================================================
-def sanitize_resource_filename(filename):
-    """Sanitize resource filenames for filesystem compatibility"""
-    filename = unicodedata.normalize('NFC', filename)
-    
-    replacements = {
-        '/': '_', '\\': '_', ':': '_', '*': '_',
-        '?': '_', '"': '_', '<': '_', '>': '_',
-        '|': '_', '\0': '', '\n': '_', '\r': '_'
-    }
-    
-    for old, new in replacements.items():
-        filename = filename.replace(old, new)
-    
-    filename = ''.join(char for char in filename if ord(char) >= 32)
-    
-    name, ext = os.path.splitext(filename)
-    
-    if not name:
-        name = 'resource'
-    
-    return name + ext
-
-def make_safe_filename(title, actual_num):
-    """Create a safe filename that works across different filesystems"""
-    if not title:
-        return f"chapter_{actual_num:03d}"
-    
-    title = unicodedata.normalize('NFC', str(title))
-    
-    dangerous_chars = {
-        '/': '_', '\\': '_', ':': '_', '*': '_', '?': '_',
-        '"': '_', '<': '_', '>': '_', '|': '_', '\0': '',
-        '\n': ' ', '\r': ' ', '\t': ' '
-    }
-    
-    for old, new in dangerous_chars.items():
-        title = title.replace(old, new)
-    
-    title = ''.join(char for char in title if ord(char) >= 32)
-    title = re.sub(r'\s+', '_', title)
-    title = title.strip('_.• \t')
-    
-    if not title or title == '_' * len(title):
-        title = f"chapter_{actual_num:03d}"
-    
-    return title
-
-def get_content_hash(html_content):
-    """Create a stable hash of content"""
-    return ContentProcessor.get_content_hash(html_content)
-
-def clean_ai_artifacts(text, remove_artifacts=True):
-    """Remove AI response artifacts from text"""
-    return ContentProcessor.clean_ai_artifacts(text, remove_artifacts)
-
-def clean_memory_artifacts(text):
-    """Remove any memory/summary artifacts"""
-    return ContentProcessor.clean_memory_artifacts(text)
-
-def emergency_restore_paragraphs(text, original_html=None, verbose=True):
-    """Emergency restoration when AI returns wall of text"""
-    return ContentProcessor.emergency_restore_paragraphs(text, original_html, verbose)
-
-def is_meaningful_text_content(html_content):
-    """Check if chapter has meaningful text beyond just structure"""
-    return ContentProcessor.is_meaningful_text_content(html_content)
-
-# =====================================================
-# GLOBAL SETTINGS AND FLAGS
-# =====================================================
-logging.basicConfig(level=logging.DEBUG)
-
-try:
-    if hasattr(sys.stdout, 'reconfigure'):
-        sys.stdout.reconfigure(encoding='utf-8', errors='ignore')
-except AttributeError:
-    if sys.stdout is None:
-        devnull = open(os.devnull, "wb")
-        sys.stdout = io.TextIOWrapper(devnull, encoding='utf-8', errors='ignore')
-    elif hasattr(sys.stdout, 'buffer'):
-        try:
-            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='ignore')
-        except:
-            pass
-
-_stop_requested = False
-
-def set_stop_flag(value):
-    """Set the global stop flag"""
-    global _stop_requested
-    _stop_requested = value
-
-def is_stop_requested():
-    """Check if stop was requested"""
-    global _stop_requested
-    return _stop_requested
-
-def set_output_redirect(log_callback=None):
-    """Redirect print statements to a callback function for GUI integration"""
-    if log_callback:
-        class CallbackWriter:
-            def __init__(self, callback):
-                self.callback = callback
-                
-            def write(self, text):
-                if text.strip():
-                    self.callback(text.strip())
-                    
-            def flush(self):
-                pass
-                
-        sys.stdout = CallbackWriter(log_callback)
-
-# =====================================================
-# EPUB AND FILE PROCESSING
-# =====================================================
-def extract_chapter_number_from_filename(filename):
-    """Extract chapter number from filename, handling various formats"""
-    name_without_ext = os.path.splitext(filename)[0]
-
-    patterns = [
-        (r'^(\d+)[_\.]', 'direct_number'),
-        (r'^response_(\d+)[_\.]', 'response_prefix'),
-        (r'[Cc]hapter[_\s]*(\d+)', 'chapter_word'),
-        (r'[Cc]h[_\s]*(\d+)', 'ch_abbreviation'),
-        (r'No(\d+)', 'no_prefix'),
-        (r'第(\d+)[章话回]', 'chinese_chapter'),
-        (r'_(\d+)', 'underscore_suffix'),
-        (r'-(\d+)', 'dash_suffix'),
-        (r'(\d+)', 'trailing_number'),
-    ]
-
-    for pattern, method in patterns:
-        match = re.search(pattern, name_without_ext, re.IGNORECASE)
-        if match:
-            return int(match.group(1)), method
-
-    return None, None
-
-def process_chapter_images(chapter_html: str, actual_num: int, image_translator: ImageTranslator, 
-                         check_stop_fn=None) -> Tuple[str, Dict[str, str]]:
-    """Process and translate images in a chapter"""
-    images = image_translator.extract_images_from_chapter(chapter_html)
-    
-    if not images:
-        return chapter_html, {}
-        
-    print(f"🖼️ Found {len(images)} images in chapter {actual_num}")
-    
-    soup = BeautifulSoup(chapter_html, 'html.parser')
-    
-    image_translations = {}
-    translated_count = 0
-    
-    max_images_per_chapter = int(os.getenv('MAX_IMAGES_PER_CHAPTER', '10'))
-    if len(images) > max_images_per_chapter:
-        print(f"   ⚠️ Chapter has {len(images)} images - processing first {max_images_per_chapter} only")
-        images = images[:max_images_per_chapter]
-    
-    for idx, img_info in enumerate(images, 1):
-        if check_stop_fn and check_stop_fn():
-            print("❌ Image translation stopped by user")
-            break
-            
-        img_src = img_info['src']
-        
-        if img_src.startswith('../'):
-            img_path = os.path.join(image_translator.output_dir, img_src[3:])
-        elif img_src.startswith('./'):
-            img_path = os.path.join(image_translator.output_dir, img_src[2:])
-        elif img_src.startswith('/'):
-            img_path = os.path.join(image_translator.output_dir, img_src[1:])
-        else:
-            possible_paths = [
-                os.path.join(image_translator.images_dir, os.path.basename(img_src)),
-                os.path.join(image_translator.output_dir, img_src),
-                os.path.join(image_translator.output_dir, 'images', os.path.basename(img_src)),
-                os.path.join(image_translator.output_dir, os.path.basename(img_src)),
-                os.path.join(image_translator.output_dir, os.path.dirname(img_src), os.path.basename(img_src))
-            ]
-            
-            img_path = None
-            for path in possible_paths:
-                if os.path.exists(path):
-                    img_path = path
-                    print(f"   ✅ Found image at: {path}")
-                    break
-            
-            if not img_path:
-                print(f"   ❌ Image not found in any location for: {img_src}")
-                print(f"   Tried: {possible_paths}")
-                continue
-        
-        img_path = os.path.normpath(img_path)
-        
-        if not os.path.exists(img_path):
-            print(f"   ⚠️ Image not found: {img_path}")
-            print(f"   📁 Images directory: {image_translator.images_dir}")
-            print(f"   📁 Output directory: {image_translator.output_dir}")
-            print(f"   📁 Working directory: {os.getcwd()}")
-            
-            if os.path.exists(image_translator.images_dir):
-                files = os.listdir(image_translator.images_dir)
-                print(f"   📁 Files in images dir: {files[:5]}...")
-            continue
-        
-        print(f"   🔍 Processing image {idx}/{len(images)}: {os.path.basename(img_path)}")
-        
-        context = ""
-        if img_info.get('alt'):
-            context += f", Alt text: {img_info['alt']}"
-            
-        if translated_count > 0:
-            delay = float(os.getenv('IMAGE_API_DELAY', '1.0'))
-            time.sleep(delay)
-            
-        translation_result = image_translator.translate_image(img_path, context, check_stop_fn)
-        
-        if translation_result:
-            img_tag = None
-            for img in soup.find_all('img'):
-                if img.get('src') == img_src:
-                    img_tag = img
-                    break
-            
-            if img_tag:
-                hide_label = os.getenv("HIDE_IMAGE_TRANSLATION_LABEL", "0") == "1"
-                
-                container = soup.new_tag('div', **{'class': 'translated-text-only' if hide_label else 'image-with-translation'})
-                
-                img_tag.replace_with(container)
-                
-                if not hide_label:
-                    container.append(img_tag)
-                
-                translation_div = soup.new_tag('div', **{'class': 'image-translation'})
-                
-                if '<div class="image-translation">' in translation_result:
-                    trans_soup = BeautifulSoup(translation_result, 'html.parser')
-                    trans_content = trans_soup.find('div', class_='image-translation')
-                    if trans_content:
-                        for element in trans_content.children:
-                            if element.name:
-                                translation_div.append(element)
-                else:
-                    trans_p = soup.new_tag('p')
-                    trans_p.string = translation_result
-                    translation_div.append(trans_p)
-                
-                container.append(translation_div)
-                
-                translated_count += 1
-                
-                trans_filename = f"ch{actual_num:03d}_img{idx:02d}_translation.html"
-                trans_filepath = os.path.join(image_translator.translated_images_dir, trans_filename)
-                
-                with open(trans_filepath, 'w', encoding='utf-8') as f:
-                    f.write(f"""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8"/>
-    <title>Chapter {actual_num} - Image {idx} Translation</title>
-</head>
-<body>
-    <h2>Chapter {actual_num} - Image {idx}</h2>
-    <p>Original: {os.path.basename(img_path)}</p>
-    <hr/>
-    {translation_div}
-</body>
-</html>""")
-                
-                print(f"   ✅ Saved translation to: {trans_filename}")
-            else:
-                print(f"   ⚠️ Could not find image tag in HTML for: {img_src}")
-    
-    if translated_count > 0:
-        print(f"   🖼️ Successfully translated {translated_count} images")
-        
-        prog = image_translator.load_progress()
-        if "image_chunks" in prog:
-            completed_images = []
-            for img_key, img_data in prog["image_chunks"].items():
-                if len(img_data["completed"]) == img_data["total"]:
-                    completed_images.append(img_key)
-            
-            for img_key in completed_images:
-                del prog["image_chunks"][img_key]
-                
-            if completed_images:
-                image_translator.save_progress(prog)
-                print(f"   🧹 Cleaned up progress for {len(completed_images)} completed images")
-        
-        image_translator.save_translation_log(actual_num, image_translations)
-        
-        return str(soup), image_translations
-    else:
-        print(f"   ℹ️ No images were successfully translated")
-        
-    return chapter_html, {}
-
-def detect_novel_numbering(chapters):
-    """Detect if the novel uses 0-based or 1-based chapter numbering with improved accuracy"""
-    print("[DEBUG] Detecting novel numbering system...")
-    
-    if not chapters:
-        return False
-    
-    if isinstance(chapters[0], str):
-        print("[DEBUG] Text file detected, skipping numbering detection")
-        return False
-    
-    patterns = PatternManager.FILENAME_EXTRACT_PATTERNS
-    
-    # Special check for prefix_suffix pattern like "0000_1.xhtml"
-    prefix_suffix_pattern = r'^(\d+)_(\d+)[_\.]'
-    
-    # Track chapter numbers from different sources
-    filename_numbers = []
-    content_numbers = []
-    has_prefix_suffix = False
-    prefix_suffix_numbers = []
-    
-    for idx, chapter in enumerate(chapters):
-        extracted_num = None
-        
-        # Check filename patterns
-        if 'original_basename' in chapter and chapter['original_basename']:
-            filename = chapter['original_basename']
-        elif 'filename' in chapter:
-            filename = os.path.basename(chapter['filename'])
-        else:
-            continue
-            
-        # First check for prefix_suffix pattern
-        prefix_match = re.search(prefix_suffix_pattern, filename, re.IGNORECASE)
-        if prefix_match:
-            has_prefix_suffix = True
-            # Use the SECOND number (after underscore)
-            suffix_num = int(prefix_match.group(2))
-            prefix_suffix_numbers.append(suffix_num)
-            extracted_num = suffix_num
-            print(f"[DEBUG] Prefix_suffix pattern matched: {filename} -> Chapter {suffix_num}")
-        else:
-            # Try other patterns
-            for pattern in patterns:
-                match = re.search(pattern, filename)
-                if match:
-                    extracted_num = int(match.group(1))
-                    #print(f"[DEBUG] Pattern '{pattern}' matched: {filename} -> Chapter {extracted_num}")
-                    break
-        
-        if extracted_num is not None:
-            filename_numbers.append(extracted_num)
-        
-        # Also check chapter content for chapter declarations
-        if 'body' in chapter:
-            # Look for "Chapter N" in the first 1000 characters
-            content_preview = chapter['body'][:1000]
-            content_match = re.search(r'Chapter\s+(\d+)', content_preview, re.IGNORECASE)
-            if content_match:
-                content_num = int(content_match.group(1))
-                content_numbers.append(content_num)
-                print(f"[DEBUG] Found 'Chapter {content_num}' in content")
-    
-    # Decision logic with improved heuristics
-    
-    # 1. If using prefix_suffix pattern, trust those numbers exclusively
-    if has_prefix_suffix and prefix_suffix_numbers:
-        min_suffix = min(prefix_suffix_numbers)
-        if min_suffix >= 1:
-            print(f"[DEBUG] ✅ 1-based novel detected (prefix_suffix pattern starts at {min_suffix})")
-            return False
-        else:
-            print(f"[DEBUG] ✅ 0-based novel detected (prefix_suffix pattern starts at {min_suffix})")
-            return True
-    
-    # 2. If we have content numbers, prefer those over filename numbers
-    if content_numbers:
-        min_content = min(content_numbers)
-        # Check if we have a good sequence starting from 0 or 1
-        if 0 in content_numbers and 1 in content_numbers:
-            print(f"[DEBUG] ✅ 0-based novel detected (found both Chapter 0 and Chapter 1 in content)")
-            return True
-        elif min_content == 1:
-            print(f"[DEBUG] ✅ 1-based novel detected (content chapters start at 1)")
-            return False
-    
-    # 3. Fall back to filename numbers
-    if filename_numbers:
-        min_filename = min(filename_numbers)
-        max_filename = max(filename_numbers)
-        
-        # Check for a proper sequence
-        # If we have 0,1,2,3... it's likely 0-based
-        # If we have 1,2,3,4... it's likely 1-based
-        
-        # Count how many chapters we have in sequence starting from 0
-        zero_sequence_count = 0
-        for i in range(len(chapters)):
-            if i in filename_numbers:
-                zero_sequence_count += 1
-            else:
-                break
-        
-        # Count how many chapters we have in sequence starting from 1
-        one_sequence_count = 0
-        for i in range(1, len(chapters) + 1):
-            if i in filename_numbers:
-                one_sequence_count += 1
-            else:
-                break
-        
-        print(f"[DEBUG] Zero-based sequence length: {zero_sequence_count}")
-        print(f"[DEBUG] One-based sequence length: {one_sequence_count}")
-        
-        # If we have a better sequence starting from 1, it's 1-based
-        if one_sequence_count > zero_sequence_count and min_filename >= 1:
-            print(f"[DEBUG] ✅ 1-based novel detected (better sequence match starting from 1)")
-            return False
-        
-        # If we have any 0 in filenames and it's part of a sequence
-        if 0 in filename_numbers and zero_sequence_count >= 3:
-            print(f"[DEBUG] ✅ 0-based novel detected (found 0 in sequence)")
-            return True
-    
-    # 4. Default to 1-based if uncertain
-    print(f"[DEBUG] ✅ Defaulting to 1-based novel (insufficient evidence for 0-based)")
-    return False
-    
-def validate_chapter_continuity(chapters):
-    """Validate chapter continuity and warn about issues"""
-    if not chapters:
-        print("No chapters to translate")
-        return
-    
-    issues = []
-    
-    chapter_nums = [c['num'] for c in chapters]
-    duplicates = [num for num in chapter_nums if chapter_nums.count(num) > 1]
-    if duplicates:
-        issues.append(f"Duplicate chapter numbers found: {set(duplicates)}")
-    
-    min_num = min(chapter_nums)
-    max_num = max(chapter_nums)
-    expected = set(range(min_num, max_num + 1))
-    actual = set(chapter_nums)
-    missing = expected - actual
-    if missing:
-        issues.append(f"Missing chapter numbers: {sorted(missing)}")
-    
-    for i in range(len(chapters) - 1):
-        for j in range(i + 1, len(chapters)):
-            title1 = chapters[i]['title'].lower()
-            title2 = chapters[j]['title'].lower()
-            if title1 == title2 and chapters[i]['num'] != chapters[j]['num']:
-                issues.append(f"Chapters {chapters[i]['num']} and {chapters[j]['num']} have identical titles")
-    
-    if issues:
-        print("\n⚠️  Chapter Validation Issues:")
-        for issue in issues:
-            print(f"  - {issue}")
-        print()
-
-def validate_epub_structure(output_dir):
-    """Validate that all necessary EPUB structure files are present"""
-    print("🔍 Validating EPUB structure...")
-    
-    required_files = {
-        'container.xml': 'META-INF container file (critical)',
-        '*.opf': 'OPF package file (critical)',
-        '*.ncx': 'Navigation file (recommended)'
-    }
-    
-    found_files = {}
-    missing_files = []
-    
-    container_path = os.path.join(output_dir, 'container.xml')
-    if os.path.exists(container_path):
-        found_files['container.xml'] = 'Found'
-        print("   ✅ container.xml - Found")
-    else:
-        missing_files.append('container.xml')
-        print("   ❌ container.xml - Missing (CRITICAL)")
-    
-    opf_files = []
-    ncx_files = []
-    
-    for file in os.listdir(output_dir):
-        if file.lower().endswith('.opf'):
-            opf_files.append(file)
-        elif file.lower().endswith('.ncx'):
-            ncx_files.append(file)
-    
-    if opf_files:
-        found_files['opf'] = opf_files
-        print(f"   ✅ OPF file(s) - Found: {', '.join(opf_files)}")
-    else:
-        missing_files.append('*.opf')
-        print("   ❌ OPF file - Missing (CRITICAL)")
-    
-    if ncx_files:
-        found_files['ncx'] = ncx_files
-        print(f"   ✅ NCX file(s) - Found: {', '.join(ncx_files)}")
-    else:
-        missing_files.append('*.ncx')
-        print("   ⚠️ NCX file - Missing (navigation may not work)")
-    
-    html_files = [f for f in os.listdir(output_dir) if f.lower().endswith('.html') and f.startswith('response_')]
-    if html_files:
-        print(f"   ✅ Translated chapters - Found: {len(html_files)} files")
-    else:
-        print("   ⚠️ No translated chapter files found")
-    
-    critical_missing = [f for f in missing_files if f in ['container.xml', '*.opf']]
-    
-    if not critical_missing:
-        print("✅ EPUB structure validation PASSED")
-        print("   All critical files present for EPUB reconstruction")
-        return True
-    else:
-        print("❌ EPUB structure validation FAILED")
-        print(f"   Missing critical files: {', '.join(critical_missing)}")
-        print("   EPUB reconstruction may fail without these files")
-        return False
-
-def check_epub_readiness(output_dir):
-    """Check if the output directory is ready for EPUB compilation"""
-    print("📋 Checking EPUB compilation readiness...")
-    
-    issues = []
-    
-    if not validate_epub_structure(output_dir):
-        issues.append("Missing critical EPUB structure files")
-    
-    html_files = [f for f in os.listdir(output_dir) if f.lower().endswith('.html') and f.startswith('response_')]
-    if not html_files:
-        issues.append("No translated chapter files found")
-    else:
-        print(f"   ✅ Found {len(html_files)} translated chapters")
-    
-    metadata_path = os.path.join(output_dir, 'metadata.json')
-    if os.path.exists(metadata_path):
-        print("   ✅ Metadata file present")
-        try:
-            with open(metadata_path, 'r', encoding='utf-8') as f:
-                metadata = json.load(f)
-            if 'title' not in metadata:
-                issues.append("Metadata missing title")
-        except Exception as e:
-            issues.append(f"Metadata file corrupted: {e}")
-    else:
-        issues.append("Missing metadata.json file")
-    
-    resource_dirs = ['css', 'fonts', 'images']
-    found_resources = 0
-    for res_dir in resource_dirs:
-        res_path = os.path.join(output_dir, res_dir)
-        if os.path.exists(res_path):
-            files = [f for f in os.listdir(res_path) if os.path.isfile(os.path.join(res_path, f))]
-            if files:
-                found_resources += len(files)
-                print(f"   ✅ Found {len(files)} {res_dir} files")
-    
-    if found_resources > 0:
-        print(f"   ✅ Total resources: {found_resources} files")
-    else:
-        print("   ⚠️ No resource files found (this may be normal)")
-    
-    if not issues:
-        print("🎉 EPUB compilation readiness: READY")
-        print("   All necessary files present for EPUB creation")
-        return True
-    else:
-        print("⚠️ EPUB compilation readiness: ISSUES FOUND")
-        for issue in issues:
-            print(f"   • {issue}")
-        return False
-
-def cleanup_previous_extraction(output_dir):
-    """Clean up any files from previous extraction runs"""
-    cleanup_items = [
-        'css', 'fonts', 'images',
-        '.resources_extracted'
-    ]
-    
-    epub_structure_files = [
-        'container.xml', 'content.opf', 'toc.ncx'
-    ]
-    
-    cleaned_count = 0
-    
-    for item in cleanup_items:
-        if item.startswith('.'):
-            continue
-        item_path = os.path.join(output_dir, item)
-        try:
-            if os.path.isdir(item_path):
-                shutil.rmtree(item_path)
-                print(f"🧹 Removed directory: {item}")
-                cleaned_count += 1
-        except Exception as e:
-            print(f"⚠️ Could not remove directory {item}: {e}")
-    
-    for epub_file in epub_structure_files:
-        file_path = os.path.join(output_dir, epub_file)
-        try:
-            if os.path.isfile(file_path):
-                os.remove(file_path)
-                print(f"🧹 Removed EPUB file: {epub_file}")
-                cleaned_count += 1
-        except Exception as e:
-            print(f"⚠️ Could not remove {epub_file}: {e}")
-    
-    try:
-        for file in os.listdir(output_dir):
-            if file.lower().endswith(('.opf', '.ncx')):
-                file_path = os.path.join(output_dir, file)
-                if os.path.isfile(file_path):
-                    os.remove(file_path)
-                    print(f"🧹 Removed EPUB file: {file}")
-                    cleaned_count += 1
-    except Exception as e:
-        print(f"⚠️ Error scanning for EPUB files: {e}")
-    
-    marker_path = os.path.join(output_dir, '.resources_extracted')
-    try:
-        if os.path.isfile(marker_path):
-            os.remove(marker_path)
-            print(f"🧹 Removed extraction marker")
-            cleaned_count += 1
-    except Exception as e:
-        print(f"⚠️ Could not remove extraction marker: {e}")
-    
-    if cleaned_count > 0:
-        print(f"🧹 Cleaned up {cleaned_count} items from previous runs")
-    
-    return cleaned_count
-
-# =====================================================
-# API AND TRANSLATION UTILITIES
-# =====================================================
-def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None):
-    """Send API request with interrupt capability and optional timeout retry"""
-    result_queue = queue.Queue()
-    
-    def api_call():
-        try:
-            start_time = time.time()
-            result = client.send(messages, temperature=temperature, max_tokens=max_tokens)
-            elapsed = time.time() - start_time
-            result_queue.put((result, elapsed))
-        except Exception as e:
-            result_queue.put(e)
-    
-    api_thread = threading.Thread(target=api_call)
-    api_thread.daemon = True
-    api_thread.start()
-    
-    timeout = chunk_timeout if chunk_timeout is not None else 86400
-    check_interval = 0.5
-    elapsed = 0
-    
-    while elapsed < timeout:
-        try:
-            result = result_queue.get(timeout=check_interval)
-            if isinstance(result, Exception):
-                raise result
-            if isinstance(result, tuple):
-                api_result, api_time = result
-                if chunk_timeout and api_time > chunk_timeout:
-                    raise UnifiedClientError(f"API call took {api_time:.1f}s (timeout: {chunk_timeout}s)")
-                return api_result
-            return result
-        except queue.Empty:
-            if stop_check_fn():
-                raise UnifiedClientError("Translation stopped by user")
-            elapsed += check_interval
-    
-    raise UnifiedClientError(f"API call timed out after {timeout} seconds")
-
-def parse_token_limit(env_value):
-    """Parse token limit from environment variable"""
-    if not env_value or env_value.strip() == "":
-        return None, "unlimited"
-    
-    env_value = env_value.strip()
-    if env_value.lower() == "unlimited":
-        return None, "unlimited"
-    
-    if env_value.isdigit() and int(env_value) > 0:
-        limit = int(env_value)
-        return limit, str(limit)
-    
-    return 1000000, "1000000 (default)"
-
-def build_system_prompt(user_prompt, glossary_path):
-    """Build the system prompt with glossary - NO FALLBACK"""
-    append_glossary = os.getenv("APPEND_GLOSSARY", "1") == "1"
-    
-    system = user_prompt if user_prompt else ""
-    
-    def format_glossary_for_prompt(glossary_data):
-        """Convert various glossary formats into a unified prompt format"""
-        formatted_entries = {}
-        
-        try:
-            if isinstance(glossary_data, list):
-                for char in glossary_data:
-                    if not isinstance(char, dict):
-                        continue
-                        
-                    original = char.get('original_name', '')
-                    translated = char.get('name', original)
-                    if original and translated:
-                        formatted_entries[original] = translated
-                    
-                    title = char.get('title')
-                    if title and original:
-                        formatted_entries[f"{original} ({title})"] = f"{translated} ({title})"
-                    
-                    refer_map = char.get('how_they_refer_to_others', {})
-                    if isinstance(refer_map, dict):
-                        for other_name, reference in refer_map.items():
-                            if other_name and reference:
-                                formatted_entries[f"{original} → {other_name}"] = f"{translated} → {reference}"
-            
-            elif isinstance(glossary_data, dict):
-                if "entries" in glossary_data and isinstance(glossary_data["entries"], dict):
-                    formatted_entries = glossary_data["entries"]
-                elif all(isinstance(k, str) and isinstance(v, str) for k, v in glossary_data.items() if k != "metadata"):
-                    formatted_entries = {k: v for k, v in glossary_data.items() if k != "metadata"}
-            
-            return formatted_entries
-            
-        except Exception as e:
-            print(f"Warning: Error formatting glossary: {e}")
-            return {}
-    
-    if append_glossary and glossary_path and os.path.exists(glossary_path):
-        try:
-            with open(glossary_path, "r", encoding="utf-8") as gf:
-                glossary_data = json.load(gf)
-            
-            formatted_entries = format_glossary_for_prompt(glossary_data)
-            
-            if formatted_entries:
-                glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
-                if system:
-                    system += "\n\n"
-                
-                # Get custom prompt, fallback to default if empty
-                custom_prompt = os.getenv("APPEND_GLOSSARY_PROMPT", "Character/Term Glossary (use these translations consistently):").strip()
-                if not custom_prompt:
-                    custom_prompt = "Character/Term Glossary (use these translations consistently):"
-                
-                system += f"{custom_prompt}\n{glossary_block}"
-                    
-        except Exception as e:
-            print(f"Warning: Could not load glossary: {e}")
-    
-    return system
-
-def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
-    """Translate the book title using the configured settings"""
-    if not title or not title.strip():
-        return title
-        
-    print(f"📚 Processing book title: {title}")
-    
-    try:
-        if os.getenv("TRANSLATE_BOOK_TITLE", "1") == "0":
-            print(f"📚 Book title translation disabled - keeping original")
-            return title
-        
-        book_title_prompt = os.getenv("BOOK_TITLE_PROMPT", 
+        Recent translations to summarize:
+        {translations}"""
+    
+    def _init_variables(self):
+        """Initialize all configuration variables"""
+        # Load saved prompts
+        self.manual_glossary_prompt = self.config.get('manual_glossary_prompt', self.default_manual_glossary_prompt)
+        self.auto_glossary_prompt = self.config.get('auto_glossary_prompt', self.default_auto_glossary_prompt)
+        self.rolling_summary_system_prompt = self.config.get('rolling_summary_system_prompt', self.default_rolling_summary_system_prompt)
+        self.rolling_summary_user_prompt = self.config.get('rolling_summary_user_prompt', self.default_rolling_summary_user_prompt)
+        
+        self.custom_glossary_fields = self.config.get('custom_glossary_fields', [])
+        self.token_limit_disabled = self.config.get('token_limit_disabled', False)
+        
+        # Create all config variables with helper
+        def create_var(var_type, key, default):
+            return var_type(value=self.config.get(key, default))
+        
+        # Boolean variables
+        bool_vars = [
+            ('rolling_summary_var', 'use_rolling_summary', False),
+            ('translation_history_rolling_var', 'translation_history_rolling', False),
+            ('glossary_history_rolling_var', 'glossary_history_rolling', False),
+            ('translate_book_title_var', 'translate_book_title', True),
+            ('enable_auto_glossary_var', 'enable_auto_glossary', False),
+            ('append_glossary_var', 'append_glossary', False),
+            ('reset_failed_chapters_var', 'reset_failed_chapters', True),
+            ('retry_truncated_var', 'retry_truncated', True),
+            ('retry_duplicate_var', 'retry_duplicate_bodies', True),
+            ('enable_image_translation_var', 'enable_image_translation', False),
+            ('process_webnovel_images_var', 'process_webnovel_images', True),
+            ('comprehensive_extraction_var', 'comprehensive_extraction', False),
+            ('hide_image_translation_label_var', 'hide_image_translation_label', True),
+            ('retry_timeout_var', 'retry_timeout', True),
+            ('batch_translation_var', 'batch_translation', False),
+            ('disable_epub_gallery_var', 'disable_epub_gallery', False),
+            ('disable_zero_detection_var', 'disable_zero_detection', True),
+            ('use_header_as_output_var', 'use_header_as_output', False),
+            ('emergency_restore_var', 'emergency_paragraph_restore', False),
+            ('contextual_var', 'contextual', True),
+            ('REMOVE_AI_ARTIFACTS_var', 'REMOVE_AI_ARTIFACTS', False),
+            ('enable_decimal_chapters_var', 'enable_decimal_chapters', False)
+        ]
+        
+        for var_name, key, default in bool_vars:
+            setattr(self, var_name, create_var(tk.BooleanVar, key, default))
+        
+        # String variables
+        str_vars = [
+            ('summary_role_var', 'summary_role', 'user'),
+            ('rolling_summary_exchanges_var', 'rolling_summary_exchanges', '5'),
+            ('rolling_summary_mode_var', 'rolling_summary_mode', 'append'),
+            ('reinforcement_freq_var', 'reinforcement_frequency', '10'),
+            ('max_retry_tokens_var', 'max_retry_tokens', '16384'),
+            ('duplicate_lookback_var', 'duplicate_lookback_chapters', '5'),
+            ('glossary_min_frequency_var', 'glossary_min_frequency', '2'),
+            ('glossary_max_names_var', 'glossary_max_names', '50'),
+            ('glossary_max_titles_var', 'glossary_max_titles', '30'),
+            ('glossary_batch_size_var', 'glossary_batch_size', '50'),
+            ('webnovel_min_height_var', 'webnovel_min_height', '1000'),
+            ('image_max_tokens_var', 'image_max_tokens', '16384'),
+            ('max_images_per_chapter_var', 'max_images_per_chapter', '1'),
+            ('image_chunk_height_var', 'image_chunk_height', '1500'),
+            ('chunk_timeout_var', 'chunk_timeout', '900'),
+            ('batch_size_var', 'batch_size', '3'),
+            ('chapter_number_offset_var', 'chapter_number_offset', '0')
+        ]
+        
+        for var_name, key, default in str_vars:
+            setattr(self, var_name, create_var(tk.StringVar, key, str(default)))
+        
+        self.book_title_prompt = self.config.get('book_title_prompt', 
             "Translate this book title to English while retaining any acronyms:")
         
-        messages = [
-            {"role": "system", "content": "You are a translator. Respond with only the translated text, nothing else. Do not add any explanation or additional content."},
-            {"role": "user", "content": f"{book_title_prompt}\n\n{title}"}
-        ]
+        # Profiles
+        self.prompt_profiles = self.config.get('prompt_profiles', self.default_prompts.copy())
+        active = self.config.get('active_profile', next(iter(self.prompt_profiles)))
+        self.profile_var = tk.StringVar(value=active)
+        self.lang_var = self.profile_var
         
-        translated_title, _ = client.send(messages, temperature=temperature, max_tokens=512)
-        
-        print(f"[DEBUG] Raw API response: '{translated_title}'")
-        print(f"[DEBUG] Response length: {len(translated_title)} (original: {len(title)})")
-        newline = '\n'
-        print(f"[DEBUG] Has newlines: {repr(translated_title) if newline in translated_title else 'No'}")
-        
-        translated_title = translated_title.strip()
-        
-        if ((translated_title.startswith('"') and translated_title.endswith('"')) or 
-            (translated_title.startswith("'") and translated_title.endswith("'"))):
-            translated_title = translated_title[1:-1].strip()
-        
-        if '\n' in translated_title:
-            print(f"⚠️ API returned multi-line content, keeping original title")
-            return title           
-            
-        if any(char in translated_title for char in ['{', '}', '[', ']', '"role":', '"content":']):
-            print(f"⚠️ API returned structured content, keeping original title")
-            return title
-            
-        if any(tag in translated_title.lower() for tag in ['<p>', '</p>', '<h1>', '</h1>', '<html']):
-            print(f"⚠️ API returned HTML content, keeping original title")
-            return title
-        
-        print(f"✅ Processed title: {translated_title}")
-        return translated_title
-        
-    except Exception as e:
-        print(f"⚠️ Failed to process title: {e}")
-        return title
+        # Detection mode
+        self.duplicate_detection_mode_var = tk.StringVar(value=self.config.get('duplicate_detection_mode', 'basic'))
 
-# =====================================================
-# MAIN TRANSLATION FUNCTION
-# =====================================================
-def main(log_callback=None, stop_callback=None):
-    """Main translation function with enhanced duplicate detection and progress tracking"""
-    
-    config = TranslationConfig()
-    builtins._DISABLE_ZERO_DETECTION = config.DISABLE_ZERO_DETECTION
-    
-    if config.DISABLE_ZERO_DETECTION:
-        print("=" * 60)
-        print("⚠️  0-BASED DETECTION DISABLED BY USER")
-        print("⚠️  All chapter numbers will be used exactly as found")
-        print("=" * 60)
-    
-    args = None
-    chapters_completed = 0
-    chunks_completed = 0
-    
-    args = None
-    chapters_completed = 0
-    chunks_completed = 0
-    
-    input_path = config.input_path
-    if not input_path and len(sys.argv) > 1:
-        input_path = sys.argv[1]
-    
-    is_text_file = input_path.lower().endswith('.txt')
-    
-    if is_text_file:
-        os.environ["IS_TEXT_FILE_TRANSLATION"] = "1"  
+    def _setup_gui(self):
+        """Initialize all GUI components"""
+        self.frame = tb.Frame(self.master, padding=10)
+        self.frame.pack(fill=tk.BOTH, expand=True)
         
-    import json as _json
-    _original_load = _json.load
-      
-    def debug_json_load(fp, *args, **kwargs):
-        result = _original_load(fp, *args, **kwargs)
-        if isinstance(result, list) and len(result) > 0:
-            if isinstance(result[0], dict) and 'original_name' in result[0]:
-                print(f"[DEBUG] Loaded glossary list with {len(result)} items from {fp.name if hasattr(fp, 'name') else 'unknown'}")
-        return result
+        # Configure grid
+        for i in range(5):
+            self.frame.grid_columnconfigure(i, weight=1 if i in [1, 3] else 0)
+        for r in range(12):
+            self.frame.grid_rowconfigure(r, weight=1 if r in [9, 10] else 0, minsize=200 if r == 9 else 150 if r == 10 else 0)
+        
+        # Create UI elements using helper methods
+        self._create_file_section()
+        self._create_model_section()
+        self._create_language_section()
+        self._create_settings_section()
+        self._create_api_section()
+        self._create_prompt_section()
+        self._create_log_section()
+        self._make_bottom_toolbar()
+        
+        # Apply token limit state
+        if self.token_limit_disabled:
+            self.token_limit_entry.config(state=tk.DISABLED)
+            self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
+        
+        self.on_profile_select()
+        self.append_log("🚀 Glossarion v2.8.4 - Ready to use!")
+        self.append_log("💡 Click any function button to load modules automatically")
     
-    _json.load = debug_json_load
+    def _create_file_section(self):
+        """Create file selection section"""
+        tb.Label(self.frame, text="Input File:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        self.entry_epub = tb.Entry(self.frame, width=50)
+        self.entry_epub.grid(row=0, column=1, columnspan=3, sticky=tk.EW, padx=5, pady=5)
+        tb.Button(self.frame, text="Browse", command=self.browse_file, width=12).grid(row=0, column=4, sticky=tk.EW, padx=5, pady=5)
     
-    if log_callback:
-        set_output_redirect(log_callback)
+    def _create_model_section(self):
+        """Create model selection section"""
+        tb.Label(self.frame, text="Model:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
+        default_model = self.config.get('model', 'gemini-2.0-flash')
+        self.model_var = tk.StringVar(value=default_model)
+        models = ["gpt-4o","gpt-4o-mini","gpt-4-turbo","gpt-4.1-nano","gpt-4.1-mini","gpt-4.1",
+                  "gpt-3.5-turbo","o4-mini","gemini-1.5-pro","gemini-1.5-flash", "gemini-2.0-flash",
+                  "gemini-2.0-flash","gemini-2.5-flash","gemini-2.5-pro",
+                  "deepseek-chat","claude-3-5-sonnet-20241022","claude-3-7-sonnet-20250219"]
+        tb.Combobox(self.frame, textvariable=self.model_var, values=models, state="normal").grid(
+            row=1, column=1, columnspan=2, sticky=tk.EW, padx=5, pady=5)
     
-    def check_stop():
-        if stop_callback and stop_callback():
-            print("❌ Translation stopped by user request.")
+    def _create_language_section(self):
+        """Create language/profile section"""
+        tb.Label(self.frame, text="Language:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
+        self.profile_menu = tb.Combobox(self.frame, textvariable=self.profile_var,
+                                       values=list(self.prompt_profiles.keys()), state="normal")
+        self.profile_menu.grid(row=2, column=1, sticky=tk.EW, padx=5, pady=5)
+        self.profile_menu.bind("<<ComboboxSelected>>", self.on_profile_select)
+        self.profile_menu.bind("<Return>", self.on_profile_select)
+        tb.Button(self.frame, text="Save Language", command=self.save_profile, width=14).grid(row=2, column=2, sticky=tk.W, padx=5, pady=5)
+        tb.Button(self.frame, text="Delete Language", command=self.delete_profile, width=14).grid(row=2, column=3, sticky=tk.W, padx=5, pady=5)
+    
+    def _create_settings_section(self):
+        """Create all settings controls"""
+        # Contextual
+        tb.Checkbutton(self.frame, text="Contextual Translation", variable=self.contextual_var).grid(
+            row=3, column=0, columnspan=2, sticky=tk.W, padx=5, pady=5)
+        
+        # API delay
+        tb.Label(self.frame, text="API call delay (s):").grid(row=4, column=0, sticky=tk.W, padx=5, pady=5)
+        self.delay_entry = tb.Entry(self.frame, width=8)
+        self.delay_entry.insert(0, str(self.config.get('delay', 2)))
+        self.delay_entry.grid(row=4, column=1, sticky=tk.W, padx=5, pady=5)
+        
+        # Chapter Range
+        tb.Label(self.frame, text="Chapter range (e.g., 5-10):").grid(row=5, column=0, sticky=tk.W, padx=5, pady=5)
+        self.chapter_range_entry = tb.Entry(self.frame, width=12)
+        self.chapter_range_entry.insert(0, self.config.get('chapter_range', ''))
+        self.chapter_range_entry.grid(row=5, column=1, sticky=tk.W, padx=5, pady=5)
+        
+        # Token limit
+        tb.Label(self.frame, text="Input Token limit:").grid(row=6, column=0, sticky=tk.W, padx=5, pady=5)
+        self.token_limit_entry = tb.Entry(self.frame, width=8)
+        self.token_limit_entry.insert(0, str(self.config.get('token_limit', 50000)))
+        self.token_limit_entry.grid(row=6, column=1, sticky=tk.W, padx=5, pady=5)
+        
+        self.toggle_token_btn = tb.Button(self.frame, text="Disable Input Token Limit",
+                                         command=self.toggle_token_limit, bootstyle="danger-outline", width=21)
+        self.toggle_token_btn.grid(row=7, column=1, sticky=tk.W, padx=5, pady=5)
+        
+        # Translation settings (right side)
+        tb.Label(self.frame, text="Temperature:").grid(row=4, column=2, sticky=tk.W, padx=5, pady=5)
+        self.trans_temp = tb.Entry(self.frame, width=6)
+        self.trans_temp.insert(0, str(self.config.get('translation_temperature', 0.3)))
+        self.trans_temp.grid(row=4, column=3, sticky=tk.W, padx=5, pady=5)
+        
+        tb.Label(self.frame, text="Transl. Hist. Limit:").grid(row=5, column=2, sticky=tk.W, padx=5, pady=5)
+        self.trans_history = tb.Entry(self.frame, width=6)
+        self.trans_history.insert(0, str(self.config.get('translation_history_limit', 3)))
+        self.trans_history.grid(row=5, column=3, sticky=tk.W, padx=5, pady=5)
+        
+        # Batch Translation
+        tb.Checkbutton(self.frame, text="Batch Translation", variable=self.batch_translation_var,
+                      bootstyle="round-toggle").grid(row=6, column=2, sticky=tk.W, padx=5, pady=5)
+        self.batch_size_entry = tb.Entry(self.frame, width=6, textvariable=self.batch_size_var)
+        self.batch_size_entry.grid(row=6, column=3, sticky=tk.W, padx=5, pady=5)
+        
+        # Set batch entry state
+        self.batch_size_entry.config(state=tk.NORMAL if self.batch_translation_var.get() else tk.DISABLED)
+        self.batch_translation_var.trace('w', lambda *args: self.batch_size_entry.config(
+            state=tk.NORMAL if self.batch_translation_var.get() else tk.DISABLED))
+        
+        # Rolling History
+        tb.Checkbutton(self.frame, text="Rolling History Window", variable=self.translation_history_rolling_var,
+                      bootstyle="round-toggle").grid(row=7, column=2, sticky=tk.W, padx=5, pady=5)
+        tk.Label(self.frame, text="(Keep recent history instead of purging)",
+                font=('TkDefaultFont', 11), fg='gray').grid(row=7, column=3, sticky=tk.W, padx=5, pady=5)
+        
+        # Hidden entries for compatibility
+        self.title_trim = tb.Entry(self.frame, width=6)
+        self.title_trim.insert(0, str(self.config.get('title_trim_count', 1)))
+        self.group_trim = tb.Entry(self.frame, width=6)
+        self.group_trim.insert(0, str(self.config.get('group_affiliation_trim_count', 1)))
+        self.traits_trim = tb.Entry(self.frame, width=6)
+        self.traits_trim.insert(0, str(self.config.get('traits_trim_count', 1)))
+        self.refer_trim = tb.Entry(self.frame, width=6)
+        self.refer_trim.insert(0, str(self.config.get('refer_trim_count', 1)))
+        self.loc_trim = tb.Entry(self.frame, width=6)
+        self.loc_trim.insert(0, str(self.config.get('locations_trim_count', 1)))
+    
+    def _create_api_section(self):
+        """Create API key section"""
+        tb.Label(self.frame, text="OpenAI/Gemini/... API Key:").grid(row=8, column=0, sticky=tk.W, padx=5, pady=5)
+        self.api_key_entry = tb.Entry(self.frame, show='*')
+        self.api_key_entry.grid(row=8, column=1, columnspan=3, sticky=tk.EW, padx=5, pady=5)
+        initial_key = self.config.get('api_key', '')
+        if initial_key:
+            self.api_key_entry.insert(0, initial_key)
+        tb.Button(self.frame, text="Show", command=self.toggle_api_visibility, width=12).grid(row=8, column=4, sticky=tk.EW, padx=5, pady=5)
+        
+        # Other Settings button
+        tb.Button(self.frame, text="⚙️  Other Setting", command=self.open_other_settings,
+                 bootstyle="info-outline", width=15).grid(row=7, column=4, sticky=tk.EW, padx=5, pady=5)
+        
+        # Remove AI Artifacts
+        tb.Checkbutton(self.frame, text="Remove AI Artifacts", variable=self.REMOVE_AI_ARTIFACTS_var,
+                      bootstyle="round-toggle").grid(row=7, column=0, columnspan=5, sticky=tk.W, padx=5, pady=(0,5))
+    
+    def _create_prompt_section(self):
+        """Create system prompt section with UIHelper"""
+        tb.Label(self.frame, text="System Prompt:").grid(row=9, column=0, sticky=tk.NW, padx=5, pady=5)
+        
+        # Use UIHelper to create text widget with undo/redo
+        self.prompt_text = self.ui.setup_scrollable_text(
+            self.frame, 
+            height=5, 
+            width=60, 
+            wrap='word'
+        )
+        self.prompt_text.grid(row=9, column=1, columnspan=3, sticky=tk.NSEW, padx=5, pady=5)
+        
+        # Output Token Limit button
+        self.output_btn = tb.Button(self.frame, text=f"Output Token Limit: {self.max_output_tokens}",
+                                   command=self.prompt_custom_token_limit, bootstyle="info", width=22)
+        self.output_btn.grid(row=9, column=0, sticky=tk.W, padx=5, pady=5)
+        
+        # Run Translation button
+        self.run_button = tb.Button(self.frame, text="Run Translation", command=self.run_translation_thread,
+                                   bootstyle="success", width=14)
+        self.run_button.grid(row=9, column=4, sticky=tk.N+tk.S+tk.EW, padx=5, pady=5)
+        self.master.update_idletasks()
+        self.run_base_w = self.run_button.winfo_width()
+        self.run_base_h = self.run_button.winfo_height()
+        
+        # Setup resize handler
+        self._resize_handler = self.ui.create_button_resize_handler(
+            self.run_button, 
+            self.run_base_w, 
+            self.run_base_h,
+            self.master,
+            BASE_WIDTH,
+            BASE_HEIGHT
+        )
+    
+    def _create_log_section(self):
+        """Create log text area with UIHelper"""
+        self.log_text = scrolledtext.ScrolledText(self.frame, wrap=tk.WORD)
+        self.log_text.grid(row=10, column=0, columnspan=5, sticky=tk.NSEW, padx=5, pady=5)
+        
+        # Use UIHelper to block editing
+        self.ui.block_text_editing(self.log_text)
+        
+        # Setup context menu
+        self.log_text.bind("<Button-3>", self._show_context_menu)
+        if sys.platform == "darwin":
+            self.log_text.bind("<Button-2>", self._show_context_menu)
+
+    def _lazy_load_modules(self, splash_callback=None):
+        """Load heavy modules only when needed - Enhanced with thread safety, retry logic, and progress tracking"""
+        # Quick return if already loaded (unchanged for compatibility)
+        if self._modules_loaded:
             return True
-        return is_stop_requested()
-    
-    if config.EMERGENCY_RESTORE:
-        print("✅ Emergency paragraph restoration is ENABLED")
-    else:
-        print("⚠️ Emergency paragraph restoration is DISABLED")
-    
-    print(f"[DEBUG] REMOVE_AI_ARTIFACTS environment variable: {os.getenv('REMOVE_AI_ARTIFACTS', 'NOT SET')}")
-    print(f"[DEBUG] REMOVE_AI_ARTIFACTS parsed value: {config.REMOVE_AI_ARTIFACTS}")
-    if config.REMOVE_AI_ARTIFACTS:
-        print("⚠️ AI artifact removal is ENABLED - will clean AI response artifacts")
-    else:
-        print("✅ AI artifact removal is DISABLED - preserving all content as-is")
-       
-    if '--epub' in sys.argv or (len(sys.argv) > 1 and sys.argv[1].endswith(('.epub', '.txt'))):
-        import argparse
-        parser = argparse.ArgumentParser()
-        parser.add_argument('epub', help='Input EPUB or text file')
-        args = parser.parse_args()
-        input_path = args.epub
-    
-    is_text_file = input_path.lower().endswith('.txt')
-    
-    if is_text_file:
-        file_base = os.path.splitext(os.path.basename(input_path))[0]
-    else:
-        epub_base = os.path.splitext(os.path.basename(input_path))[0]
-        file_base = epub_base
-        
-    out = file_base
-    os.makedirs(out, exist_ok=True)
-    print(f"[DEBUG] Created output folder → {out}")
-    
-    cleanup_previous_extraction(out)
-
-    os.environ["EPUB_OUTPUT_DIR"] = out
-    payloads_dir = out
-    
-    history_manager = HistoryManager(payloads_dir)
-    chapter_splitter = ChapterSplitter(model_name=config.MODEL)
-    chunk_context_manager = ChunkContextManager()
-    progress_manager = ProgressManager(payloads_dir)
-    chapter_extractor = ChapterExtractor()
-    glossary_manager = GlossaryManager()
-
-    history_file = os.path.join(payloads_dir, "translation_history.json")
-    if os.path.exists(history_file):
-        os.remove(history_file)
-        print(f"[DEBUG] Purged translation history → {history_file}")
-
-    print("🔍 Checking for deleted output files...")
-    progress_manager.cleanup_missing_files(out)
-    progress_manager.save()
-
-    if os.getenv("RESET_FAILED_CHAPTERS", "1") == "1":
-        reset_count = 0
-        for chapter_key, chapter_info in list(progress_manager.prog["chapters"].items()):
-            status = chapter_info.get("status")
             
-            # Include all failure states for reset
-            if status in ["failed", "qa_failed", "file_missing", "error", "file_deleted", "in_progress"]:
-                del progress_manager.prog["chapters"][chapter_key]
+        # Enhanced thread safety with timeout protection
+        if self._modules_loading:
+            timeout_start = time.time()
+            timeout_duration = 30.0  # 30 second timeout to prevent infinite waiting
+            
+            while self._modules_loading and not self._modules_loaded:
+                # Check for timeout to prevent infinite loops
+                if time.time() - timeout_start > timeout_duration:
+                    self.append_log("⚠️ Module loading timeout - resetting loading state")
+                    self._modules_loading = False
+                    break
+                time.sleep(0.1)
+            return self._modules_loaded
+        
+        # Set loading flag with enhanced error handling
+        self._modules_loading = True
+        loading_start_time = time.time()
+        
+        try:
+            if splash_callback:
+                splash_callback("Loading translation modules...")
+            
+            # Global module imports (unchanged for compatibility)
+            global translation_main, translation_stop_flag, translation_stop_check
+            global glossary_main, glossary_stop_flag, glossary_stop_check
+            global fallback_compile_epub, scan_html_folder
+            
+            # Enhanced module configuration with validation and retry info
+            modules = [
+                {
+                    'name': 'TransateKRtoEN',
+                    'display_name': 'translation engine',
+                    'imports': ['main', 'set_stop_flag', 'is_stop_requested'],
+                    'global_vars': ['translation_main', 'translation_stop_flag', 'translation_stop_check'],
+                    'critical': True,
+                    'retry_count': 0,
+                    'max_retries': 2
+                },
+                {
+                    'name': 'extract_glossary_from_epub',
+                    'display_name': 'glossary extractor', 
+                    'imports': ['main', 'set_stop_flag', 'is_stop_requested'],
+                    'global_vars': ['glossary_main', 'glossary_stop_flag', 'glossary_stop_check'],
+                    'critical': True,
+                    'retry_count': 0,
+                    'max_retries': 2
+                },
+                {
+                    'name': 'epub_converter',
+                    'display_name': 'EPUB converter',
+                    'imports': ['fallback_compile_epub'],
+                    'global_vars': ['fallback_compile_epub'],
+                    'critical': False,
+                    'retry_count': 0,
+                    'max_retries': 1
+                },
+                {
+                    'name': 'scan_html_folder', 
+                    'display_name': 'QA scanner',
+                    'imports': ['scan_html_folder'],
+                    'global_vars': ['scan_html_folder'],
+                    'critical': False,
+                    'retry_count': 0,
+                    'max_retries': 1
+                }
+            ]
+            
+            success_count = 0
+            total_modules = len(modules)
+            failed_modules = []
+            
+            # Enhanced module loading with progress tracking and retry logic
+            for i, module_info in enumerate(modules):
+                module_name = module_info['name']
+                display_name = module_info['display_name']
+                max_retries = module_info['max_retries']
                 
-                content_hash = chapter_info.get("content_hash")
-                if content_hash and content_hash in progress_manager.prog["content_hashes"]:
-                    del progress_manager.prog["content_hashes"][content_hash]
+                # Progress callback with detailed information
+                if splash_callback:
+                    progress_percent = int((i / total_modules) * 100)
+                    splash_callback(f"Loading {display_name}... ({progress_percent}%)")
                 
-                if chapter_key in progress_manager.prog.get("chapter_chunks", {}):
-                    del progress_manager.prog["chapter_chunks"][chapter_key]
+                # Retry logic for robust loading
+                loaded_successfully = False
+                
+                for retry_attempt in range(max_retries + 1):
+                    try:
+                        if retry_attempt > 0:
+                            # Add small delay between retries
+                            time.sleep(0.2)
+                            if splash_callback:
+                                splash_callback(f"Retrying {display_name}... (attempt {retry_attempt + 1})")
+                        
+                        # Enhanced import logic with specific error handling
+                        if module_name == 'TransateKRtoEN':
+                            # Validate the module before importing critical functions
+                            import TransateKRtoEN
+                            # Verify the module has required functions
+                            if hasattr(TransateKRtoEN, 'main') and hasattr(TransateKRtoEN, 'set_stop_flag'):
+                                from TransateKRtoEN import main as translation_main, set_stop_flag as translation_stop_flag, is_stop_requested as translation_stop_check
+                            else:
+                                raise ImportError("TransateKRtoEN module missing required functions")
+                                
+                        elif module_name == 'extract_glossary_from_epub':
+                            # Validate the module before importing critical functions  
+                            import extract_glossary_from_epub
+                            if hasattr(extract_glossary_from_epub, 'main') and hasattr(extract_glossary_from_epub, 'set_stop_flag'):
+                                from extract_glossary_from_epub import main as glossary_main, set_stop_flag as glossary_stop_flag, is_stop_requested as glossary_stop_check
+                            else:
+                                raise ImportError("extract_glossary_from_epub module missing required functions")
+                                
+                        elif module_name == 'epub_converter':
+                            # Validate the module before importing
+                            import epub_converter
+                            if hasattr(epub_converter, 'fallback_compile_epub'):
+                                from epub_converter import fallback_compile_epub
+                            else:
+                                raise ImportError("epub_converter module missing fallback_compile_epub function")
+                                
+                        elif module_name == 'scan_html_folder':
+                            # Validate the module before importing
+                            import scan_html_folder
+                            if hasattr(scan_html_folder, 'scan_html_folder'):
+                                from scan_html_folder import scan_html_folder
+                            else:
+                                raise ImportError("scan_html_folder module missing scan_html_folder function")
+                        
+                        # If we reach here, import was successful
+                        loaded_successfully = True
+                        success_count += 1
+                        break
+                        
+                    except ImportError as e:
+                        module_info['retry_count'] = retry_attempt + 1
+                        error_msg = str(e)
+                        
+                        # Log retry attempts
+                        if retry_attempt < max_retries:
+                            if hasattr(self, 'append_log'):
+                                self.append_log(f"⚠️ Failed to load {display_name} (attempt {retry_attempt + 1}): {error_msg}")
+                        else:
+                            # Final failure
+                            print(f"Warning: Could not import {module_name} after {max_retries + 1} attempts: {error_msg}")
+                            failed_modules.append({
+                                'name': module_name,
+                                'display_name': display_name,
+                                'error': error_msg,
+                                'critical': module_info['critical']
+                            })
+                            break
                     
-                reset_count += 1
-        
-        if reset_count > 0:
-            print(f"🔄 Reset {reset_count} failed/deleted/incomplete chapters for re-translation")
-            progress_manager.save()
-
-    if check_stop():
-        return
-
-    if not config.API_KEY:
-        print("❌ Error: Set API_KEY, OPENAI_API_KEY, or OPENAI_OR_Gemini_API_KEY in your environment.")
-        return
-
-    print(f"[DEBUG] Found API key: {config.API_KEY[:10]}...")
-    print(f"[DEBUG] Using model = {config.MODEL}")
-    print(f"[DEBUG] Max output tokens = {config.MAX_OUTPUT_TOKENS}")
-
-    client = UnifiedClient(model=config.MODEL, api_key=config.API_KEY)
-    
-    if is_text_file:
-        print("📄 Processing text file...")
-        try:
-            txt_processor = TextFileProcessor(input_path, out)
-            chapters = txt_processor.extract_chapters()
-            txt_processor.save_original_structure()
+                    except Exception as e:
+                        # Handle unexpected errors
+                        error_msg = f"Unexpected error: {str(e)}"
+                        print(f"Warning: Unexpected error loading {module_name}: {error_msg}")
+                        failed_modules.append({
+                            'name': module_name,
+                            'display_name': display_name, 
+                            'error': error_msg,
+                            'critical': module_info['critical']
+                        })
+                        break
+                
+                # Enhanced progress feedback
+                if loaded_successfully and splash_callback:
+                    progress_percent = int(((i + 1) / total_modules) * 100)
+                    splash_callback(f"✅ {display_name} loaded ({progress_percent}%)")
             
-            metadata = {
-                "title": os.path.splitext(os.path.basename(input_path))[0],
-                "type": "text",
-                "chapter_count": len(chapters)
-            }
-        except ImportError as e:
-            print(f"❌ Error: Text file processor not available: {e}")
-            if log_callback:
-                log_callback(f"❌ Error: Text file processor not available: {e}")
-            return
-        except Exception as e:
-            print(f"❌ Error processing text file: {e}")
-            if log_callback:
-                log_callback(f"❌ Error processing text file: {e}")
-            return
-    else:
-        print("🚀 Using comprehensive chapter extraction with resource handling...")
-        with zipfile.ZipFile(input_path, 'r') as zf:
-            metadata = chapter_extractor._extract_epub_metadata(zf)
-            chapters = chapter_extractor.extract_chapters(zf, out)
+            # Calculate loading time for performance monitoring
+            loading_time = time.time() - loading_start_time
             
-            validate_chapter_continuity(chapters)
-        
-        print("\n" + "="*50)
-        validate_epub_structure(out)
-        print("="*50 + "\n")
-    
-    progress_manager.migrate_to_content_hash(chapters)
-    progress_manager.save()
-
-    if check_stop():
-        return
-
-    metadata_path = os.path.join(out, "metadata.json")
-    if os.path.exists(metadata_path):
-        with open(metadata_path, 'r', encoding='utf-8') as mf:
-            metadata = json.load(mf)
-
-    metadata["chapter_count"] = len(chapters)
-    metadata["chapter_titles"] = {str(c["num"]): c["title"] for c in chapters}
-
-    print(f"[DEBUG] Initializing client with model = {config.MODEL}")
-    client = UnifiedClient(model=config.MODEL, api_key=config.API_KEY)
-    
-    if "title" in metadata and config.TRANSLATE_BOOK_TITLE and not metadata.get("title_translated", False):
-        original_title = metadata["title"]
-        print(f"📚 Original title: {original_title}")
-        
-        if not check_stop():
-            translated_title = translate_title(
-                original_title, 
-                client, 
-                None,
-                None,
-                config.TEMP
-            )
-            
-            metadata["original_title"] = original_title
-            metadata["title"] = translated_title
-            metadata["title_translated"] = True
-            
-            print(f"📚 Translated title: {translated_title}")
-        else:
-            print("❌ Title translation skipped due to stop request")
-    
-    with open(metadata_path, 'w', encoding='utf-8') as mf:
-        json.dump(metadata, mf, ensure_ascii=False, indent=2)
-    print(f"💾 Saved metadata with {'translated' if metadata.get('title_translated', False) else 'original'} title")
-        
-    print("\n" + "="*50)
-    print("📑 GLOSSARY GENERATION PHASE")
-    print("="*50)
-
-    if config.MANUAL_GLOSSARY and os.path.isfile(config.MANUAL_GLOSSARY):
-        target_path = os.path.join(out, "glossary.json")
-        if os.path.abspath(config.MANUAL_GLOSSARY) != os.path.abspath(target_path):
-            shutil.copy(config.MANUAL_GLOSSARY, target_path)
-            print("📑 Using manual glossary from:", config.MANUAL_GLOSSARY)
-        else:
-            print("📑 Using existing glossary:", config.MANUAL_GLOSSARY)
-    elif not config.DISABLE_AUTO_GLOSSARY:
-        print("📑 Starting automatic glossary generation...")
-        
-        try:
-            instructions = ""
-            glossary_manager.save_glossary(out, chapters, instructions)
-            print("✅ Automatic glossary generation COMPLETED")
-        except Exception as e:
-            print(f"❌ Glossary generation failed: {e}")
-    else:
-        print("📑 Automatic glossary disabled - no glossary will be used")
-        with open(os.path.join(out, "glossary.json"), 'w', encoding='utf-8') as f:
-            json.dump({}, f, ensure_ascii=False, indent=2)
-
-    glossary_path = os.path.join(out, "glossary.json")
-    if os.path.exists(glossary_path):
-        try:
-            with open(glossary_path, 'r', encoding='utf-8') as f:
-                glossary_data = json.load(f)
-            
-            if isinstance(glossary_data, dict):
-                if 'entries' in glossary_data and isinstance(glossary_data['entries'], dict):
-                    entry_count = len(glossary_data['entries'])
-                    sample_items = list(glossary_data['entries'].items())[:3]
+            # Enhanced success/failure reporting
+            if splash_callback:
+                if success_count == total_modules:
+                    splash_callback(f"Loaded {success_count}/{total_modules} modules successfully in {loading_time:.1f}s")
                 else:
-                    entry_count = len(glossary_data)
-                    sample_items = list(glossary_data.items())[:3]
-                
-                print(f"📑 Glossary ready with {entry_count} entries")
-                print("📑 Sample glossary entries:")
-                for key, value in sample_items:
-                    print(f"   • {key} → {value}")
-                    
-            elif isinstance(glossary_data, list):
-                print(f"📑 Glossary ready with {len(glossary_data)} entries")
-                print("📑 Sample glossary entries:")
-                for i, entry in enumerate(glossary_data[:3]):
-                    if isinstance(entry, dict):
-                        original = entry.get('original_name', '?')
-                        translated = entry.get('name', original)
-                        print(f"   • {original} → {translated}")
-            else:
-                print(f"⚠️ Unexpected glossary format: {type(glossary_data)}")
-                
-        except Exception as e:
-            print(f"⚠️ Glossary file exists but is corrupted: {e}")
-            with open(glossary_path, 'w', encoding='utf-8') as f:
-                json.dump({}, f, ensure_ascii=False, indent=2)
-    else:
-        print("⚠️ No glossary file found, creating empty one")
-        with open(glossary_path, 'w', encoding='utf-8') as f:
-            json.dump({}, f, ensure_ascii=False, indent=2)
-
-    print("="*50)
-    print("🚀 STARTING MAIN TRANSLATION PHASE")
-    print("="*50 + "\n")
-
-    glossary_path = os.path.join(out, "glossary.json")
-    if os.path.exists(glossary_path):
-        try:
-            with open(glossary_path, 'r', encoding='utf-8') as f:
-                g_data = json.load(f)
-            print(f"[DEBUG] Glossary type before translation: {type(g_data)}")
-            if isinstance(g_data, list):
-                print(f"[DEBUG] Glossary is a list")
-        except Exception as e:
-            print(f"[DEBUG] Error checking glossary: {e}")
+                    splash_callback(f"Loaded {success_count}/{total_modules} modules ({len(failed_modules)} failed)")
             
-    system = build_system_prompt(config.SYSTEM_PROMPT, glossary_path)
-    base_msg = [{"role": "system", "content": system}]
-    
-    image_translator = None
+            # Enhanced logging with module status details
+            if hasattr(self, 'append_log'):
+                if success_count == total_modules:
+                    self.append_log(f"✅ Loaded {success_count}/{total_modules} modules successfully in {loading_time:.1f}s")
+                else:
+                    self.append_log(f"⚠️ Loaded {success_count}/{total_modules} modules successfully ({len(failed_modules)} failed)")
+                    
+                    # Report critical failures
+                    critical_failures = [f for f in failed_modules if f['critical']]
+                    if critical_failures:
+                        for failure in critical_failures:
+                            self.append_log(f"❌ Critical module failed: {failure['display_name']} - {failure['error']}")
+                    
+                    # Report non-critical failures
+                    non_critical_failures = [f for f in failed_modules if not f['critical']]
+                    if non_critical_failures:
+                        for failure in non_critical_failures:
+                            self.append_log(f"⚠️ Optional module failed: {failure['display_name']} - {failure['error']}")
+            
+            # Final module state update with enhanced error checking
+            self._modules_loaded = True
+            self._modules_loading = False
+            
+            # Enhanced module availability checking with better integration
+            if hasattr(self, 'master'):
+                self.master.after(0, self._check_modules)
+            
+            # Return success status - maintain compatibility by returning True if any modules loaded
+            # But also check for critical module failures
+            critical_failures = [f for f in failed_modules if f['critical']]
+            if critical_failures and success_count == 0:
+                # Complete failure case
+                if hasattr(self, 'append_log'):
+                    self.append_log("❌ Critical module loading failed - some functionality may be unavailable")
+                return False
+            
+            return True
+            
+        except Exception as unexpected_error:
+            # Enhanced error recovery for unexpected failures
+            error_msg = f"Unexpected error during module loading: {str(unexpected_error)}"
+            print(f"Critical error: {error_msg}")
+            
+            if hasattr(self, 'append_log'):
+                self.append_log(f"❌ Module loading failed: {error_msg}")
+            
+            # Reset states for retry possibility
+            self._modules_loaded = False
+            self._modules_loading = False
+            
+            if splash_callback:
+                splash_callback(f"Module loading failed: {str(unexpected_error)}")
+            
+            return False
+            
+        finally:
+            # Enhanced cleanup - ensure loading flag is always reset
+            if self._modules_loading:
+                self._modules_loading = False
 
-    if config.ENABLE_IMAGE_TRANSLATION:
-        print(f"🖼️ Image translation enabled for model: {config.MODEL}")
-        print("🖼️ Image translation will use your custom system prompt and glossary")
-        image_translator = ImageTranslator(
-            client, 
-            out, 
-            config.PROFILE_NAME, 
-            system, 
-            config.TEMP,
-            log_callback ,
-            progress_manager
-        )
+    def _check_modules(self):
+        """Check which modules are available and disable buttons if needed"""
+        if not self._modules_loaded:
+            return
         
-        known_vision_models = [
-            'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-exp', 
-            'gpt-4-turbo', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1-nano', 'o4-mini'
+        button_checks = [
+            (translation_main, 'run_button', "Translation"),
+            (glossary_main, 'glossary_button', "Glossary extraction"),
+            (fallback_compile_epub, 'epub_button', "EPUB converter"),
+            (scan_html_folder, 'qa_button', "QA scanner")
         ]
         
-        if config.MODEL.lower() not in known_vision_models:
-            print(f"⚠️ Note: {config.MODEL} may not have vision capabilities. Image translation will be attempted anyway.")
-    else:
-        print("ℹ️ Image translation disabled by user")
-    
-    total_chapters = len(chapters)
+        for module, button_attr, name in button_checks:
+            if module is None and hasattr(self, button_attr):
+                getattr(self, button_attr).config(state='disabled')
+                self.append_log(f"⚠️ {name} module not available")
 
-    # Only detect numbering if the toggle is not disabled
-    if config.DISABLE_ZERO_DETECTION:
-        print(f"📊 0-based detection disabled by user setting")
-        uses_zero_based = False
-        # Important: Set a flag that can be checked throughout the codebase
-        config._force_disable_zero_detection = True
-    else:
-        if chapters:
-            uses_zero_based = detect_novel_numbering(chapters)
-            print(f"📊 Novel numbering detected: {'0-based' if uses_zero_based else '1-based'}")
-        else:
-            uses_zero_based = False
-        config._force_disable_zero_detection = False
-
-    # Store this for later use
-    config._uses_zero_based = uses_zero_based
-
-
-    rng = os.getenv("CHAPTER_RANGE", "")
-    start = None
-    end = None
-    if rng and re.match(r"^\d+\s*-\s*\d+$", rng):
-            start, end = map(int, rng.split("-", 1))
-            
-            if config.DISABLE_ZERO_DETECTION:
-                print(f"📊 0-based detection disabled - using range as specified: {start}-{end}")
-            elif uses_zero_based:
-                print(f"📊 0-based novel detected")
-                print(f"📊 User range {start}-{end} will be used as-is (chapters are already adjusted)")
-            else:
-                print(f"📊 1-based novel detected")
-                print(f"📊 Using range as specified: {start}-{end}")
-    
-    print("📊 Calculating total chunks needed...")
-    total_chunks_needed = 0
-    chunks_per_chapter = {}
-    chapters_to_process = 0
-
-    # When setting actual chapter numbers (in the main function)
-    for idx, c in enumerate(chapters):
-        chap_num = c["num"]
-        content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
-        
-        # Extract the raw chapter number from the file
-        raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
-        #print(f"[DEBUG] Extracted raw_num={raw_num} from {c.get('original_basename', 'unknown')}")
-
-        
-        # Apply the offset
-        offset = config.CHAPTER_NUMBER_OFFSET if hasattr(config, 'CHAPTER_NUMBER_OFFSET') else 0
-        raw_num += offset
-        
-        # When toggle is disabled, use raw numbers without any 0-based adjustment
-        if config.DISABLE_ZERO_DETECTION:
-            c['actual_chapter_num'] = raw_num
-            # Store raw number for consistency
-            c['raw_chapter_num'] = raw_num
-            c['zero_adjusted'] = False
-        else:
-            # Store raw number
-            c['raw_chapter_num'] = raw_num
-            # Apply adjustment only if this is a 0-based novel
-            if uses_zero_based:
-                c['actual_chapter_num'] = raw_num + 1
-                c['zero_adjusted'] = True
-            else:
-                c['actual_chapter_num'] = raw_num
-                c['zero_adjusted'] = False
-        
-        # Now we can safely use actual_num
-        actual_num = c['actual_chapter_num']
-
-
-        if start is not None:
-            if not (start <= c['actual_chapter_num'] <= end):
-                #print(f"[SKIP] Chapter {c['actual_chapter_num']} outside range {start}-{end}")
-                continue
-                
-        needs_translation, skip_reason, _ = progress_manager.check_chapter_status(
-            idx, actual_num, content_hash, out
+    def configure_title_prompt(self):
+        """Configure the book title translation prompt"""
+        dialog = self.wm.create_simple_dialog(
+            self.master,
+            "Configure Book Title Translation",
+            width=950,
+            height=700
         )
         
-        if not needs_translation:
-            chunks_per_chapter[idx] = 0
-            continue
+        main_frame = tk.Frame(dialog, padx=20, pady=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
         
-        chapters_to_process += 1
+        tk.Label(main_frame, text="Book Title Translation Prompt", 
+                font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W, pady=(0, 10))
         
-        chapter_key = str(idx)
-        if chapter_key in progress_manager.prog["chapters"] and progress_manager.prog["chapters"][chapter_key].get("status") == "in_progress":
-            pass
+        tk.Label(main_frame, text="This prompt will be used when translating book titles.\n"
+                "The book title will be appended after this prompt.",
+                font=('TkDefaultFont', 11), fg='gray').pack(anchor=tk.W, pady=(0, 10))
         
-        _tok_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
-        max_tokens_limit, _ = parse_token_limit(_tok_env)
-        
-        system_tokens = chapter_splitter.count_tokens(system)
-        history_tokens = config.HIST_LIMIT * 2 * 1000
-        safety_margin = 1000
-        
-        if max_tokens_limit is not None:
-            available_tokens = max_tokens_limit - system_tokens - history_tokens - safety_margin
-            chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
-        else:
-            chunks = [(c["body"], 1, 1)]
-        
-        chapter_key_str = content_hash
-        old_key_str = str(idx)
-
-        if chapter_key_str not in progress_manager.prog.get("chapter_chunks", {}) and old_key_str in progress_manager.prog.get("chapter_chunks", {}):
-            progress_manager.prog["chapter_chunks"][chapter_key_str] = progress_manager.prog["chapter_chunks"][old_key_str]
-            del progress_manager.prog["chapter_chunks"][old_key_str]
-            print(f"[PROGRESS] Migrated chunks for chapter {actual_num} to new tracking system")
-
-        if chapter_key_str in progress_manager.prog.get("chapter_chunks", {}):
-            completed_chunks = len(progress_manager.prog["chapter_chunks"][chapter_key_str].get("completed", []))
-            chunks_needed = len(chunks) - completed_chunks
-            chunks_per_chapter[idx] = max(0, chunks_needed)
-        else:
-            chunks_per_chapter[idx] = len(chunks)
-        
-        total_chunks_needed += chunks_per_chapter[idx]
-    
-    terminology = "Sections" if is_text_file else "Chapters"
-    print(f"📊 Total chunks to translate: {total_chunks_needed}")
-    print(f"📚 {terminology} to process: {chapters_to_process}")
-    
-    multi_chunk_chapters = [(idx, count) for idx, count in chunks_per_chapter.items() if count > 1]
-    if multi_chunk_chapters:
-        # Determine terminology based on file type
-        terminology = "Sections" if is_text_file else "Chapters"
-        print(f"📄 {terminology} requiring multiple chunks:")
-        for idx, chunk_count in multi_chunk_chapters:
-            chap = chapters[idx]
-            section_term = "Section" if is_text_file else "Chapter"
-            print(f"   • {section_term} {idx+1} ({chap['title'][:30]}...): {chunk_count} chunks")
-    
-    translation_start_time = time.time()
-    chunks_completed = 0
-    chapters_completed = 0
-    
-    current_chunk_number = 0
-
-    if config.BATCH_TRANSLATION:
-        print(f"\n📦 PARALLEL TRANSLATION MODE ENABLED")
-        print(f"📦 Processing chapters with up to {config.BATCH_SIZE} concurrent API calls")
-        
-        import concurrent.futures
-        from threading import Lock
-        
-        progress_lock = Lock()
-        
-        chapters_to_translate = []
-        
-        # FIX: First pass to set actual chapter numbers for ALL chapters
-        # This ensures batch mode has the same chapter numbering as non-batch mode
-        print("📊 Setting chapter numbers...")
-        for idx, c in enumerate(chapters):
-            raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
-            
-            # Apply offset if configured
-            offset = config.CHAPTER_NUMBER_OFFSET if hasattr(config, 'CHAPTER_NUMBER_OFFSET') else 0
-            raw_num += offset
-            
-            if config.DISABLE_ZERO_DETECTION:
-                # Use raw numbers without adjustment
-                c['actual_chapter_num'] = raw_num
-                c['raw_chapter_num'] = raw_num
-                c['zero_adjusted'] = False
-            else:
-                # Store raw number
-                c['raw_chapter_num'] = raw_num
-                # Apply 0-based adjustment if detected
-                if uses_zero_based:
-                    c['actual_chapter_num'] = raw_num + 1
-                    c['zero_adjusted'] = True
-                else:
-                    c['actual_chapter_num'] = raw_num
-                    c['zero_adjusted'] = False
-        
-        # NOW the existing loop continues...
-        for idx, c in enumerate(chapters):
-            chap_num = c["num"]
-            content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
-            
-            # Check if this is a pre-split text chunk with decimal number
-            if (is_text_file and c.get('is_chunk', False) and isinstance(c['num'], float)):
-                actual_num = c['num']  # Preserve the decimal for text files only
-            else:
-                actual_num = c.get('actual_chapter_num', c['num'])  # Now this will exist!
-            
-            # Skip chapters outside the range
-            if start is not None and not (start <= actual_num <= end):
-                continue
-            
-            # Check if chapter needs translation
-            needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
-                idx, actual_num, content_hash, out
-            )
-            
-            if not needs_translation:
-                # Modify skip_reason to use appropriate terminology
-                is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
-                terminology = "Section" if is_text_source else "Chapter"
-                
-                # Replace "Chapter" with appropriate terminology in skip_reason
-                skip_reason_modified = skip_reason.replace("Chapter", terminology)
-                print(f"[SKIP] {skip_reason_modified}")
-                chapters_completed += 1
-                continue
-            
-            # Check for empty or image-only chapters
-            has_images = c.get('has_images', False)
-            has_meaningful_text = ContentProcessor.is_meaningful_text_content(c["body"])
-            text_size = c.get('file_size', 0)
-            
-            is_empty_chapter = (not has_images and text_size < 50)
-            is_image_only_chapter = (has_images and not has_meaningful_text)
-            
-            # Handle empty chapters
-            if is_empty_chapter:
-                print(f"📄 Empty chapter {chap_num} - will process individually")
-                
-                safe_title = make_safe_filename(c['title'], c['num'])
-                
-                if isinstance(c['num'], float):
-                    fname = FileUtilities.create_chapter_filename(c, c['num'])
-                else:
-                    fname = FileUtilities.create_chapter_filename(c, c['num'])
-                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                    f.write(c["body"])
-                progress_manager.update(idx, actual_num, content_hash, fname, status="completed_empty")
-                progress_manager.save()
-                chapters_completed += 1
-                continue
-            
-            # Add to chapters to translate
-            chapters_to_translate.append((idx, c))
-        
-        print(f"📊 Found {len(chapters_to_translate)} chapters to translate in parallel")
-        
-        # Continue with the rest of the existing batch processing code...
-        batch_processor = BatchTranslationProcessor(
-            config, client, base_msg, out, progress_lock,
-            progress_manager.save, 
-            lambda idx, actual_num, content_hash, output_file=None, status="completed", **kwargs: progress_manager.update(idx, actual_num, content_hash, output_file, status, **kwargs),
-            check_stop,
-            image_translator,
-            is_text_file=is_text_file
+        self.title_prompt_text = self.ui.setup_scrollable_text(
+            main_frame, height=8, wrap=tk.WORD
         )
+        self.title_prompt_text.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        self.title_prompt_text.insert('1.0', self.book_title_prompt)
         
-        total_to_process = len(chapters_to_translate)
-        processed = 0
+        lang_frame = tk.Frame(main_frame)
+        lang_frame.pack(fill=tk.X, pady=(10, 0))
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=config.BATCH_SIZE) as executor:
-            for batch_start in range(0, total_to_process, config.BATCH_SIZE * 3):
-                if check_stop():
-                    print("❌ Translation stopped during parallel processing")
-                    executor.shutdown(wait=False)
-                    return
+        tk.Label(lang_frame, text="💡 Tip: Modify the prompt above to translate to other languages",
+                font=('TkDefaultFont', 10), fg='blue').pack(anchor=tk.W)
+        
+        example_frame = tk.LabelFrame(main_frame, text="Example Prompts", padx=10, pady=10)
+        example_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        examples = [
+            ("Spanish", "Traduce este título de libro al español manteniendo los acrónimos:"),
+            ("French", "Traduisez ce titre de livre en français en conservant les acronymes:"),
+            ("German", "Übersetzen Sie diesen Buchtitel ins Deutsche und behalten Sie Akronyme bei:"),
+            ("Keep Original", "Return the title exactly as provided without any translation:")
+        ]
+        
+        for lang, prompt in examples:
+            btn = tb.Button(example_frame, text=f"Use {lang}", 
+                           command=lambda p=prompt: self.title_prompt_text.replace('1.0', tk.END, p),
+                           bootstyle="secondary-outline", width=15)
+            btn.pack(side=tk.LEFT, padx=2, pady=2)
+        
+        button_frame = tk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(20, 0))
+        
+        def save_title_prompt():
+            self.book_title_prompt = self.title_prompt_text.get('1.0', tk.END).strip()
+            self.config['book_title_prompt'] = self.book_title_prompt
+            messagebox.showinfo("Success", "Book title prompt saved!")
+            dialog.destroy()
+        
+        def reset_title_prompt():
+            if messagebox.askyesno("Reset Prompt", "Reset to default English translation prompt?"):
+                default_prompt = "Translate this book title to English while retaining any acronyms:"
+                self.title_prompt_text.delete('1.0', tk.END)
+                self.title_prompt_text.insert('1.0', default_prompt)
+        
+        tb.Button(button_frame, text="Save", command=save_title_prompt, 
+                 bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
+        tb.Button(button_frame, text="Reset to Default", command=reset_title_prompt, 
+                 bootstyle="warning", width=15).pack(side=tk.LEFT, padx=5)
+        tb.Button(button_frame, text="Cancel", command=dialog.destroy, 
+                 bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
+        
+        dialog.deiconify()
+
+    def detect_novel_numbering_unified(self, output_dir, progress_data):
+        """
+        Use the backend's detect_novel_numbering function for consistent detection
+        """
+        try:
+            # Try to load the backend detection function
+            if not self._lazy_load_modules():
+                # Fallback to current GUI logic if modules not loaded
+                return self._detect_novel_numbering_gui_fallback(output_dir, progress_data)
+            
+            # Import the detection function from backend
+            from TransateKRtoEN import detect_novel_numbering
+            
+            # Build a chapters list from progress data to pass to backend function
+            chapters = []
+            for chapter_key, chapter_info in progress_data.get("chapters", {}).items():
+                # Get the output file, handling None values
+                output_file = chapter_info.get('output_file', '')
                 
-                batch_end = min(batch_start + config.BATCH_SIZE * 3, total_to_process)
-                current_batch = chapters_to_translate[batch_start:batch_end]
-                
-                print(f"\n📦 Submitting batch {batch_start//config.BATCH_SIZE + 1}: {len(current_batch)} chapters")
-                
-                future_to_chapter = {
-                    executor.submit(batch_processor.process_single_chapter, chapter_data): chapter_data
-                    for chapter_data in current_batch
+                chapter_dict = {
+                    'original_basename': chapter_info.get('original_basename', ''),
+                    'filename': output_file or '',  # Ensure it's never None
+                    'num': chapter_info.get('chapter_num', 0)
                 }
                 
-                active_count = 0
-                completed_in_batch = 0
-                failed_in_batch = 0
+                # Only add the output file path if it exists and is not empty
+                if output_file and output_file.strip():
+                    chapter_dict['filename'] = os.path.join(output_dir, output_file)
+                else:
+                    # If no output file, try to construct from original basename
+                    if chapter_dict['original_basename']:
+                        chapter_dict['filename'] = os.path.join(output_dir, f"response_{chapter_dict['original_basename']}.html")
+                    else:
+                        # Last resort: use chapter number
+                        chapter_num = chapter_info.get('actual_num', chapter_info.get('chapter_num', 0))
+                        chapter_dict['filename'] = os.path.join(output_dir, f"response_{chapter_num:04d}.html")
                 
-                for future in concurrent.futures.as_completed(future_to_chapter):
-                    if check_stop():
-                        print("❌ Translation stopped")
-                        executor.shutdown(wait=False)
-                        return
-                    
-                    chapter_data = future_to_chapter[future]
-                    idx, chapter = chapter_data
-                    
-                    try:
-                        success, chap_num = future.result()
-                        if success:
-                            completed_in_batch += 1
-                            print(f"✅ Chapter {chap_num} done ({completed_in_batch + failed_in_batch}/{len(current_batch)} in batch)")
-                        else:
-                            failed_in_batch += 1
-                            print(f"❌ Chapter {chap_num} failed ({completed_in_batch + failed_in_batch}/{len(current_batch)} in batch)")
-                    except Exception as e:
-                        failed_in_batch += 1
-                        print(f"❌ Chapter thread error: {e}")
-                    
-                    processed += 1
-                    
-                    progress_percent = (processed / total_to_process) * 100
-                    print(f"📊 Overall Progress: {processed}/{total_to_process} ({progress_percent:.1f}%)")
-                
-                print(f"\n📦 Batch Summary:")
-                print(f"   ✅ Successful: {completed_in_batch}")
-                print(f"   ❌ Failed: {failed_in_batch}")
-                
-                if batch_end < total_to_process:
-                    print(f"⏳ Waiting {config.DELAY}s before next batch...")
-                    time.sleep(config.DELAY)
+                chapters.append(chapter_dict)
+            
+            # Use the backend detection logic
+            uses_zero_based = detect_novel_numbering(chapters)
+            
+            print(f"[GUI] Unified detection result: {'0-based' if uses_zero_based else '1-based'}")
+            return uses_zero_based
+            
+        except Exception as e:
+            print(f"[GUI] Error in unified detection: {e}")
+            # Fallback to GUI logic on error
+            return self._detect_novel_numbering_gui_fallback(output_dir, progress_data)
+
+    def _detect_novel_numbering_gui_fallback(self, output_dir, progress_data):
+        """
+        Fallback detection logic (current GUI implementation)
+        """
+        uses_zero_based = False
         
-        chapters_completed = batch_processor.chapters_completed
-        chunks_completed = batch_processor.chunks_completed
+        for chapter_key, chapter_info in progress_data.get("chapters", {}).items():
+            if chapter_info.get("status") == "completed":
+                output_file = chapter_info.get("output_file", "")
+                stored_chapter_num = chapter_info.get("chapter_num", 0)
+                if output_file:
+                    match = re.search(r'response_(\d+)', output_file)
+                    if match:
+                        file_num = int(match.group(1))
+                        if file_num == stored_chapter_num - 1:
+                            uses_zero_based = True
+                            break
+                        elif file_num == stored_chapter_num:
+                            uses_zero_based = False
+                            break
+
+        if not uses_zero_based:
+            try:
+                for file in os.listdir(output_dir):
+                    if re.search(r'_0+[_\.]', file):
+                        uses_zero_based = True
+                        break
+            except: pass
         
-        print(f"\n🎉 Parallel translation complete!")
-        print(f"   Total chapters processed: {processed}")
-        print(f"   Successful: {chapters_completed}")
-        
-        config.BATCH_TRANSLATION = False
+        return uses_zero_based
     
-    if not config.BATCH_TRANSLATION:
-        translation_processor = TranslationProcessor(config, client, out, log_callback, check_stop, uses_zero_based, is_text_file)
+    def force_retranslation(self):
+        """Force retranslation of specific chapters with improved display"""
+        input_path = self.entry_epub.get()
+        if not input_path or not os.path.isfile(input_path):
+            messagebox.showerror("Error", "Please select a valid EPUB or text file first.")
+            return
         
-        if config.DUPLICATE_DETECTION_MODE == 'ai-hunter':
-            # Build the main config from environment variables and config object
-            main_config = {
-                'duplicate_lookback_chapters': config.DUPLICATE_LOOKBACK_CHAPTERS,
-                'duplicate_detection_mode': config.DUPLICATE_DETECTION_MODE,
-            }
+        epub_base = os.path.splitext(os.path.basename(input_path))[0]
+        output_dir = epub_base  # KEEP THIS AS IS - it's relative to current working directory
+        
+        if not os.path.exists(output_dir):
+            messagebox.showinfo("Info", "No translation output found for this EPUB.")
+            return
+        
+        progress_file = os.path.join(output_dir, "translation_progress.json")
+        if not os.path.exists(progress_file):
+            messagebox.showinfo("Info", "No progress tracking found.")
+            return
+        
+        with open(progress_file, 'r', encoding='utf-8') as f:
+            prog = json.load(f)
             
-            # Check if AI Hunter config was passed via environment variable
-            ai_hunter_config_str = os.getenv('AI_HUNTER_CONFIG')
-            if ai_hunter_config_str:
+            # Check if there are any chapters
+            if not prog.get("chapters"):
+                messagebox.showinfo("Info", "No chapters found in progress tracking.")
+                return
+            
+            # Group all entries by their output filename to handle duplicates
+            files_to_entries = {}
+            no_file_entries = []
+            
+            for chapter_key, chapter_info in prog.get("chapters", {}).items():
+                output_file = chapter_info.get("output_file", "")
+                
+                if output_file:
+                    if output_file not in files_to_entries:
+                        files_to_entries[output_file] = []
+                    files_to_entries[output_file].append((chapter_key, chapter_info))
+                else:
+                    no_file_entries.append((chapter_key, chapter_info))
+            
+            #print(f"Found {len(files_to_entries)} unique files from {len(prog.get('chapters', {}))} total entries")
+        
+            # Load chapters info if available
+            chapters_info_file = os.path.join(output_dir, "chapters_info.json")
+            chapters_info_map = {}
+            if os.path.exists(chapters_info_file):
                 try:
-                    ai_hunter_config = json.loads(ai_hunter_config_str)
-                    main_config['ai_hunter_config'] = ai_hunter_config
-                    print("🤖 AI Hunter: Loaded configuration from environment")
-                except json.JSONDecodeError:
-                    print("⚠️ AI Hunter: Failed to parse AI_HUNTER_CONFIG from environment")
+                    with open(chapters_info_file, 'r', encoding='utf-8') as f:
+                        chapters_info = json.load(f)
+                        for ch_info in chapters_info:
+                            if 'num' in ch_info:
+                                chapters_info_map[ch_info['num']] = ch_info
+                except: pass
             
-            # If no AI Hunter config in environment, try to load from file as fallback
-            if 'ai_hunter_config' not in main_config:
-                # Try multiple locations for config.json
-                config_paths = [
-                    os.path.join(os.getcwd(), 'config.json'),
-                    os.path.join(out, '..', 'config.json'),
+            # Create dialog using WindowManager
+            dialog = self.wm.create_simple_dialog(
+                self.master,
+                "Force Retranslation",
+                width=900,
+                height=600
+            )
+            
+            # Add instructions label
+            instruction_text = "Select chapters to retranslate (scroll horizontally if needed):"
+            tk.Label(dialog, text=instruction_text, font=('Arial', 12)).pack(pady=10)
+            
+            # Create main frame for listbox and scrollbars
+            main_frame = tk.Frame(dialog)
+            main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+            
+            # Create scrollbars
+            h_scrollbar = ttk.Scrollbar(main_frame, orient=tk.HORIZONTAL)
+            h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+            
+            v_scrollbar = ttk.Scrollbar(main_frame, orient=tk.VERTICAL)
+            v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            
+            # Create listbox
+            listbox = tk.Listbox(
+                main_frame, 
+                selectmode=tk.MULTIPLE, 
+                yscrollcommand=v_scrollbar.set,
+                xscrollcommand=h_scrollbar.set,
+                width=100
+            )
+            listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            
+            # Configure scrollbars
+            v_scrollbar.config(command=listbox.yview)
+            h_scrollbar.config(command=listbox.xview)
+            
+            # Build display info - ONE entry per unique file
+            chapter_display_info = []
+            
+            for output_file, entries in files_to_entries.items():
+                # Use the first entry for each file (they're duplicates anyway)
+                chapter_key, chapter_info = entries[0]
+                
+                # Extract chapter number from filename using existing patterns
+                chapter_num = 0
+                
+                # Import the pattern from TransateKRtoEN at the top of the method if not already imported
+                from TransateKRtoEN import extract_chapter_number_from_filename
+                
+                # Use the existing function that handles all the patterns
+                chapter_num, _ = extract_chapter_number_from_filename(output_file)
+                
+                # Determine chapter number with proper None handling
+                chapter_num = 0
+                if 'actual_num' in chapter_info and chapter_info['actual_num'] is not None:
+                    chapter_num = chapter_info['actual_num']
+                elif 'chapter_num' in chapter_info and chapter_info['chapter_num'] is not None:
+                    chapter_num = chapter_info['chapter_num']
+                else:
+                    # Fallback: try to extract from output filename
+                    if output_file:
+                        match = re.search(r'response_(\d+)', output_file)
+                        if match:
+                            chapter_num = int(match.group(1))
+                        else:
+                            # Last resort: use a sequential number based on position
+                            chapter_num = len(chapter_display_info) + 1
+                    else:
+                        chapter_num = len(chapter_display_info) + 1
+                
+                # Get status and validate
+                status = chapter_info.get("status", "unknown")
+                if status == "completed_empty":
+                    status = "completed"
+                
+                # Check file existence
+                if status == "completed":
+                    output_path = os.path.join(output_dir, output_file)
+                    if not os.path.exists(output_path):
+                        status = "file_missing"
+                
+                chapter_display_info.append({
+                    'key': chapter_key,
+                    'num': chapter_num,
+                    'info': chapter_info,
+                    'output_file': output_file,
+                    'status': status,
+                    'duplicate_count': len(entries)  # Track how many duplicates
+                })
+            
+            # Sort by chapter number with None handling
+            chapter_display_info.sort(key=lambda x: x['num'] if x['num'] is not None else 999999)
+            
+            # Populate listbox
+            for info in chapter_display_info:
+                chapter_num = info['num']
+                status = info['status']
+                output_file = info['output_file']
+                
+                # Status indicators
+                status_icons = {
+                    'completed': '✅',
+                    'failed': '❌',
+                    'qa_failed': '❌',
+                    'file_missing': '⚠️',
+                    'in_progress': '🔄',
+                    'unknown': '❓'
+                }
+                
+                icon = status_icons.get(status, '❓')
+                
+                # Build display string
+                display = f"Chapter {chapter_num:03d} | {icon} {status} | {output_file}"
+                
+                # Add duplicate count if more than 1
+                if info['duplicate_count'] > 1:
+                    display += f" | ({info['duplicate_count']} entries)"
+                
+                listbox.insert(tk.END, display)
+            
+            # Selection count label
+            selection_count_label = tk.Label(dialog, text="Selected: 0", font=('Arial', 10))
+            selection_count_label.pack(pady=(5, 10))
+            
+            def update_selection_count(*args):
+                count = len(listbox.curselection())
+                selection_count_label.config(text=f"Selected: {count}")
+            
+            listbox.bind('<<ListboxSelect>>', update_selection_count)
+            
+            # Button frame
+            button_frame = tk.Frame(dialog)
+            button_frame.pack(pady=10)
+            
+            def select_all():
+                listbox.select_set(0, tk.END)
+                update_selection_count()
+            
+            def clear_selection():
+                listbox.select_clear(0, tk.END)
+                update_selection_count()
+            
+            def select_status(status_to_select):
+                listbox.select_clear(0, tk.END)
+                for idx, info in enumerate(chapter_display_info):
+                    # Check for both 'failed' and 'qa_failed' statuses
+                    if status_to_select == 'failed':
+                        if info['status'] in ['failed', 'qa_failed']:
+                            listbox.select_set(idx)
+                    else:
+                        if info['status'] == status_to_select:
+                            listbox.select_set(idx)
+                update_selection_count()
+            
+            def retranslate_selected():
+                selected = listbox.curselection()
+                if not selected:
+                    messagebox.showwarning("No Selection", "Please select at least one chapter.")
+                    return
+                
+                # Confirm action
+                count = len(selected)
+                if count > 10:
+                    confirm_msg = f"This will delete {count} translated chapters and mark them for retranslation.\n\nContinue?"
+                else:
+                    chapters = [f"Chapter {chapter_display_info[i]['num']}" for i in selected]
+                    confirm_msg = f"This will delete and retranslate:\n\n{', '.join(chapters)}\n\nContinue?"
+                
+                if not messagebox.askyesno("Confirm Retranslation", confirm_msg):
+                    return
+                
+                # Process selected chapters
+                deleted_count = 0
+                for idx in selected:
+                    info = chapter_display_info[idx]
+                    output_file = info['output_file']
+                    
+                    # Delete the output file
+                    if output_file:
+                        output_path = os.path.join(output_dir, output_file)
+                        try:
+                            if os.path.exists(output_path):
+                                os.remove(output_path)
+                                deleted_count += 1
+                        except Exception as e:
+                            print(f"Failed to delete {output_path}: {e}")
+                    
+                    # Remove ALL duplicate entries for this file from progress
+                    if output_file in files_to_entries:
+                        for chapter_key, _ in files_to_entries[output_file]:
+                            if chapter_key in prog["chapters"]:
+                                # Get content hash before deleting
+                                content_hash = prog["chapters"][chapter_key].get("content_hash")
+                                
+                                # Delete from chapters
+                                del prog["chapters"][chapter_key]
+                                
+                                # Clean up related data
+                                if content_hash and content_hash in prog.get("content_hashes", {}):
+                                    del prog["content_hashes"][content_hash]
+                                
+                                if content_hash and content_hash in prog.get("chapter_chunks", {}):
+                                    del prog["chapter_chunks"][content_hash]
+                                
+                                if chapter_key in prog.get("chapter_chunks", {}):
+                                    del prog["chapter_chunks"][chapter_key]
+                
+                # Save updated progress
+                with open(progress_file, 'w', encoding='utf-8') as f:
+                    json.dump(prog, f, ensure_ascii=False, indent=2)
+                
+                messagebox.showinfo("Success", 
+                    f"Deleted {deleted_count} files and cleared {len(selected)} chapters from tracking.\n\n"
+                    "They will be retranslated on the next run.")
+                
+                dialog.destroy()
+            
+            # Add buttons
+            tb.Button(button_frame, text="Select All", command=select_all, bootstyle="info").grid(row=0, column=0, padx=5)
+            tb.Button(button_frame, text="Clear Selection", command=clear_selection, bootstyle="secondary").grid(row=0, column=1, padx=5)
+            tb.Button(button_frame, text="Select Completed", command=lambda: select_status('completed'), bootstyle="success").grid(row=0, column=2, padx=5)
+            tb.Button(button_frame, text="Select Failed", command=lambda: select_status('failed'), bootstyle="danger").grid(row=0, column=3, padx=5)
+            
+            tb.Button(button_frame, text="Retranslate Selected", command=retranslate_selected, 
+                     bootstyle="warning").grid(row=1, column=0, columnspan=2, pady=10)
+            tb.Button(button_frame, text="Cancel", command=dialog.destroy, 
+                     bootstyle="secondary").grid(row=1, column=2, columnspan=2, pady=10)
+            
+
+    
+    def glossary_manager(self):
+       """Open comprehensive glossary management dialog"""
+       # Create scrollable dialog (stays hidden)
+       dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
+           self.master, 
+           "Glossary Manager",
+           width=0,  # Will be auto-sized
+           height=None,
+           max_width_ratio=0.8,
+           max_height_ratio=0.85
+       )
+       
+       # Create notebook for tabs
+       notebook = ttk.Notebook(scrollable_frame)
+       notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+       
+       # Create and add tabs
+       tabs = [
+           ("Manual Glossary Extraction", self._setup_manual_glossary_tab),
+           ("Automatic Glossary Generation", self._setup_auto_glossary_tab),
+           ("Glossary Editor", self._setup_glossary_editor_tab)
+       ]
+       
+       for tab_name, setup_method in tabs:
+           frame = ttk.Frame(notebook)
+           notebook.add(frame, text=tab_name)
+           setup_method(frame)
+       
+       # Dialog Controls
+       control_frame = tk.Frame(dialog)
+       control_frame.pack(fill=tk.X, padx=10, pady=10)
+       
+       def save_glossary_settings():
+           try:
+               # Manual glossary fields
+               for field, var in self.manual_field_vars.items():
+                   self.config[f'manual_extract_{field}'] = var.get()
+               
+               self.config['custom_glossary_fields'] = self.custom_glossary_fields
+               
+               # Prompts
+               self.manual_glossary_prompt = self.manual_prompt_text.get('1.0', tk.END).strip()
+               self.auto_glossary_prompt = self.auto_prompt_text.get('1.0', tk.END).strip()
+               self.config['manual_glossary_prompt'] = self.manual_glossary_prompt
+               self.config['enable_auto_glossary'] = self.enable_auto_glossary_var.get()
+               self.config['append_glossary'] = self.append_glossary_var.get()
+               self.config['auto_glossary_prompt'] = self.auto_glossary_prompt
+               self.append_glossary_prompt = self.append_prompt_text.get('1.0', tk.END).strip()
+               self.config['append_glossary_prompt'] = self.append_glossary_prompt
+               
+               # Temperature and context limit
+               try:
+                   self.config['manual_glossary_temperature'] = float(self.manual_temp_var.get())
+                   self.config['manual_context_limit'] = int(self.manual_context_var.get())
+               except ValueError:
+                   messagebox.showwarning("Invalid Input", 
+                       "Please enter valid numbers for temperature and context limit")
+                   return
+               
+               # Update environment variables
+               os.environ['GLOSSARY_SYSTEM_PROMPT'] = self.manual_glossary_prompt
+               os.environ['AUTO_GLOSSARY_PROMPT'] = self.auto_glossary_prompt
+               
+               # Set field extraction flags
+               enabled_fields = []
+               for field, var in self.manual_field_vars.items():
+                   env_key = f'GLOSSARY_EXTRACT_{field.upper()}'
+                   os.environ[env_key] = '1' if var.get() else '0'
+                   if var.get():
+                       enabled_fields.append(field)
+               
+               if self.custom_glossary_fields:
+                   os.environ['GLOSSARY_CUSTOM_FIELDS'] = json.dumps(self.custom_glossary_fields)
+               
+               # Save config
+               with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                   json.dump(self.config, f, ensure_ascii=False, indent=2)
+               
+               self.append_log("✅ Glossary settings saved successfully")
+               messagebox.showinfo("Success", "Glossary settings saved!")
+               dialog.destroy()
+               
+           except Exception as e:
+               messagebox.showerror("Error", f"Failed to save settings: {e}")
+               self.append_log(f"❌ Failed to save glossary settings: {e}")
+       
+       # Create button container
+       button_container = tk.Frame(control_frame)
+       button_container.pack(expand=True)
+       
+       # Add buttons
+       tb.Button(
+           button_container, 
+           text="Save All Settings", 
+           command=save_glossary_settings, 
+           bootstyle="success", 
+           width=20
+       ).pack(side=tk.LEFT, padx=5)
+       
+       tb.Button(
+           button_container, 
+           text="Cancel", 
+           command=lambda: [dialog._cleanup_scrolling(), dialog.destroy()], 
+           bootstyle="secondary", 
+           width=20
+       ).pack(side=tk.LEFT, padx=5)
+       
+       # Auto-resize and show
+       self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.8, max_height_ratio=1.43)
+       
+       dialog.protocol("WM_DELETE_WINDOW", 
+                      lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
+
+    def _setup_manual_glossary_tab(self, parent):
+       """Setup manual glossary tab"""
+       manual_container = tk.Frame(parent)
+       manual_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+       
+       fields_frame = tk.LabelFrame(manual_container, text="Extraction Fields", padx=10, pady=10)
+       fields_frame.pack(fill=tk.X, pady=(0, 10))
+       
+       if not hasattr(self, 'manual_field_vars'):
+           self.manual_field_vars = {
+               'original_name': tk.BooleanVar(value=self.config.get('manual_extract_original_name', True)),
+               'name': tk.BooleanVar(value=self.config.get('manual_extract_name', True)),
+               'gender': tk.BooleanVar(value=self.config.get('manual_extract_gender', True)),
+               'title': tk.BooleanVar(value=self.config.get('manual_extract_title', True)),
+               'group_affiliation': tk.BooleanVar(value=self.config.get('manual_extract_group_affiliation', True)),
+               'traits': tk.BooleanVar(value=self.config.get('manual_extract_traits', True)),
+               'how_they_refer_to_others': tk.BooleanVar(value=self.config.get('manual_extract_how_they_refer_to_others', True)),
+               'locations': tk.BooleanVar(value=self.config.get('manual_extract_locations', True))
+           }
+       
+       field_info = {
+           'original_name': "Original name in source language",
+           'name': "English/romanized name translation",
+           'gender': "Character gender",
+           'title': "Title or rank (with romanized suffix)",
+           'group_affiliation': "Organization/group membership",
+           'traits': "Character traits and descriptions",
+           'how_they_refer_to_others': "How they address other characters",
+           'locations': "Place names mentioned"
+       }
+       
+       fields_grid = tk.Frame(fields_frame)
+       fields_grid.pack(fill=tk.X)
+       
+       for row, (field, var) in enumerate(self.manual_field_vars.items()):
+           cb = tb.Checkbutton(fields_grid, text=field.replace('_', ' ').title(), 
+                              variable=var, bootstyle="round-toggle")
+           cb.grid(row=row, column=0, sticky=tk.W, padx=5, pady=2)
+           
+           desc = tk.Label(fields_grid, text=field_info[field], 
+                         font=('TkDefaultFont', 9), fg='gray')
+           desc.grid(row=row, column=1, sticky=tk.W, padx=20, pady=2)
+       
+       # Custom fields
+       custom_frame = tk.LabelFrame(manual_container, text="Custom Fields", padx=10, pady=10)
+       custom_frame.pack(fill=tk.X, pady=(0, 10))
+       
+       custom_list_frame = tk.Frame(custom_frame)
+       custom_list_frame.pack(fill=tk.X)
+       
+       tk.Label(custom_list_frame, text="Additional fields to extract:").pack(anchor=tk.W)
+       
+       custom_scroll = ttk.Scrollbar(custom_list_frame)
+       custom_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+       
+       self.custom_fields_listbox = tk.Listbox(custom_list_frame, height=5, 
+                                              yscrollcommand=custom_scroll.set)
+       self.custom_fields_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+       custom_scroll.config(command=self.custom_fields_listbox.yview)
+       
+       for field in self.custom_glossary_fields:
+           self.custom_fields_listbox.insert(tk.END, field)
+       
+       custom_controls = tk.Frame(custom_frame)
+       custom_controls.pack(fill=tk.X, pady=(5, 0))
+       
+       self.custom_field_entry = tb.Entry(custom_controls, width=30)
+       self.custom_field_entry.pack(side=tk.LEFT, padx=(0, 5))
+       
+       def add_custom_field():
+           field = self.custom_field_entry.get().strip()
+           if field and field not in self.custom_glossary_fields:
+               self.custom_glossary_fields.append(field)
+               self.custom_fields_listbox.insert(tk.END, field)
+               self.custom_field_entry.delete(0, tk.END)
+       
+       def remove_custom_field():
+           selection = self.custom_fields_listbox.curselection()
+           if selection:
+               idx = selection[0]
+               field = self.custom_fields_listbox.get(idx)
+               self.custom_glossary_fields.remove(field)
+               self.custom_fields_listbox.delete(idx)
+       
+       tb.Button(custom_controls, text="Add", command=add_custom_field, width=10).pack(side=tk.LEFT, padx=2)
+       tb.Button(custom_controls, text="Remove", command=remove_custom_field, width=10).pack(side=tk.LEFT, padx=2)
+       
+       # Prompt section
+       prompt_frame = tk.LabelFrame(manual_container, text="Extraction Prompt Template", padx=10, pady=10)
+       prompt_frame.pack(fill=tk.BOTH, expand=True)
+       
+       tk.Label(prompt_frame, text="Use {fields} for field list and {chapter_text} for content placeholder",
+               font=('TkDefaultFont', 9), fg='blue').pack(anchor=tk.W, pady=(0, 5))
+       
+       self.manual_prompt_text = self.ui.setup_scrollable_text(
+           prompt_frame, height=12, wrap=tk.WORD
+       )
+       self.manual_prompt_text.pack(fill=tk.BOTH, expand=True)
+       self.manual_prompt_text.insert('1.0', self.manual_glossary_prompt)
+       self.manual_prompt_text.edit_reset()
+       
+       prompt_controls = tk.Frame(manual_container)
+       prompt_controls.pack(fill=tk.X, pady=(10, 0))
+       
+       def reset_manual_prompt():
+           if messagebox.askyesno("Reset Prompt", "Reset manual glossary prompt to default?"):
+               self.manual_prompt_text.delete('1.0', tk.END)
+               self.manual_prompt_text.insert('1.0', self.default_manual_glossary_prompt)
+       
+       tb.Button(prompt_controls, text="Reset to Default", command=reset_manual_prompt, 
+                bootstyle="warning").pack(side=tk.LEFT, padx=5)
+       
+       # Settings
+       settings_frame = tk.LabelFrame(manual_container, text="Extraction Settings", padx=10, pady=10)
+       settings_frame.pack(fill=tk.X, pady=(10, 0))
+       
+       settings_grid = tk.Frame(settings_frame)
+       settings_grid.pack()
+       
+       tk.Label(settings_grid, text="Temperature:").grid(row=0, column=0, sticky=tk.W, padx=5)
+       self.manual_temp_var = tk.StringVar(value=str(self.config.get('manual_glossary_temperature', 0.3)))
+       tb.Entry(settings_grid, textvariable=self.manual_temp_var, width=10).grid(row=0, column=1, padx=5)
+       
+       tk.Label(settings_grid, text="Context Limit:").grid(row=0, column=2, sticky=tk.W, padx=5)
+       self.manual_context_var = tk.StringVar(value=str(self.config.get('manual_context_limit', 3)))
+       tb.Entry(settings_grid, textvariable=self.manual_context_var, width=10).grid(row=0, column=3, padx=5)
+       
+       tk.Label(settings_grid, text="Rolling Window:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=(10, 0))
+       tb.Checkbutton(settings_grid, text="Keep recent context instead of reset", 
+                     variable=self.glossary_history_rolling_var,
+                     bootstyle="round-toggle").grid(row=1, column=1, columnspan=3, sticky=tk.W, padx=5, pady=(10, 0))
+       
+       tk.Label(settings_grid, text="When context limit is reached, keep recent chapters instead of clearing all history",
+               font=('TkDefaultFont', 11), fg='gray').grid(row=2, column=0, columnspan=4, sticky=tk.W, padx=20, pady=(0, 5))
+
+    def _setup_auto_glossary_tab(self, parent):
+        """Setup automatic glossary tab"""
+        auto_container = tk.Frame(parent)
+        auto_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Master toggle
+        master_toggle_frame = tk.Frame(auto_container)
+        master_toggle_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        tb.Checkbutton(master_toggle_frame, text="Enable Automatic Glossary Generation", 
+                      variable=self.enable_auto_glossary_var,
+                      bootstyle="round-toggle").pack(side=tk.LEFT)
+        
+        tk.Label(master_toggle_frame, text="(Automatically extracts and translates character names/terms during translation)",
+                font=('TkDefaultFont', 10), fg='gray').pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Append glossary toggle
+        append_frame = tk.Frame(auto_container)
+        append_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        tb.Checkbutton(append_frame, text="Append Glossary to System Prompt", 
+                      variable=self.append_glossary_var,
+                      bootstyle="round-toggle").pack(side=tk.LEFT)
+        
+        tk.Label(append_frame, text="(Applies to ALL glossaries - manual and automatic)",
+                font=('TkDefaultFont', 10, 'italic'), fg='blue').pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Custom append prompt section
+        append_prompt_frame = tk.LabelFrame(auto_container, text="Glossary Append Format", padx=10, pady=10)
+        append_prompt_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        tk.Label(append_prompt_frame, text="This text will be added before the glossary entries:",
+                font=('TkDefaultFont', 10)).pack(anchor=tk.W, pady=(0, 5))
+        
+        self.append_prompt_text = self.ui.setup_scrollable_text(
+            append_prompt_frame, height=2, wrap=tk.WORD
+        )
+        self.append_prompt_text.pack(fill=tk.X)
+        
+        # Initialize append_glossary_prompt if not exists
+        if not hasattr(self, 'append_glossary_prompt'):
+            self.append_glossary_prompt = self.config.get('append_glossary_prompt', "Character/Term Glossary (use these translations consistently):")
+        
+        self.append_prompt_text.insert('1.0', self.append_glossary_prompt)
+        self.append_prompt_text.edit_reset()
+        
+        append_prompt_controls = tk.Frame(append_prompt_frame)
+        append_prompt_controls.pack(fill=tk.X, pady=(5, 0))
+        
+        def reset_append_prompt():
+            if messagebox.askyesno("Reset Prompt", "Reset to default glossary append format?"):
+                self.append_prompt_text.delete('1.0', tk.END)
+                self.append_prompt_text.insert('1.0', "Character/Term Glossary (use these translations consistently):")
+        
+        tb.Button(append_prompt_controls, text="Reset to Default", command=reset_append_prompt, 
+                 bootstyle="warning").pack(side=tk.LEFT, padx=5)
+        
+        # Extraction settings
+        settings_container = tk.Frame(auto_container)
+        settings_container.pack(fill=tk.BOTH, expand=True)
+        
+        settings_label_frame = tk.LabelFrame(settings_container, text="Targeted Extraction Settings", padx=10, pady=10)
+        settings_label_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        extraction_grid = tk.Frame(settings_label_frame)
+        extraction_grid.pack(fill=tk.X)
+        
+        # Row 1
+        tk.Label(extraction_grid, text="Min frequency:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        tb.Entry(extraction_grid, textvariable=self.glossary_min_frequency_var, width=10).grid(row=0, column=1, sticky=tk.W, padx=(0, 20))
+        
+        tk.Label(extraction_grid, text="Max names:").grid(row=0, column=2, sticky=tk.W, padx=(0, 5))
+        tb.Entry(extraction_grid, textvariable=self.glossary_max_names_var, width=10).grid(row=0, column=3, sticky=tk.W)
+        
+        # Row 2
+        tk.Label(extraction_grid, text="Max titles:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        tb.Entry(extraction_grid, textvariable=self.glossary_max_titles_var, width=10).grid(row=1, column=1, sticky=tk.W, padx=(0, 20), pady=(5, 0))
+        
+        tk.Label(extraction_grid, text="Translation batch:").grid(row=1, column=2, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        tb.Entry(extraction_grid, textvariable=self.glossary_batch_size_var, width=10).grid(row=1, column=3, sticky=tk.W, pady=(5, 0))
+        
+        # Help text
+        help_frame = tk.Frame(settings_container)
+        help_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        tk.Label(help_frame, text="💡 Settings Guide:", font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W)
+        help_texts = [
+            "• Min frequency: How many times a name must appear (lower = more terms)",
+            "• Max names/titles: Limits to prevent huge glossaries",
+            "• Translation batch: Terms per API call (larger = faster but may reduce quality)"
+        ]
+        for txt in help_texts:
+            tk.Label(help_frame, text=txt, font=('TkDefaultFont', 11), fg='gray').pack(anchor=tk.W, padx=20)
+        
+        # Auto prompt section
+        auto_prompt_frame = tk.LabelFrame(settings_container, text="Extraction Prompt Template", padx=10, pady=10)
+        auto_prompt_frame.pack(fill=tk.BOTH, expand=True)
+        
+        tk.Label(auto_prompt_frame, text="Available placeholders: {language}, {min_frequency}, {max_names}, {max_titles}",
+                font=('TkDefaultFont', 9), fg='blue').pack(anchor=tk.W, pady=(0, 5))
+        
+        self.auto_prompt_text = self.ui.setup_scrollable_text(
+            auto_prompt_frame, height=12, wrap=tk.WORD
+        )
+        self.auto_prompt_text.pack(fill=tk.BOTH, expand=True)
+        self.auto_prompt_text.insert('1.0', self.auto_glossary_prompt)
+        self.auto_prompt_text.edit_reset()
+        
+        auto_prompt_controls = tk.Frame(settings_container)
+        auto_prompt_controls.pack(fill=tk.X, pady=(10, 0))
+        
+        def reset_auto_prompt():
+            if messagebox.askyesno("Reset Prompt", "Reset automatic glossary prompt to default?"):
+                self.auto_prompt_text.delete('1.0', tk.END)
+                self.auto_prompt_text.insert('1.0', self.default_auto_glossary_prompt)
+        
+        tb.Button(auto_prompt_controls, text="Reset to Default", command=reset_auto_prompt, 
+                 bootstyle="warning").pack(side=tk.LEFT, padx=5)
+        
+        # Update states function with proper error handling
+        def update_auto_glossary_state():
+            try:
+                if not extraction_grid.winfo_exists():
+                    return
+                state = tk.NORMAL if self.enable_auto_glossary_var.get() else tk.DISABLED
+                for widget in extraction_grid.winfo_children():
+                    if isinstance(widget, (tb.Entry, ttk.Entry)):
+                        widget.config(state=state)
+                if self.auto_prompt_text.winfo_exists():
+                    self.auto_prompt_text.config(state=state)
+                for widget in auto_prompt_controls.winfo_children():
+                    if isinstance(widget, (tb.Button, ttk.Button)) and widget.winfo_exists():
+                        widget.config(state=state)
+            except tk.TclError:
+                # Widget was destroyed, ignore
+                pass
+        
+        def update_append_prompt_state():
+            try:
+                if not self.append_prompt_text.winfo_exists():
+                    return
+                state = tk.NORMAL if self.append_glossary_var.get() else tk.DISABLED
+                self.append_prompt_text.config(state=state)
+                for widget in append_prompt_controls.winfo_children():
+                    if isinstance(widget, (tb.Button, ttk.Button)) and widget.winfo_exists():
+                        widget.config(state=state)
+            except tk.TclError:
+                # Widget was destroyed, ignore
+                pass
+        
+        # Initialize states
+        update_auto_glossary_state()
+        update_append_prompt_state()
+        
+        # Add traces
+        self.enable_auto_glossary_var.trace('w', lambda *args: update_auto_glossary_state())
+        self.append_glossary_var.trace('w', lambda *args: update_append_prompt_state())
+
+
+    def _setup_glossary_editor_tab(self, parent):
+       """Set up the glossary editor/trimmer tab"""
+       container = tk.Frame(parent)
+       container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+       
+       file_frame = tk.Frame(container)
+       file_frame.pack(fill=tk.X, pady=(0, 10))
+       
+       tk.Label(file_frame, text="Glossary File:").pack(side=tk.LEFT, padx=(0, 5))
+       self.editor_file_var = tk.StringVar()
+       tb.Entry(file_frame, textvariable=self.editor_file_var, state='readonly').pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+       
+       stats_frame = tk.Frame(container)
+       stats_frame.pack(fill=tk.X, pady=(0, 5))
+       self.stats_label = tk.Label(stats_frame, text="No glossary loaded", font=('TkDefaultFont', 10, 'italic'))
+       self.stats_label.pack(side=tk.LEFT)
+       
+       content_frame = tk.LabelFrame(container, text="Glossary Entries", padx=10, pady=10)
+       content_frame.pack(fill=tk.BOTH, expand=True)
+       
+       tree_frame = tk.Frame(content_frame)
+       tree_frame.pack(fill=tk.BOTH, expand=True)
+       
+       vsb = ttk.Scrollbar(tree_frame, orient="vertical")
+       hsb = ttk.Scrollbar(tree_frame, orient="horizontal")
+       
+       self.glossary_tree = ttk.Treeview(tree_frame, show='tree headings',
+                                        yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+       
+       vsb.config(command=self.glossary_tree.yview)
+       hsb.config(command=self.glossary_tree.xview)
+       
+       self.glossary_tree.grid(row=0, column=0, sticky='nsew')
+       vsb.grid(row=0, column=1, sticky='ns')
+       hsb.grid(row=1, column=0, sticky='ew')
+       
+       tree_frame.grid_rowconfigure(0, weight=1)
+       tree_frame.grid_columnconfigure(0, weight=1)
+       
+       self.glossary_tree.bind('<Double-Button-1>', self._on_tree_double_click)
+       
+       self.current_glossary_data = None
+       self.current_glossary_format = None
+       
+       # Editor functions
+       def load_glossary_for_editing():
+           path = self.editor_file_var.get()
+           if not path or not os.path.exists(path):
+               messagebox.showerror("Error", "Please select a valid glossary file")
+               return
+           
+           try:
+               with open(path, 'r', encoding='utf-8') as f:
+                   data = json.load(f)
+               
+               entries = []
+               all_fields = set()
+               
+               if isinstance(data, dict):
+                   if 'entries' in data:
+                       self.current_glossary_data = data
+                       self.current_glossary_format = 'dict'
+                       for original, translated in data['entries'].items():
+                           entry = {'original': original, 'translated': translated}
+                           entries.append(entry)
+                           all_fields.update(entry.keys())
+                   else:
+                       self.current_glossary_data = {'entries': data}
+                       self.current_glossary_format = 'dict'
+                       for original, translated in data.items():
+                           entry = {'original': original, 'translated': translated}
+                           entries.append(entry)
+                           all_fields.update(entry.keys())
+               
+               elif isinstance(data, list):
+                   self.current_glossary_data = data
+                   self.current_glossary_format = 'list'
+                   for item in data:
+                       all_fields.update(item.keys())
+                       entries.append(item)
+               
+               standard_fields = ['original_name', 'name', 'original', 'translated', 'gender', 
+                                'title', 'group_affiliation', 'traits', 'how_they_refer_to_others', 
+                                'locations']
+               
+               column_fields = []
+               for field in standard_fields:
+                   if field in all_fields:
+                       column_fields.append(field)
+               
+               custom_fields = sorted(all_fields - set(standard_fields))
+               column_fields.extend(custom_fields)
+               
+               self.glossary_tree.delete(*self.glossary_tree.get_children())
+               self.glossary_tree['columns'] = column_fields
+               
+               self.glossary_tree.heading('#0', text='#')
+               self.glossary_tree.column('#0', width=40, stretch=False)
+               
+               for field in column_fields:
+                   display_name = field.replace('_', ' ').title()
+                   self.glossary_tree.heading(field, text=display_name)
+                   
+                   if field in ['original_name', 'name', 'original', 'translated']:
+                       width = 150
+                   elif field in ['traits', 'locations', 'how_they_refer_to_others']:
+                       width = 200
+                   else:
+                       width = 100
+                   
+                   self.glossary_tree.column(field, width=width)
+               
+               for idx, entry in enumerate(entries):
+                   values = []
+                   for field in column_fields:
+                       value = entry.get(field, '')
+                       if isinstance(value, list):
+                           value = ', '.join(str(v) for v in value)
+                       elif isinstance(value, dict):
+                           value = ', '.join(f"{k}: {v}" for k, v in value.items())
+                       elif value is None:
+                           value = ''
+                       values.append(value)
+                   
+                   self.glossary_tree.insert('', 'end', text=str(idx + 1), values=values)
+               
+               stats = []
+               stats.append(f"Total entries: {len(entries)}")
+               if self.current_glossary_format == 'list':
+                   chars = sum(1 for e in entries if 'original_name' in e or 'name' in e)
+                   locs = sum(1 for e in entries if 'locations' in e and e['locations'])
+                   stats.append(f"Characters: {chars}, Locations: {locs}")
+               
+               self.stats_label.config(text=" | ".join(stats))
+               self.append_log(f"✅ Loaded {len(entries)} entries from glossary")
+               
+           except Exception as e:
+               messagebox.showerror("Error", f"Failed to load glossary: {e}")
+               self.append_log(f"❌ Failed to load glossary: {e}")
+       
+       def browse_glossary():
+           path = filedialog.askopenfilename(
+               title="Select glossary.json",
+               filetypes=[("JSON files", "*.json")]
+           )
+           if path:
+               self.editor_file_var.set(path)
+               load_glossary_for_editing()
+       
+       # Common save helper
+       def save_current_glossary():
+           path = self.editor_file_var.get()
+           if not path or not self.current_glossary_data:
+               return False
+           try:
+               with open(path, 'w', encoding='utf-8') as f:
+                   json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
+               return True
+           except Exception as e:
+               messagebox.showerror("Error", f"Failed to save: {e}")
+               return False
+       
+       def clean_empty_fields():
+           if not self.current_glossary_data:
+               messagebox.showerror("Error", "No glossary loaded")
+               return
+           
+           count = 0
+           if self.current_glossary_format == 'list':
+               for entry in self.current_glossary_data:
+                   fields_to_remove = []
+                   for field, value in entry.items():
+                       if value is None or value == '' or (isinstance(value, list) and not value) or (isinstance(value, dict) and not value):
+                           fields_to_remove.append(field)
+                   for field in fields_to_remove:
+                       entry.pop(field)
+                       count += 1
+           
+           elif self.current_glossary_format == 'dict':
+               messagebox.showinfo("Info", "Empty field cleaning is only available for manual glossary format")
+               return
+           
+           if count > 0 and save_current_glossary():
+               load_glossary_for_editing()
+               messagebox.showinfo("Success", f"Removed {count} empty fields and saved")
+               self.append_log(f"✅ Cleaned {count} empty fields from glossary")
+       
+       def delete_selected_entries():
+           selected = self.glossary_tree.selection()
+           if not selected:
+               messagebox.showwarning("Warning", "No entries selected")
+               return
+           
+           if messagebox.askyesno("Confirm Delete", f"Delete {len(selected)} selected entries?"):
+               indices_to_delete = []
+               for item in selected:
+                   idx = int(self.glossary_tree.item(item)['text']) - 1
+                   indices_to_delete.append(idx)
+               
+               indices_to_delete.sort(reverse=True)
+               
+               if self.current_glossary_format == 'list':
+                   for idx in indices_to_delete:
+                       if 0 <= idx < len(self.current_glossary_data):
+                           del self.current_glossary_data[idx]
+               
+               elif self.current_glossary_format == 'dict':
+                   entries_list = list(self.current_glossary_data.get('entries', {}).items())
+                   for idx in indices_to_delete:
+                       if 0 <= idx < len(entries_list):
+                           key = entries_list[idx][0]
+                           self.current_glossary_data['entries'].pop(key, None)
+               
+               if save_current_glossary():
+                   load_glossary_for_editing()
+                   messagebox.showinfo("Success", f"Deleted {len(indices_to_delete)} entries")
+       
+       def remove_duplicates():
+           if not self.current_glossary_data:
+               messagebox.showerror("Error", "No glossary loaded")
+               return
+           
+           if self.current_glossary_format == 'list':
+               seen = {}
+               unique_entries = []
+               duplicates = 0
+               
+               for entry in self.current_glossary_data:
+                   key = entry.get('original_name') or entry.get('name')
+                   if key and key not in seen:
+                       seen[key] = True
+                       unique_entries.append(entry)
+                   else:
+                       duplicates += 1
+               
+               self.current_glossary_data[:] = unique_entries
+               
+               if duplicates > 0 and save_current_glossary():
+                   load_glossary_for_editing()
+                   messagebox.showinfo("Success", f"Removed {duplicates} duplicate entries")
+               else:
+                   messagebox.showinfo("Info", "No duplicates found")
+       
+       def smart_trim_dialog():
+           if not self.current_glossary_data:
+               messagebox.showerror("Error", "No glossary loaded")
+               return
+           
+           dialog = self.wm.create_simple_dialog(
+               self.master,
+               "Smart Trim Glossary",
+               width=500,
+               height=700
+           )
+           
+           main_frame = tk.Frame(dialog, padx=20, pady=20)
+           main_frame.pack(fill=tk.BOTH, expand=True)
+           
+           tk.Label(main_frame, text="Smart Glossary Trimming", 
+                   font=('TkDefaultFont', 12, 'bold')).pack(pady=(0, 10))
+           
+           options_frame = tk.LabelFrame(main_frame, text="Trimming Options", padx=10, pady=10)
+           options_frame.pack(fill=tk.X, pady=(0, 10))
+           
+           top_frame = tk.Frame(options_frame)
+           top_frame.pack(fill=tk.X, pady=5)
+           tk.Label(top_frame, text="Keep top").pack(side=tk.LEFT)
+           top_var = tk.StringVar(value="100")
+           tb.Entry(top_frame, textvariable=top_var, width=10).pack(side=tk.LEFT, padx=5)
+           tk.Label(top_frame, text="entries").pack(side=tk.LEFT)
+           
+           tk.Label(options_frame, text="Field-specific limits:", 
+                   font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(10, 5))
+           
+           field_vars = {}
+           fields_to_limit = [
+               ('traits', "Max traits per character:", "5"),
+               ('locations', "Max locations per entry:", "10"),
+               ('group_affiliation', "Max groups per character:", "3")
+           ]
+           
+           for field, label, default in fields_to_limit:
+               frame = tk.Frame(options_frame)
+               frame.pack(fill=tk.X, pady=2)
+               tk.Label(frame, text=label).pack(side=tk.LEFT)
+               var = tk.StringVar(value=default)
+               tb.Entry(frame, textvariable=var, width=10).pack(side=tk.LEFT, padx=5)
+               field_vars[field] = var
+           
+           tk.Label(options_frame, text="Remove fields:", 
+                   font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(10, 5))
+           
+           remove_vars = {}
+           fields_to_remove = ['title', 'how_they_refer_to_others', 'gender']
+           
+           for field in fields_to_remove:
+               var = tk.BooleanVar(value=False)
+               tb.Checkbutton(options_frame, text=f"Remove {field.replace('_', ' ')}", 
+                            variable=var).pack(anchor=tk.W, padx=20)
+               remove_vars[field] = var
+           
+           def apply_smart_trim():
+               try:
+                   top_n = int(top_var.get())
+                   
+                   if self.current_glossary_format == 'list':
+                       if top_n < len(self.current_glossary_data):
+                           self.current_glossary_data = self.current_glossary_data[:top_n]
+                       
+                       for entry in self.current_glossary_data:
+                           for field, var in field_vars.items():
+                               if field in entry and isinstance(entry[field], list):
+                                   limit = int(var.get())
+                                   if len(entry[field]) > limit:
+                                       entry[field] = entry[field][:limit]
+                           
+                           for field, var in remove_vars.items():
+                               if var.get() and field in entry:
+                                   entry.pop(field)
+                   
+                   elif self.current_glossary_format == 'dict':
+                       entries = list(self.current_glossary_data['entries'].items())
+                       if top_n < len(entries):
+                           self.current_glossary_data['entries'] = dict(entries[:top_n])
+                   
+                   if save_current_glossary():
+                       load_glossary_for_editing()
+                       messagebox.showinfo("Success", "Smart trim applied successfully")
+                       dialog.destroy()
+                       
+               except ValueError:
+                   messagebox.showerror("Error", "Please enter valid numbers")
+           
+           button_frame = tk.Frame(main_frame)
+           button_frame.pack(fill=tk.X, pady=(10, 0))
+           
+           tb.Button(button_frame, text="Apply Trim", command=apply_smart_trim,
+                    bootstyle="primary", width=15).pack(side=tk.LEFT, padx=5)
+           tb.Button(button_frame, text="Cancel", command=dialog.destroy,
+                    bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
+           
+           dialog.deiconify()
+       
+       def filter_entries_dialog():
+           if not self.current_glossary_data:
+               messagebox.showerror("Error", "No glossary loaded")
+               return
+           
+           dialog = self.wm.create_simple_dialog(
+               self.master,
+               "Filter Entries",
+               width=400,
+               height=300
+           )
+           
+           main_frame = tk.Frame(dialog, padx=20, pady=20)
+           main_frame.pack(fill=tk.BOTH, expand=True)
+           
+           tk.Label(main_frame, text="Filter Glossary Entries", 
+                   font=('TkDefaultFont', 12, 'bold')).pack(pady=(0, 10))
+           
+           filter_frame = tk.LabelFrame(main_frame, text="Keep only entries that:", padx=10, pady=10)
+           filter_frame.pack(fill=tk.X, pady=(0, 10))
+           
+           filter_vars = {
+               'name': (tk.BooleanVar(value=True), "Have name/original_name"),
+               'translation': (tk.BooleanVar(value=False), "Have English translation"),
+               'traits': (tk.BooleanVar(value=False), "Have traits"),
+               'locations': (tk.BooleanVar(value=False), "Have locations")
+           }
+           
+           for key, (var, label) in filter_vars.items():
+               tb.Checkbutton(filter_frame, text=label, variable=var).pack(anchor=tk.W)
+           
+           def apply_filter():
+               if self.current_glossary_format == 'list':
+                   filtered = []
+                   for entry in self.current_glossary_data:
+                       keep = True
+                       
+                       if filter_vars['name'][0].get():
+                           if not (entry.get('name') or entry.get('original_name')):
+                               keep = False
+                       
+                       if filter_vars['translation'][0].get():
+                           if not entry.get('name'):
+                               keep = False
+                       
+                       if filter_vars['traits'][0].get():
+                           if not entry.get('traits'):
+                               keep = False
+                       
+                       if filter_vars['locations'][0].get():
+                           if not entry.get('locations'):
+                               keep = False
+                       
+                       if keep:
+                           filtered.append(entry)
+                   
+                   removed = len(self.current_glossary_data) - len(filtered)
+                   self.current_glossary_data[:] = filtered
+                   
+                   if save_current_glossary():
+                       load_glossary_for_editing()
+                       messagebox.showinfo("Success", f"Filtered out {removed} entries")
+                       dialog.destroy()
+               else:
+                   messagebox.showinfo("Info", "Filtering is only available for manual glossary format")
+                   dialog.destroy()
+           
+           button_frame = tk.Frame(main_frame)
+           button_frame.pack(fill=tk.X, pady=(10, 0))
+           
+           tb.Button(button_frame, text="Apply Filter", command=apply_filter,
+                    bootstyle="primary", width=15).pack(side=tk.LEFT, padx=5)
+           tb.Button(button_frame, text="Cancel", command=dialog.destroy,
+                    bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
+           
+           dialog.deiconify()
+       
+       def export_selection():
+           selected = self.glossary_tree.selection()
+           if not selected:
+               messagebox.showwarning("Warning", "No entries selected")
+               return
+           
+           path = filedialog.asksaveasfilename(
+               title="Export Selected Entries",
+               defaultextension=".json",
+               filetypes=[("JSON files", "*.json")]
+           )
+           
+           if not path:
+               return
+           
+           try:
+               if self.current_glossary_format == 'list':
+                   exported = []
+                   for item in selected:
+                       idx = int(self.glossary_tree.item(item)['text']) - 1
+                       if 0 <= idx < len(self.current_glossary_data):
+                           exported.append(self.current_glossary_data[idx])
+                   
+                   with open(path, 'w', encoding='utf-8') as f:
+                       json.dump(exported, f, ensure_ascii=False, indent=2)
+               
+               else:
+                   exported = {}
+                   entries_list = list(self.current_glossary_data.get('entries', {}).items())
+                   for item in selected:
+                       idx = int(self.glossary_tree.item(item)['text']) - 1
+                       if 0 <= idx < len(entries_list):
+                           key, value = entries_list[idx]
+                           exported[key] = value
+                   
+                   with open(path, 'w', encoding='utf-8') as f:
+                       json.dump(exported, f, ensure_ascii=False, indent=2)
+               
+               messagebox.showinfo("Success", f"Exported {len(selected)} entries to {os.path.basename(path)}")
+               
+           except Exception as e:
+               messagebox.showerror("Error", f"Failed to export: {e}")
+       
+       def save_edited_glossary():
+           if save_current_glossary():
+               messagebox.showinfo("Success", "Glossary saved successfully")
+               self.append_log(f"✅ Saved glossary to: {self.editor_file_var.get()}")
+       
+       def save_as_glossary():
+           if not self.current_glossary_data:
+               messagebox.showerror("Error", "No glossary loaded")
+               return
+           
+           path = filedialog.asksaveasfilename(
+               title="Save Glossary As",
+               defaultextension=".json",
+               filetypes=[("JSON files", "*.json")]
+           )
+           
+           if not path:
+               return
+           
+           try:
+               with open(path, 'w', encoding='utf-8') as f:
+                   json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
+               
+               self.editor_file_var.set(path)
+               messagebox.showinfo("Success", f"Glossary saved to {os.path.basename(path)}")
+               self.append_log(f"✅ Saved glossary as: {path}")
+               
+           except Exception as e:
+               messagebox.showerror("Error", f"Failed to save: {e}")
+       
+       # Buttons
+       tb.Button(file_frame, text="Browse", command=browse_glossary, width=15).pack(side=tk.LEFT)
+       
+       editor_controls = tk.Frame(container)
+       editor_controls.pack(fill=tk.X, pady=(10, 0))
+       
+       # Row 1
+       row1 = tk.Frame(editor_controls)
+       row1.pack(fill=tk.X, pady=2)
+       
+       buttons_row1 = [
+           ("Reload", load_glossary_for_editing, "info"),
+           ("Delete Selected", delete_selected_entries, "danger"),
+           ("Clean Empty Fields", clean_empty_fields, "warning"),
+           ("Remove Duplicates", remove_duplicates, "warning")
+       ]
+       
+       for text, cmd, style in buttons_row1:
+           tb.Button(row1, text=text, command=cmd, bootstyle=style, width=15).pack(side=tk.LEFT, padx=2)
+       
+       # Row 2
+       row2 = tk.Frame(editor_controls)
+       row2.pack(fill=tk.X, pady=2)
+       
+       buttons_row2 = [
+           ("Smart Trim", smart_trim_dialog, "primary"),
+           ("Filter Entries", filter_entries_dialog, "primary"),
+           ("Aggregate Locations", lambda: self._aggregate_locations(load_glossary_for_editing), "info"),
+           ("Export Selection", export_selection, "secondary")
+       ]
+       
+       for text, cmd, style in buttons_row2:
+           tb.Button(row2, text=text, command=cmd, bootstyle=style, width=15).pack(side=tk.LEFT, padx=2)
+       
+       # Row 3
+       row3 = tk.Frame(editor_controls)
+       row3.pack(fill=tk.X, pady=2)
+       
+       tb.Button(row3, text="Save Changes", command=save_edited_glossary,
+                bootstyle="success", width=20).pack(side=tk.LEFT, padx=2)
+       tb.Button(row3, text="Save As...", command=save_as_glossary,
+                bootstyle="success-outline", width=20).pack(side=tk.LEFT, padx=2)
+
+    def _on_tree_double_click(self, event):
+       """Handle double-click on treeview item for inline editing"""
+       region = self.glossary_tree.identify_region(event.x, event.y)
+       if region != 'cell':
+           return
+       
+       item = self.glossary_tree.identify_row(event.y)
+       column = self.glossary_tree.identify_column(event.x)
+       
+       if not item or column == '#0':
+           return
+       
+       col_idx = int(column.replace('#', '')) - 1
+       columns = self.glossary_tree['columns']
+       if col_idx >= len(columns):
+           return
+       
+       col_name = columns[col_idx]
+       values = self.glossary_tree.item(item)['values']
+       current_value = values[col_idx] if col_idx < len(values) else ''
+       
+       dialog = self.wm.create_simple_dialog(
+           self.master,
+           f"Edit {col_name.replace('_', ' ').title()}",
+           width=400,
+           height=150
+       )
+       
+       frame = tk.Frame(dialog, padx=20, pady=20)
+       frame.pack(fill=tk.BOTH, expand=True)
+       
+       tk.Label(frame, text=f"Edit {col_name.replace('_', ' ').title()}:").pack(anchor=tk.W)
+       
+       if col_name in ['traits', 'locations', 'group_affiliation'] or ',' in str(current_value):
+           text_widget = tk.Text(frame, height=4, width=50)
+           text_widget.pack(fill=tk.BOTH, expand=True, pady=5)
+           text_widget.insert('1.0', current_value)
+           
+           def get_value():
+               return text_widget.get('1.0', tk.END).strip()
+       else:
+           var = tk.StringVar(value=current_value)
+           entry = tb.Entry(frame, textvariable=var, width=50)
+           entry.pack(fill=tk.X, pady=5)
+           entry.focus()
+           entry.select_range(0, tk.END)
+           
+           def get_value():
+               return var.get()
+       
+       def save_edit():
+           new_value = get_value()
+           
+           new_values = list(values)
+           new_values[col_idx] = new_value
+           self.glossary_tree.item(item, values=new_values)
+           
+           row_idx = int(self.glossary_tree.item(item)['text']) - 1
+           
+           if self.current_glossary_format == 'list':
+               if 0 <= row_idx < len(self.current_glossary_data):
+                   entry = self.current_glossary_data[row_idx]
+                   
+                   if col_name in ['traits', 'locations', 'group_affiliation']:
+                       if new_value:
+                           entry[col_name] = [v.strip() for v in new_value.split(',') if v.strip()]
+                       else:
+                           entry.pop(col_name, None)
+                   else:
+                       if new_value:
+                           entry[col_name] = new_value
+                       else:
+                           entry.pop(col_name, None)
+           
+           dialog.destroy()
+       
+       button_frame = tk.Frame(frame)
+       button_frame.pack(fill=tk.X, pady=(10, 0))
+       
+       tb.Button(button_frame, text="Save", command=save_edit,
+                bootstyle="success", width=10).pack(side=tk.LEFT, padx=5)
+       tb.Button(button_frame, text="Cancel", command=dialog.destroy,
+                bootstyle="secondary", width=10).pack(side=tk.LEFT, padx=5)
+       
+       dialog.bind('<Return>', lambda e: save_edit())
+       dialog.bind('<Escape>', lambda e: dialog.destroy())
+       
+       dialog.deiconify()
+
+    def _aggregate_locations(self, reload_callback):
+       """Aggregate all location entries into a single entry"""
+       if not self.current_glossary_data:
+           messagebox.showerror("Error", "No glossary loaded")
+           return
+       
+       if isinstance(self.current_glossary_data, list):
+           all_locs = []
+           for char in self.current_glossary_data:
+               locs = char.get('locations', [])
+               if isinstance(locs, list):
+                   all_locs.extend(locs)
+               char.pop('locations', None)
+           
+           seen = set()
+           unique_locs = []
+           for loc in all_locs:
+               if loc not in seen:
+                   seen.add(loc)
+                   unique_locs.append(loc)
+           
+           self.current_glossary_data = [
+               entry for entry in self.current_glossary_data 
+               if entry.get('original_name') != "📍 Location Summary"
+           ]
+           
+           self.current_glossary_data.append({
+               "original_name": "📍 Location Summary",
+               "name": "Location Summary",
+               "locations": unique_locs
+           })
+           
+           path = self.editor_file_var.get()
+           with open(path, 'w', encoding='utf-8') as f:
+               json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
+           
+           messagebox.showinfo("Success", f"Aggregated {len(unique_locs)} unique locations")
+           reload_callback()
+       else:
+           messagebox.showinfo("Info", "Location aggregation only works with manual glossary format")
+
+    def _make_bottom_toolbar(self):
+       """Create the bottom toolbar with all action buttons"""
+       btn_frame = tb.Frame(self.frame)
+       btn_frame.grid(row=11, column=0, columnspan=5, sticky=tk.EW, pady=5)
+       
+       self.qa_button = tb.Button(btn_frame, text="QA Scan", command=self.run_qa_scan, bootstyle="warning")
+       self.qa_button.grid(row=0, column=99, sticky=tk.EW, padx=5)
+       
+       toolbar_items = [
+           ("EPUB Converter", self.epub_converter, "info"),
+           ("Extract Glossary", self.run_glossary_extraction_thread, "warning"),
+           ("Glossary Manager", self.glossary_manager, "secondary"),
+           ("Retranslate", self.force_retranslation, "warning"),
+           ("Save Config", self.save_config, "secondary"),
+           ("Load Glossary", self.load_glossary, "secondary"),
+           ("Import Profiles", self.import_profiles, "secondary"),
+           ("Export Profiles", self.export_profiles, "secondary"),
+       ]
+       
+       for idx, (lbl, cmd, style) in enumerate(toolbar_items):
+           btn_frame.columnconfigure(idx, weight=1)
+           btn = tb.Button(btn_frame, text=lbl, command=cmd, bootstyle=style)
+           btn.grid(row=0, column=idx, sticky=tk.EW, padx=2)
+           if lbl == "Extract Glossary":
+               self.glossary_button = btn
+           elif lbl == "EPUB Converter":
+               self.epub_button = btn
+       
+       self.frame.grid_rowconfigure(12, weight=0)
+
+    # Thread management methods
+    def run_translation_thread(self):
+       """Start translation in a separate thread"""
+       if hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive():
+           self.append_log("⚠️ Cannot run translation while glossary extraction is in progress.")
+           messagebox.showwarning("Process Running", "Please wait for glossary extraction to complete before starting translation.")
+           return
+       
+       if self.translation_thread and self.translation_thread.is_alive():
+           self.stop_translation()
+           return
+       
+       self.stop_requested = False
+       if translation_stop_flag:
+           translation_stop_flag(False)
+       
+       self.translation_thread = threading.Thread(target=self.run_translation_direct, daemon=True)
+       self.translation_thread.start()
+       self.master.after(100, self.update_run_button)
+
+    def run_translation_direct(self):
+       """Run translation directly without subprocess"""
+       try:
+           self.append_log("🔄 Loading translation modules...")
+           if not self._lazy_load_modules():
+               self.append_log("❌ Failed to load translation modules")
+               return
+           
+           if translation_main is None:
+               self.append_log("❌ Translation module is not available")
+               messagebox.showerror("Module Error", "Translation module is not available. Please ensure all files are present.")
+               return
+           
+           epub_path = self.entry_epub.get()
+           if not epub_path or not os.path.isfile(epub_path):
+               self.append_log("❌ Error: Please select a valid EPUB file.")
+               return
+           
+           api_key = self.api_key_entry.get()
+           if not api_key:
+               self.append_log("❌ Error: Please enter your API key.")
+               return
+           
+           old_argv = sys.argv
+           old_env = dict(os.environ)
+           
+           try:
+               self.append_log(f"🔧 Setting up environment variables...")
+               self.append_log(f"📖 EPUB: {os.path.basename(epub_path)}")
+               self.append_log(f"🤖 Model: {self.model_var.get()}")
+               self.append_log(f"🔑 API Key: {api_key[:10]}...")
+               self.append_log(f"📤 Output Token Limit: {self.max_output_tokens}")
+               
+               # Log key settings
+               if self.enable_auto_glossary_var.get():
+                   self.append_log("✅ Automatic glossary generation ENABLED")
+                   self.append_log(f"📑 Targeted Glossary Settings:")
+                   self.append_log(f"   • Min frequency: {self.glossary_min_frequency_var.get()} occurrences")
+                   self.append_log(f"   • Max character names: {self.glossary_max_names_var.get()}")
+                   self.append_log(f"   • Max titles/ranks: {self.glossary_max_titles_var.get()}")
+                   self.append_log(f"   • Translation batch size: {self.glossary_batch_size_var.get()}")
+               else:
+                   self.append_log("⚠️ Automatic glossary generation DISABLED")
+               
+               if self.batch_translation_var.get():
+                   self.append_log(f"📦 Batch translation ENABLED - processing {self.batch_size_var.get()} chapters per API call")
+                   self.append_log("   💡 This can improve speed but may reduce per-chapter customization")
+               else:
+                   self.append_log("📄 Standard translation mode - processing one chapter at a time")
+               
+               # Set environment variables
+               env_vars = self._get_environment_variables(epub_path, api_key)
+               os.environ.update(env_vars)
+               
+               chap_range = self.chapter_range_entry.get().strip()
+               if chap_range:
+                   os.environ['CHAPTER_RANGE'] = chap_range
+                   self.append_log(f"📊 Chapter Range: {chap_range}")
+               
+               # Handle token limit
+               if self.token_limit_disabled:
+                   os.environ['MAX_INPUT_TOKENS'] = ''
+                   self.append_log("🎯 Input Token Limit: Unlimited (disabled)")
+               else:
+                   token_val = self.token_limit_entry.get().strip()
+                   if token_val and token_val.isdigit():
+                       os.environ['MAX_INPUT_TOKENS'] = token_val
+                       self.append_log(f"🎯 Input Token Limit: {token_val}")
+                   else:
+                       default_limit = '1000000'
+                       os.environ['MAX_INPUT_TOKENS'] = default_limit
+                       self.append_log(f"🎯 Input Token Limit: {default_limit} (default)")
+               
+               # Log image translation status
+               if self.enable_image_translation_var.get():
+                   self.append_log("🖼️ Image translation ENABLED")
+                   vision_models = ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash', 
+                                  'gemini-2.0-flash-exp', 'gpt-4-turbo', 'gpt-4o']
+                   if self.model_var.get().lower() in vision_models:
+                       self.append_log(f"   ✅ Using vision-capable model: {self.model_var.get()}")
+                       self.append_log(f"   • Max images per chapter: {self.max_images_per_chapter_var.get()}")
+                       if self.process_webnovel_images_var.get():
+                           self.append_log(f"   • Web novel images: Enabled (min height: {self.webnovel_min_height_var.get()}px)")
+                   else:
+                       self.append_log(f"   ⚠️ Model {self.model_var.get()} does not support vision")
+                       self.append_log("   ⚠️ Image translation will be skipped")
+               else:
+                   self.append_log("🖼️ Image translation disabled")
+               
+               if hasattr(self, 'manual_glossary_path'):
+                   os.environ['MANUAL_GLOSSARY'] = self.manual_glossary_path
+                   self.append_log(f"📑 Manual Glossary: {os.path.basename(self.manual_glossary_path)}")
+               
+               sys.argv = ['TransateKRtoEN.py', epub_path]
+               
+               self.append_log("🚀 Starting translation...")
+               
+               os.makedirs("Payloads", exist_ok=True)
+               
+               translation_main(
+                   log_callback=self.append_log,
+                   stop_callback=lambda: self.stop_requested
+               )
+               
+               if not self.stop_requested:
+                   self.append_log("✅ Translation completed successfully!")
+               
+           except Exception as e:
+               self.append_log(f"❌ Translation error: {e}")
+               import traceback
+               self.append_log(f"❌ Full error: {traceback.format_exc()}")
+           
+           finally:
+               sys.argv = old_argv
+               os.environ.clear()
+               os.environ.update(old_env)
+       
+       except Exception as e:
+           self.append_log(f"❌ Translation setup error: {e}")
+       
+       finally:
+           self.stop_requested = False
+           if translation_stop_flag:
+               translation_stop_flag(False)
+           self.translation_thread = None
+           self.master.after(0, self.update_run_button)
+
+    def _get_environment_variables(self, epub_path, api_key):
+       """Get all environment variables for translation/glossary"""
+       return {
+           'EPUB_PATH': epub_path,
+           'MODEL': self.model_var.get(),
+           'CONTEXTUAL': '1' if self.contextual_var.get() else '0',
+           'SEND_INTERVAL_SECONDS': str(self.delay_entry.get()),
+           'MAX_OUTPUT_TOKENS': str(self.max_output_tokens),
+           'API_KEY': api_key,
+           'OPENAI_API_KEY': api_key,
+           'OPENAI_OR_Gemini_API_KEY': api_key,
+           'GEMINI_API_KEY': api_key,
+           'SYSTEM_PROMPT': self.prompt_text.get("1.0", "end").strip(),
+           'TRANSLATE_BOOK_TITLE': "1" if self.translate_book_title_var.get() else "0",
+           'BOOK_TITLE_PROMPT': self.book_title_prompt,
+           'REMOVE_AI_ARTIFACTS': "1" if self.REMOVE_AI_ARTIFACTS_var.get() else "0",
+           'USE_ROLLING_SUMMARY': "1" if self.config.get('use_rolling_summary') else "0",
+           'SUMMARY_ROLE': self.config.get('summary_role', 'user'),
+           'ROLLING_SUMMARY_EXCHANGES': self.rolling_summary_exchanges_var.get(),
+           'ROLLING_SUMMARY_MODE': self.rolling_summary_mode_var.get(),
+           'ROLLING_SUMMARY_SYSTEM_PROMPT': self.rolling_summary_system_prompt,
+           'ROLLING_SUMMARY_USER_PROMPT': self.rolling_summary_user_prompt,
+           'PROFILE_NAME': self.lang_var.get().lower(),
+           'TRANSLATION_TEMPERATURE': str(self.trans_temp.get()),
+           'TRANSLATION_HISTORY_LIMIT': str(self.trans_history.get()),
+           'EPUB_OUTPUT_DIR': os.getcwd(),
+           'DISABLE_AUTO_GLOSSARY': "0" if self.enable_auto_glossary_var.get() else "1",
+           'DISABLE_GLOSSARY_TRANSLATION': "0" if self.enable_auto_glossary_var.get() else "1",
+           'APPEND_GLOSSARY': "1" if self.append_glossary_var.get() else "0",
+           'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt,
+           'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var.get() else "0",
+           'REINFORCEMENT_FREQUENCY': self.reinforcement_freq_var.get(),
+           'RESET_FAILED_CHAPTERS': "1" if self.reset_failed_chapters_var.get() else "0",
+           'RETRY_TRUNCATED': "1" if self.retry_truncated_var.get() else "0",
+           'MAX_RETRY_TOKENS': self.max_retry_tokens_var.get(),
+           'RETRY_DUPLICATE_BODIES': "1" if self.retry_duplicate_var.get() else "0",
+           'DUPLICATE_LOOKBACK_CHAPTERS': self.duplicate_lookback_var.get(),
+           'GLOSSARY_MIN_FREQUENCY': self.glossary_min_frequency_var.get(),
+           'GLOSSARY_MAX_NAMES': self.glossary_max_names_var.get(),
+           'GLOSSARY_MAX_TITLES': self.glossary_max_titles_var.get(),
+           'GLOSSARY_BATCH_SIZE': self.glossary_batch_size_var.get(),
+           'ENABLE_IMAGE_TRANSLATION': "1" if self.enable_image_translation_var.get() else "0",
+           'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var.get() else "0",
+           'WEBNOVEL_MIN_HEIGHT': self.webnovel_min_height_var.get(),
+           'IMAGE_MAX_TOKENS': self.image_max_tokens_var.get(),
+           'MAX_IMAGES_PER_CHAPTER': self.max_images_per_chapter_var.get(),
+           'IMAGE_API_DELAY': '1.0',
+           'SAVE_IMAGE_TRANSLATIONS': '1',
+           'IMAGE_CHUNK_HEIGHT': self.image_chunk_height_var.get(),
+           'HIDE_IMAGE_TRANSLATION_LABEL': "1" if self.hide_image_translation_label_var.get() else "0",
+           'RETRY_TIMEOUT': "1" if self.retry_timeout_var.get() else "0",
+           'CHUNK_TIMEOUT': self.chunk_timeout_var.get(),
+           'BATCH_TRANSLATION': "1" if self.batch_translation_var.get() else "0",
+           'BATCH_SIZE': self.batch_size_var.get(),
+           'DISABLE_ZERO_DETECTION': "1" if self.disable_zero_detection_var.get() else "0",
+           'TRANSLATION_HISTORY_ROLLING': "1" if self.translation_history_rolling_var.get() else "0",
+           'COMPREHENSIVE_EXTRACTION': "1" if self.comprehensive_extraction_var.get() else "0",
+           'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var.get() else "0",
+           'DUPLICATE_DETECTION_MODE': self.duplicate_detection_mode_var.get(),
+           'CHAPTER_NUMBER_OFFSET': str(self.chapter_number_offset_var.get()), 
+           'USE_HEADER_AS_OUTPUT': "1" if self.use_header_as_output_var.get() else "0",
+           'ENABLE_DECIMAL_CHAPTERS': "1" if self.enable_decimal_chapters_var.get() else "0",
+       }
+
+    def run_glossary_extraction_thread(self):
+       """Start glossary extraction in a separate thread"""
+       if not self._lazy_load_modules():
+           self.append_log("❌ Failed to load glossary modules")
+           return
+       
+       if glossary_main is None:
+           self.append_log("❌ Glossary extraction module is not available")
+           messagebox.showerror("Module Error", "Glossary extraction module is not available.")
+           return
+       
+       if hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive():
+           self.append_log("⚠️ Cannot run glossary extraction while translation is in progress.")
+           messagebox.showwarning("Process Running", "Please wait for translation to complete before extracting glossary.")
+           return
+       
+       if self.glossary_thread and self.glossary_thread.is_alive():
+           self.stop_glossary_extraction()
+           return
+       
+       self.stop_requested = False
+       if glossary_stop_flag:
+           glossary_stop_flag(False)
+       self.glossary_thread = threading.Thread(target=self.run_glossary_extraction_direct, daemon=True)
+       self.glossary_thread.start()
+       self.master.after(100, self.update_run_button)
+
+    def run_glossary_extraction_direct(self):
+       """Run glossary extraction directly without subprocess"""
+       try:
+           input_path = self.entry_epub.get()
+           if not input_path or not os.path.isfile(input_path):
+               self.append_log("❌ Error: Please select a valid EPUB or text file for glossary extraction.")
+               return
+           
+           api_key = self.api_key_entry.get()
+           if not api_key:
+               self.append_log("❌ Error: Please enter your API key.")
+               return
+           
+           old_argv = sys.argv
+           old_env = dict(os.environ)
+           
+           try:
+               env_updates = {
+                   'GLOSSARY_TEMPERATURE': str(self.config.get('manual_glossary_temperature', 0.3)),
+                   'GLOSSARY_CONTEXT_LIMIT': str(self.config.get('manual_context_limit', 3)),
+                   'MODEL': self.model_var.get(),
+                   'OPENAI_API_KEY': self.api_key_entry.get(),
+                   'OPENAI_OR_Gemini_API_KEY': self.api_key_entry.get(),
+                   'API_KEY': self.api_key_entry.get(),
+                   'MAX_OUTPUT_TOKENS': str(self.max_output_tokens),
+                   'GLOSSARY_SYSTEM_PROMPT': self.manual_glossary_prompt,
+                   'CHAPTER_RANGE': self.chapter_range_entry.get().strip(),
+                   'GLOSSARY_EXTRACT_ORIGINAL_NAME': '1' if self.config.get('manual_extract_original_name', True) else '0',
+                   'GLOSSARY_EXTRACT_NAME': '1' if self.config.get('manual_extract_name', True) else '0',
+                   'GLOSSARY_EXTRACT_GENDER': '1' if self.config.get('manual_extract_gender', True) else '0',
+                   'GLOSSARY_EXTRACT_TITLE': '1' if self.config.get('manual_extract_title', True) else '0',
+                   'GLOSSARY_EXTRACT_GROUP_AFFILIATION': '1' if self.config.get('manual_extract_group_affiliation', True) else '0',
+                   'GLOSSARY_EXTRACT_TRAITS': '1' if self.config.get('manual_extract_traits', True) else '0',
+                   'GLOSSARY_EXTRACT_HOW_THEY_REFER_TO_OTHERS': '1' if self.config.get('manual_extract_how_they_refer_to_others', True) else '0',
+                   'GLOSSARY_EXTRACT_LOCATIONS': '1' if self.config.get('manual_extract_locations', True) else '0',
+                   'GLOSSARY_HISTORY_ROLLING': "1" if self.glossary_history_rolling_var.get() else "0"
+               }
+               
+               if self.custom_glossary_fields:
+                   env_updates['GLOSSARY_CUSTOM_FIELDS'] = json.dumps(self.custom_glossary_fields)
+               
+               os.environ.update(env_updates)
+               
+               chap_range = self.chapter_range_entry.get().strip()
+               if chap_range:
+                   self.append_log(f"📊 Chapter Range: {chap_range} (glossary extraction will only process these chapters)")
+               
+               if self.token_limit_disabled:
+                   os.environ['MAX_INPUT_TOKENS'] = ''
+                   self.append_log("🎯 Input Token Limit: Unlimited (disabled)")
+               else:
+                   token_val = self.token_limit_entry.get().strip()
+                   if token_val and token_val.isdigit():
+                       os.environ['MAX_INPUT_TOKENS'] = token_val
+                       self.append_log(f"🎯 Input Token Limit: {token_val}")
+                   else:
+                       os.environ['MAX_INPUT_TOKENS'] = '50000'
+                       self.append_log(f"🎯 Input Token Limit: 50000 (default)")
+               
+               epub_base = os.path.splitext(os.path.basename(input_path))[0]
+               output_path = f"{epub_base}_glossary.json"
+               
+               sys.argv = [
+                   'extract_glossary_from_epub.py',
+                   '--epub', input_path,
+                   '--output', output_path,
+                   '--config', CONFIG_FILE
+               ]
+               
+               self.append_log("🚀 Starting glossary extraction...")
+               self.append_log(f"📤 Output Token Limit: {self.max_output_tokens}")
+               os.environ['MAX_OUTPUT_TOKENS'] = str(self.max_output_tokens)
+               
+               glossary_main(
+                   log_callback=self.append_log,
+                   stop_callback=lambda: self.stop_requested
+               )
+               
+               if not self.stop_requested:
+                   self.append_log("✅ Glossary extraction completed successfully!")
+               
+           finally:
+               sys.argv = old_argv
+               os.environ.clear()
+               os.environ.update(old_env)
+       
+       except Exception as e:
+           self.append_log(f"❌ Glossary extraction error: {e}")
+       
+       finally:
+           self.stop_requested = False
+           if glossary_stop_flag:
+               glossary_stop_flag(False)
+           self.glossary_thread = None
+           self.master.after(0, self.update_run_button)
+
+    def epub_converter(self):
+       """Start EPUB converter in a separate thread"""
+       if not self._lazy_load_modules():
+           self.append_log("❌ Failed to load EPUB converter modules")
+           return
+       
+       if fallback_compile_epub is None:
+           self.append_log("❌ EPUB converter module is not available")
+           messagebox.showerror("Module Error", "EPUB converter module is not available.")
+           return
+       
+       if hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive():
+           self.append_log("⚠️ Cannot run EPUB converter while translation is in progress.")
+           messagebox.showwarning("Process Running", "Please wait for translation to complete before converting EPUB.")
+           return
+       
+       if hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive():
+           self.append_log("⚠️ Cannot run EPUB converter while glossary extraction is in progress.")
+           messagebox.showwarning("Process Running", "Please wait for glossary extraction to complete before converting EPUB.")
+           return
+       
+       if hasattr(self, 'epub_thread') and self.epub_thread and self.epub_thread.is_alive():
+           self.stop_epub_converter()
+           return
+       
+       folder = filedialog.askdirectory(title="Select translation output folder")
+       if not folder:
+           return
+       
+       self.epub_folder = folder
+       self.stop_requested = False
+       self.epub_thread = threading.Thread(target=self.run_epub_converter_direct, daemon=True)
+       self.epub_thread.start()
+       self.master.after(100, self.update_run_button)
+ 
+    def run_epub_converter_direct(self):
+       """Run EPUB converter directly without blocking GUI"""
+       try:
+           folder = self.epub_folder
+           self.append_log("📦 Starting EPUB Converter...")
+           os.environ['DISABLE_EPUB_GALLERY'] = "1" if self.disable_epub_gallery_var.get() else "0"
+           
+           fallback_compile_epub(folder, log_callback=self.append_log)
+           
+           if not self.stop_requested:
+               self.append_log("✅ EPUB Converter completed successfully!")
+               
+               epub_files = [f for f in os.listdir(folder) if f.endswith('.epub')]
+               if epub_files:
+                   epub_files.sort(key=lambda x: os.path.getmtime(os.path.join(folder, x)), reverse=True)
+                   out_file = os.path.join(folder, epub_files[0])
+                   self.master.after(0, lambda: messagebox.showinfo("EPUB Compilation Success", f"Created: {out_file}"))
+               else:
+                   self.append_log("⚠️ EPUB file was not created. Check the logs for details.")
+           
+       except Exception as e:
+           error_str = str(e)
+           self.append_log(f"❌ EPUB Converter error: {error_str}")
+           
+           if "Document is empty" not in error_str:
+               self.master.after(0, lambda: messagebox.showerror("EPUB Converter Failed", f"Error: {error_str}"))
+           else:
+               self.append_log("📋 Check the log above for details about what went wrong.")
+       
+       finally:
+           self.epub_thread = None
+           self.stop_requested = False
+           self.master.after(0, self.update_run_button)
+           
+           if hasattr(self, 'epub_button'):
+               self.master.after(0, lambda: self.epub_button.config(
+                   text="EPUB Converter",
+                   command=self.epub_converter,
+                   bootstyle="info",
+                   state=tk.NORMAL if fallback_compile_epub else tk.DISABLED
+               ))
+
+    def run_qa_scan(self):
+       """Run QA scan with mode selection"""
+       # Create a small loading window with icon
+       loading_window = self.wm.create_simple_dialog(
+           self.master,
+           "Loading QA Scanner",
+           width=300,
+           height=120,
+           modal=True,
+           hide_initially=False
+       )
+       
+       # Create content frame
+       content_frame = tk.Frame(loading_window, padx=20, pady=20)
+       content_frame.pack(fill=tk.BOTH, expand=True)
+       
+       # Try to add icon image if available
+       status_label = None
+       try:
+           from PIL import Image, ImageTk
+           ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+           if os.path.isfile(ico_path):
+               # Load icon at small size
+               icon_image = Image.open(ico_path)
+               icon_image = icon_image.resize((32, 32), Image.Resampling.LANCZOS)
+               icon_photo = ImageTk.PhotoImage(icon_image)
+               
+               # Create horizontal layout
+               icon_label = tk.Label(content_frame, image=icon_photo)
+               icon_label.image = icon_photo  # Keep reference
+               icon_label.pack(side=tk.LEFT, padx=(0, 10))
+               
+               # Text on the right
+               text_frame = tk.Frame(content_frame)
+               text_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+               tk.Label(text_frame, text="Initializing QA Scanner...", 
+                       font=('TkDefaultFont', 11)).pack(anchor=tk.W)
+               status_label = tk.Label(text_frame, text="Loading modules...", 
+                                     font=('TkDefaultFont', 9), fg='gray')
+               status_label.pack(anchor=tk.W, pady=(5, 0))
+           else:
+               # Fallback without icon
+               tk.Label(content_frame, text="Initializing QA Scanner...", 
+                       font=('TkDefaultFont', 11)).pack()
+               status_label = tk.Label(content_frame, text="Loading modules...", 
+                                     font=('TkDefaultFont', 9), fg='gray')
+               status_label.pack(pady=(10, 0))
+       except ImportError:
+           # No PIL, simple text only
+           tk.Label(content_frame, text="Initializing QA Scanner...", 
+                   font=('TkDefaultFont', 11)).pack()
+           status_label = tk.Label(content_frame, text="Loading modules...", 
+                                 font=('TkDefaultFont', 9), fg='gray')
+           status_label.pack(pady=(10, 0))
+       
+
+       self.master.update_idletasks()
+       
+       try:
+           # Update status
+           if status_label:
+               status_label.config(text="Loading translation modules...")
+           loading_window.update_idletasks()
+           
+           if not self._lazy_load_modules():
+               loading_window.destroy()
+               self.append_log("❌ Failed to load QA scanner modules")
+               return
+           
+           if status_label:
+               status_label.config(text="Preparing scanner...")
+           loading_window.update_idletasks()
+           
+           if scan_html_folder is None:
+               loading_window.destroy()
+               self.append_log("❌ QA scanner module is not available")
+               messagebox.showerror("Module Error", "QA scanner module is not available.")
+               return
+           
+           if hasattr(self, 'qa_thread') and self.qa_thread and self.qa_thread.is_alive():
+               loading_window.destroy()
+               self.stop_requested = True
+               self.append_log("⛔ QA scan stop requested.")
+               return
+           
+           # Close loading window
+           loading_window.destroy()
+           self.append_log("✅ QA scanner initialized successfully")
+           
+       except Exception as e:
+           loading_window.destroy()
+           self.append_log(f"❌ Error initializing QA scanner: {e}")
+           return
+       
+       # ALWAYS show mode selection dialog
+       mode_dialog = self.wm.create_simple_dialog(
+           self.master,
+           "Select QA Scanner Mode",
+           width=1920,
+           height=820,
+           hide_initially=True
+       )
+       
+       # Variables
+       selected_mode_value = None
+       
+       # Main container
+       main_container = tk.Frame(mode_dialog)
+       main_container.pack(fill=tk.BOTH, expand=True)
+       
+       # Content with padding
+       main_frame = tk.Frame(main_container, padx=40, pady=35)
+       main_frame.pack(fill=tk.BOTH, expand=True)
+       
+       # Title with subtitle
+       title_frame = tk.Frame(main_frame)
+       title_frame.pack(pady=(0, 30))
+       
+       tk.Label(title_frame, text="Select Detection Mode", 
+                font=('Arial', 36, 'bold'), fg='#f0f0f0').pack()
+       tk.Label(title_frame, text="Choose how sensitive the duplicate detection should be",
+                font=('Arial', 20), fg='#d0d0d0').pack(pady=(8, 0))
+       
+       # Mode cards container
+       modes_container = tk.Frame(main_frame)
+       modes_container.pack(fill=tk.BOTH, expand=True)
+               
+       mode_data = [
+           {
+               "value": "ai-hunter",
+               "emoji": "🤖",
+               "title": "AI HUNTER",
+               "subtitle": "30% threshold",
+               "features": [
+                   "✓ Catches AI retranslations",
+                   "✓ Different translation styles",
+                   "⚠ MANY false positives",
+                   "✓ Same chapter, different words",
+                   "✓ Detects paraphrasing",
+                   "✓ Ultimate duplicate finder"
+               ],
+               "bg_color": "#2a1a3e",  # Dark purple
+               "hover_color": "#6a4c93",  # Medium purple
+               "border_color": "#8b5cf6",
+               "accent_color": "#a78bfa",
+               "text_color": "#f0f0f0",
+               "feature_color": "#e0e0e0",
+               "recommendation": "EXTREME"
+           },
+           {
+               "value": "aggressive",
+               "emoji": "🔴",
+               "title": "AGGRESSIVE",
+               "subtitle": "75% threshold",
+               "features": [
+                   "✓ Catches more duplicates",
+                   "✓ Best for initial cleanup", 
+                   "⚠ May have false positives",
+                   "✓ Detects partial matches",
+                   "✓ Finds similar content patterns",
+                   "✓ Aggressive fuzzy matching"
+               ],
+               "bg_color": "#4a1515",
+               "hover_color": "#dc143c",
+               "border_color": "#ff0000",
+               "accent_color": "#ff5555",
+               "text_color": "#f0f0f0",
+               "feature_color": "#e0e0e0",
+               "recommendation": "BEST"
+           },
+           {
+               "value": "standard", 
+               "emoji": "🟡",
+               "title": "STANDARD",
+               "subtitle": "85% threshold",
+               "features": [
+                   "✓ Balanced detection",
+                   "✓ Good for most cases",
+                   "✓ Recommended approach",
+                   "✓ Reliable accuracy",
+                   "✓ Minimal false alarms",
+                   "✓ Production ready"
+               ],
+               "bg_color": "#4a4015",
+               "hover_color": "#d4a017",
+               "border_color": "#ffaa00",
+               "accent_color": "#ffdd44",
+               "text_color": "#f0f0f0",
+               "feature_color": "#e0e0e0",
+               "recommendation": "RECOMMENDED"
+           },
+           {
+               "value": "strict",
+               "emoji": "🟢", 
+               "title": "STRICT",
+               "subtitle": "95% threshold",
+               "features": [
+                   "✓ Only identical matches",
+                   "✓ Minimal false positives",
+                   "✓ Precision focused",
+                   "✓ Conservative approach",
+                   "✓ High confidence results",
+                   "✓ Final QA checks"
+               ],
+               "bg_color": "#1a3a1c",
+               "hover_color": "#228b22",
+               "border_color": "#2e7d32",
+               "accent_color": "#66bb6a",
+               "text_color": "#f0f0f0",
+               "feature_color": "#e0e0e0",
+               "recommendation": "FASTEST"
+           }
+       ]
+       
+       def select_mode(mode_value):
+           nonlocal selected_mode_value
+           selected_mode_value = mode_value
+           mode_dialog.destroy()
+       
+       for i, mode in enumerate(mode_data):
+           # Card frame
+           card = tk.Frame(modes_container, bg=mode["bg_color"], 
+                          relief=tk.RAISED, bd=3)
+           card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0 if i == 0 else 25, 0))
+           
+           # Make entire card clickable
+           def make_card_click_handler(value):
+               return lambda e: select_mode(value)
+           
+           click_handler = make_card_click_handler(mode["value"])
+           
+           # Card content
+           content_frame = tk.Frame(card, padx=45, pady=40, bg=mode["bg_color"])
+           content_frame.pack(fill=tk.BOTH, expand=True)
+           
+           # Emoji at top
+           emoji_label = tk.Label(content_frame, text=mode["emoji"], 
+                                 font=('Arial', 64), 
+                                 bg=mode["bg_color"])
+           emoji_label.pack()
+           
+           # Title
+           title_label = tk.Label(content_frame, text=mode["title"], 
+                                 font=('Arial', 32, 'bold'),
+                                 fg=mode["text_color"], bg=mode["bg_color"])
+           title_label.pack(pady=(12, 0))
+           
+           # Subtitle
+           tk.Label(content_frame, text=mode["subtitle"], 
+                   font=('Arial', 20), 
+                   fg=mode["feature_color"], bg=mode["bg_color"]).pack(pady=(2, 0))
+           
+           # Recommendation badge
+           if mode["recommendation"]:
+               rec_frame = tk.Frame(content_frame, bg=mode["bg_color"])
+               rec_frame.pack(pady=(10, 0))
+               rec_label = tk.Label(rec_frame, text=f"★ {mode['recommendation']} ★", 
+                                  font=('Arial', 18, 'bold'), 
+                                  fg=mode["accent_color"], bg=mode["bg_color"])
+               rec_label.pack()
+           else:
+               # Empty space to maintain alignment
+               tk.Label(content_frame, text=" ", font=('Arial', 18), 
+                       bg=mode["bg_color"]).pack(pady=(10, 0))
+           
+           # Features list
+           features_frame = tk.Frame(content_frame, bg=mode["bg_color"])
+           features_frame.pack(pady=(20, 10), fill=tk.BOTH, expand=True)
+           
+           for feature in mode["features"]:
+               feature_label = tk.Label(features_frame, text=feature, 
+                                      font=('Arial', 18), 
+                                      fg=mode["feature_color"], bg=mode["bg_color"],
+                                      justify=tk.LEFT)
+               feature_label.pack(anchor=tk.W, pady=4)
+           
+           # Create closure for each card's hover effects
+           def create_hover_handlers(card, content_frame, mode, all_widgets):
+               hover_state = {'active': False}
+               original_bg = mode["bg_color"]
+               hover_bg = mode["hover_color"]
+               
+               def on_enter(e):
+                   if not hover_state['active']:
+                       hover_state['active'] = True
+                       card.config(bg=hover_bg)
+                       content_frame.config(bg=hover_bg)
+                       # Update all widgets that were captured
+                       for widget in all_widgets:
+                           try:
+                               widget.config(bg=hover_bg)
+                           except:
+                               pass
+               
+               def on_leave(e):
+                   if hover_state['active']:
+                       hover_state['active'] = False
+                       card.config(bg=original_bg)
+                       content_frame.config(bg=original_bg)
+                       # Restore all widgets that were captured
+                       for widget in all_widgets:
+                           try:
+                               widget.config(bg=original_bg)
+                           except:
+                               pass
+               
+               return on_enter, on_leave
+
+           # Collect ALL widgets that need background color changes
+           all_widgets = []
+           all_widgets.append(emoji_label)
+           all_widgets.append(title_label)
+           all_widgets.append(content_frame)
+           all_widgets.extend([child for child in content_frame.winfo_children() if isinstance(child, (tk.Label, tk.Frame))])
+           all_widgets.append(features_frame)
+           all_widgets.extend([child for child in features_frame.winfo_children() if isinstance(child, tk.Label)])
+           if mode["recommendation"]:
+               all_widgets.append(rec_frame)
+               all_widgets.append(rec_label)
+
+           # Get handlers for this specific card with ALL widgets captured
+           on_enter, on_leave = create_hover_handlers(card, content_frame, mode, all_widgets)
+
+           # Bind events to all interactive elements
+           interactive_widgets = [card, content_frame, emoji_label, title_label, features_frame] + list(features_frame.winfo_children())
+           for widget in interactive_widgets:
+               widget.bind("<Enter>", on_enter)
+               widget.bind("<Leave>", on_leave)
+               widget.bind("<Button-1>", click_handler)
+               if hasattr(widget, 'config'):
+                   widget.config(cursor='hand2')
+           
+           # Make features clickable too
+           for child in features_frame.winfo_children():
+               child.bind("<Enter>", on_enter)
+               child.bind("<Leave>", on_leave)
+               child.bind("<Button-1>", click_handler)
+               child.config(cursor='hand2')
+       
+
+       
+       # Handle window close (X button)
+       def on_close():
+           nonlocal selected_mode_value
+           selected_mode_value = None
+           mode_dialog.destroy()
+       
+       mode_dialog.protocol("WM_DELETE_WINDOW", on_close)
+       
+       # Show dialog
+       mode_dialog.deiconify()
+       mode_dialog.wait_window()
+       
+       # Check if user selected a mode
+       if selected_mode_value is None:
+           self.append_log("⚠️ QA scan canceled.")
+           return
+       
+       # Now get the folder
+       folder_path = filedialog.askdirectory(title="Select Folder with HTML Files")
+       if not folder_path:
+           self.append_log("⚠️ QA scan canceled.")
+           return
+       
+       mode = selected_mode_value
+       self.append_log(f"🔍 Starting QA scan in {mode.upper()} mode for folder: {folder_path}")
+       self.stop_requested = False
+       
+       def run_scan():
+           self.master.after(0, self.update_run_button)
+           self.qa_button.config(text="Stop Scan", command=self.stop_qa_scan, bootstyle="danger")
+           
+           try:
+               # Call scan_html_folder with the mode parameter
+               scan_html_folder(folder_path, log=self.append_log, stop_flag=lambda: self.stop_requested, mode=mode)
+               self.append_log("✅ QA scan completed successfully.")
+           except Exception as e:
+               self.append_log(f"❌ QA scan error: {e}")
+           finally:
+               self.qa_thread = None
+               self.master.after(0, self.update_run_button)
+               self.master.after(0, lambda: self.qa_button.config(
+                   text="QA Scan", 
+                   command=self.run_qa_scan, 
+                   bootstyle="warning",
+                   state=tk.NORMAL if scan_html_folder else tk.DISABLED
+               ))
+       
+       self.qa_thread = threading.Thread(target=run_scan, daemon=True)
+       self.qa_thread.start()
+       
+    def toggle_token_limit(self):
+       """Toggle whether the token-limit entry is active or not."""
+       if not self.token_limit_disabled:
+           self.token_limit_entry.config(state=tk.DISABLED)
+           self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
+           self.append_log("⚠️ Input token limit disabled - both translation and glossary extraction will process chapters of any size.")
+           self.token_limit_disabled = True
+       else:
+           self.token_limit_entry.config(state=tk.NORMAL)
+           if not self.token_limit_entry.get().strip():
+               self.token_limit_entry.insert(0, str(self.config.get('token_limit', 1000000)))
+           self.toggle_token_btn.config(text="Disable Input Token Limit", bootstyle="danger-outline")
+           self.append_log(f"✅ Input token limit enabled: {self.token_limit_entry.get()} tokens (applies to both translation and glossary extraction)")
+           self.token_limit_disabled = False
+
+    def update_run_button(self):
+       """Switch Run↔Stop depending on whether a process is active."""
+       translation_running = hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive()
+       glossary_running = hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive()
+       qa_running = hasattr(self, 'qa_thread') and self.qa_thread and self.qa_thread.is_alive()
+       epub_running = hasattr(self, 'epub_thread') and self.epub_thread and self.epub_thread.is_alive()
+       
+       any_process_running = translation_running or glossary_running or qa_running or epub_running
+       
+       # Translation button
+       if translation_running:
+           self.run_button.config(text="Stop Translation", command=self.stop_translation,
+                                bootstyle="danger", state=tk.NORMAL)
+       else:
+           self.run_button.config(text="Run Translation", command=self.run_translation_thread,
+                                bootstyle="success", state=tk.NORMAL if translation_main and not any_process_running else tk.DISABLED)
+       
+       # Glossary button
+       if hasattr(self, 'glossary_button'):
+           if glossary_running:
+               self.glossary_button.config(text="Stop Glossary", command=self.stop_glossary_extraction,
+                                         bootstyle="danger", state=tk.NORMAL)
+           else:
+               self.glossary_button.config(text="Extract Glossary", command=self.run_glossary_extraction_thread,
+                                         bootstyle="warning", state=tk.NORMAL if glossary_main and not any_process_running else tk.DISABLED)
+       
+       # EPUB button
+       if hasattr(self, 'epub_button'):
+           if epub_running:
+               self.epub_button.config(text="Stop EPUB", command=self.stop_epub_converter,
+                                     bootstyle="danger", state=tk.NORMAL)
+           else:
+               self.epub_button.config(text="EPUB Converter", command=self.epub_converter,
+                                     bootstyle="info", state=tk.NORMAL if fallback_compile_epub and not any_process_running else tk.DISABLED)
+       
+       # QA button
+       if hasattr(self, 'qa_button'):
+           self.qa_button.config(state=tk.NORMAL if scan_html_folder and not any_process_running else tk.DISABLED)
+
+    def stop_translation(self):
+       """Stop translation while preserving loaded file"""
+       current_file = self.entry_epub.get() if hasattr(self, 'entry_epub') else None
+       
+       self.stop_requested = True
+       if translation_stop_flag:
+           translation_stop_flag(True)
+       
+       try:
+           import TransateKRtoEN
+           if hasattr(TransateKRtoEN, 'set_stop_flag'):
+               TransateKRtoEN.set_stop_flag(True)
+       except: pass
+       
+       self.append_log("❌ Translation stop requested.")
+       self.append_log("⏳ Please wait... stopping after current operation completes.")
+       self.update_run_button()
+       
+       if current_file and hasattr(self, 'entry_epub'):
+           self.master.after(100, lambda: self.preserve_file_path(current_file))
+
+    def preserve_file_path(self, file_path):
+       """Helper to ensure file path stays in the entry field"""
+       if hasattr(self, 'entry_epub') and file_path:
+           current = self.entry_epub.get()
+           if not current or current != file_path:
+               self.entry_epub.delete(0, tk.END)
+               self.entry_epub.insert(0, file_path)
+
+    def stop_glossary_extraction(self):
+       """Stop glossary extraction specifically"""
+       self.stop_requested = True
+       if glossary_stop_flag:
+           glossary_stop_flag(True)
+       
+       try:
+           import extract_glossary_from_epub
+           if hasattr(extract_glossary_from_epub, 'set_stop_flag'):
+               extract_glossary_from_epub.set_stop_flag(True)
+       except: pass
+       
+       self.append_log("❌ Glossary extraction stop requested.")
+       self.append_log("⏳ Please wait... stopping after current API call completes.")
+       self.update_run_button()
+
+    def stop_epub_converter(self):
+       """Stop EPUB converter"""
+       self.stop_requested = True
+       self.append_log("❌ EPUB converter stop requested.")
+       self.append_log("⏳ Please wait... stopping after current operation completes.")
+       self.update_run_button()
+
+    def stop_qa_scan(self):
+       """Stop QA scan"""
+       self.stop_requested = True
+       self.append_log("⛔ QA scan stop requested.")
+
+    def on_close(self):
+       if messagebox.askokcancel("Quit", "Are you sure you want to exit?"):
+           self.stop_requested = True
+           self.master.destroy()
+           sys.exit(0)
+
+    def append_log(self, message):
+       """Append message to log with special formatting for memory"""
+       def _append():
+           at_bottom = self.log_text.yview()[1] >= 0.98
+           is_memory = any(keyword in message for keyword in ['[MEMORY]', '📝', 'rolling summary', 'memory'])
+           
+           if is_memory:
+               self.log_text.insert(tk.END, message + "\n", "memory")
+               if "memory" not in self.log_text.tag_names():
+                   self.log_text.tag_config("memory", foreground="#4CAF50", font=('TkDefaultFont', 10, 'italic'))
+           else:
+               self.log_text.insert(tk.END, message + "\n")
+           
+           if at_bottom:
+               self.log_text.see(tk.END)
+       
+       if threading.current_thread() is threading.main_thread():
+           _append()
+       else:
+           self.master.after(0, _append)
+
+    def update_status_line(self, message, progress_percent=None):
+       """Update a status line in the log"""
+       def _update():
+           content = self.log_text.get("1.0", "end-1c")
+           lines = content.split('\n')
+           
+           status_markers = ['⏳', '📊', '✅', '❌', '🔄']
+           is_status_line = False
+           
+           if lines and any(lines[-1].strip().startswith(marker) for marker in status_markers):
+               is_status_line = True
+           
+           if progress_percent is not None:
+               bar_width = 10
+               filled = int(bar_width * progress_percent / 100)
+               bar = "▓" * filled + "░" * (bar_width - filled)
+               status_msg = f"⏳ {message} [{bar}] {progress_percent:.1f}%"
+           else:
+               status_msg = f"📊 {message}"
+           
+           if is_status_line and lines[-1].strip().startswith(('⏳', '📊')):
+               start_pos = f"{len(lines)}.0"
+               self.log_text.delete(f"{start_pos} linestart", "end")
+               if len(lines) > 1:
+                   self.log_text.insert("end", "\n" + status_msg)
+               else:
+                   self.log_text.insert("end", status_msg)
+           else:
+               if content and not content.endswith('\n'):
+                   self.log_text.insert("end", "\n" + status_msg)
+               else:
+                   self.log_text.insert("end", status_msg + "\n")
+           
+           self.log_text.see("end")
+       
+       if threading.current_thread() is threading.main_thread():
+           _update()
+       else:
+           self.master.after(0, _update)
+
+    def append_chunk_progress(self, chunk_num, total_chunks, chunk_type="text", chapter_info="", 
+                           overall_current=None, overall_total=None, extra_info=None):
+       """Append chunk progress with enhanced visual indicator"""
+       progress_bar_width = 20
+       
+       overall_progress = 0
+       if overall_current is not None and overall_total is not None and overall_total > 0:
+           overall_progress = overall_current / overall_total
+       
+       overall_filled = int(progress_bar_width * overall_progress)
+       overall_bar = "█" * overall_filled + "░" * (progress_bar_width - overall_filled)
+       
+       if total_chunks == 1:
+           icon = "📄" if chunk_type == "text" else "🖼️"
+           msg_parts = [f"{icon} {chapter_info}"]
+           
+           if extra_info:
+               msg_parts.append(f"[{extra_info}]")
+           
+           if overall_current is not None and overall_total is not None:
+               msg_parts.append(f"\n    Progress: [{overall_bar}] {overall_current}/{overall_total} ({overall_progress*100:.1f}%)")
+               
+               if hasattr(self, '_chunk_start_times'):
+                   if overall_current > 1:
+                       elapsed = time.time() - self._translation_start_time
+                       avg_time = elapsed / (overall_current - 1)
+                       remaining = overall_total - overall_current + 1
+                       eta_seconds = remaining * avg_time
+                       
+                       if eta_seconds < 60:
+                           eta_str = f"{int(eta_seconds)}s"
+                       elif eta_seconds < 3600:
+                           eta_str = f"{int(eta_seconds/60)}m {int(eta_seconds%60)}s"
+                       else:
+                           hours = int(eta_seconds / 3600)
+                           minutes = int((eta_seconds % 3600) / 60)
+                           eta_str = f"{hours}h {minutes}m"
+                       
+                       msg_parts.append(f" - ETA: {eta_str}")
+               else:
+                   self._translation_start_time = time.time()
+                   self._chunk_start_times = {}
+           
+           msg = " ".join(msg_parts)
+       else:
+           chunk_progress = chunk_num / total_chunks if total_chunks > 0 else 0
+           chunk_filled = int(progress_bar_width * chunk_progress)
+           chunk_bar = "█" * chunk_filled + "░" * (progress_bar_width - chunk_filled)
+           
+           icon = "📄" if chunk_type == "text" else "🖼️"
+           
+           msg_parts = [f"{icon} {chapter_info}"]
+           msg_parts.append(f"\n    Chunk: [{chunk_bar}] {chunk_num}/{total_chunks} ({chunk_progress*100:.1f}%)")
+           
+           if overall_current is not None and overall_total is not None:
+               msg_parts.append(f"\n    Overall: [{overall_bar}] {overall_current}/{overall_total} ({overall_progress*100:.1f}%)")
+           
+           msg = "".join(msg_parts)
+       
+       if hasattr(self, '_chunk_start_times'):
+           self._chunk_start_times[f"{chapter_info}_{chunk_num}"] = time.time()
+       
+       self.append_log(msg)
+
+    def _show_context_menu(self, event):
+       """Show context menu for log text"""
+       try:
+           context_menu = tk.Menu(self.master, tearoff=0)
+           
+           try:
+               self.log_text.selection_get()
+               context_menu.add_command(label="Copy", command=self.copy_selection)
+           except tk.TclError:
+               context_menu.add_command(label="Copy", state="disabled")
+           
+           context_menu.add_separator()
+           context_menu.add_command(label="Select All", command=self.select_all_log)
+           
+           context_menu.tk_popup(event.x_root, event.y_root)
+       finally:
+           context_menu.grab_release()
+
+    def copy_selection(self):
+       """Copy selected text from log to clipboard"""
+       try:
+           text = self.log_text.selection_get()
+           self.master.clipboard_clear()
+           self.master.clipboard_append(text)
+       except tk.TclError:
+           pass
+
+    def select_all_log(self):
+       """Select all text in the log"""
+       self.log_text.tag_add(tk.SEL, "1.0", tk.END)
+       self.log_text.mark_set(tk.INSERT, "1.0")
+       self.log_text.see(tk.INSERT)
+
+    def auto_load_glossary_for_file(self, file_path):
+       """Automatically load glossary if it exists in the output folder"""
+       if not file_path or not os.path.isfile(file_path):
+           return
+       
+       if not file_path.lower().endswith('.epub'):
+           return
+       
+       file_base = os.path.splitext(os.path.basename(file_path))[0]
+       output_dir = file_base
+       
+       glossary_candidates = [
+           os.path.join(output_dir, "glossary.json"),
+           os.path.join(output_dir, f"{file_base}_glossary.json"),
+           os.path.join(output_dir, "Glossary", f"{file_base}_glossary.json")
+       ]
+       
+       for glossary_path in glossary_candidates:
+           if os.path.exists(glossary_path):
+               try:
+                   with open(glossary_path, 'r', encoding='utf-8') as f:
+                       data = json.load(f)
+                   
+                   if data:
+                       self.manual_glossary_path = glossary_path
+                       self.append_log(f"📑 Auto-loaded glossary: {os.path.basename(glossary_path)}")
+                       return True
+               except Exception:
+                   continue
+       
+       return False
+
+    def browse_file(self):
+       path = filedialog.askopenfilename(
+           filetypes=[
+               ("Supported files", "*.epub;*.txt"),
+               ("EPUB files", "*.epub"),
+               ("Text files", "*.txt"),
+               ("All files", "*.*")
+           ]
+       )
+       if path:
+           self.entry_epub.delete(0, tk.END)
+           self.entry_epub.insert(0, path)
+           
+           if path.lower().endswith('.epub'):
+               self.auto_load_glossary_for_file(path)
+
+    def toggle_api_visibility(self):
+       show = self.api_key_entry.cget('show')
+       self.api_key_entry.config(show='' if show == '*' else '*')
+
+    def prompt_custom_token_limit(self):
+       val = simpledialog.askinteger(
+           "Set Max Output Token Limit",
+           "Enter max output tokens for API output (e.g., 2048, 4196, 8192):",
+           minvalue=1,
+           maxvalue=200000
+       )
+       if val:
+           self.max_output_tokens = val
+           self.output_btn.config(text=f"Output Token Limit: {val}")
+           self.append_log(f"✅ Output token limit set to {val}")
+
+    def configure_rolling_summary_prompts(self):
+       """Configure rolling summary prompts"""
+       dialog = self.wm.create_simple_dialog(
+           self.master,
+           "Configure Memory System Prompts",
+           width=800,
+           height=1050
+       )
+       
+       main_frame = tk.Frame(dialog, padx=20, pady=20)
+       main_frame.pack(fill=tk.BOTH, expand=True)
+       
+       tk.Label(main_frame, text="Memory System Configuration", 
+               font=('TkDefaultFont', 14, 'bold')).pack(anchor=tk.W, pady=(0, 5))
+       
+       tk.Label(main_frame, text="Configure how the AI creates and maintains translation memory/context summaries.",
+               font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, pady=(0, 15))
+       
+       system_frame = tk.LabelFrame(main_frame, text="System Prompt (Role Definition)", padx=10, pady=10)
+       system_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+       
+       tk.Label(system_frame, text="Defines the AI's role and behavior when creating summaries",
+               font=('TkDefaultFont', 9), fg='blue').pack(anchor=tk.W, pady=(0, 5))
+       
+       self.summary_system_text = self.ui.setup_scrollable_text(
+           system_frame, height=5, wrap=tk.WORD
+       )
+       self.summary_system_text.pack(fill=tk.BOTH, expand=True)
+       self.summary_system_text.insert('1.0', self.rolling_summary_system_prompt)
+       
+       user_frame = tk.LabelFrame(main_frame, text="User Prompt Template", padx=10, pady=10)
+       user_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+       
+       tk.Label(user_frame, text="Template for summary requests. Use {translations} for content placeholder",
+               font=('TkDefaultFont', 9), fg='blue').pack(anchor=tk.W, pady=(0, 5))
+       
+       self.summary_user_text = self.ui.setup_scrollable_text(
+           user_frame, height=12, wrap=tk.WORD
+       )
+       self.summary_user_text.pack(fill=tk.BOTH, expand=True)
+       self.summary_user_text.insert('1.0', self.rolling_summary_user_prompt)
+       
+       button_frame = tk.Frame(main_frame)
+       button_frame.pack(fill=tk.X, pady=(10, 0))
+       
+       def save_prompts():
+           self.rolling_summary_system_prompt = self.summary_system_text.get('1.0', tk.END).strip()
+           self.rolling_summary_user_prompt = self.summary_user_text.get('1.0', tk.END).strip()
+           
+           self.config['rolling_summary_system_prompt'] = self.rolling_summary_system_prompt
+           self.config['rolling_summary_user_prompt'] = self.rolling_summary_user_prompt
+           
+           os.environ['ROLLING_SUMMARY_SYSTEM_PROMPT'] = self.rolling_summary_system_prompt
+           os.environ['ROLLING_SUMMARY_USER_PROMPT'] = self.rolling_summary_user_prompt
+           
+           messagebox.showinfo("Success", "Memory prompts saved!")
+           dialog.destroy()
+       
+       def reset_prompts():
+           if messagebox.askyesno("Reset Prompts", "Reset memory prompts to defaults?"):
+               self.summary_system_text.delete('1.0', tk.END)
+               self.summary_system_text.insert('1.0', self.default_rolling_summary_system_prompt)
+               self.summary_user_text.delete('1.0', tk.END)
+               self.summary_user_text.insert('1.0', self.default_rolling_summary_user_prompt)
+       
+       tb.Button(button_frame, text="Save", command=save_prompts, 
+                bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
+       tb.Button(button_frame, text="Reset to Defaults", command=reset_prompts, 
+                bootstyle="warning", width=15).pack(side=tk.LEFT, padx=5)
+       tb.Button(button_frame, text="Cancel", command=dialog.destroy, 
+                bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
+       
+       dialog.deiconify()
+
+    def open_other_settings(self):
+       """Open the Other Settings dialog"""
+       dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
+           self.master,
+           "Other Settings",
+           width=0,
+           height=None,
+           max_width_ratio=0.7,
+           max_height_ratio=0.8
+       )
+       
+       scrollable_frame.grid_columnconfigure(0, weight=1, uniform="column")
+       scrollable_frame.grid_columnconfigure(1, weight=1, uniform="column")
+       
+       # Section 1: Context Management
+       self._create_context_management_section(scrollable_frame)
+       
+       # Section 2: Response Handling
+       self._create_response_handling_section(scrollable_frame)
+       
+       # Section 3: Prompt Management
+       self._create_prompt_management_section(scrollable_frame)
+       
+       # Section 4: Processing Options
+       self._create_processing_options_section(scrollable_frame)
+       
+       # Section 5: Image Translation
+       self._create_image_translation_section(scrollable_frame)
+       
+       # Save & Close buttons
+       self._create_settings_buttons(scrollable_frame, dialog, canvas)
+       
+       # Auto-resize and show
+       self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.48)
+       
+       dialog.protocol("WM_DELETE_WINDOW", lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
+
+    def _create_context_management_section(self, parent):
+       """Create context management section"""
+       section_frame = tk.LabelFrame(parent, text="Context Management & Memory", padx=10, pady=10)
+       section_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 10), pady=(10, 5))
+           
+       content_frame = tk.Frame(section_frame)
+       content_frame.pack(anchor=tk.NW, fill=tk.BOTH, expand=True)
+       
+       tb.Checkbutton(content_frame, text="Use Rolling Summary (Memory)", 
+                     variable=self.rolling_summary_var,
+                     bootstyle="round-toggle").pack(anchor=tk.W)
+       
+       tk.Label(content_frame, text="AI-powered memory system that maintains story context",
+               font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+       
+       settings_frame = tk.Frame(content_frame)
+       settings_frame.pack(anchor=tk.W, padx=20, fill=tk.X, pady=(5, 10))
+       
+       row1 = tk.Frame(settings_frame)
+       row1.pack(fill=tk.X, pady=(0, 10))
+       
+       tk.Label(row1, text="Role:").pack(side=tk.LEFT, padx=(0, 5))
+       ttk.Combobox(row1, textvariable=self.summary_role_var,
+                   values=["user", "system"], state="readonly", width=10).pack(side=tk.LEFT, padx=(0, 30))
+       
+       tk.Label(row1, text="Mode:").pack(side=tk.LEFT, padx=(0, 5))
+       ttk.Combobox(row1, textvariable=self.rolling_summary_mode_var,
+                   values=["append", "replace"], state="readonly", width=10).pack(side=tk.LEFT, padx=(0, 10))
+       
+       row2 = tk.Frame(settings_frame)
+       row2.pack(fill=tk.X, pady=(0, 10))
+       
+       tk.Label(row2, text="Summarize last").pack(side=tk.LEFT, padx=(0, 5))
+       tb.Entry(row2, width=5, textvariable=self.rolling_summary_exchanges_var).pack(side=tk.LEFT, padx=(0, 5))
+       tk.Label(row2, text="exchanges").pack(side=tk.LEFT)
+       
+       tb.Button(content_frame, text="⚙️ Configure Memory Prompts", 
+                command=self.configure_rolling_summary_prompts,
+                bootstyle="info-outline", width=30).pack(anchor=tk.W, padx=20, pady=(10, 10))
+       
+       ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
+       
+       tk.Label(section_frame, text="💡 Memory Mode:\n"
+               "• Append: Keeps adding summaries (longer context)\n"
+               "• Replace: Only keeps latest summary (concise)",
+               font=('TkDefaultFont', 11), fg='#666', justify=tk.LEFT).pack(anchor=tk.W, padx=5, pady=(0, 5))
+
+    def _create_response_handling_section(self, parent):
+        """Create response handling section with AI Hunter additions"""
+        section_frame = tk.LabelFrame(parent, text="Response Handling & Retry Logic", padx=10, pady=10)
+        section_frame.grid(row=1, column=0, sticky="nsew", padx=(10, 5), pady=5)
+        
+        # Retry Truncated
+        tb.Checkbutton(section_frame, text="Auto-retry Truncated Responses", 
+                      variable=self.retry_truncated_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W)
+
+        retry_frame = tk.Frame(section_frame)
+        retry_frame.pack(anchor=tk.W, padx=20, pady=(5, 5))
+        tk.Label(retry_frame, text="Max retry tokens:").pack(side=tk.LEFT)
+        tb.Entry(retry_frame, width=8, textvariable=self.max_retry_tokens_var).pack(side=tk.LEFT, padx=5)
+
+        tk.Label(section_frame, text="Automatically retry when API response\nis cut off due to token limits",
+               font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+
+        # Retry Duplicate
+        tb.Checkbutton(section_frame, text="Auto-retry Duplicate Content", 
+                     variable=self.retry_duplicate_var,
+                     bootstyle="round-toggle").pack(anchor=tk.W)
+
+        duplicate_frame = tk.Frame(section_frame)
+        duplicate_frame.pack(anchor=tk.W, padx=20, pady=(5, 0))
+        tk.Label(duplicate_frame, text="Check last").pack(side=tk.LEFT)
+        tb.Entry(duplicate_frame, width=4, textvariable=self.duplicate_lookback_var).pack(side=tk.LEFT, padx=3)
+        tk.Label(duplicate_frame, text="chapters").pack(side=tk.LEFT)
+
+        tk.Label(section_frame, text="Detects when AI returns same content\nfor different chapters",
+               font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(5, 10))
+
+        # Container for detection-related options (to show/hide based on toggle)
+        self.detection_options_container = tk.Frame(section_frame)
+
+        # Function to show/hide detection options based on auto-retry toggle
+        def update_detection_visibility():
+            try:
+                # Check if widgets still exist before manipulating them
+                if (hasattr(self, 'detection_options_container') and 
+                    self.detection_options_container.winfo_exists() and
+                    duplicate_frame.winfo_exists()):
+                    
+                    if self.retry_duplicate_var.get():
+                        self.detection_options_container.pack(fill='x', after=duplicate_frame)
+                    else:
+                        self.detection_options_container.pack_forget()
+            except tk.TclError:
+                # Widget has been destroyed, ignore
+                pass
+
+        # Add trace to update visibility when toggle changes
+        self.retry_duplicate_var.trace('w', lambda *args: update_detection_visibility())
+
+        # Detection Method subsection (now inside the container)
+        method_label = tk.Label(self.detection_options_container, text="Detection Method:", 
+                               font=('TkDefaultFont', 10, 'bold'))
+        method_label.pack(anchor=tk.W, padx=20, pady=(10, 5))
+
+        methods = [
+           ("basic", "Basic (Fast) - Original 85% threshold, 1000 chars"),
+           ("ai-hunter", "AI Hunter - Multi-method semantic analysis"),
+           ("cascading", "Cascading - Basic first, then AI Hunter")
+        ]
+
+        # Container for AI Hunter config (will be shown/hidden based on selection)
+        self.ai_hunter_container = tk.Frame(self.detection_options_container)
+
+        # Function to update AI Hunter visibility based on detection mode
+        def update_ai_hunter_visibility(*args):
+            """Update AI Hunter section visibility based on selection"""
+            # Clear existing widgets
+            for widget in self.ai_hunter_container.winfo_children():
+                widget.destroy()
+            
+            # Show AI Hunter config for both ai-hunter and cascading modes
+            if self.duplicate_detection_mode_var.get() in ['ai-hunter', 'cascading']:
+                self.create_ai_hunter_section(self.ai_hunter_container)
+            
+            # Update status if label exists and hasn't been destroyed
+            if hasattr(self, 'ai_hunter_status_label'):
+                try:
+                    # Check if the widget still exists before updating
+                    self.ai_hunter_status_label.winfo_exists()
+                    self.ai_hunter_status_label.config(text=self._get_ai_hunter_status_text())
+                except tk.TclError:
+                    # Widget has been destroyed, remove the reference
+                    delattr(self, 'ai_hunter_status_label')
+
+        # Create radio buttons (inside detection container) - ONLY ONCE
+        for value, text in methods:
+           rb = tb.Radiobutton(self.detection_options_container, text=text, 
+                              variable=self.duplicate_detection_mode_var, 
+                              value=value, bootstyle="primary")
+           rb.pack(anchor=tk.W, padx=40, pady=2)
+
+        # Pack the AI Hunter container
+        self.ai_hunter_container.pack(fill='x')
+
+        # Add trace to detection mode variable - ONLY ONCE
+        self.duplicate_detection_mode_var.trace('w', update_ai_hunter_visibility)
+
+        # Initial visibility updates
+        update_detection_visibility()
+        update_ai_hunter_visibility()
+        
+        # Retry Slow
+        tb.Checkbutton(section_frame, text="Auto-retry Slow Chunks", 
+                      variable=self.retry_timeout_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W, pady=(15, 0))
+
+        timeout_frame = tk.Frame(section_frame)
+        timeout_frame.pack(anchor=tk.W, padx=20, pady=(5, 0))
+        tk.Label(timeout_frame, text="Timeout after").pack(side=tk.LEFT)
+        tb.Entry(timeout_frame, width=6, textvariable=self.chunk_timeout_var).pack(side=tk.LEFT, padx=5)
+        tk.Label(timeout_frame, text="seconds").pack(side=tk.LEFT)
+
+        tk.Label(section_frame, text="Retry chunks/images that take too long\n(reduces tokens for faster response)",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
+
+    def create_ai_hunter_section(self, parent_frame):
+        """Create the AI Hunter configuration section - without redundant toggle"""
+        # AI Hunter Configuration
+        config_frame = tk.Frame(parent_frame)
+        config_frame.pack(anchor=tk.W, padx=20, pady=(10, 5))
+        
+        # Status label
+        ai_config = self.config.get('ai_hunter_config', {})
+        self.ai_hunter_status_label = tk.Label(
+            config_frame, 
+            text=self._get_ai_hunter_status_text(),
+            font=('TkDefaultFont', 10)
+        )
+        self.ai_hunter_status_label.pack(side=tk.LEFT)
+        
+        # Configure button
+        tb.Button(
+            config_frame, 
+            text="Configure AI Hunter", 
+            command=self.show_ai_hunter_settings,
+            bootstyle="info"
+        ).pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Info text
+        tk.Label(
+            parent_frame,  # Use parent_frame instead of section_frame
+            text="AI Hunter uses multiple detection methods to identify duplicate content\n"
+                 "with configurable thresholds and detection modes",
+            font=('TkDefaultFont', 10), 
+            fg='gray', 
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, padx=20, pady=(0, 10))
+
+    def _get_ai_hunter_status_text(self):
+        """Get status text for AI Hunter configuration"""
+        ai_config = self.config.get('ai_hunter_config', {})
+        
+        # AI Hunter is shown when the detection mode is set to 'ai-hunter' or 'cascading'
+        if self.duplicate_detection_mode_var.get() not in ['ai-hunter', 'cascading']:
+            return "AI Hunter: Not Selected"
+        
+        if not ai_config.get('enabled', True):
+            return "AI Hunter: Disabled in Config"
+        
+        mode_text = {
+            'single_method': 'Single Method',
+            'multi_method': 'Multi-Method',
+            'weighted_average': 'Weighted Average'
+        }
+        
+        mode = mode_text.get(ai_config.get('detection_mode', 'multi_method'), 'Unknown')
+        thresholds = ai_config.get('thresholds', {})
+        
+        if thresholds:
+            avg_threshold = sum(thresholds.values()) / len(thresholds)
+        else:
+            avg_threshold = 85
+        
+        return f"AI Hunter: {mode} mode, Avg threshold: {int(avg_threshold)}%"
+
+    def show_ai_hunter_settings(self):
+        """Open AI Hunter configuration window"""
+        def on_config_saved():
+            # Save the entire configuration
+            self.save_config()
+            # Update status label if it still exists
+            if hasattr(self, 'ai_hunter_status_label'):
+                try:
+                    self.ai_hunter_status_label.winfo_exists()
+                    self.ai_hunter_status_label.config(text=self._get_ai_hunter_status_text())
+                except tk.TclError:
+                    # Widget has been destroyed
+                    pass
+            if hasattr(self, 'ai_hunter_enabled_var'):
+                self.ai_hunter_enabled_var.set(self.config.get('ai_hunter_config', {}).get('enabled', True))
+        
+        gui = AIHunterConfigGUI(self.master, self.config, on_config_saved)
+        gui.show_ai_hunter_config()
+    
+    def toggle_ai_hunter(self):
+        """Toggle AI Hunter enabled state"""
+        if 'ai_hunter_config' not in self.config:
+            self.config['ai_hunter_config'] = {}
+        
+        self.config['ai_hunter_config']['enabled'] = self.ai_hunter_enabled_var.get()
+        self.save_config()
+        self.ai_hunter_status_label.config(text=self._get_ai_hunter_status_text())
+    
+    def _create_prompt_management_section(self, parent):
+        """Create meta data section (formerly prompt management)"""
+        section_frame = tk.LabelFrame(parent, text="Meta Data", padx=10, pady=10)
+        section_frame.grid(row=0, column=0, sticky="nsew", padx=(10, 5), pady=(10, 5))
+        
+        title_frame = tk.Frame(section_frame)
+        title_frame.pack(anchor=tk.W, pady=(10, 10))
+        
+        tb.Checkbutton(title_frame, text="Translate Book Title", 
+                      variable=self.translate_book_title_var,
+                      bootstyle="round-toggle").pack(side=tk.LEFT)
+        
+        tb.Button(title_frame, text="Configure Title Prompt", 
+                 command=self.configure_title_prompt,
+                 bootstyle="info-outline", width=20).pack(side=tk.LEFT, padx=(10, 0))
+        
+        tk.Label(section_frame, text="When enabled: Book titles will be translated to English\n"
+                    "When disabled: Book titles remain in original language",
+                    font=('TkDefaultFont', 11), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+            
+        # EPUB Validation
+        ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
+        
+        tk.Label(section_frame, text="EPUB Utilities:", font=('TkDefaultFont', 11, 'bold')).pack(anchor=tk.W, pady=(5, 5))
+        
+        tb.Button(section_frame, text="🔍 Validate EPUB Structure", 
+                 command=self.validate_epub_structure_gui, 
+                 bootstyle="success-outline",
+                 width=25).pack(anchor=tk.W, pady=2)
+        
+        tk.Label(section_frame, text="Check if all required EPUB files are\npresent for compilation",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 5))
+
+    def _create_processing_options_section(self, parent):
+        """Create processing options section"""
+        section_frame = tk.LabelFrame(parent, text="Processing Options", padx=10, pady=10)
+        section_frame.grid(row=1, column=1, sticky="nsew", padx=(5, 10), pady=5)
+        
+        # Reinforce messages option
+        reinforce_frame = tk.Frame(section_frame)
+        reinforce_frame.pack(anchor=tk.W, pady=(0, 10))
+        tk.Label(reinforce_frame, text="Reinforce every").pack(side=tk.LEFT)
+        tb.Entry(reinforce_frame, width=6, textvariable=self.reinforcement_freq_var).pack(side=tk.LEFT, padx=5)
+        tk.Label(reinforce_frame, text="messages").pack(side=tk.LEFT)
+        
+        tb.Checkbutton(section_frame, text="Emergency Paragraph Restoration", 
+                      variable=self.emergency_restore_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+        
+        tk.Label(section_frame, text="Fixes AI responses that lose paragraph\nstructure (wall of text)",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
+                
+        tb.Checkbutton(section_frame, text="Enable Decimal Chapter Detection (EPUBs)", 
+              variable=self.enable_decimal_chapters_var,
+              bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+
+        tk.Label(section_frame, text="Detect chapters like 1.1, 1.2 in EPUB files\n(Text files always use decimal chapters when split)",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+        
+        tb.Checkbutton(section_frame, text="Reset Failed Chapters on Start", 
+                      variable=self.reset_failed_chapters_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+        
+        tk.Label(section_frame, text="Automatically retry failed/deleted chapters\non each translation run",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+        
+        tb.Checkbutton(section_frame, text="Comprehensive Chapter Extraction", 
+                      variable=self.comprehensive_extraction_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+        
+        tk.Label(section_frame, text="Extract ALL files (disable smart filtering)",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+        
+        tb.Checkbutton(section_frame, text="Disable Image Gallery in EPUB", 
+                      variable=self.disable_epub_gallery_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+        
+        tk.Label(section_frame, text="Skip creating image gallery page in EPUB",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+        
+        tb.Checkbutton(section_frame, text="Disable 0-based Chapter Detection", 
+                      variable=self.disable_zero_detection_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+        
+        tk.Label(section_frame, text="Always use chapter ranges as specified\n(don't adjust for 0-based novels)",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+                
+        tb.Checkbutton(section_frame, text="Use Header as Output Name", 
+                      variable=self.use_header_as_output_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+
+        tk.Label(section_frame, text="Use chapter headers/titles as output filenames",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+                
+
+         # NEW: Chapter number offset
+        ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
+        
+        offset_frame = tk.Frame(section_frame)
+        offset_frame.pack(anchor=tk.W, pady=5)
+        
+        tk.Label(offset_frame, text="Chapter Number Offset:").pack(side=tk.LEFT)
+        
+        # Create variable if not exists
+        if not hasattr(self, 'chapter_number_offset_var'):
+            self.chapter_number_offset_var = tk.StringVar(
+                value=str(self.config.get('chapter_number_offset', '0'))
+            )
+        
+        tb.Entry(offset_frame, width=6, textvariable=self.chapter_number_offset_var).pack(side=tk.LEFT, padx=5)
+        
+        tk.Label(offset_frame, text="(+/- adjustment)").pack(side=tk.LEFT)
+        
+        tk.Label(section_frame, text="Adjust all chapter numbers by this amount.\nUseful for matching file numbers to actual chapters.",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))               
+        
+
+    def _create_image_translation_section(self, parent):
+        """Create image translation section"""
+        section_frame = tk.LabelFrame(parent, text="Image Translation", padx=10, pady=8)
+        section_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=10, pady=(5, 10))
+        
+        left_column = tk.Frame(section_frame)
+        left_column.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 20))
+        
+        right_column = tk.Frame(section_frame)
+        right_column.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Left column
+        enable_frame = tk.Frame(left_column)
+        enable_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tb.Checkbutton(enable_frame, text="Enable Image Translation", 
+                      variable=self.enable_image_translation_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W)
+        
+        tk.Label(left_column, text="Extracts and translates text from images using vision models",
+                font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, pady=(0, 10))
+        
+        tb.Checkbutton(left_column, text="Process Long Images (Web Novel Style)", 
+                      variable=self.process_webnovel_images_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W)
+        
+        tk.Label(left_column, text="Include tall images often used in web novels",
+                font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, padx=20, pady=(0, 10))
+        
+        tb.Checkbutton(left_column, text="Hide labels and remove OCR images", 
+                      variable=self.hide_image_translation_label_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W)
+        
+        tk.Label(left_column, text="Clean mode: removes image and shows only translated text",
+                font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, padx=20)
+        
+        # Right column
+        settings_frame = tk.Frame(right_column)
+        settings_frame.pack(fill=tk.X)
+        
+        settings_frame.grid_columnconfigure(1, minsize=80)
+        
+        settings = [
+            ("Min Image height (px):", self.webnovel_min_height_var),
+            ("Max Images per chapter:", self.max_images_per_chapter_var),
+            ("Output token Limit:", self.image_max_tokens_var),
+            ("Chunk height:", self.image_chunk_height_var)
+        ]
+        
+        for row, (label, var) in enumerate(settings):
+            tk.Label(settings_frame, text=label).grid(row=row, column=0, sticky=tk.W, pady=3)
+            tb.Entry(settings_frame, width=10, textvariable=var).grid(row=row, column=1, sticky=tk.W, pady=3)
+        
+        tk.Label(right_column, text="💡 Supported models:\n"
+                "• Gemini 1.5 Pro/Flash, 2.0 Flash\n"
+                "• GPT-4V, GPT-4o, o4-mini",
+                font=('TkDefaultFont', 10), fg='#666', justify=tk.LEFT).pack(anchor=tk.W, pady=(10, 0))
+
+    def _create_settings_buttons(self, parent, dialog, canvas):
+        """Create save and close buttons for settings dialog"""
+        button_frame = tk.Frame(parent)
+        button_frame.grid(row=3, column=0, columnspan=2, pady=(10, 10))
+        
+        button_container = tk.Frame(button_frame)
+        button_container.pack(expand=True)
+        
+        def save_and_close():
+            try:
+                def safe_int(value, default):
+                    try: return int(value)
+                    except (ValueError, TypeError): return default
+                
+                # Save all settings
+                self.config.update({
+                    'use_rolling_summary': self.rolling_summary_var.get(),
+                    'summary_role': self.summary_role_var.get(),
+                    'rolling_summary_exchanges': safe_int(self.rolling_summary_exchanges_var.get(), 5),
+                    'rolling_summary_mode': self.rolling_summary_mode_var.get(),
+                    'retry_truncated': self.retry_truncated_var.get(),
+                    'max_retry_tokens': safe_int(self.max_retry_tokens_var.get(), 16384),
+                    'retry_duplicate_bodies': self.retry_duplicate_var.get(),
+                    'duplicate_lookback_chapters': safe_int(self.duplicate_lookback_var.get(), 5),
+                    'retry_timeout': self.retry_timeout_var.get(),
+                    'chunk_timeout': safe_int(self.chunk_timeout_var.get(), 900),
+                    'reinforcement_frequency': safe_int(self.reinforcement_freq_var.get(), 10),
+                    'translate_book_title': self.translate_book_title_var.get(),
+                    'book_title_prompt': getattr(self, 'book_title_prompt', 
+                        "Translate this book title to English while retaining any acronyms:"),
+                    'emergency_paragraph_restore': self.emergency_restore_var.get(),
+                    'reset_failed_chapters': self.reset_failed_chapters_var.get(),
+                    'comprehensive_extraction': self.comprehensive_extraction_var.get(),
+                    'disable_epub_gallery': self.disable_epub_gallery_var.get(),
+                    'disable_zero_detection': self.disable_zero_detection_var.get(),
+                    'enable_image_translation': self.enable_image_translation_var.get(),
+                    'process_webnovel_images': self.process_webnovel_images_var.get(),
+                    'hide_image_translation_label': self.hide_image_translation_label_var.get(),
+                    'duplicate_detection_mode': self.duplicate_detection_mode_var.get(),
+                    'chapter_number_offset': safe_int(self.chapter_number_offset_var.get(), 0),
+                    'enable_decimal_chapters': self.enable_decimal_chapters_var.get(),
+                    'use_header_as_output': self.use_header_as_output_var.get()
+                })
+                
+                # Validate numeric fields
+                numeric_fields = [
+                    ('webnovel_min_height', self.webnovel_min_height_var, 1000),
+                    ('image_max_tokens', self.image_max_tokens_var, 16384),
+                    ('max_images_per_chapter', self.max_images_per_chapter_var, 1),
+                    ('image_chunk_height', self.image_chunk_height_var, 1500)
                 ]
                 
-                if getattr(sys, 'frozen', False):
-                    config_paths.append(os.path.join(os.path.dirname(sys.executable), 'config.json'))
-                else:
-                    script_dir = os.path.dirname(os.path.abspath(__file__))
-                    config_paths.extend([
-                        os.path.join(script_dir, 'config.json'),
-                        os.path.join(os.path.dirname(script_dir), 'config.json')
-                    ])
-                
-                for config_path in config_paths:
-                    if os.path.exists(config_path):
-                        try:
-                            with open(config_path, 'r', encoding='utf-8') as f:
-                                file_config = json.load(f)
-                                if 'ai_hunter_config' in file_config:
-                                    main_config['ai_hunter_config'] = file_config['ai_hunter_config']
-                                    print(f"🤖 AI Hunter: Loaded configuration from {config_path}")
-                                    break
-                        except Exception as e:
-                            print(f"⚠️ Failed to load config from {config_path}: {e}")
-                
-                # Create and inject the improved AI Hunter
-                ai_hunter = ImprovedAIHunterDetection(main_config)
-
-                # The TranslationProcessor class has a method that checks for duplicates
-                # We need to replace it with our enhanced AI Hunter
-                
-                # Create a wrapper to match the expected signature
-                def enhanced_duplicate_check(self, result, idx, prog, out):
-                    # Try to get the actual chapter number from progress
-                    actual_num = None
-                    
-                    # Look for the chapter being processed
-                    for ch_key, ch_info in prog.get("chapters", {}).items():
-                        if ch_info.get("chapter_idx") == idx:
-                            actual_num = ch_info.get("actual_num", idx + 1)
-                            break
-                    
-                    # Fallback to idx+1 if not found
-                    if not actual_num:
-                        actual_num = idx + 1
-                    
-                    return ai_hunter.detect_duplicate_ai_hunter_enhanced(result, idx, prog, out, actual_num)
-                
-                # Bind the enhanced method to the processor instance
-                translation_processor.check_duplicate_content = enhanced_duplicate_check.__get__(translation_processor, TranslationProcessor)
-                
-                print("🤖 AI Hunter: Using enhanced detection with configurable thresholds")
-            else:
-                print("⚠️ AI Hunter: Config file not found, using default detection")
-                
-        # First pass: set actual chapter numbers respecting the config
-        for idx, c in enumerate(chapters):
-            raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
-            #print(f"[DEBUG] Extracted raw_num={raw_num} from {c.get('original_basename', 'unknown')}")
-
-            
-            # Apply offset if configured
-            offset = config.CHAPTER_NUMBER_OFFSET if hasattr(config, 'CHAPTER_NUMBER_OFFSET') else 0
-            raw_num += offset
-            
-            if config.DISABLE_ZERO_DETECTION:
-                # Use raw numbers without adjustment
-                c['actual_chapter_num'] = raw_num
-                c['raw_chapter_num'] = raw_num
-                c['zero_adjusted'] = False
-            else:
-                # Store raw number
-                c['raw_chapter_num'] = raw_num
-                # Apply 0-based adjustment if detected
-                if uses_zero_based:
-                    c['actual_chapter_num'] = raw_num + 1
-                    c['zero_adjusted'] = True
-                else:
-                    c['actual_chapter_num'] = raw_num
-                    c['zero_adjusted'] = False
-
-        # Second pass: process chapters
-        for idx, c in enumerate(chapters):
-            chap_num = c["num"]
-            
-            # Check if this is a pre-split text chunk with decimal number
-            if (is_text_file and c.get('is_chunk', False) and isinstance(c['num'], float)):
-                actual_num = c['num']  # Preserve the decimal for text files only
-            else:
-                actual_num = c.get('actual_chapter_num', c['num'])
-            content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
-            
-            if start is not None and not (start <= actual_num <= end):
-                #print(f"[SKIP] Chapter {actual_num} (file: {c.get('original_basename', 'unknown')}) outside range {start}-{end}")
-                continue
-            
-            needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
-                idx, actual_num, content_hash, out
-            )
-            
-            if not needs_translation:
-                # Modify skip_reason to use appropriate terminology
-                is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
-                terminology = "Section" if is_text_source else "Chapter"
-                
-                # Replace "Chapter" with appropriate terminology in skip_reason
-                skip_reason_modified = skip_reason.replace("Chapter", terminology)
-                print(f"[SKIP] {skip_reason_modified}")
-                continue
-
-            chapter_position = f"{chapters_completed + 1}/{chapters_to_process}"
-          
-            # Determine if this is a text file
-            is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
-            terminology = "Section" if is_text_source else "Chapter"
-
-            # Determine file reference based on type
-            if c.get('is_chunk', False):
-                file_ref = f"Section_{c['num']}"
-            else:
-                file_ref = c.get('original_basename', f'{terminology}_{actual_num}')
-
-            print(f"\n🔄 Processing #{idx+1}/{total_chapters} (Actual: {terminology} {actual_num}) ({chapter_position} to translate): {c['title']} [File: {file_ref}]")
-
-            chunk_context_manager.start_chapter(chap_num, c['title'])
-            
-            has_images = c.get('has_images', False)
-            has_meaningful_text = ContentProcessor.is_meaningful_text_content(c["body"])
-            text_size = c.get('file_size', 0)
-            
-            is_empty_chapter = (not has_images and text_size < 50)
-            is_image_only_chapter = (has_images and not has_meaningful_text)
-            is_mixed_content = (has_images and has_meaningful_text)
-            is_text_only = (not has_images and has_meaningful_text)
-            
-            if is_empty_chapter:
-                print(f"📄 Empty chapter detected")
-            elif is_image_only_chapter:
-                if image_translator and config.ENABLE_IMAGE_TRANSLATION:
-                    print(f"🖼️ Translating {c.get('image_count', 0)} images...")
-                    image_translator.set_current_chapter(chap_num)
-                    translated_html, image_translations = process_chapter_images(
-                        c["body"], 
-                        actual_num, 
-                        image_translator,
-                        check_stop
-                    )
-                print(f"📸 Image-only chapter: {c.get('image_count', 0)} images, no meaningful text")
-            elif is_mixed_content:
-                print(f"📖📸 Mixed content: {text_size} chars + {c.get('image_count', 0)} images")
-            else:
-                print(f"📖 Text-only chapter: {text_size} characters")
-
-            if is_empty_chapter:
-                print(f"📄 Copying empty chapter as-is")
-                safe_title = make_safe_filename(c['title'], c['num'])
-                if isinstance(c['num'], float):
-                    fname = FileUtilities.create_chapter_filename(c, c['num'])
-                else:
-                    fname = FileUtilities.create_chapter_filename(c, c['num'])
-                
-                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                    f.write(c["body"])
-                
-                print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved empty chapter")
-                progress_manager.update(idx, chap_num, content_hash, fname, status="completed_empty")
-                progress_manager.save()
-                chapters_completed += 1
-                continue
-
-            elif is_image_only_chapter:
-                if image_translator and config.ENABLE_IMAGE_TRANSLATION:
-                    print(f"🖼️ Translating {c.get('image_count', 0)} images...")
-                    translated_html, image_translations = process_chapter_images(
-                        c["body"], 
-                        chap_num, 
-                        image_translator,
-                        check_stop
-                    )
-                    
-                    if '<div class="image-translation">' in translated_html:
-                        print(f"✅ Successfully translated images")
-                        status = "completed"
-                    else:
-                        print(f"ℹ️ No text found in images")
-                        status = "completed_image_only"
-                else:
-                    print(f"ℹ️ Image translation disabled - copying chapter as-is")
-                    translated_html = c["body"]
-                    status = "completed_image_only"
-                
-                safe_title = make_safe_filename(c['title'], c['num'])
-                if isinstance(c['num'], float):
-                    fname = f"response_{c['num']:06.1f}_{safe_title}.html"
-                else:
-                    fname = f"response_{c['num']:03d}_{safe_title}.html"
-                
-                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                    f.write(translated_html)
-                
-                print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved image-only chapter")
-                progress_manager.update(idx, chap_num, content_hash, fname, status=status)
-                progress_manager.save()
-                chapters_completed += 1
-                continue
-
-            else:
-                if is_mixed_content and image_translator and config.ENABLE_IMAGE_TRANSLATION:
-                    print(f"🖼️ Processing {c.get('image_count', 0)} images first...")
-                    
-                    print(f"[DEBUG] Content before image processing (first 200 chars):")
-                    print(c["body"][:200])
-                    print(f"[DEBUG] Has h1 tags: {'<h1>' in c['body']}")
-                    print(f"[DEBUG] Has h2 tags: {'<h2>' in c['body']}")
-                    image_translator.set_current_chapter(chap_num)
-                    c["body"], image_translations = process_chapter_images(
-                        c["body"], 
-                        actual_num,
-                        image_translator,
-                        check_stop
-                    )
-                    print(f"[DEBUG] Content after image processing (first 200 chars):")
-                    print(c["body"][:200])
-                    print(f"[DEBUG] Still has h1 tags: {'<h1>' in c['body']}")
-                    print(f"[DEBUG] Still has h2 tags: {'<h2>' in c['body']}")
-                    
-                    if image_translations:
-                        print(f"✅ Translated {len(image_translations)} images")
-                    else:
-                        print(f"ℹ️ No translatable text found in images")
-
-                print(f"📖 Translating text content ({text_size} characters)")
-                progress_manager.update(idx, chap_num, content_hash, output_file=None, status="in_progress")
-                progress_manager.save()
-
-
-                # Check if this chapter is already a chunk from text file splitting
-                if c.get('is_chunk', False):
-                    # This is already a pre-split chunk, but still check if it needs further splitting
-                    _tok_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
-                    max_tokens_limit, budget_str = parse_token_limit(_tok_env)
-                    
-                    system_tokens = chapter_splitter.count_tokens(system)
-                    history_tokens = config.HIST_LIMIT * 2 * 1000
-                    safety_margin = 1000
-                    
-                    if max_tokens_limit is not None:
-                        available_tokens = max_tokens_limit - system_tokens - history_tokens - safety_margin
-                        chapter_tokens = chapter_splitter.count_tokens(c["body"])
-                        
-                        if chapter_tokens > available_tokens:
-                            # Even pre-split chunks might need further splitting
-                            chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
-                            print(f"📄 Section {c['num']} (pre-split from text file) needs further splitting into {len(chunks)} chunks")
-                        else:
-                            chunks = [(c["body"], 1, 1)]
-                            print(f"📄 Section {c['num']} (pre-split from text file)")
-                    else:
-                        chunks = [(c["body"], 1, 1)]
-                        print(f"📄 Section {c['num']} (pre-split from text file)")
-                else:
-                    # Normal splitting logic for non-text files
-                    _tok_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
-                    max_tokens_limit, budget_str = parse_token_limit(_tok_env)
-                    
-                    system_tokens = chapter_splitter.count_tokens(system)
-                    history_tokens = config.HIST_LIMIT * 2 * 1000
-                    safety_margin = 1000
-                    
-                    if max_tokens_limit is not None:
-                        available_tokens = max_tokens_limit - system_tokens - history_tokens - safety_margin
-                        chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
-                    else:
-                        chunks = [(c["body"], 1, 1)]
-                    
-                    # Use consistent terminology
-                    is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
-                    terminology = "Section" if is_text_source else "Chapter"
-                    print(f"📄 {terminology} will be processed in {len(chunks)} chunk(s)")
-               
-            if len(chunks) > 1:
-                chapter_tokens = chapter_splitter.count_tokens(c["body"])
-                is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
-                terminology = "Section" if is_text_source else "Chapter"
-                print(f"   ℹ️ {terminology} size: {chapter_tokens:,} tokens (limit: {available_tokens:,} tokens per chunk)")
-            else:
-                chapter_tokens = chapter_splitter.count_tokens(c["body"])
-                if max_tokens_limit is not None:
-                    is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
-                    terminology = "Section" if is_text_source else "Chapter"
-                    print(f"   ℹ️ {terminology} size: {chapter_tokens:,} tokens (within limit of {available_tokens:,} tokens)")
-            
-            chapter_key_str = str(idx)
-            if chapter_key_str not in progress_manager.prog["chapter_chunks"]:
-                progress_manager.prog["chapter_chunks"][chapter_key_str] = {
-                    "total": len(chunks),
-                    "completed": [],
-                    "chunks": {}
-                }
-            
-            progress_manager.prog["chapter_chunks"][chapter_key_str]["total"] = len(chunks)
-            
-            translated_chunks = []
-            
-            for chunk_html, chunk_idx, total_chunks in chunks:
-                chapter_key_str = content_hash
-                old_key_str = str(idx)
-                
-                if chapter_key_str not in progress_manager.prog.get("chapter_chunks", {}) and old_key_str in progress_manager.prog.get("chapter_chunks", {}):
-                    progress_manager.prog["chapter_chunks"][chapter_key_str] = progress_manager.prog["chapter_chunks"][old_key_str]
-                    del progress_manager.prog["chapter_chunks"][old_key_str]
-                    print(f"[PROGRESS] Migrated chunks for chapter {chap_num} to new tracking system")
-                
-                if chapter_key_str not in progress_manager.prog["chapter_chunks"]:
-                    progress_manager.prog["chapter_chunks"][chapter_key_str] = {
-                        "total": len(chunks),
-                        "completed": [],
-                        "chunks": {}
-                    }
-                
-                progress_manager.prog["chapter_chunks"][chapter_key_str]["total"] = len(chunks)
-                
-                if chunk_idx in progress_manager.prog["chapter_chunks"][chapter_key_str]["completed"]:
-                    saved_chunk = progress_manager.prog["chapter_chunks"][chapter_key_str]["chunks"].get(str(chunk_idx))
-                    if saved_chunk:
-                        translated_chunks.append((saved_chunk, chunk_idx, total_chunks))
-                        print(f"  [SKIP] Chunk {chunk_idx}/{total_chunks} already translated")
-                        continue
-                        
-                if config.CONTEXTUAL and history_manager.will_reset_on_next_append(config.HIST_LIMIT):
-                    print(f"  📌 History will reset after this chunk (current: {len(history_manager.load_history())//2}/{config.HIST_LIMIT} exchanges)")
-                    
-                if check_stop():
-                    print(f"❌ Translation stopped during chapter {idx+1}, chunk {chunk_idx}")
-                    return
-                
-                current_chunk_number += 1
-                
-                progress_percent = (current_chunk_number / total_chunks_needed) * 100 if total_chunks_needed > 0 else 0
-                
-                if chunks_completed > 0:
-                    elapsed_time = time.time() - translation_start_time
-                    avg_time_per_chunk = elapsed_time / chunks_completed
-                    remaining_chunks = total_chunks_needed - current_chunk_number + 1
-                    eta_seconds = remaining_chunks * avg_time_per_chunk
-                    
-                    eta_hours = int(eta_seconds // 3600)
-                    eta_minutes = int((eta_seconds % 3600) // 60)
-                    eta_str = f"{eta_hours}h {eta_minutes}m" if eta_hours > 0 else f"{eta_minutes}m"
-                else:
-                    eta_str = "calculating..."
-                
-                if total_chunks > 1:
-                    print(f"  🔄 Translating chunk {chunk_idx}/{total_chunks} for #{idx+1} (Overall: {current_chunk_number}/{total_chunks_needed} - {progress_percent:.1f}% - ETA: {eta_str})")
-                    print(f"  ⏳ Chunk size: {len(chunk_html):,} characters (~{chapter_splitter.count_tokens(chunk_html):,} tokens)")
-                else:
-                    # Determine terminology and file reference
-                    is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
-                    terminology = "Section" if is_text_source else "Chapter"
-                    
-                    # Consistent file reference
-                    if c.get('is_chunk', False):
-                        file_ref = f"Section_{c['num']}"
-                    else:
-                        file_ref = c.get('original_basename', f'{terminology}_{actual_num}')
-                    
-                    print(f"  📄 Translating {terminology.lower()} content (Overall: {current_chunk_number}/{total_chunks_needed} - {progress_percent:.1f}% - ETA: {eta_str}) [File: {file_ref}]")
-                    print(f"  📊 {terminology} {actual_num} size: {len(chunk_html):,} characters (~{chapter_splitter.count_tokens(chunk_html):,} tokens)")
-                
-                print(f"  ℹ️ This may take 30-60 seconds. Stop will take effect after completion.")
-                
-                if log_callback:
-                    if hasattr(log_callback, '__self__') and hasattr(log_callback.__self__, 'append_chunk_progress'):
-                        if total_chunks == 1:
-                            # Determine terminology based on source type
-                            is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
-                            terminology = "Section" if is_text_source else "Chapter"
-
-                            log_callback.__self__.append_chunk_progress(
-                                1, 1, "text", 
-                                f"{terminology} {actual_num}",
-                                overall_current=current_chunk_number,
-                                overall_total=total_chunks_needed,
-                                extra_info=f"{len(chunk_html):,} chars"
-                            )
-                        else:
-                            log_callback.__self__.append_chunk_progress(
-                                chunk_idx, 
-                                total_chunks, 
-                                "text", 
-                                f"{terminology} {actual_num}",
-                                overall_current=current_chunk_number,
-                                overall_total=total_chunks_needed
-                            )
-                    else:
-                        # Determine terminology based on source type
-                        is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
-                        terminology = "Section" if is_text_source else "Chapter"
-                        terminology_lower = "section" if is_text_source else "chapter"
-
-                        if total_chunks == 1:
-                            log_callback(f"📄 Processing {terminology} {actual_num} ({chapters_completed + 1}/{chapters_to_process}) - {progress_percent:.1f}% complete")
-                        else:
-                            log_callback(f"📄 processing chunk {chunk_idx}/{total_chunks} for {terminology_lower} {actual_num} - {progress_percent:.1f}% complete")
-                        
-                if total_chunks > 1:
-                    user_prompt = f"[PART {chunk_idx}/{total_chunks}]\n{chunk_html}"
-                else:
-                    user_prompt = chunk_html
-                
-                history = history_manager.load_history()
-                
-                if config.CONTEXTUAL:
-                    trimmed = history[-config.HIST_LIMIT*2:]
-                    
-                    chunk_context = chunk_context_manager.get_context_messages(limit=2)
-                    
-                else:
-                    trimmed = []
-                    chunk_context = []
-
-                if base_msg:
-                    if not config.USE_ROLLING_SUMMARY:
-                        filtered_base = [msg for msg in base_msg if "summary of the previous" not in msg.get("content", "")]
-                        msgs = filtered_base + chunk_context + trimmed + [{"role": "user", "content": user_prompt}]
-                    else:
-                        msgs = base_msg + chunk_context + trimmed + [{"role": "user", "content": user_prompt}]
-                else:
-                    if trimmed or chunk_context:
-                        msgs = chunk_context + trimmed + [{"role": "user", "content": user_prompt}]
-                    else:
-                        msgs = [{"role": "user", "content": user_prompt}]
-
-                c['__index'] = idx
-                c['__progress'] = progress_manager.prog
-                c['history_manager'] = history_manager
-                
-                result, finish_reason = translation_processor.translate_with_retry(
-                    msgs, chunk_html, c, chunk_idx, total_chunks
-                )
-                
-                if result is None:
-                    progress_manager.update(idx, actual_num, content_hash, output_file=None, status="failed")
-                    progress_manager.save()
-                    continue
-
-                if config.REMOVE_AI_ARTIFACTS:
-                    result = ContentProcessor.clean_ai_artifacts(result, True)
-
-                if config.EMERGENCY_RESTORE:
-                    result = ContentProcessor.emergency_restore_paragraphs(result, chunk_html)
-
-                if config.REMOVE_AI_ARTIFACTS:
-                    lines = result.split('\n')
-                    
-                    json_line_count = 0
-                    for i, line in enumerate(lines[:5]):
-                        if line.strip() and any(pattern in line for pattern in [
-                            '"role":', '"content":', '"messages":', 
-                            '{"role"', '{"content"', '[{', '}]'
-                        ]):
-                            json_line_count = i + 1
-                        else:
-                            break
-                    
-                    if json_line_count > 0 and json_line_count < len(lines):
-                        remaining = '\n'.join(lines[json_line_count:])
-                        if remaining.strip() and len(remaining) > 100:
-                            result = remaining
-                            print(f"✂️ Removed {json_line_count} lines of JSON artifacts")
-
-                result = re.sub(r'\[PART \d+/\d+\]\s*', '', result, flags=re.IGNORECASE)
-
-                translated_chunks.append((result, chunk_idx, total_chunks))
-                
-                chunk_context_manager.add_chunk(user_prompt, result, chunk_idx, total_chunks)
-
-                progress_manager.prog["chapter_chunks"][chapter_key_str]["completed"].append(chunk_idx)
-                progress_manager.prog["chapter_chunks"][chapter_key_str]["chunks"][str(chunk_idx)] = result
-                progress_manager.save()
-
-                chunks_completed += 1
-                    
-                will_reset = history_manager.will_reset_on_next_append(
-                    config.HIST_LIMIT if config.CONTEXTUAL else 0, 
-                    config.TRANSLATION_HISTORY_ROLLING
-                )
-
-                if will_reset and config.USE_ROLLING_SUMMARY and config.CONTEXTUAL:
-                    if check_stop():
-                        print(f"❌ Translation stopped during summary generation for chapter {idx+1}")
+                for field_name, var, default in numeric_fields:
+                    value = var.get().strip()
+                    if value and not value.isdigit():
+                        messagebox.showerror("Invalid Input", 
+                            f"Please enter a valid number for {field_name.replace('_', ' ').title()}")
                         return
-                    
-                    summary_resp = translation_processor.generate_rolling_summary(
-                        history_manager, idx, chunk_idx
-                    )
-                    
-                    if summary_resp:
-                        base_msg[:] = [msg for msg in base_msg if "[MEMORY]" not in msg.get("content", "")]
-                        
-                        summary_msg = {
-                            "role": os.getenv("SUMMARY_ROLE", "user"),
-                            "content": (
-                                "CONTEXT ONLY - DO NOT INCLUDE IN TRANSLATION:\n"
-                                "[MEMORY] Previous context summary:\n\n"
-                                f"{summary_resp}\n\n"
-                                "[END MEMORY]\n"
-                                "END OF CONTEXT - BEGIN ACTUAL CONTENT TO TRANSLATE:"
-                            )
-                        }
-                        
-                        if base_msg and base_msg[0].get("role") == "system":
-                            base_msg.insert(1, summary_msg)
-                        else:
-                            base_msg.insert(0, summary_msg)
-
-                history = history_manager.append_to_history(
-                    user_prompt, 
-                    result, 
-                    config.HIST_LIMIT if config.CONTEXTUAL else 0,
-                    reset_on_limit=True,
-                    rolling_window=config.TRANSLATION_HISTORY_ROLLING
-                )
-
-                if chunk_idx < total_chunks:
-                    for i in range(config.DELAY):
-                        if check_stop():
-                            print("❌ Translation stopped during delay")
-                            return
-                        time.sleep(1)
-
-            if check_stop():
-                print(f"❌ Translation stopped before saving chapter {idx+1}")
-                return
-
-            if len(translated_chunks) > 1:
-                print(f"  📎 Merging {len(translated_chunks)} chunks...")
-                translated_chunks.sort(key=lambda x: x[1])
-                merged_result = chapter_splitter.merge_translated_chunks(translated_chunks)
-            else:
-                merged_result = translated_chunks[0][0] if translated_chunks else ""
-
-            if config.CONTEXTUAL and len(translated_chunks) > 1:
-                user_summary, assistant_summary = chunk_context_manager.get_summary_for_history()
                 
-                if user_summary and assistant_summary:
-                    history_manager.append_to_history(
-                        user_summary,
-                        assistant_summary,
-                        config.HIST_LIMIT,
-                        reset_on_limit=False,
-                        rolling_window=config.TRANSLATION_HISTORY_ROLLING
-                    )
-                    print(f"  📝 Added chapter summary to history")
-
-            chunk_context_manager.clear()
-
-            # For text file chunks, ensure we pass the decimal number
-            if is_text_file and c.get('is_chunk', False) and isinstance(c.get('num'), float):
-                fname = FileUtilities.create_chapter_filename(c, c['num'])  # Use the decimal num directly
-            else:
-                fname = FileUtilities.create_chapter_filename(c, actual_num)
-
-            cleaned = re.sub(r"^```(?:html)?\s*\n?", "", merged_result, count=1, flags=re.MULTILINE)
-            cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
-
-            cleaned = ContentProcessor.clean_ai_artifacts(cleaned, remove_artifacts=config.REMOVE_AI_ARTIFACTS)
-
-            if is_text_file:
-                # For text files, save as plain text instead of HTML
-                fname_txt = fname.replace('.html', '.txt')  # Change extension to .txt
+                for field_name, var, default in numeric_fields:
+                    self.config[field_name] = safe_int(var.get(), default)
                 
-                # Extract text from HTML
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(cleaned, 'html.parser')
-                text_content = soup.get_text(strip=True)
+                # Update environment variables
+                env_updates = {
+                    "USE_ROLLING_SUMMARY": "1" if self.rolling_summary_var.get() else "0",
+                    "SUMMARY_ROLE": self.summary_role_var.get(),
+                    "ROLLING_SUMMARY_EXCHANGES": str(self.config['rolling_summary_exchanges']),
+                    "ROLLING_SUMMARY_MODE": self.rolling_summary_mode_var.get(),
+                    "ROLLING_SUMMARY_SYSTEM_PROMPT": self.rolling_summary_system_prompt,
+                    "ROLLING_SUMMARY_USER_PROMPT": self.rolling_summary_user_prompt,
+                    "RETRY_TRUNCATED": "1" if self.retry_truncated_var.get() else "0",
+                    "MAX_RETRY_TOKENS": str(self.config['max_retry_tokens']),
+                    "RETRY_DUPLICATE_BODIES": "1" if self.retry_duplicate_var.get() else "0",
+                    "DUPLICATE_LOOKBACK_CHAPTERS": str(self.config['duplicate_lookback_chapters']),
+                    "RETRY_TIMEOUT": "1" if self.retry_timeout_var.get() else "0",
+                    "CHUNK_TIMEOUT": str(self.config['chunk_timeout']),
+                    "REINFORCEMENT_FREQUENCY": str(self.config['reinforcement_frequency']),
+                    "TRANSLATE_BOOK_TITLE": "1" if self.translate_book_title_var.get() else "0",
+                    "BOOK_TITLE_PROMPT": self.book_title_prompt,
+                    "EMERGENCY_PARAGRAPH_RESTORE": "1" if self.emergency_restore_var.get() else "0",
+                    "RESET_FAILED_CHAPTERS": "1" if self.reset_failed_chapters_var.get() else "0",
+                    "COMPREHENSIVE_EXTRACTION": "1" if self.comprehensive_extraction_var.get() else "0",
+                    "ENABLE_IMAGE_TRANSLATION": "1" if self.enable_image_translation_var.get() else "0",
+                    "PROCESS_WEBNOVEL_IMAGES": "1" if self.process_webnovel_images_var.get() else "0",
+                    "WEBNOVEL_MIN_HEIGHT": str(self.config['webnovel_min_height']),
+                    "IMAGE_MAX_TOKENS": str(self.config['image_max_tokens']),
+                    "MAX_IMAGES_PER_CHAPTER": str(self.config['max_images_per_chapter']),
+                    "IMAGE_CHUNK_HEIGHT": str(self.config['image_chunk_height']),
+                    "HIDE_IMAGE_TRANSLATION_LABEL": "1" if self.hide_image_translation_label_var.get() else "0",
+                    "DISABLE_EPUB_GALLERY": "1" if self.disable_epub_gallery_var.get() else "0",
+                    "DISABLE_ZERO_DETECTION": "1" if self.disable_zero_detection_var.get() else "0",
+                    "DUPLICATE_DETECTION_MODE": self.duplicate_detection_mode_var.get(),
+                    "ENABLE_DECIMAL_CHAPTERS": "1" if self.enable_decimal_chapters_var.get() else "0",
+                }
+                os.environ.update(env_updates)
                 
-                # Write plain text file
-                with open(os.path.join(out, fname_txt), 'w', encoding='utf-8') as f:
-                    f.write(text_content)
+                with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(self.config, f, ensure_ascii=False, indent=2)
                 
-                final_title = c['title'] or make_safe_filename(c['title'], actual_num)
-                print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
+                self.append_log("✅ Other Settings saved successfully")
+                dialog.destroy()
                 
-                # Update progress with .txt filename
-                progress_manager.update(idx, actual_num, content_hash, fname_txt, status="completed")
-            else:
-                # For EPUB files, keep original HTML behavior
-                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                    f.write(cleaned)
-                
-                final_title = c['title'] or make_safe_filename(c['title'], actual_num)
-                print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
-                
-    
-            
-            progress_manager.update(idx, actual_num, content_hash, fname, status="completed")
-            progress_manager.save()
-            
-            chapters_completed += 1
-
-    if is_text_file:
-        print("📄 Text file translation complete!")
-        try:
-            # Collect all translated chapters with their metadata
-            translated_chapters = []
-            
-            for chapter in chapters:
-                # Look for .txt files instead of .html
-                fname_base = FileUtilities.create_chapter_filename(chapter, chapter['num'])
-                fname_txt = fname_base.replace('.html', '.txt')
-                
-                if os.path.exists(os.path.join(out, fname_txt)):
-                    with open(os.path.join(out, fname_txt), 'r', encoding='utf-8') as f:
-                        content = f.read()
-                    
-                    translated_chapters.append({
-                        'num': chapter['num'],
-                        'title': chapter['title'],
-                        'content': content,
-                        'is_chunk': chapter.get('is_chunk', False),
-                        'chunk_info': chapter.get('chunk_info', {})
-                    })
-                elif os.path.exists(os.path.join(out, fname_base)):
-                    # Fallback to HTML if txt doesn't exist
-                    with open(os.path.join(out, fname_base), 'r', encoding='utf-8') as f:
-                        content = f.read()
-                        # Extract text from HTML
-                        from bs4 import BeautifulSoup
-                        soup = BeautifulSoup(content, 'html.parser')
-                        text = soup.get_text(strip=True)
-                    
-                    translated_chapters.append({
-                        'num': chapter['num'],
-                        'title': chapter['title'],
-                        'content': text,
-                        'is_chunk': chapter.get('is_chunk', False),
-                        'chunk_info': chapter.get('chunk_info', {})
-                    })
-            
-            print(f"✅ Translation complete! {len(translated_chapters)} section files created:")
-            for chapter_data in sorted(translated_chapters, key=lambda x: x['num']):
-                print(f"   • Section {chapter_data['num']}: {chapter_data['title']}")
-            
-            # Create a combined file with proper section structure
-            combined_path = os.path.join(out, f"{txt_processor.file_base}_translated.txt")
-            with open(combined_path, 'w', encoding='utf-8') as combined:
-                current_main_chapter = None
-                
-                for i, chapter_data in enumerate(sorted(translated_chapters, key=lambda x: x['num'])):
-                    content = chapter_data['content']
-                    
-                    # Check if this is a chunk of a larger chapter
-                    if chapter_data.get('is_chunk'):
-                        chunk_info = chapter_data.get('chunk_info', {})
-                        original_chapter = chunk_info.get('original_chapter')
-                        chunk_idx = chunk_info.get('chunk_idx', 1)
-                        total_chunks = chunk_info.get('total_chunks', 1)
-                        
-                        # Only add the chapter header for the first chunk
-                        if original_chapter != current_main_chapter:
-                            current_main_chapter = original_chapter
-                            
-                            # Add separator if not first chapter
-                            if i > 0:
-                                combined.write(f"\n\n{'='*50}\n\n")
-                            
-                            # Write the original chapter title (without Part X/Y suffix)
-                            original_title = chapter_data['title']
-                            # Remove the (Part X/Y) suffix if present
-                            if ' (Part ' in original_title:
-                                original_title = original_title.split(' (Part ')[0]
-                            
-                            combined.write(f"{original_title}\n\n")
-                        
-                        # Add the chunk content
-                        combined.write(content)
-                        
-                        # Add spacing between chunks of the same chapter
-                        if chunk_idx < total_chunks:
-                            combined.write("\n\n")
-                    else:
-                        # This is a standalone chapter
-                        current_main_chapter = chapter_data['num']
-                        
-                        # Add separator if not first chapter
-                        if i > 0:
-                            combined.write(f"\n\n{'='*50}\n\n")
-                        
-                        # Write the chapter title
-                        combined.write(f"{chapter_data['title']}\n\n")
-                        
-                        # Add the content
-                        combined.write(content)
-            
-            print(f"   • Combined file with preserved sections: {combined_path}")
-            
-            total_time = time.time() - translation_start_time
-            hours = int(total_time // 3600)
-            minutes = int((total_time % 3600) // 60)
-            seconds = int(total_time % 60)
-            
-            print(f"\n⏱️ Total translation time: {hours}h {minutes}m {seconds}s")
-            print(f"📊 Chapters completed: {chapters_completed}")
-            print(f"✅ Text file translation complete!")
-            
-            if log_callback:
-                log_callback(f"✅ Text file translation complete! Created {combined_path}")
-            
-        except Exception as e:
-            print(f"❌ Error creating combined text file: {e}")
-            if log_callback:
-                log_callback(f"❌ Error creating combined text file: {e}")
-    else:
-        print("🔍 Checking for translated chapters...")
-        response_files = [f for f in os.listdir(out) if f.startswith('response_') and f.endswith('.html')]
-        chapter_files = [f for f in os.listdir(out) if f.startswith('chapter_') and f.endswith('.html')]
-
-        if not response_files and chapter_files:
-            print(f"⚠️ No translated files found, but {len(chapter_files)} original chapters exist")
-            print("📝 Creating placeholder response files for EPUB compilation...")
-            
-            for chapter_file in chapter_files:
-                response_file = chapter_file.replace('chapter_', 'response_', 1)
-                src = os.path.join(out, chapter_file)
-                dst = os.path.join(out, response_file)
-                
-                try:
-                    with open(src, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                    
-                    soup = BeautifulSoup(content, 'html.parser')
-                    notice = soup.new_tag('p')
-                    notice.string = "[Note: This chapter could not be translated - showing original content]"
-                    notice['style'] = "color: red; font-style: italic;"
-                    
-                    if soup.body:
-                        soup.body.insert(0, notice)
-                    
-                    with open(dst, 'w', encoding='utf-8') as f:
-                        f.write(str(soup))
-                        
-                except Exception as e:
-                    print(f"⚠️ Error processing {chapter_file}: {e}")
-                    try:
-                        shutil.copy2(src, dst)
-                    except:
-                        pass
-            
-            print(f"✅ Created {len(chapter_files)} placeholder response files")
-            print("⚠️ Note: The EPUB will contain untranslated content")
+            except Exception as e:
+                print(f"❌ Failed to save Other Settings: {e}")
+                messagebox.showerror("Error", f"Failed to save settings: {e}")
         
-        print("📘 Building final EPUB…")
-        try:
-            from epub_converter import fallback_compile_epub
-            fallback_compile_epub(out, log_callback=log_callback)
-            print("✅ All done: your final EPUB is in", out)
-            
-            total_time = time.time() - translation_start_time
-            hours = int(total_time // 3600)
-            minutes = int((total_time % 3600) // 60)
-            seconds = int(total_time % 60)
-            
-            print(f"\n📊 Translation Statistics:")
-            print(f"   • Total chunks processed: {chunks_completed}")
-            print(f"   • Total time: {hours}h {minutes}m {seconds}s")
-            if chunks_completed > 0:
-                avg_time = total_time / chunks_completed
-                print(f"   • Average time per chunk: {avg_time:.1f} seconds")
-            
-            stats = progress_manager.get_stats(out)
-            print(f"\n📊 Progress Tracking Summary:")
-            print(f"   • Total chapters tracked: {stats['total_tracked']}")
-            print(f"   • Successfully completed: {stats['completed']}")
-            print(f"   • Missing files: {stats['missing_files']}")
-            print(f"   • In progress: {stats['in_progress']}")
-                
-        except Exception as e:
-            print("❌ EPUB build failed:", e)
+        tb.Button(button_container, text="💾 Save Settings", command=save_and_close, 
+                 bootstyle="success", width=20).pack(side=tk.LEFT, padx=5)
+        
+        tb.Button(button_container, text="❌ Cancel", command=lambda: [dialog._cleanup_scrolling(), dialog.destroy()], 
+                 bootstyle="secondary", width=20).pack(side=tk.LEFT, padx=5)
 
-    print("TRANSLATION_COMPLETE_SIGNAL")
+    def validate_epub_structure_gui(self):
+        """GUI wrapper for EPUB structure validation"""
+        input_path = self.entry_epub.get()
+        if not input_path:
+            messagebox.showerror("Error", "Please select a file first.")
+            return
+        
+        if input_path.lower().endswith('.txt'):
+            messagebox.showinfo("Info", "Structure validation is only available for EPUB files.")
+            return
+        
+        epub_base = os.path.splitext(os.path.basename(input_path))[0]
+        output_dir = epub_base
+        
+        if not os.path.exists(output_dir):
+            messagebox.showinfo("Info", f"No output directory found: {output_dir}")
+            return
+        
+        self.append_log("🔍 Validating EPUB structure...")
+        
+        try:
+            from TransateKRtoEN import validate_epub_structure, check_epub_readiness
+            
+            structure_ok = validate_epub_structure(output_dir)
+            readiness_ok = check_epub_readiness(output_dir)
+            
+            if structure_ok and readiness_ok:
+                self.append_log("✅ EPUB validation PASSED - Ready for compilation!")
+                messagebox.showinfo("Validation Passed", 
+                                  "✅ All EPUB structure files are present!\n\n"
+                                  "Your translation is ready for EPUB compilation.")
+            elif structure_ok:
+                self.append_log("⚠️ EPUB structure OK, but some issues found")
+                messagebox.showwarning("Validation Warning", 
+                                     "⚠️ EPUB structure is mostly OK, but some issues were found.\n\n"
+                                     "Check the log for details.")
+            else:
+                self.append_log("❌ EPUB validation FAILED - Missing critical files")
+                messagebox.showerror("Validation Failed", 
+                                   "❌ Missing critical EPUB files!\n\n"
+                                   "container.xml and/or OPF files are missing.\n"
+                                   "Try re-running the translation to extract them.")
+        
+        except ImportError as e:
+            self.append_log(f"❌ Could not import validation functions: {e}")
+            messagebox.showerror("Error", "Validation functions not available.")
+        except Exception as e:
+            self.append_log(f"❌ Validation error: {e}")
+            messagebox.showerror("Error", f"Validation failed: {e}")
+
+    def on_profile_select(self, event=None):
+        """Load the selected profile's prompt into the text area."""
+        name = self.profile_var.get()
+        prompt = self.prompt_profiles.get(name, "")
+        self.prompt_text.delete("1.0", tk.END)
+        self.prompt_text.insert("1.0", prompt)
+
+    def save_profile(self):
+        """Save current prompt under selected profile and persist."""
+        name = self.profile_var.get().strip()
+        if not name:
+            messagebox.showerror("Error", "Language name cannot be empty.")
+            return
+        content = self.prompt_text.get('1.0', tk.END).strip()
+        self.prompt_profiles[name] = content
+        self.config['prompt_profiles'] = self.prompt_profiles
+        self.config['active_profile'] = name
+        self.profile_menu['values'] = list(self.prompt_profiles.keys())
+        messagebox.showinfo("Saved", f"Language '{name}' saved.")
+        self.save_profiles()
+
+    def delete_profile(self):
+        """Delete the selected language/profile."""
+        name = self.profile_var.get()
+        if name not in self.prompt_profiles:
+            messagebox.showerror("Error", f"Language '{name}' not found.")
+            return
+        if messagebox.askyesno("Delete", f"Are you sure you want to delete language '{name}'?"):
+            del self.prompt_profiles[name]
+            self.config['prompt_profiles'] = self.prompt_profiles
+            if self.prompt_profiles:
+                new = next(iter(self.prompt_profiles))
+                self.profile_var.set(new)
+                self.on_profile_select()
+            else:
+                self.profile_var.set("")
+                self.prompt_text.delete('1.0', tk.END)
+            self.profile_menu['values'] = list(self.prompt_profiles.keys())
+            self.save_profiles()
+
+    def save_profiles(self):
+        """Persist only the prompt profiles and active profile."""
+        try:
+            data = {}
+            if os.path.exists(CONFIG_FILE):
+                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            data['prompt_profiles'] = self.prompt_profiles
+            data['active_profile'] = self.profile_var.get()
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save profiles: {e}")
+
+    def import_profiles(self):
+        """Import profiles from a JSON file, merging into existing ones."""
+        path = filedialog.askopenfilename(title="Import Profiles", filetypes=[("JSON files","*.json")])
+        if not path:
+            return
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            self.prompt_profiles.update(data)
+            self.config['prompt_profiles'] = self.prompt_profiles
+            self.profile_menu['values'] = list(self.prompt_profiles.keys())
+            messagebox.showinfo("Imported", f"Imported {len(data)} profiles.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to import profiles: {e}")
+
+    def export_profiles(self):
+        """Export all profiles to a JSON file."""
+        path = filedialog.asksaveasfilename(title="Export Profiles", defaultextension=".json", 
+                                          filetypes=[("JSON files","*.json")])
+        if not path:
+            return
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(self.prompt_profiles, f, ensure_ascii=False, indent=2)
+            messagebox.showinfo("Exported", f"Profiles exported to {path}.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export profiles: {e}")
+
+    def load_glossary(self):
+        """Let the user pick a glossary.json and remember its path."""
+        path = filedialog.askopenfilename(
+            title="Select glossary.json",
+            filetypes=[("JSON files", "*.json")]
+        )
+        if not path:
+            return
+        self.manual_glossary_path = path
+        self.append_log(f"📑 Loaded manual glossary: {path}")
+        
+        self.append_glossary_var.set(True)
+        self.append_log("✅ Automatically enabled 'Append Glossary to System Prompt'")
+
+    def save_config(self):
+        """Persist all settings to config.json."""
+        try:
+            def safe_int(value, default):
+                try: return int(value)
+                except (ValueError, TypeError): return default
+            
+            def safe_float(value, default):
+                try: return float(value)
+                except (ValueError, TypeError): return default
+            
+            # Basic settings
+            self.config['model'] = self.model_var.get()
+            self.config['active_profile'] = self.profile_var.get()
+            self.config['prompt_profiles'] = self.prompt_profiles
+            self.config['contextual'] = self.contextual_var.get()
+            
+            # Validate numeric fields
+            delay_val = self.delay_entry.get().strip()
+            if delay_val and not delay_val.replace('.', '', 1).isdigit():
+                messagebox.showerror("Invalid Input", "Please enter a valid number for API call delay")
+                return
+            self.config['delay'] = safe_int(delay_val, 2)
+            
+            trans_temp_val = self.trans_temp.get().strip()
+            if trans_temp_val:
+                try: float(trans_temp_val)
+                except ValueError:
+                    messagebox.showerror("Invalid Input", "Please enter a valid number for Temperature")
+                    return
+            self.config['translation_temperature'] = safe_float(trans_temp_val, 0.3)
+            
+            trans_history_val = self.trans_history.get().strip()
+            if trans_history_val and not trans_history_val.isdigit():
+                messagebox.showerror("Invalid Input", "Please enter a valid number for Translation History Limit")
+                return
+            self.config['translation_history_limit'] = safe_int(trans_history_val, 3)
+            
+            # Save all other settings
+            self.config['api_key'] = self.api_key_entry.get()
+            self.config['REMOVE_AI_ARTIFACTS'] = self.REMOVE_AI_ARTIFACTS_var.get()
+            self.config['chapter_range'] = self.chapter_range_entry.get().strip()
+            self.config['use_rolling_summary'] = self.rolling_summary_var.get()
+            self.config['summary_role'] = self.summary_role_var.get()
+            self.config['max_output_tokens'] = self.max_output_tokens
+            self.config['translate_book_title'] = self.translate_book_title_var.get()
+            self.config['book_title_prompt'] = self.book_title_prompt
+            self.config['append_glossary'] = self.append_glossary_var.get()
+            self.config['emergency_paragraph_restore'] = self.emergency_restore_var.get()
+            self.config['reinforcement_frequency'] = safe_int(self.reinforcement_freq_var.get(), 10)
+            self.config['reset_failed_chapters'] = self.reset_failed_chapters_var.get()
+            self.config['retry_duplicate_bodies'] = self.retry_duplicate_var.get()
+            self.config['duplicate_lookback_chapters'] = safe_int(self.duplicate_lookback_var.get(), 5)
+            self.config['token_limit_disabled'] = self.token_limit_disabled
+            self.config['glossary_min_frequency'] = safe_int(self.glossary_min_frequency_var.get(), 2)
+            self.config['glossary_max_names'] = safe_int(self.glossary_max_names_var.get(), 50)
+            self.config['glossary_max_titles'] = safe_int(self.glossary_max_titles_var.get(), 30)
+            self.config['glossary_batch_size'] = safe_int(self.glossary_batch_size_var.get(), 50)
+            self.config['enable_image_translation'] = self.enable_image_translation_var.get()
+            self.config['process_webnovel_images'] = self.process_webnovel_images_var.get()
+            self.config['webnovel_min_height'] = safe_int(self.webnovel_min_height_var.get(), 1000)
+            self.config['image_max_tokens'] = safe_int(self.image_max_tokens_var.get(), 16384)
+            self.config['max_images_per_chapter'] = safe_int(self.max_images_per_chapter_var.get(), 1)
+            self.config['batch_translation'] = self.batch_translation_var.get()
+            self.config['batch_size'] = safe_int(self.batch_size_var.get(), 3)
+            self.config['translation_history_rolling'] = self.translation_history_rolling_var.get()
+            self.config['glossary_history_rolling'] = self.glossary_history_rolling_var.get()
+            self.config['disable_epub_gallery'] = self.disable_epub_gallery_var.get()
+            self.config['enable_auto_glossary'] = self.enable_auto_glossary_var.get()
+            self.config['duplicate_detection_mode'] = self.duplicate_detection_mode_var.get()
+            self.config['chapter_number_offset'] = safe_int(self.chapter_number_offset_var.get(), 0)
+            self.config['use_header_as_output'] = self.use_header_as_output_var.get()
+            self.config['enable_decimal_chapters'] = self.enable_decimal_chapters_var.get()
+
+
+            _tl = self.token_limit_entry.get().strip()
+            if _tl.isdigit():
+                self.config['token_limit'] = int(_tl)
+            else:
+                self.config['token_limit'] = None
+            
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.config, f, ensure_ascii=False, indent=2)
+            messagebox.showinfo("Saved", "Configuration saved.")
+            self.append_log("✅ Configuration saved successfully")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save config: {e}")
+            self.append_log(f"❌ Failed to save configuration: {e}")
+
+    def log_debug(self, message):
+        self.append_log(f"[DEBUG] {message}")
 
 if __name__ == "__main__":
-    main()
+    import time
+    
+    print("🚀 Starting Glossarion v2.8.4...")
+    
+    # Initialize splash screen
+    splash_manager = None
+    try:
+        from splash_utils import SplashManager
+        splash_manager = SplashManager()
+        splash_started = splash_manager.start_splash()
+        
+        if splash_started:
+            splash_manager.update_status("Loading theme framework...")
+            time.sleep(0.1)
+    except Exception as e:
+        print(f"⚠️ Splash screen failed: {e}")
+        splash_manager = None
+    
+    try:
+        if splash_manager:
+            splash_manager.update_status("Loading UI framework...")
+            time.sleep(0.08)
+        
+        # Import ttkbootstrap while splash is visible
+        import ttkbootstrap as tb
+        from ttkbootstrap.constants import *
+        
+        # REAL module loading during splash screen with gradual progression
+        if splash_manager:
+            # Create a custom callback function for splash updates
+            def splash_callback(message):
+                if splash_manager and splash_manager.splash_window:
+                    splash_manager.update_status(message)
+                    splash_manager.splash_window.update()
+                    time.sleep(0.09)
+            
+            # Actually load modules during splash with real feedback
+            splash_callback("Loading translation modules...")
+            
+            # Import and test each module for real
+            translation_main = translation_stop_flag = translation_stop_check = None
+            glossary_main = glossary_stop_flag = glossary_stop_check = None
+            fallback_compile_epub = scan_html_folder = None
+            
+            modules_loaded = 0
+            total_modules = 4
+            
+            # Load TranslateKRtoEN
+            splash_callback("Loading translation engine...")
+            try:
+                splash_callback("Validating translation engine...")
+                import TransateKRtoEN
+                if hasattr(TransateKRtoEN, 'main') and hasattr(TransateKRtoEN, 'set_stop_flag'):
+                    from TransateKRtoEN import main as translation_main, set_stop_flag as translation_stop_flag, is_stop_requested as translation_stop_check
+                    modules_loaded += 1
+                    splash_callback("✅ translation engine loaded")
+                else:
+                    splash_callback("⚠️ translation engine incomplete")
+            except Exception as e:
+                splash_callback("❌ translation engine failed")
+                print(f"Warning: Could not import TransateKRtoEN: {e}")
+            
+            # Load extract_glossary_from_epub
+            splash_callback("Loading glossary extractor...")
+            try:
+                splash_callback("Validating glossary extractor...")
+                import extract_glossary_from_epub
+                if hasattr(extract_glossary_from_epub, 'main') and hasattr(extract_glossary_from_epub, 'set_stop_flag'):
+                    from extract_glossary_from_epub import main as glossary_main, set_stop_flag as glossary_stop_flag, is_stop_requested as glossary_stop_check
+                    modules_loaded += 1
+                    splash_callback("✅ glossary extractor loaded")
+                else:
+                    splash_callback("⚠️ glossary extractor incomplete")
+            except Exception as e:
+                splash_callback("❌ glossary extractor failed")
+                print(f"Warning: Could not import extract_glossary_from_epub: {e}")
+            
+            # Load epub_converter
+            splash_callback("Loading EPUB converter...")
+            try:
+                import epub_converter
+                if hasattr(epub_converter, 'fallback_compile_epub'):
+                    from epub_converter import fallback_compile_epub
+                    modules_loaded += 1
+                    splash_callback("✅ EPUB converter loaded")
+                else:
+                    splash_callback("⚠️ EPUB converter incomplete")
+            except Exception as e:
+                splash_callback("❌ EPUB converter failed")
+                print(f"Warning: Could not import epub_converter: {e}")
+            
+            # Load scan_html_folder
+            splash_callback("Loading QA scanner...")
+            try:
+                import scan_html_folder
+                if hasattr(scan_html_folder, 'scan_html_folder'):
+                    from scan_html_folder import scan_html_folder
+                    modules_loaded += 1
+                    splash_callback("✅ QA scanner loaded")
+                else:
+                    splash_callback("⚠️ QA scanner incomplete")
+            except Exception as e:
+                splash_callback("❌ QA scanner failed")
+                print(f"Warning: Could not import scan_html_folder: {e}")
+            
+            # Final status with pause for visibility
+            splash_callback("Finalizing module initialization...")
+            if modules_loaded == total_modules:
+                splash_callback("✅ All modules loaded successfully")
+            else:
+                splash_callback(f"⚠️ {modules_loaded}/{total_modules} modules loaded")
+            
+            # Store loaded modules globally for GUI access
+            import translator_gui
+            translator_gui.translation_main = translation_main
+            translator_gui.translation_stop_flag = translation_stop_flag  
+            translator_gui.translation_stop_check = translation_stop_check
+            translator_gui.glossary_main = glossary_main
+            translator_gui.glossary_stop_flag = glossary_stop_flag
+            translator_gui.glossary_stop_check = glossary_stop_check
+            translator_gui.fallback_compile_epub = fallback_compile_epub
+            translator_gui.scan_html_folder = scan_html_folder
+        
+        if splash_manager:
+            splash_manager.update_status("Creating main window...")
+            time.sleep(0.07)
+            
+            # Extra pause to show "Ready!" before closing
+            splash_manager.update_status("Ready!")
+            time.sleep(0.1)
+            splash_manager.close_splash()
+        
+        # Create main window (modules already loaded)
+        root = tb.Window(themename="darkly")
+        
+        # CRITICAL: Hide window immediately to prevent white flash
+        root.withdraw()
+        
+        # Initialize the app (modules already available)  
+        app = TranslatorGUI(root)
+        
+        # Mark modules as already loaded to skip lazy loading
+        app._modules_loaded = True
+        app._modules_loading = False
+        
+        # CRITICAL: Let all widgets and theme fully initialize
+        root.update_idletasks()
+        
+        # CRITICAL: Now show the window after everything is ready
+        root.deiconify()
+        
+        print("✅ Ready to use!")
+        
+        # Start main loop
+        root.mainloop()
+        
+    except Exception as e:
+        print(f"❌ Failed to start application: {e}")
+        if splash_manager:
+            splash_manager.close_splash()
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+    
+    finally:
+        if splash_manager:
+            try:
+                splash_manager.close_splash()
+            except:
+                pass
