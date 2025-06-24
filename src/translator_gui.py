@@ -621,7 +621,7 @@ class TranslatorGUI:
         
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        master.title("Glossarion v2.8.4")
+        master.title("Glossarion v2.8.5")
         
         self.wm.responsive_size(master, BASE_WIDTH, BASE_HEIGHT)
         master.minsize(1600, 1000)
@@ -831,7 +831,7 @@ class TranslatorGUI:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v2.8.4 - Ready to use!")
+        self.append_log("🚀 Glossarion v2.8.5 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -1579,8 +1579,13 @@ class TranslatorGUI:
                 
                 icon = status_icons.get(status, '❓')
                 
-                # Build display string
-                display = f"Chapter {chapter_num:03d} | {icon} {status} | {output_file}"
+                # Handle both integer and decimal chapter numbers
+                if isinstance(chapter_num, float) and chapter_num.is_integer():
+                    display = f"Chapter {int(chapter_num):03d} | {icon} {status} | {output_file}"
+                elif isinstance(chapter_num, float):
+                    display = f"Chapter {chapter_num:06.1f} | {icon} {status} | {output_file}"
+                else:
+                    display = f"Chapter {chapter_num:03d} | {icon} {status} | {output_file}"
                 
                 # Add duplicate count if more than 1
                 if info['duplicate_count'] > 1:
@@ -4883,7 +4888,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v2.8.4...")
+    print("🚀 Starting Glossarion v2.8.5...")
     
     # Initialize splash screen
     splash_manager = None
