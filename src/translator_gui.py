@@ -3,7 +3,7 @@ import io, json, logging, math, os, shutil, sys, threading, time, re
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 from ai_hunter_enhanced import AIHunterConfigGUI, ImprovedAIHunterDetection
-
+import traceback
 # Third-Party
 import ttkbootstrap as tb
 from ttkbootstrap.constants import *
@@ -621,7 +621,7 @@ class TranslatorGUI:
         
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        master.title("Glossarion v2.8.5")
+        master.title("Glossarion v2.8.8")
         
         self.wm.responsive_size(master, BASE_WIDTH, BASE_HEIGHT)
         master.minsize(1600, 1000)
@@ -762,6 +762,9 @@ class TranslatorGUI:
             ('emergency_restore_var', 'emergency_paragraph_restore', False),
             ('contextual_var', 'contextual', True),
             ('REMOVE_AI_ARTIFACTS_var', 'REMOVE_AI_ARTIFACTS', False),
+            ('enable_watermark_removal_var', 'enable_watermark_removal', True),
+            ('save_cleaned_images_var', 'save_cleaned_images', False),
+            ('advanced_watermark_removal_var', 'advanced_watermark_removal', False),
             ('enable_decimal_chapters_var', 'enable_decimal_chapters', False)
         ]
         
@@ -831,7 +834,7 @@ class TranslatorGUI:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v2.8.5 - Ready to use!")
+        self.append_log("🚀 Glossarion v2.8.8 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -1472,7 +1475,7 @@ class TranslatorGUI:
                 self.master,
                 "Force Retranslation",
                 width=900,
-                height=600
+                height=600  # Back to original height since no toggle
             )
             
             # Add instructions label
@@ -1603,6 +1606,8 @@ class TranslatorGUI:
             
             listbox.bind('<<ListboxSelect>>', update_selection_count)
             
+
+            
             # Button frame
             button_frame = tk.Frame(dialog)
             button_frame.pack(pady=10)
@@ -1627,13 +1632,81 @@ class TranslatorGUI:
                             listbox.select_set(idx)
                 update_selection_count()
             
+            def remove_qa_failed_mark():
+                selected = listbox.curselection()
+                if not selected:
+                    messagebox.showwarning("No Selection", "Please select at least one chapter.")
+                    return
+                
+                # Filter for QA failed chapters only
+                selected_chapters = [chapter_display_info[i] for i in selected]
+                qa_failed_chapters = [ch for ch in selected_chapters if ch['status'] == 'qa_failed']
+                
+                if not qa_failed_chapters:
+                    messagebox.showwarning("No QA Failed Chapters", 
+                                         "None of the selected chapters have 'qa_failed' status.\n"
+                                         "Only QA failed chapters can have their mark removed.")
+                    return
+                
+                # Build confirmation message
+                count = len(qa_failed_chapters)
+                if count > 10:
+                    confirm_msg = f"This will remove QA failed mark from {count} chapters.\n\nContinue?"
+                else:
+                    chapters_text = [f"Chapter {info['num']}" for info in qa_failed_chapters]
+                    confirm_msg = f"This will remove QA failed mark from:\n\n{', '.join(chapters_text)}\n\nContinue?"
+                
+                # Add warning if non-QA-failed chapters are also selected
+                non_qa_failed = [ch for ch in selected_chapters if ch['status'] != 'qa_failed']
+                if non_qa_failed:
+                    confirm_msg += f"\n\nNote: {len(non_qa_failed)} non-QA-failed chapters in selection will be ignored."
+                
+                if not messagebox.askyesno("Confirm Remove QA Failed Mark", confirm_msg):
+                    return
+                
+                # Remove QA failed mark from chapters
+                cleared_count = 0
+                for idx in selected:
+                    info = chapter_display_info[idx]
+                    
+                    # Only process QA failed chapters
+                    if info['status'] != 'qa_failed':
+                        continue
+                    
+                    output_file = info['output_file']
+                    
+                    # Update ALL duplicate entries for this file from progress
+                    if output_file in files_to_entries:
+                        for chapter_key, chapter_info in files_to_entries[output_file]:
+                            if chapter_key in prog["chapters"]:
+                                # Change status from qa_failed back to completed
+                                prog["chapters"][chapter_key]["status"] = "completed"
+                                
+                                # Remove all QA-related fields
+                                prog["chapters"][chapter_key].pop("qa_issues", None)
+                                prog["chapters"][chapter_key].pop("qa_timestamp", None)
+                                prog["chapters"][chapter_key].pop("qa_issues_found", None)
+                                prog["chapters"][chapter_key].pop("duplicate_confidence", None)
+                                
+                                cleared_count += 1
+                
+                # Save updated progress
+                with open(progress_file, 'w', encoding='utf-8') as f:
+                    json.dump(prog, f, ensure_ascii=False, indent=2)
+                
+                messagebox.showinfo("Success", 
+                    f"Removed QA failed mark from {cleared_count} chapters.\n\n"
+                    "They are now marked as completed.")
+                
+                dialog.destroy()
+            
             def retranslate_selected():
                 selected = listbox.curselection()
                 if not selected:
                     messagebox.showwarning("No Selection", "Please select at least one chapter.")
                     return
                 
-                # Confirm action
+                # Build confirmation message for retranslation
                 count = len(selected)
                 if count > 10:
                     confirm_msg = f"This will delete {count} translated chapters and mark them for retranslation.\n\nContinue?"
@@ -1644,7 +1717,7 @@ class TranslatorGUI:
                 if not messagebox.askyesno("Confirm Retranslation", confirm_msg):
                     return
                 
-                # Process selected chapters
+                # Regular retranslation logic
                 deleted_count = 0
                 for idx in selected:
                     info = chapter_display_info[idx]
@@ -1690,17 +1763,24 @@ class TranslatorGUI:
                 
                 dialog.destroy()
             
-            # Add buttons
-            tb.Button(button_frame, text="Select All", command=select_all, bootstyle="info").grid(row=0, column=0, padx=5)
-            tb.Button(button_frame, text="Clear Selection", command=clear_selection, bootstyle="secondary").grid(row=0, column=1, padx=5)
-            tb.Button(button_frame, text="Select Completed", command=lambda: select_status('completed'), bootstyle="success").grid(row=0, column=2, padx=5)
-            tb.Button(button_frame, text="Select Failed", command=lambda: select_status('failed'), bootstyle="danger").grid(row=0, column=3, padx=5)
+            # Add buttons with improved layout
+            # Configure column weights for better distribution
+            for i in range(4):
+                button_frame.columnconfigure(i, weight=1)
             
+            # Row 1: Selection buttons
+            tb.Button(button_frame, text="Select All", command=select_all, bootstyle="info").grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+            tb.Button(button_frame, text="Clear Selection", command=clear_selection, bootstyle="secondary").grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+            tb.Button(button_frame, text="Select Completed", command=lambda: select_status('completed'), bootstyle="success").grid(row=0, column=2, padx=5, pady=5, sticky="ew")
+            tb.Button(button_frame, text="Select Failed", command=lambda: select_status('failed'), bootstyle="danger").grid(row=0, column=3, padx=5, pady=5, sticky="ew")
+            
+            # Row 2: Action buttons - spanning multiple columns for better balance
             tb.Button(button_frame, text="Retranslate Selected", command=retranslate_selected, 
-                     bootstyle="warning").grid(row=1, column=0, columnspan=2, pady=10)
+                     bootstyle="warning").grid(row=1, column=0, columnspan=2, padx=5, pady=10, sticky="ew")
+            tb.Button(button_frame, text="Remove QA Failed Mark", command=remove_qa_failed_mark, 
+                     bootstyle="success").grid(row=1, column=2, columnspan=1, padx=5, pady=10, sticky="ew")
             tb.Button(button_frame, text="Cancel", command=dialog.destroy, 
-                     bootstyle="secondary").grid(row=1, column=2, columnspan=2, pady=10)
-            
+                     bootstyle="secondary").grid(row=1, column=3, columnspan=1, padx=5, pady=10, sticky="ew")
 
     
     def glossary_manager(self):
@@ -3028,6 +3108,10 @@ class TranslatorGUI:
            'CHAPTER_NUMBER_OFFSET': str(self.chapter_number_offset_var.get()), 
            'USE_HEADER_AS_OUTPUT': "1" if self.use_header_as_output_var.get() else "0",
            'ENABLE_DECIMAL_CHAPTERS': "1" if self.enable_decimal_chapters_var.get() else "0",
+           'ENABLE_WATERMARK_REMOVAL': "1" if self.enable_watermark_removal_var.get() else "0",
+           'ADVANCED_WATERMARK_REMOVAL': "1" if self.advanced_watermark_removal_var.get() else "0",
+           'SAVE_CLEANED_IMAGES': "1" if self.save_cleaned_images_var.get() else "0"
+           
        }
 
     def run_glossary_extraction_thread(self):
@@ -3231,396 +3315,732 @@ class TranslatorGUI:
                ))
 
     def run_qa_scan(self):
-       """Run QA scan with mode selection"""
-       # Create a small loading window with icon
-       loading_window = self.wm.create_simple_dialog(
-           self.master,
-           "Loading QA Scanner",
-           width=300,
-           height=120,
-           modal=True,
-           hide_initially=False
-       )
-       
-       # Create content frame
-       content_frame = tk.Frame(loading_window, padx=20, pady=20)
-       content_frame.pack(fill=tk.BOTH, expand=True)
-       
-       # Try to add icon image if available
-       status_label = None
-       try:
-           from PIL import Image, ImageTk
-           ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
-           if os.path.isfile(ico_path):
-               # Load icon at small size
-               icon_image = Image.open(ico_path)
-               icon_image = icon_image.resize((32, 32), Image.Resampling.LANCZOS)
-               icon_photo = ImageTk.PhotoImage(icon_image)
-               
-               # Create horizontal layout
-               icon_label = tk.Label(content_frame, image=icon_photo)
-               icon_label.image = icon_photo  # Keep reference
-               icon_label.pack(side=tk.LEFT, padx=(0, 10))
-               
-               # Text on the right
-               text_frame = tk.Frame(content_frame)
-               text_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-               tk.Label(text_frame, text="Initializing QA Scanner...", 
-                       font=('TkDefaultFont', 11)).pack(anchor=tk.W)
-               status_label = tk.Label(text_frame, text="Loading modules...", 
-                                     font=('TkDefaultFont', 9), fg='gray')
-               status_label.pack(anchor=tk.W, pady=(5, 0))
-           else:
-               # Fallback without icon
-               tk.Label(content_frame, text="Initializing QA Scanner...", 
-                       font=('TkDefaultFont', 11)).pack()
-               status_label = tk.Label(content_frame, text="Loading modules...", 
-                                     font=('TkDefaultFont', 9), fg='gray')
-               status_label.pack(pady=(10, 0))
-       except ImportError:
-           # No PIL, simple text only
-           tk.Label(content_frame, text="Initializing QA Scanner...", 
-                   font=('TkDefaultFont', 11)).pack()
-           status_label = tk.Label(content_frame, text="Loading modules...", 
-                                 font=('TkDefaultFont', 9), fg='gray')
-           status_label.pack(pady=(10, 0))
-       
+            """Run QA scan with mode selection and settings"""
+            # Create a small loading window with icon
+            loading_window = self.wm.create_simple_dialog(
+                self.master,
+                "Loading QA Scanner",
+                width=300,
+                height=120,
+                modal=True,
+                hide_initially=False
+            )
+            
+            # Create content frame
+            content_frame = tk.Frame(loading_window, padx=20, pady=20)
+            content_frame.pack(fill=tk.BOTH, expand=True)
+            
+            # Try to add icon image if available
+            status_label = None
+            try:
+                from PIL import Image, ImageTk
+                ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+                if os.path.isfile(ico_path):
+                    # Load icon at small size
+                    icon_image = Image.open(ico_path)
+                    icon_image = icon_image.resize((32, 32), Image.Resampling.LANCZOS)
+                    icon_photo = ImageTk.PhotoImage(icon_image)
+                    
+                    # Create horizontal layout
+                    icon_label = tk.Label(content_frame, image=icon_photo)
+                    icon_label.image = icon_photo  # Keep reference
+                    icon_label.pack(side=tk.LEFT, padx=(0, 10))
+                    
+                    # Text on the right
+                    text_frame = tk.Frame(content_frame)
+                    text_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+                    tk.Label(text_frame, text="Initializing QA Scanner...", 
+                            font=('TkDefaultFont', 11)).pack(anchor=tk.W)
+                    status_label = tk.Label(text_frame, text="Loading modules...", 
+                                          font=('TkDefaultFont', 9), fg='gray')
+                    status_label.pack(anchor=tk.W, pady=(5, 0))
+                else:
+                    # Fallback without icon
+                    tk.Label(content_frame, text="Initializing QA Scanner...", 
+                            font=('TkDefaultFont', 11)).pack()
+                    status_label = tk.Label(content_frame, text="Loading modules...", 
+                                          font=('TkDefaultFont', 9), fg='gray')
+                    status_label.pack(pady=(10, 0))
+            except ImportError:
+                # No PIL, simple text only
+                tk.Label(content_frame, text="Initializing QA Scanner...", 
+                        font=('TkDefaultFont', 11)).pack()
+                status_label = tk.Label(content_frame, text="Loading modules...", 
+                                      font=('TkDefaultFont', 9), fg='gray')
+                status_label.pack(pady=(10, 0))
+            
 
-       self.master.update_idletasks()
-       
-       try:
-           # Update status
-           if status_label:
-               status_label.config(text="Loading translation modules...")
-           loading_window.update_idletasks()
-           
-           if not self._lazy_load_modules():
-               loading_window.destroy()
-               self.append_log("❌ Failed to load QA scanner modules")
-               return
-           
-           if status_label:
-               status_label.config(text="Preparing scanner...")
-           loading_window.update_idletasks()
-           
-           if scan_html_folder is None:
-               loading_window.destroy()
-               self.append_log("❌ QA scanner module is not available")
-               messagebox.showerror("Module Error", "QA scanner module is not available.")
-               return
-           
-           if hasattr(self, 'qa_thread') and self.qa_thread and self.qa_thread.is_alive():
-               loading_window.destroy()
-               self.stop_requested = True
-               self.append_log("⛔ QA scan stop requested.")
-               return
-           
-           # Close loading window
-           loading_window.destroy()
-           self.append_log("✅ QA scanner initialized successfully")
-           
-       except Exception as e:
-           loading_window.destroy()
-           self.append_log(f"❌ Error initializing QA scanner: {e}")
-           return
-       
-       # ALWAYS show mode selection dialog
-       mode_dialog = self.wm.create_simple_dialog(
-           self.master,
-           "Select QA Scanner Mode",
-           width=1920,
-           height=820,
-           hide_initially=True
-       )
-       
-       # Variables
-       selected_mode_value = None
-       
-       # Main container
-       main_container = tk.Frame(mode_dialog)
-       main_container.pack(fill=tk.BOTH, expand=True)
-       
-       # Content with padding
-       main_frame = tk.Frame(main_container, padx=40, pady=35)
-       main_frame.pack(fill=tk.BOTH, expand=True)
-       
-       # Title with subtitle
-       title_frame = tk.Frame(main_frame)
-       title_frame.pack(pady=(0, 30))
-       
-       tk.Label(title_frame, text="Select Detection Mode", 
-                font=('Arial', 36, 'bold'), fg='#f0f0f0').pack()
-       tk.Label(title_frame, text="Choose how sensitive the duplicate detection should be",
-                font=('Arial', 20), fg='#d0d0d0').pack(pady=(8, 0))
-       
-       # Mode cards container
-       modes_container = tk.Frame(main_frame)
-       modes_container.pack(fill=tk.BOTH, expand=True)
-               
-       mode_data = [
-           {
-               "value": "ai-hunter",
-               "emoji": "🤖",
-               "title": "AI HUNTER",
-               "subtitle": "30% threshold",
-               "features": [
-                   "✓ Catches AI retranslations",
-                   "✓ Different translation styles",
-                   "⚠ MANY false positives",
-                   "✓ Same chapter, different words",
-                   "✓ Detects paraphrasing",
-                   "✓ Ultimate duplicate finder"
-               ],
-               "bg_color": "#2a1a3e",  # Dark purple
-               "hover_color": "#6a4c93",  # Medium purple
-               "border_color": "#8b5cf6",
-               "accent_color": "#a78bfa",
-               "text_color": "#f0f0f0",
-               "feature_color": "#e0e0e0",
-               "recommendation": "EXTREME"
-           },
-           {
-               "value": "aggressive",
-               "emoji": "🔴",
-               "title": "AGGRESSIVE",
-               "subtitle": "75% threshold",
-               "features": [
-                   "✓ Catches more duplicates",
-                   "✓ Best for initial cleanup", 
-                   "⚠ May have false positives",
-                   "✓ Detects partial matches",
-                   "✓ Finds similar content patterns",
-                   "✓ Aggressive fuzzy matching"
-               ],
-               "bg_color": "#4a1515",
-               "hover_color": "#dc143c",
-               "border_color": "#ff0000",
-               "accent_color": "#ff5555",
-               "text_color": "#f0f0f0",
-               "feature_color": "#e0e0e0",
-               "recommendation": "BEST"
-           },
-           {
-               "value": "standard", 
-               "emoji": "🟡",
-               "title": "STANDARD",
-               "subtitle": "85% threshold",
-               "features": [
-                   "✓ Balanced detection",
-                   "✓ Good for most cases",
-                   "✓ Recommended approach",
-                   "✓ Reliable accuracy",
-                   "✓ Minimal false alarms",
-                   "✓ Production ready"
-               ],
-               "bg_color": "#4a4015",
-               "hover_color": "#d4a017",
-               "border_color": "#ffaa00",
-               "accent_color": "#ffdd44",
-               "text_color": "#f0f0f0",
-               "feature_color": "#e0e0e0",
-               "recommendation": "RECOMMENDED"
-           },
-           {
-               "value": "strict",
-               "emoji": "🟢", 
-               "title": "STRICT",
-               "subtitle": "95% threshold",
-               "features": [
-                   "✓ Only identical matches",
-                   "✓ Minimal false positives",
-                   "✓ Precision focused",
-                   "✓ Conservative approach",
-                   "✓ High confidence results",
-                   "✓ Final QA checks"
-               ],
-               "bg_color": "#1a3a1c",
-               "hover_color": "#228b22",
-               "border_color": "#2e7d32",
-               "accent_color": "#66bb6a",
-               "text_color": "#f0f0f0",
-               "feature_color": "#e0e0e0",
-               "recommendation": "FASTEST"
-           }
-       ]
-       
-       def select_mode(mode_value):
-           nonlocal selected_mode_value
-           selected_mode_value = mode_value
-           mode_dialog.destroy()
-       
-       for i, mode in enumerate(mode_data):
-           # Card frame
-           card = tk.Frame(modes_container, bg=mode["bg_color"], 
-                          relief=tk.RAISED, bd=3)
-           card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0 if i == 0 else 25, 0))
-           
-           # Make entire card clickable
-           def make_card_click_handler(value):
-               return lambda e: select_mode(value)
-           
-           click_handler = make_card_click_handler(mode["value"])
-           
-           # Card content
-           content_frame = tk.Frame(card, padx=45, pady=40, bg=mode["bg_color"])
-           content_frame.pack(fill=tk.BOTH, expand=True)
-           
-           # Emoji at top
-           emoji_label = tk.Label(content_frame, text=mode["emoji"], 
-                                 font=('Arial', 64), 
-                                 bg=mode["bg_color"])
-           emoji_label.pack()
-           
-           # Title
-           title_label = tk.Label(content_frame, text=mode["title"], 
-                                 font=('Arial', 32, 'bold'),
-                                 fg=mode["text_color"], bg=mode["bg_color"])
-           title_label.pack(pady=(12, 0))
-           
-           # Subtitle
-           tk.Label(content_frame, text=mode["subtitle"], 
-                   font=('Arial', 20), 
-                   fg=mode["feature_color"], bg=mode["bg_color"]).pack(pady=(2, 0))
-           
-           # Recommendation badge
-           if mode["recommendation"]:
-               rec_frame = tk.Frame(content_frame, bg=mode["bg_color"])
-               rec_frame.pack(pady=(10, 0))
-               rec_label = tk.Label(rec_frame, text=f"★ {mode['recommendation']} ★", 
-                                  font=('Arial', 18, 'bold'), 
-                                  fg=mode["accent_color"], bg=mode["bg_color"])
-               rec_label.pack()
-           else:
-               # Empty space to maintain alignment
-               tk.Label(content_frame, text=" ", font=('Arial', 18), 
-                       bg=mode["bg_color"]).pack(pady=(10, 0))
-           
-           # Features list
-           features_frame = tk.Frame(content_frame, bg=mode["bg_color"])
-           features_frame.pack(pady=(20, 10), fill=tk.BOTH, expand=True)
-           
-           for feature in mode["features"]:
-               feature_label = tk.Label(features_frame, text=feature, 
-                                      font=('Arial', 18), 
-                                      fg=mode["feature_color"], bg=mode["bg_color"],
-                                      justify=tk.LEFT)
-               feature_label.pack(anchor=tk.W, pady=4)
-           
-           # Create closure for each card's hover effects
-           def create_hover_handlers(card, content_frame, mode, all_widgets):
-               hover_state = {'active': False}
-               original_bg = mode["bg_color"]
-               hover_bg = mode["hover_color"]
-               
-               def on_enter(e):
-                   if not hover_state['active']:
-                       hover_state['active'] = True
-                       card.config(bg=hover_bg)
-                       content_frame.config(bg=hover_bg)
-                       # Update all widgets that were captured
-                       for widget in all_widgets:
-                           try:
-                               widget.config(bg=hover_bg)
-                           except:
-                               pass
-               
-               def on_leave(e):
-                   if hover_state['active']:
-                       hover_state['active'] = False
-                       card.config(bg=original_bg)
-                       content_frame.config(bg=original_bg)
-                       # Restore all widgets that were captured
-                       for widget in all_widgets:
-                           try:
-                               widget.config(bg=original_bg)
-                           except:
-                               pass
-               
-               return on_enter, on_leave
+            self.master.update_idletasks()
+            
+            try:
+                # Update status
+                if status_label:
+                    status_label.config(text="Loading translation modules...")
+                loading_window.update_idletasks()
+                
+                if not self._lazy_load_modules():
+                    loading_window.destroy()
+                    self.append_log("❌ Failed to load QA scanner modules")
+                    return
+                
+                if status_label:
+                    status_label.config(text="Preparing scanner...")
+                loading_window.update_idletasks()
+                
+                if scan_html_folder is None:
+                    loading_window.destroy()
+                    self.append_log("❌ QA scanner module is not available")
+                    messagebox.showerror("Module Error", "QA scanner module is not available.")
+                    return
+                
+                if hasattr(self, 'qa_thread') and self.qa_thread and self.qa_thread.is_alive():
+                    loading_window.destroy()
+                    self.stop_requested = True
+                    self.append_log("⛔ QA scan stop requested.")
+                    return
+                
+                # Close loading window
+                loading_window.destroy()
+                self.append_log("✅ QA scanner initialized successfully")
+                
+            except Exception as e:
+                loading_window.destroy()
+                self.append_log(f"❌ Error initializing QA scanner: {e}")
+                return
+            
+            # Load QA scanner settings from config
+            qa_settings = self.config.get('qa_scanner_settings', {
+                'foreign_char_threshold': 10,
+                'excluded_characters': '',
+                'check_encoding_issues': True,
+                'check_repetition': True,
+                'check_translation_artifacts': True,
+                'min_file_length': 100,
+                'report_format': 'detailed',
+                'auto_save_report': True
+            })
+            
+            # ALWAYS show mode selection dialog with settings
+            mode_dialog = self.wm.create_simple_dialog(
+                self.master,
+                "Select QA Scanner Mode",
+                width=1500,  # Optimal width for 4 cards
+                height=650,  # Compact height to ensure buttons are visible
+                hide_initially=True
+            )
+            
+            # Set minimum size to prevent dialog from being too small
+            mode_dialog.minsize(1200, 600)
+            
+            # Variables
+            selected_mode_value = None
+            
+            # Main container with constrained expansion
+            main_container = tk.Frame(mode_dialog)
+            main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)  # Add padding
+            
+            # Content with padding
+            main_frame = tk.Frame(main_container, padx=30, pady=20)  # Reduced padding
+            main_frame.pack(fill=tk.X)  # Only fill horizontally, don't expand
+            
+            # Title with subtitle
+            title_frame = tk.Frame(main_frame)
+            title_frame.pack(pady=(0, 15))  # Further reduced
+            
+            tk.Label(title_frame, text="Select Detection Mode", 
+                     font=('Arial', 28, 'bold'), fg='#f0f0f0').pack()  # Further reduced
+            tk.Label(title_frame, text="Choose how sensitive the duplicate detection should be",
+                     font=('Arial', 16), fg='#d0d0d0').pack(pady=(3, 0))  # Further reduced
+            
+            # Mode cards container - don't expand vertically to leave room for buttons
+            modes_container = tk.Frame(main_frame)
+            modes_container.pack(fill=tk.X, pady=(0, 10))  # Reduced bottom padding
+                    
+            mode_data = [
+                {
+                    "value": "ai-hunter",
+                    "emoji": "🤖",
+                    "title": "AI HUNTER",
+                    "subtitle": "30% threshold",
+                    "features": [
+                        "✓ Catches AI retranslations",
+                        "✓ Different translation styles",
+                        "⚠ MANY false positives",
+                        "✓ Same chapter, different words",
+                        "✓ Detects paraphrasing",
+                        "✓ Ultimate duplicate finder"
+                    ],
+                    "bg_color": "#2a1a3e",  # Dark purple
+                    "hover_color": "#6a4c93",  # Medium purple
+                    "border_color": "#8b5cf6",
+                    "accent_color": "#a78bfa",
+                    "recommendation": "⚡ Best for finding ALL similar content"
+                },
+                {
+                    "value": "aggressive",
+                    "emoji": "🔥",
+                    "title": "AGGRESSIVE",
+                    "subtitle": "75% threshold",
+                    "features": [
+                        "✓ Catches most duplicates",
+                        "✓ Good for similar chapters",
+                        "⚠ Some false positives",
+                        "✓ Finds edited duplicates",
+                        "✓ Moderate detection",
+                        "✓ Balanced approach"
+                    ],
+                    "bg_color": "#3a1f1f",  # Dark red
+                    "hover_color": "#8b3a3a",  # Medium red
+                    "border_color": "#dc2626",
+                    "accent_color": "#ef4444",
+                    "recommendation": None
+                },
+                {
+                    "value": "standard",
+                    "emoji": "⚖️",
+                    "title": "STANDARD",
+                    "subtitle": "85% threshold",
+                    "features": [
+                        "✓ Balanced detection",
+                        "✓ Few false positives",
+                        "✓ Default mode",
+                        "✓ Reliable results",
+                        "✓ Good accuracy",
+                        "✓ Recommended"
+                    ],
+                    "bg_color": "#1f2937",  # Dark gray
+                    "hover_color": "#374151",  # Medium gray
+                    "border_color": "#059669",
+                    "accent_color": "#10b981",
+                    "recommendation": "✅ Recommended for most users"
+                },
+                {
+                    "value": "strict",
+                    "emoji": "🛡️",
+                    "title": "STRICT",
+                    "subtitle": "95% threshold",
+                    "features": [
+                        "✓ Very few false positives",
+                        "✓ High precision",
+                        "⚠ May miss some duplicates",
+                        "✓ Near-exact matches only",
+                        "✓ Conservative approach",
+                        "✓ Minimal false alarms"
+                    ],
+                    "bg_color": "#1e3a5f",  # Dark blue
+                    "hover_color": "#2c5aa0",  # Medium blue
+                    "border_color": "#3b82f6",
+                    "accent_color": "#60a5fa",
+                    "recommendation": None
+                }
+            ]
+            
+            # Create mode cards
+            for idx, mode in enumerate(mode_data):
+                # Main card frame with initial background
+                card = tk.Frame(modes_container, 
+                               bg=mode["bg_color"],
+                               highlightbackground=mode["border_color"],
+                               highlightthickness=2,
+                               relief='flat')
+                card.grid(row=0, column=idx, padx=10, pady=5, sticky='nsew')  # Minimal padding
+                modes_container.columnconfigure(idx, weight=1)
+                
+                # Configure row to not expand too much
+                modes_container.rowconfigure(0, weight=0)  # Don't expand row vertically
+                
+                # Content frame
+                content_frame = tk.Frame(card, bg=mode["bg_color"], cursor='hand2')
+                content_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)  # Further reduced padding
+                
+                # Emoji
+                emoji_label = tk.Label(content_frame, text=mode["emoji"], 
+                                      font=('Arial', 48), bg=mode["bg_color"])  # Further reduced
+                emoji_label.pack(pady=(0, 5))  # Minimal padding
+                
+                # Title
+                title_label = tk.Label(content_frame, text=mode["title"], 
+                                      font=('Arial', 24, 'bold'),  # Further reduced
+                                      fg='white', bg=mode["bg_color"])
+                title_label.pack()
+                
+                # Subtitle
+                tk.Label(content_frame, text=mode["subtitle"], 
+                        font=('Arial', 14), fg=mode["accent_color"],  # Further reduced
+                        bg=mode["bg_color"]).pack(pady=(3, 10))  # Minimal padding
+                
+                # Features
+                features_frame = tk.Frame(content_frame, bg=mode["bg_color"])
+                features_frame.pack(fill=tk.X)
+                
+                for feature in mode["features"]:
+                    feature_label = tk.Label(features_frame, text=feature, 
+                                           font=('Arial', 11), fg='#e0e0e0',  # Further reduced from 12
+                                           bg=mode["bg_color"], justify=tk.LEFT)
+                    feature_label.pack(anchor=tk.W, pady=1)  # Minimal padding
+                
+                # Recommendation badge if present
+                if mode["recommendation"]:
+                    rec_frame = tk.Frame(content_frame, bg=mode["accent_color"])
+                    rec_frame.pack(pady=(10, 0), fill=tk.X)  # Further reduced
+                    
+                    rec_label = tk.Label(rec_frame, text=mode["recommendation"],
+                                       font=('Arial', 11, 'bold'),  # Further reduced
+                                       fg='white', bg=mode["accent_color"],
+                                       padx=8, pady=4)  # Minimal padding
+                    rec_label.pack()
+                
+                # Click handler
+                def make_click_handler(mode_value):
+                    def handler(event=None):
+                        nonlocal selected_mode_value
+                        selected_mode_value = mode_value
+                        mode_dialog.destroy()
+                    return handler
+                
+                click_handler = make_click_handler(mode["value"])
+                
+                # Hover effects function
+                def create_hover_handlers(card_widget, content_widget, mode_info, all_widgets):
+                    def on_enter(event=None):
+                        # Apply hover color to ALL widgets
+                        for widget in all_widgets:
+                            try:
+                                if hasattr(widget, 'config'):
+                                    widget.config(bg=mode_info["hover_color"])
+                            except:
+                                pass
+                    
+                    def on_leave(event=None):
+                        # Restore original color to ALL widgets
+                        for widget in all_widgets:
+                            try:
+                                if hasattr(widget, 'config'):
+                                    widget.config(bg=mode_info["bg_color"])
+                            except:
+                                pass
+                    
+                    return on_enter, on_leave
 
-           # Collect ALL widgets that need background color changes
-           all_widgets = []
-           all_widgets.append(emoji_label)
-           all_widgets.append(title_label)
-           all_widgets.append(content_frame)
-           all_widgets.extend([child for child in content_frame.winfo_children() if isinstance(child, (tk.Label, tk.Frame))])
-           all_widgets.append(features_frame)
-           all_widgets.extend([child for child in features_frame.winfo_children() if isinstance(child, tk.Label)])
-           if mode["recommendation"]:
-               all_widgets.append(rec_frame)
-               all_widgets.append(rec_label)
+                # Collect ALL widgets that need background color changes
+                all_widgets = []
+                all_widgets.append(emoji_label)
+                all_widgets.append(title_label)
+                all_widgets.append(content_frame)
+                all_widgets.extend([child for child in content_frame.winfo_children() if isinstance(child, (tk.Label, tk.Frame))])
+                all_widgets.append(features_frame)
+                all_widgets.extend([child for child in features_frame.winfo_children() if isinstance(child, tk.Label)])
+                if mode["recommendation"]:
+                    all_widgets.append(rec_frame)
+                    all_widgets.append(rec_label)
 
-           # Get handlers for this specific card with ALL widgets captured
-           on_enter, on_leave = create_hover_handlers(card, content_frame, mode, all_widgets)
+                # Get handlers for this specific card with ALL widgets captured
+                on_enter, on_leave = create_hover_handlers(card, content_frame, mode, all_widgets)
 
-           # Bind events to all interactive elements
-           interactive_widgets = [card, content_frame, emoji_label, title_label, features_frame] + list(features_frame.winfo_children())
-           for widget in interactive_widgets:
-               widget.bind("<Enter>", on_enter)
-               widget.bind("<Leave>", on_leave)
-               widget.bind("<Button-1>", click_handler)
-               if hasattr(widget, 'config'):
-                   widget.config(cursor='hand2')
-           
-           # Make features clickable too
-           for child in features_frame.winfo_children():
-               child.bind("<Enter>", on_enter)
-               child.bind("<Leave>", on_leave)
-               child.bind("<Button-1>", click_handler)
-               child.config(cursor='hand2')
-       
+                # Bind events to all interactive elements
+                interactive_widgets = [card, content_frame, emoji_label, title_label, features_frame] + list(features_frame.winfo_children())
+                for widget in interactive_widgets:
+                    widget.bind("<Enter>", on_enter)
+                    widget.bind("<Leave>", on_leave)
+                    widget.bind("<Button-1>", click_handler)
+                    if hasattr(widget, 'config'):
+                        widget.config(cursor='hand2')
+                
+                # Make features clickable too
+                for child in features_frame.winfo_children():
+                    child.bind("<Enter>", on_enter)
+                    child.bind("<Leave>", on_leave)
+                    child.bind("<Button-1>", click_handler)
+                    child.config(cursor='hand2')
+            
+            # Add separator line before buttons
+            separator = tk.Frame(main_frame, height=1, bg='#cccccc')  # Thinner separator
+            separator.pack(fill=tk.X, pady=(10, 0))
+            
+            # Add settings button at the bottom
+            button_frame = tk.Frame(main_frame)
+            button_frame.pack(fill=tk.X, pady=(10, 5))  # Reduced padding
+            
+            # Create inner frame for centering buttons
+            button_inner = tk.Frame(button_frame)
+            button_inner.pack()
+            
+            def show_qa_settings():
+                """Show QA Scanner settings dialog"""
+                self.show_qa_scanner_settings(mode_dialog, qa_settings)
+            
+            settings_btn = tb.Button(
+                button_inner,
+                text="⚙️  Scanner Settings",  # Added extra space
+                command=show_qa_settings,
+                bootstyle="info-outline",  # Changed to be more visible
+                width=18,  # Slightly smaller
+                padding=(8, 10)  # Reduced padding
+            )
+            settings_btn.pack(side=tk.LEFT, padx=10)
+            
+            cancel_btn = tb.Button(
+                button_inner,
+                text="Cancel",
+                command=lambda: mode_dialog.destroy(),
+                bootstyle="danger",  # Changed from outline to solid
+                width=12,  # Smaller
+                padding=(8, 10)  # Reduced padding
+            )
+            cancel_btn.pack(side=tk.LEFT, padx=10)
+            
+            # Handle window close (X button)
+            def on_close():
+                nonlocal selected_mode_value
+                selected_mode_value = None
+                mode_dialog.destroy()
+            
+            mode_dialog.protocol("WM_DELETE_WINDOW", on_close)
+            
+            # Show dialog
+            mode_dialog.deiconify()
+            mode_dialog.update_idletasks()  # Force geometry update
+            mode_dialog.wait_window()
+            
+            # Check if user selected a mode
+            if selected_mode_value is None:
+                self.append_log("⚠️ QA scan canceled.")
+                return
+            
+            # Now get the folder
+            folder_path = filedialog.askdirectory(title="Select Folder with HTML Files")
+            if not folder_path:
+                self.append_log("⚠️ QA scan canceled.")
+                return
+            
+            mode = selected_mode_value
+            self.append_log(f"🔍 Starting QA scan in {mode.upper()} mode for folder: {folder_path}")
+            self.stop_requested = False
+            
+            def run_scan():
+                self.master.after(0, self.update_run_button)
+                self.qa_button.config(text="Stop Scan", command=self.stop_qa_scan, bootstyle="danger")
+                
+                try:
+                    # Pass the QA settings to scan_html_folder
+                    scan_html_folder(
+                        folder_path, 
+                        log=self.append_log, 
+                        stop_flag=lambda: self.stop_requested, 
+                        mode=mode,
+                        qa_settings=qa_settings  # Pass settings to the scanner
+                    )
+                    self.append_log("✅ QA scan completed successfully.")
+                except Exception as e:
+                    self.append_log(f"❌ QA scan error: {e}")
+                    self.append_log(f"Traceback: {traceback.format_exc()}")
+                finally:
+                    self.qa_thread = None
+                    self.master.after(0, self.update_run_button)
+                    self.master.after(0, lambda: self.qa_button.config(
+                        text="QA Scan", 
+                        command=self.run_qa_scan, 
+                        bootstyle="warning",
+                        state=tk.NORMAL if scan_html_folder else tk.DISABLED
+                    ))
+            
+            self.qa_thread = threading.Thread(target=run_scan, daemon=True)
+            self.qa_thread.start()
 
-       
-       # Handle window close (X button)
-       def on_close():
-           nonlocal selected_mode_value
-           selected_mode_value = None
-           mode_dialog.destroy()
-       
-       mode_dialog.protocol("WM_DELETE_WINDOW", on_close)
-       
-       # Show dialog
-       mode_dialog.deiconify()
-       mode_dialog.wait_window()
-       
-       # Check if user selected a mode
-       if selected_mode_value is None:
-           self.append_log("⚠️ QA scan canceled.")
-           return
-       
-       # Now get the folder
-       folder_path = filedialog.askdirectory(title="Select Folder with HTML Files")
-       if not folder_path:
-           self.append_log("⚠️ QA scan canceled.")
-           return
-       
-       mode = selected_mode_value
-       self.append_log(f"🔍 Starting QA scan in {mode.upper()} mode for folder: {folder_path}")
-       self.stop_requested = False
-       
-       def run_scan():
-           self.master.after(0, self.update_run_button)
-           self.qa_button.config(text="Stop Scan", command=self.stop_qa_scan, bootstyle="danger")
-           
-           try:
-               # Call scan_html_folder with the mode parameter
-               scan_html_folder(folder_path, log=self.append_log, stop_flag=lambda: self.stop_requested, mode=mode)
-               self.append_log("✅ QA scan completed successfully.")
-           except Exception as e:
-               self.append_log(f"❌ QA scan error: {e}")
-           finally:
-               self.qa_thread = None
-               self.master.after(0, self.update_run_button)
-               self.master.after(0, lambda: self.qa_button.config(
-                   text="QA Scan", 
-                   command=self.run_qa_scan, 
-                   bootstyle="warning",
-                   state=tk.NORMAL if scan_html_folder else tk.DISABLED
-               ))
-       
-       self.qa_thread = threading.Thread(target=run_scan, daemon=True)
-       self.qa_thread.start()
-       
+    def show_qa_scanner_settings(self, parent_dialog, qa_settings):
+        """Show QA Scanner settings dialog using WindowManager properly"""
+        # Use setup_scrollable from WindowManager - NOT create_scrollable_dialog
+        dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
+            parent_dialog,
+            "QA Scanner Settings",
+            width=800,
+            height=None,  # Let WindowManager calculate optimal height
+            modal=True,
+            resizable=True,
+            max_width_ratio=0.9,
+            max_height_ratio=0.9
+        )
+        
+        # Main settings frame
+        main_frame = tk.Frame(scrollable_frame, padx=30, pady=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Title
+        title_label = tk.Label(
+            main_frame,
+            text="QA Scanner Settings",
+            font=('Arial', 24, 'bold')
+        )
+        title_label.pack(pady=(0, 20))
+        
+        # Foreign Character Settings Section
+        foreign_section = tk.LabelFrame(
+            main_frame,
+            text="Foreign Character Detection",
+            font=('Arial', 12, 'bold'),
+            padx=20,
+            pady=15
+        )
+        foreign_section.pack(fill=tk.X, pady=(0, 20))
+        
+        # Threshold setting
+        threshold_frame = tk.Frame(foreign_section)
+        threshold_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(
+            threshold_frame,
+            text="Minimum foreign characters to flag:",
+            font=('Arial', 10)
+        ).pack(side=tk.LEFT)
+        
+        threshold_var = tk.IntVar(value=qa_settings.get('foreign_char_threshold', 10))
+        threshold_spinbox = tb.Spinbox(
+            threshold_frame,
+            from_=0,
+            to=1000,
+            textvariable=threshold_var,
+            width=10,
+            bootstyle="primary"
+        )
+        threshold_spinbox.pack(side=tk.LEFT, padx=(10, 0))
+        
+        tk.Label(
+            threshold_frame,
+            text="(0 = always flag, higher = more tolerant)",
+            font=('Arial', 9),
+            fg='gray'
+        ).pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Excluded characters - using UIHelper for scrollable text
+        excluded_frame = tk.Frame(foreign_section)
+        excluded_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        tk.Label(
+            excluded_frame,
+            text="Additional characters to exclude from detection:",
+            font=('Arial', 10)
+        ).pack(anchor=tk.W)
+        
+        # Use regular Text widget with manual scroll setup instead of ScrolledText
+        excluded_text_frame = tk.Frame(excluded_frame)
+        excluded_text_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        excluded_text = tk.Text(
+            excluded_text_frame,
+            height=7,
+            width=60,
+            font=('Consolas', 10),
+            wrap=tk.WORD,
+            undo=True
+        )
+        excluded_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # Add scrollbar manually
+        excluded_scrollbar = ttk.Scrollbar(excluded_text_frame, orient="vertical", command=excluded_text.yview)
+        excluded_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        excluded_text.configure(yscrollcommand=excluded_scrollbar.set)
+        
+        # Setup undo/redo for the text widget
+        UIHelper.setup_text_undo_redo(excluded_text)
+        
+        excluded_text.insert(1.0, qa_settings.get('excluded_characters', ''))
+        
+        tk.Label(
+            excluded_frame,
+            text="Enter characters separated by spaces (e.g., ™ © ® • …)",
+            font=('Arial', 9),
+            fg='gray'
+        ).pack(anchor=tk.W)
+        
+        # Detection Options Section
+        detection_section = tk.LabelFrame(
+            main_frame,
+            text="Detection Options",
+            font=('Arial', 12, 'bold'),
+            padx=20,
+            pady=15
+        )
+        detection_section.pack(fill=tk.X, pady=(0, 20))
+        
+        # Checkboxes for detection options
+        check_encoding_var = tk.BooleanVar(value=qa_settings.get('check_encoding_issues', True))
+        check_repetition_var = tk.BooleanVar(value=qa_settings.get('check_repetition', True))
+        check_artifacts_var = tk.BooleanVar(value=qa_settings.get('check_translation_artifacts', True))
+        
+        tb.Checkbutton(
+            detection_section,
+            text="Check for encoding issues (�, □, ◇)",
+            variable=check_encoding_var,
+            bootstyle="primary"
+        ).pack(anchor=tk.W, pady=2)
+        
+        tb.Checkbutton(
+            detection_section,
+            text="Check for excessive repetition",
+            variable=check_repetition_var,
+            bootstyle="primary"
+        ).pack(anchor=tk.W, pady=2)
+        
+        tb.Checkbutton(
+            detection_section,
+            text="Check for translation artifacts (MTL notes, watermarks)",
+            variable=check_artifacts_var,
+            bootstyle="primary"
+        ).pack(anchor=tk.W, pady=2)
+        
+        # File Processing Section
+        file_section = tk.LabelFrame(
+            main_frame,
+            text="File Processing",
+            font=('Arial', 12, 'bold'),
+            padx=20,
+            pady=15
+        )
+        file_section.pack(fill=tk.X, pady=(0, 20))
+        
+        # Minimum file length
+        min_length_frame = tk.Frame(file_section)
+        min_length_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(
+            min_length_frame,
+            text="Minimum file length (characters):",
+            font=('Arial', 10)
+        ).pack(side=tk.LEFT)
+        
+        min_length_var = tk.IntVar(value=qa_settings.get('min_file_length', 100))
+        min_length_spinbox = tb.Spinbox(
+            min_length_frame,
+            from_=10,
+            to=10000,
+            textvariable=min_length_var,
+            width=10,
+            bootstyle="primary"
+        )
+        min_length_spinbox.pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Report Settings Section
+        report_section = tk.LabelFrame(
+            main_frame,
+            text="Report Settings",
+            font=('Arial', 12, 'bold'),
+            padx=20,
+            pady=15
+        )
+        report_section.pack(fill=tk.X, pady=(0, 20))
+        
+        # Report format
+        format_frame = tk.Frame(report_section)
+        format_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(
+            format_frame,
+            text="Report format:",
+            font=('Arial', 10)
+        ).pack(side=tk.LEFT)
+        
+        format_var = tk.StringVar(value=qa_settings.get('report_format', 'detailed'))
+        format_options = [
+            ("Summary only", "summary"),
+            ("Detailed (recommended)", "detailed"),
+            ("Verbose (all data)", "verbose")
+        ]
+        
+        for idx, (text, value) in enumerate(format_options):
+            rb = tb.Radiobutton(
+                format_frame,
+                text=text,
+                variable=format_var,
+                value=value,
+                bootstyle="primary"
+            )
+            rb.pack(side=tk.LEFT, padx=(10 if idx == 0 else 5, 0))
+        
+        # Auto-save report
+        auto_save_var = tk.BooleanVar(value=qa_settings.get('auto_save_report', True))
+        tb.Checkbutton(
+            report_section,
+            text="Automatically save report after scan",
+            variable=auto_save_var,
+            bootstyle="primary"
+        ).pack(anchor=tk.W)
+        
+        # Buttons
+        button_frame = tk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(20, 0))
+        button_inner = tk.Frame(button_frame)
+        button_inner.pack()
+        
+        def save_settings():
+            """Save QA scanner settings"""
+            qa_settings['foreign_char_threshold'] = threshold_var.get()
+            qa_settings['excluded_characters'] = excluded_text.get(1.0, tk.END).strip()
+            qa_settings['check_encoding_issues'] = check_encoding_var.get()
+            qa_settings['check_repetition'] = check_repetition_var.get()
+            qa_settings['check_translation_artifacts'] = check_artifacts_var.get()
+            qa_settings['min_file_length'] = min_length_var.get()
+            qa_settings['report_format'] = format_var.get()
+            qa_settings['auto_save_report'] = auto_save_var.get()
+            
+            # Save to main config
+            self.config['qa_scanner_settings'] = qa_settings
+            self.save_config()
+            
+            self.append_log("✅ QA Scanner settings saved")
+            dialog._cleanup_scrolling()  # Clean up scrolling bindings
+            dialog.destroy()
+        
+        def reset_defaults():
+            """Reset to default settings"""
+            result = messagebox.askyesno(
+                "Reset to Defaults", 
+                "Are you sure you want to reset all settings to defaults?",
+                parent=dialog
+            )
+            if result:
+                threshold_var.set(10)
+                excluded_text.delete(1.0, tk.END)
+                check_encoding_var.set(True)
+                check_repetition_var.set(True)
+                check_artifacts_var.set(True)
+                min_length_var.set(100)
+                format_var.set('detailed')
+                auto_save_var.set(True)
+        
+        # Create buttons using ttkbootstrap styles
+        save_btn = tb.Button(
+            button_inner,
+            text="Save Settings",
+            command=save_settings,
+            bootstyle="success",
+            width=15
+        )
+        save_btn.pack(side=tk.LEFT, padx=5)
+        
+        reset_btn = tb.Button(
+            button_inner,
+            text="Reset Defaults",
+            command=reset_defaults,
+            bootstyle="warning",
+            width=15
+        )
+        reset_btn.pack(side=tk.RIGHT, padx=(5, 0))
+        
+        cancel_btn = tb.Button(
+            button_inner,
+            text="Cancel",
+            command=lambda: [dialog._cleanup_scrolling(), dialog.destroy()],
+            bootstyle="secondary",
+            width=15
+        )
+        cancel_btn.pack(side=tk.RIGHT)
+        
+        # Use WindowManager's auto_resize_dialog to properly size the window
+        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=0.85)
+        
+        # Handle window close - setup_scrollable adds _cleanup_scrolling method
+        dialog.protocol("WM_DELETE_WINDOW", lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
+        
     def toggle_token_limit(self):
        """Toggle whether the token-limit entry is active or not."""
        if not self.token_limit_disabled:
@@ -4096,7 +4516,7 @@ class TranslatorGUI:
        self._create_settings_buttons(scrollable_frame, dialog, canvas)
        
        # Auto-resize and show
-       self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.48)
+       self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.6)
        
        dialog.protocol("WM_DELETE_WINDOW", lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
 
@@ -4506,9 +4926,38 @@ class TranslatorGUI:
                       bootstyle="round-toggle").pack(anchor=tk.W)
         
         tk.Label(left_column, text="Clean mode: removes image and shows only translated text",
-                font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, padx=20)
+                font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, padx=20, pady=(0, 10))
+
+        # Add some spacing
+        tk.Frame(left_column, height=10).pack()
+
+        # Watermark removal toggle
+        tb.Checkbutton(left_column, text="Enable Watermark Removal", 
+                      variable=self.enable_watermark_removal_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W)
+
+        tk.Label(left_column, text="Advanced preprocessing to remove watermarks from images",
+                font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, padx=20, pady=(0, 10))
+
+        # Save cleaned images toggle - create with reference
+        self.save_cleaned_checkbox = tb.Checkbutton(left_column, text="Save Cleaned Images", 
+                                                   variable=self.save_cleaned_images_var,
+                                                   bootstyle="round-toggle")
+        self.save_cleaned_checkbox.pack(anchor=tk.W, padx=(20, 0))
+
+        tk.Label(left_column, text="Keep watermark-removed images in translated_images/cleaned/",
+                font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, padx=40, pady=(0, 10))
+
+        # Advanced watermark removal toggle - create with reference
+        self.advanced_watermark_checkbox = tb.Checkbutton(left_column, text="Advanced Watermark Removal", 
+                                                         variable=self.advanced_watermark_removal_var,
+                                                         bootstyle="round-toggle")
+        self.advanced_watermark_checkbox.pack(anchor=tk.W, padx=(20, 0))
+
+        tk.Label(left_column, text="Use FFT-based pattern detection for stubborn watermarks",
+                font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, padx=40)
         
-        # Right column
+        # Right column - existing settings
         settings_frame = tk.Frame(right_column)
         settings_frame.pack(fill=tk.X)
         
@@ -4530,6 +4979,25 @@ class TranslatorGUI:
                 "• GPT-4V, GPT-4o, o4-mini",
                 font=('TkDefaultFont', 10), fg='#666', justify=tk.LEFT).pack(anchor=tk.W, pady=(10, 0))
 
+        # Set up the dependency logic
+        def toggle_watermark_options(*args):
+            if self.enable_watermark_removal_var.get():
+                # Enable both sub-options
+                self.save_cleaned_checkbox.config(state=tk.NORMAL)
+                self.advanced_watermark_checkbox.config(state=tk.NORMAL)
+            else:
+                # Disable both sub-options and turn them off
+                self.save_cleaned_checkbox.config(state=tk.DISABLED)
+                self.advanced_watermark_checkbox.config(state=tk.DISABLED)
+                self.save_cleaned_images_var.set(False)
+                self.advanced_watermark_removal_var.set(False)
+
+        # Bind the trace to the watermark removal variable
+        self.enable_watermark_removal_var.trace('w', toggle_watermark_options)
+        
+        # Call once to set initial state
+        toggle_watermark_options()
+        
     def _create_settings_buttons(self, parent, dialog, canvas):
         """Create save and close buttons for settings dialog"""
         button_frame = tk.Frame(parent)
@@ -4623,6 +5091,8 @@ class TranslatorGUI:
                     "DISABLE_ZERO_DETECTION": "1" if self.disable_zero_detection_var.get() else "0",
                     "DUPLICATE_DETECTION_MODE": self.duplicate_detection_mode_var.get(),
                     "ENABLE_DECIMAL_CHAPTERS": "1" if self.enable_decimal_chapters_var.get() else "0",
+                    'ENABLE_WATERMARK_REMOVAL': "1" if self.enable_watermark_removal_var.get() else "0",
+                    'SAVE_CLEANED_IMAGES': "1" if self.save_cleaned_images_var.get() else "0"
                 }
                 os.environ.update(env_updates)
                 
@@ -4866,6 +5336,9 @@ class TranslatorGUI:
             self.config['chapter_number_offset'] = safe_int(self.chapter_number_offset_var.get(), 0)
             self.config['use_header_as_output'] = self.use_header_as_output_var.get()
             self.config['enable_decimal_chapters'] = self.enable_decimal_chapters_var.get()
+            self.config['enable_watermark_removal'] = self.enable_watermark_removal_var.get()
+            self.config['save_cleaned_images'] = self.save_cleaned_images_var.get()
+            self.config['advanced_watermark_removal'] = self.advanced_watermark_removal_var.get()
 
 
             _tl = self.token_limit_entry.get().strip()
@@ -4888,7 +5361,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v2.8.5...")
+    print("🚀 Starting Glossarion v2.8.8...")
     
     # Initialize splash screen
     splash_manager = None
