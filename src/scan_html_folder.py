@@ -1,3 +1,26 @@
+"""
+Enhanced QA Scanner for HTML Translation Files
+
+This module provides comprehensive quality assurance scanning for translated HTML files,
+including duplicate detection, foreign character detection, and translation artifact detection.
+
+PERFORMANCE IMPROVEMENTS:
+- Added detailed progress indicators for all slow operations
+- Shows estimated time remaining for long operations  
+- Displays current file being scanned
+- Provides progress updates every 5-10%
+- Added timing information for each phase
+- MinHash optimization status messages
+- Debug output for stop functionality
+
+OPTIMIZATION TIPS:
+- For datasets > 100 files, avoid AI Hunter mode (use aggressive instead)
+- Install 'datasketch' package for 2-10x faster duplicate detection: pip install datasketch
+- Use 'summary' report format for faster completion
+- Disable checks you don't need in QA Scanner Settings
+"""
+
+
 import os
 import hashlib
 import json
@@ -30,9 +53,18 @@ except ImportError:
 _stop_flag = False
 
 def stop_scan():
-    """Set the stop flag to True"""
+    """Set the stop flag to True
+    
+    This function should be called by the GUI to stop a running scan.
+    The GUI code needs to:
+    1. Import this function: from scan_html_folder import stop_scan
+    2. Call it in the stop_qa_scan method: stop_scan()
+    3. Update the QA button to show "Stop Scan" when scan is running
+    """
     global _stop_flag
     _stop_flag = True
+    print("🛑 STOP SCAN CALLED - Global flag set to True")  # More visible debug
+    return True  # Return True to confirm it was called
 
 # Configuration class for duplicate detection
 class DuplicateDetectionConfig:
@@ -565,7 +597,11 @@ def create_minhash_index(results, config):
     lsh = MinHashLSH(threshold=threshold, num_perm=128)
     minhashes = {}
     
-    for result in results:
+    total = len(results)
+    for idx, result in enumerate(results):
+        if idx % 50 == 0 and idx > 0:
+            print(f"   Building MinHash index: {idx}/{total} files processed...")
+            
         text = result.get('normalized_text', '')
         if not text:
             continue
@@ -865,7 +901,7 @@ def merge_duplicate_groups(duplicate_groups, filename1, filename2):
             if group == max_group:
                 duplicate_groups[filename] = min_group
 
-def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence, config, log):
+def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence, config, log, should_stop=None):
     """Additional duplicate detection specifically for different naming formats"""
     
     # First, normalize all chapter numbers
@@ -883,6 +919,10 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
     # Check each group for duplicates
     duplicates_found = []
     for chapter_num, group in chapter_groups.items():
+        if should_stop and should_stop():
+            log("⛔ Duplicate check interrupted by user.")
+            return duplicates_found
+            
         if len(group) > 1:
             log(f"   └─ Found {len(group)} files for chapter {chapter_num}")
             
@@ -926,7 +966,12 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
     
     # Group files by their content preview for faster checking
     preview_groups = {}
+    total_files = len(results)
+    
     for i, result in enumerate(results):
+        if i % 20 == 0 and i > 0:
+            log(f"   📊 Grouping previews: {i}/{total_files} files processed...")
+            
         preview = result.get('raw_text', '')[:1000].strip()
         if not preview:
             continue
@@ -948,6 +993,10 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
     
     # Check groups with multiple files
     for preview, group in preview_groups.items():
+        if should_stop and should_stop():
+            log("⛔ Duplicate check interrupted by user.")
+            return duplicates_found
+            
         if len(group) > 1:
             log(f"   └─ Found {len(group)} files with similar content")
             
@@ -981,15 +1030,26 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
     return duplicates_found
 
 
-def detect_duplicates(results, log, stop_flag, config):
+def detect_duplicates(results, log, should_stop, config):
     """Detect duplicates using multiple strategies with enhanced methods - PERFORMANCE OPTIMIZED"""
     duplicate_groups = {}
     near_duplicate_groups = {}
     duplicate_confidence = defaultdict(float)
     
+    total_files = len(results)
+    dup_start_time = time.time()  # Track timing for progress estimates
+    
     # Extract additional signatures for all results
     log("🔍 Extracting semantic and structural signatures...")
-    for result in results:
+    for idx, result in enumerate(results):
+        if should_stop():
+            log("⛔ Signature extraction interrupted by user.")
+            return duplicate_groups, near_duplicate_groups, duplicate_confidence
+            
+        if idx % 10 == 0:
+            progress = int((idx / total_files) * 100)
+            log(f"   📊 Progress: {idx}/{total_files} files ({progress}%)")
+            
         text = result.get('raw_text', '')
         _, semantic_sig = extract_semantic_fingerprint(text)
         structural_sig = extract_structural_signature(text)
@@ -1047,7 +1107,7 @@ def detect_duplicates(results, log, stop_flag, config):
     
     # 2. Enhanced duplicate detection for different naming formats
     log("🔍 Checking for same chapters with different naming...")
-    enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence, config, log)
+    enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence, config, log, should_stop)
     
     # 3. MinHash-based detection (if available)
     if lsh:
@@ -1069,11 +1129,18 @@ def detect_duplicates(results, log, stop_flag, config):
 
     # Use MinHash candidates for semantic checking if available
     if lsh and config.mode != 'ai-hunter':
+        log("🚀 Using MinHash optimization for faster semantic checking...")
+        checked_count = 0
+        
         # For non-AI Hunter modes, use MinHash to limit comparisons
         for result in results:
-            if stop_flag and stop_flag():
+            if should_stop():
                 log("⛔ Semantic check interrupted by user.")
                 break
+            
+            checked_count += 1
+            if checked_count % 10 == 0:
+                log(f"   📊 MinHash semantic check: {checked_count}/{len(results)} files processed...")
                 
             if result['filename'] in minhashes:
                 candidates = lsh.query(minhashes[result['filename']])
@@ -1109,15 +1176,35 @@ def detect_duplicates(results, log, stop_flag, config):
     
     # AI Hunter mode or fallback: check all pairs
     elif config.mode == 'ai-hunter' or not lsh:
-        log("🤖 AI Hunter mode: Enhanced semantic and structural checking active")
+        if config.mode == 'ai-hunter':
+            log("🤖 AI Hunter mode: Enhanced semantic and structural checking active")
+            log("   ⚠️ This will check ALL file pairs - may take several minutes for large datasets")
+        
+        total_comparisons = (len(results) * (len(results) - 1)) // 2
+        comparisons_done = 0
+        last_progress = 0
+        ai_start_time = time.time()  # Use local timer for AI Hunter
         
         # Check EVERY pair of files
         for i in range(len(results)):
-            if stop_flag and stop_flag():
+            if should_stop():
                 log("⛔ Semantic check interrupted by user.")
                 break
-                
+            
             for j in range(i + 1, len(results)):
+                comparisons_done += 1
+                
+                # Show progress every 5%
+                progress = int((comparisons_done / total_comparisons) * 100)
+                if progress >= last_progress + 5:
+                    elapsed = time.time() - ai_start_time
+                    if comparisons_done > 0:
+                        rate = comparisons_done / elapsed
+                        remaining = (total_comparisons - comparisons_done) / rate
+                        log(f"   📊 AI Hunter progress: {comparisons_done}/{total_comparisons} ({progress}%) - ~{int(remaining)}s remaining")
+                    else:
+                        log(f"   📊 AI Hunter progress: {comparisons_done}/{total_comparisons} ({progress}%)")
+                    last_progress = progress
                 # Skip if already in same group
                 if (results[i]['filename'] in duplicate_groups and 
                     results[j]['filename'] in duplicate_groups and
@@ -1172,7 +1259,7 @@ def detect_duplicates(results, log, stop_flag, config):
     # Use MinHash candidates for deep checking if available
     if lsh and config.mode != 'ai-hunter':
         for result in results:
-            if stop_flag and stop_flag():
+            if should_stop():
                 log("⛔ Similarity check interrupted by user.")
                 break
             
@@ -1206,12 +1293,26 @@ def detect_duplicates(results, log, stop_flag, config):
                         log(f"   └─ Content match: {result['filename']} ≈ {candidate_filename} ({int(similarity*100)}%)")
     else:
         # Fallback: check all pairs (slower but thorough)
+        total_comparisons = (len(results) * (len(results) - 1)) // 2
+        comparisons_done = 0
+        last_progress = 0
+        
+        log(f"   📊 Checking {total_comparisons} file pairs for content similarity...")
+        
         for i in range(len(results)):
-            if stop_flag and stop_flag():
+            if should_stop():
                 log("⛔ Similarity check interrupted by user.")
                 break
             
             for j in range(i + 1, len(results)):
+                comparisons_done += 1
+                
+                # Show progress every 10% or every 100 comparisons
+                if comparisons_done % 100 == 0 or (total_comparisons < 1000 and comparisons_done % 10 == 0):
+                    progress = int((comparisons_done / total_comparisons) * 100)
+                    if progress >= last_progress + 10:
+                        log(f"   📊 Content similarity progress: {comparisons_done}/{total_comparisons} ({progress}%)")
+                        last_progress = progress
                 # Check if already in same group
                 if (results[i]['filename'] in duplicate_groups and 
                     results[j]['filename'] in duplicate_groups and
@@ -1241,28 +1342,39 @@ def detect_duplicates(results, log, stop_flag, config):
                     log(f"   └─ Content match: {results[i]['filename']} ≈ {results[j]['filename']} ({int(similarity*100)}%)")
     
     # 6. Consecutive chapter check with fuzzy matching
-    check_consecutive_chapters(results, duplicate_groups, duplicate_confidence, config, log)
+    check_consecutive_chapters(results, duplicate_groups, duplicate_confidence, config, log, should_stop)
     
     # 7. Split chapter detection
     split_candidates = detect_split_chapters(results)
     if split_candidates:
         log(f"🔍 Found {len(split_candidates)} potential split chapters")
-        check_split_chapters(split_candidates, results, duplicate_groups, duplicate_confidence, log)
+        check_split_chapters(split_candidates, results, duplicate_groups, duplicate_confidence, log, should_stop)
     
     # 8. Specific pattern detection
-    check_specific_patterns(results, duplicate_groups, duplicate_confidence, log)
+    check_specific_patterns(results, duplicate_groups, duplicate_confidence, log, should_stop)
+    
+    # Summary of findings
+    unique_groups = len(set(duplicate_groups.values())) if duplicate_groups else 0
+    files_with_duplicates = len(duplicate_groups)
+    
+    if files_with_duplicates > 0:
+        log(f"\n📊 Duplicate Detection Summary:")
+        log(f"   Found {files_with_duplicates} files with duplicates")
+        log(f"   Grouped into {unique_groups} duplicate groups")
+    else:
+        log(f"\n✅ No duplicates found among {len(results)} files")
     
     return duplicate_groups, near_duplicate_groups, duplicate_confidence
 
 def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidence, 
-                                threshold, log, stop_flag):
+                                threshold, log, should_stop):
     """Perform deep similarity analysis between files"""
     log(f"🔍 Deep content similarity analysis (threshold: {int(threshold*100)}%)...")
     
     checked_pairs = set()
     
     for i in range(len(results)):
-        if stop_flag and stop_flag():
+        if should_stop():
             log("⛔ Similarity check interrupted by user.")
             break
         
@@ -1313,9 +1425,14 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
                     else:
                         log(f"   └─ Not similar enough (semantic: {int(semantic_sim*100)}%, combined: {int(combined_score*100)}%)")
 
-def check_consecutive_chapters(results, duplicate_groups, duplicate_confidence, config, log):
+def check_consecutive_chapters(results, duplicate_groups, duplicate_confidence, config, log, should_stop=None):
     """Check for consecutive chapters with same title using fuzzy matching"""
     log("🔍 Checking consecutive same-titled chapters...")
+    
+    # Check for stop early
+    if should_stop and should_stop():
+        log("⛔ Consecutive chapter check interrupted by user.")
+        return
     
     # Extract chapter titles
     for result in results:
@@ -1328,6 +1445,10 @@ def check_consecutive_chapters(results, duplicate_groups, duplicate_confidence, 
     consecutive_threshold = config.get_threshold('consecutive_chapters')
     
     for i in range(len(chapter_sorted) - 1):
+        if should_stop and should_stop():
+            log("⛔ Consecutive chapter check interrupted by user.")
+            return
+            
         current = chapter_sorted[i]
         
         for j in range(i + 1, min(i + consecutive_threshold + 1, len(chapter_sorted))):
@@ -1362,9 +1483,12 @@ def check_consecutive_chapters(results, duplicate_groups, duplicate_confidence, 
                     log(f"   └─ Same-titled chapters {current['chapter_num']} & {next_chapter['chapter_num']} "
                         f"({int(similarity*100)}% similar)")
 
-def check_split_chapters(split_candidates, results, duplicate_groups, duplicate_confidence, log):
+def check_split_chapters(split_candidates, results, duplicate_groups, duplicate_confidence, log, should_stop=None):
     """Check if split chapters are parts of the same content"""
     for i, candidate in enumerate(split_candidates):
+        if should_stop and should_stop():
+            log("⛔ Split chapter check interrupted by user.")
+            return
         idx = candidate['index']
         
         # Check next few files
@@ -1386,9 +1510,13 @@ def check_split_chapters(split_candidates, results, duplicate_groups, duplicate_
                         duplicate_confidence[pair] = 0.9  # High confidence for split chapters
                         log(f"   └─ Split chapter detected: {results[idx]['filename']} continues in {next_result['filename']}")
 
-def check_specific_patterns(results, duplicate_groups, duplicate_confidence, log):
+def check_specific_patterns(results, duplicate_groups, duplicate_confidence, log, should_stop=None):
     """Check for specific known duplicate patterns"""
     log("🔍 Checking for known duplicate patterns...")
+    
+    if should_stop and should_stop():
+        log("⛔ Pattern check interrupted by user.")
+        return
     
     # Known patterns that indicate duplicates
     patterns = {
@@ -1408,6 +1536,10 @@ def check_specific_patterns(results, duplicate_groups, duplicate_confidence, log
     
     # Group files with same patterns
     for pattern_name, indices in pattern_matches.items():
+        if should_stop and should_stop():
+            log("⛔ Pattern check interrupted by user.")
+            return
+            
         if len(indices) > 1:
             log(f"   └─ Found {len(indices)} files with '{pattern_name}' pattern")
             
@@ -1833,6 +1965,29 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='standard', qa
     global _stop_flag
     _stop_flag = False
     
+    # Create a combined stop check function
+    def should_stop():
+        # Check both the passed stop_flag and global flag
+        if stop_flag and stop_flag():
+            log("⛔ Stop requested via GUI stop button")
+            return True
+        if _stop_flag:
+            log("⛔ Stop requested via global stop_scan() function")
+            return True
+        return False
+    
+    start_time = time.time()
+    
+    # Debug info
+    log(f"🔍 Starting scan with stop_flag={'provided' if stop_flag else 'not provided'}")
+    if stop_flag:
+        log(f"   Stop flag callable: {callable(stop_flag)}")
+        try:
+            current_state = stop_flag()
+            log(f"   Stop flag current state: {current_state}")
+        except:
+            log("   Could not check stop flag state")
+    
     # Load default settings if not provided
     if qa_settings is None:
         qa_settings = {
@@ -1862,19 +2017,42 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='standard', qa
     if mode == 'ai-hunter':
         log("   ⚠️ WARNING: This mode will flag almost everything as potential duplicates!")
         log("   🎯 Designed specifically for catching AI retranslations of the same content")
+        log("   ⏱️ NOTE: AI Hunter mode checks EVERY file pair - this can take several minutes!")
+    elif mode == 'aggressive':
+        log("   ⚡ Aggressive mode: Lower thresholds for catching more potential duplicates")
+    elif mode == 'strict':
+        log("   🔒 Strict mode: Only very similar files will be flagged as duplicates")
     
     html_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith(".html")])
     log(f"🔍 Found {len(html_files)} HTML files. Starting scan...")
+    
+    # Warn about AI Hunter mode with large datasets
+    if mode == 'ai-hunter' and len(html_files) > 100:
+        total_comparisons = (len(html_files) * (len(html_files) - 1)) // 2
+        estimated_time = total_comparisons * 0.001  # Rough estimate: 1ms per comparison
+        log(f"   ⚠️ AI Hunter mode with {len(html_files)} files = {total_comparisons:,} comparisons")
+        log(f"   ⏱️ Estimated time: {int(estimated_time)} seconds ({int(estimated_time/60)} minutes)")
+        log(f"   💡 Consider using 'aggressive' mode for faster scanning of large datasets")
     
     results = []
     
     # First pass: collect all data
     for idx, filename in enumerate(html_files):
-        if stop_flag and stop_flag():
+        if should_stop():
             log("⛔ QA scan interrupted by user.")
             return
         
-        log(f"📄 [{idx+1}/{len(html_files)}] Scanning {filename}...")
+        # Progress update every 10 files
+        if idx % 10 == 0:
+            progress = int((idx / len(html_files)) * 100)
+            log(f"📄 [{idx+1}/{len(html_files)}] Scanning {filename}... ({progress}% complete)")
+            
+            # Debug: Check stop flag states periodically
+            if idx % 50 == 0 and idx > 0:
+                log(f"   [DEBUG] Global stop flag: {_stop_flag}, Stop function: {stop_flag() if stop_flag else 'N/A'}")
+        else:
+            # Less verbose for other files - show every file but compact
+            print(f"\r📄 Scanning: {filename} [{idx+1}/{len(html_files)}]", end='', flush=True)
         
         full_path = os.path.join(folder_path, filename)
         try:
@@ -1882,6 +2060,11 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='standard', qa
         except Exception as e:
             log(f"⚠️ Failed to read {filename}: {e}")
             continue
+        
+        # Check for stop after each file read
+        if should_stop():
+            log("⛔ QA scan interrupted during file reading.")
+            return
         
         # Check minimum file length from settings
         min_length = qa_settings.get('min_file_length', 100)
@@ -1918,12 +2101,21 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='standard', qa
             "translation_artifacts": artifacts
         })
     
+    # Clear the progress line
+    print()  # New line after progress indicator
+    
     log("\n✅ Initial scan complete. Performing enhanced duplicate detection...")
+    
+    # Time the duplicate detection phase
+    dup_start_time = time.time()
     
     # Detect duplicates with enhanced methods
     duplicate_groups, near_duplicate_groups, duplicate_confidence = detect_duplicates(
-        results, log, stop_flag, config
+        results, log, should_stop, config
     )
+    
+    dup_time = time.time() - dup_start_time
+    log(f"✅ Duplicate detection completed in {dup_time:.1f} seconds")
     
     # Process results and check for issues
     log("\n📊 Checking for other issues...")
@@ -2018,6 +2210,12 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='standard', qa
     
     # Update progress file
     update_progress_file(folder_path, results, log)
+    
+    # Final timing
+    total_time = time.time() - start_time
+    log(f"\n⏱️ Total scan time: {total_time:.1f} seconds")
+    if total_time > 60:
+        log(f"   ({int(total_time // 60)} minutes {int(total_time % 60)} seconds)")
 
 def launch_gui():
     """Launch GUI interface with mode selection"""
@@ -2091,3 +2289,29 @@ if __name__ == "__main__":
             elif sys.argv[2] == "--ai-hunter":
                 mode = 'ai-hunter'
         scan_html_folder(sys.argv[1], mode=mode)
+
+
+
+def reset_stop_flag():
+    """Reset the stop flag - useful for starting a new scan"""
+    global _stop_flag
+    _stop_flag = False
+    print("🔄 Stop flag reset to False")
+
+def is_stop_requested():
+    """Check if stop has been requested"""
+    global _stop_flag
+    return _stop_flag
+
+# Export the stop_scan function so GUI can call it
+__all__ = ['scan_html_folder', 'stop_scan', 'reset_stop_flag', 'is_stop_requested', 
+          'DuplicateDetectionConfig', 'test_stop_functionality']
+
+def test_stop_functionality():
+    """Test function to verify stop_scan works"""
+    global _stop_flag
+    print(f"Before stop_scan: _stop_flag = {_stop_flag}")
+    stop_scan()
+    print(f"After stop_scan: _stop_flag = {_stop_flag}")
+    _stop_flag = False  # Reset
+    return True
