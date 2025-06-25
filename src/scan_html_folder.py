@@ -190,19 +190,35 @@ def has_repeating_sentences(text, min_repeats=10):
                 return True
     return False
 
-def is_korean_separator_pattern(text):
+def is_korean_separator_pattern(text, excluded_chars=None):
     """Check if text is a Korean separator pattern like [ㅡㅡㅡㅡㅡ]"""
+    if excluded_chars is None:
+        excluded_chars = KOREAN_SEPARATOR_CHARS
+    
     # Remove brackets and spaces
     cleaned = text.strip().strip('[]').strip()
     
     if not cleaned:
         return False
     
-    # Check if all characters are Korean separators
-    return all(c in KOREAN_SEPARATOR_CHARS or c.isspace() for c in cleaned)
+    # Check if all characters are separators or excluded characters
+    return all(c in excluded_chars or c.isspace() for c in cleaned)
 
-def detect_non_english_content(text):
+def detect_non_english_content(text, qa_settings=None):
     """Detect ONLY non-Latin script characters (not romanized text), excluding Korean separators"""
+    if qa_settings is None:
+        qa_settings = {'foreign_char_threshold': 10, 'excluded_characters': ''}
+    
+    # Get threshold and excluded characters
+    threshold = qa_settings.get('foreign_char_threshold', 10)
+    excluded_chars = set()
+    if qa_settings.get('excluded_characters'):
+        excluded_chars = set(qa_settings['excluded_characters'].split())
+    
+    # Combine with existing separator chars
+    all_excluded_chars = KOREAN_SEPARATOR_CHARS.copy()
+    all_excluded_chars.update(excluded_chars)
+    
     issues = []
     filtered_text = filter_dash_lines(text)
     
@@ -229,13 +245,13 @@ def detect_non_english_content(text):
     
     for part in parts:
         # Skip if this part is a Korean separator pattern
-        if is_korean_separator_pattern(part):
+        if is_korean_separator_pattern(part, all_excluded_chars):
             continue
         
         # Check characters in this part
         for char in part:
-            # Skip Korean separator characters
-            if char in KOREAN_SEPARATOR_CHARS:
+            # Skip excluded characters
+            if char in all_excluded_chars:
                 continue
             
             # Skip whitespace and common punctuation
@@ -253,11 +269,13 @@ def detect_non_english_content(text):
                         script_chars[script_name]['examples'].append(char)
                     break
     
-    if total_non_latin > 0:
+    # Apply threshold - only flag if count exceeds threshold
+    if total_non_latin > threshold:
         for script, data in script_chars.items():
-            examples = ''.join(data['examples'][:5])
-            count = data['count']
-            issues.append(f"{script}_text_found_{count}_chars_[{examples}]")
+            if data['count'] > 0:  # Only include scripts that were found
+                examples = ''.join(data['examples'][:5])
+                count = data['count']
+                issues.append(f"{script}_text_found_{count}_chars_[{examples}]")
     
     return len(issues) > 0, issues
 
@@ -1347,8 +1365,15 @@ def check_specific_patterns(results, duplicate_groups, duplicate_confidence, log
                         duplicate_confidence[pair] = similarity
                         log(f"      Pattern match confirmed: {results[idx1]['filename']} ≈ {results[idx2]['filename']}")
 
-def generate_reports(results, folder_path, duplicate_confidence, log):
-    """Generate output reports with enhanced duplicate information"""
+def generate_reports(results, folder_path, duplicate_confidence, log=print, qa_settings=None):
+    """Generate output reports with enhanced duplicate information based on settings"""
+    if qa_settings is None:
+        qa_settings = {'report_format': 'detailed', 'auto_save_report': True}
+    
+    report_format = qa_settings.get('report_format', 'detailed')
+    auto_save = qa_settings.get('auto_save_report', True)
+    
+    # Create output directory
     output_dir = os.path.basename(folder_path.rstrip('/\\')) + "_Scan Report"
     output_path = os.path.join(folder_path, output_dir)
     os.makedirs(output_path, exist_ok=True)
@@ -1360,31 +1385,115 @@ def generate_reports(results, folder_path, duplicate_confidence, log):
             if result['filename'] in pair:
                 result['duplicate_confidence'] = max(result['duplicate_confidence'], confidence)
     
-    # Save JSON report
-    with open(os.path.join(output_path, "validation_results.json"), "w", encoding="utf-8") as jf:
-        json.dump(results, jf, indent=2, ensure_ascii=False)
+    # Generate reports based on format setting
+    if report_format == 'summary':
+        # Summary format - only key statistics
+        log(f"\n📊 QA Scan Summary:")
+        log(f"   Total files scanned: {len(results)}")
+        
+        issue_count = sum(1 for r in results if r['issues'])
+        log(f"   Files with issues: {issue_count}")
+        
+        # Count by issue type
+        issue_types = {}
+        for result in results:
+            for issue in result['issues']:
+                issue_type = issue.split('_')[0]
+                issue_types[issue_type] = issue_types.get(issue_type, 0) + 1
+        
+        log(f"\n   Issues by type:")
+        for issue_type, count in sorted(issue_types.items(), key=lambda x: x[1], reverse=True):
+            log(f"      - {issue_type}: {count}")
+        
+        # Save minimal summary file if auto-save enabled
+        if auto_save:
+            summary_file = os.path.join(output_path, "scan_summary.txt")
+            with open(summary_file, 'w', encoding='utf-8') as f:
+                f.write(f"QA Scan Summary\n")
+                f.write(f"===============\n\n")
+                f.write(f"Total files scanned: {len(results)}\n")
+                f.write(f"Files with issues: {issue_count}\n\n")
+                f.write(f"Issues by type:\n")
+                for issue_type, count in sorted(issue_types.items(), key=lambda x: x[1], reverse=True):
+                    f.write(f"  - {issue_type}: {count}\n")
+            log(f"\n📁 Summary saved to: {output_path}")
     
-    # Save CSV report
-    with open(os.path.join(output_path, "validation_results.csv"), "w", encoding="utf-8", newline="") as cf:
-        writer = csv.DictWriter(cf, fieldnames=["file_index", "filename", "score", "issues", "duplicate_confidence"])
-        writer.writeheader()
-        for row in results:
-            writer.writerow({
-                "file_index": row["file_index"],
-                "filename": row["filename"],
-                "score": row["score"],
-                "issues": "; ".join(row["issues"]),
-                "duplicate_confidence": f"{row.get('duplicate_confidence', 0):.2f}"
-            })
+    elif report_format == 'verbose':
+        # Verbose format - include everything including raw text samples
+        if auto_save:
+            # Save detailed JSON with all data
+            verbose_results = []
+            for result in results.copy():
+                verbose_result = result.copy()
+                # Include first 1000 chars of raw text in verbose mode
+                if 'raw_text' in result:
+                    verbose_result['text_sample'] = result['raw_text'][:1000]
+                verbose_results.append(verbose_result)
+            
+            with open(os.path.join(output_path, "validation_results_verbose.json"), "w", encoding="utf-8") as jf:
+                json.dump(verbose_results, jf, indent=2, ensure_ascii=False)
+            
+            # Generate detailed text report
+            with open(os.path.join(output_path, "detailed_report.txt"), "w", encoding="utf-8") as tf:
+                tf.write("DETAILED QA SCAN REPORT\n")
+                tf.write("=" * 80 + "\n\n")
+                
+                for result in results:
+                    tf.write(f"File: {result['filename']}\n")
+                    tf.write(f"Chapter: {result.get('chapter_num', 'Unknown')}\n")
+                    tf.write(f"Issues: {len(result['issues'])}\n")
+                    if result['issues']:
+                        for issue in result['issues']:
+                            tf.write(f"  - {issue}\n")
+                    tf.write(f"Duplicate Confidence: {result.get('duplicate_confidence', 0):.2f}\n")
+                    tf.write(f"Preview: {result.get('preview', '')[:200]}...\n")
+                    tf.write("-" * 80 + "\n\n")
+        
+        # All existing reports (JSON, CSV, HTML)
+        save_all_reports()
     
-    # Generate HTML report
-    generate_html_report(results, output_path, duplicate_confidence)
+    else:  # detailed (default)
+        # Current behavior - standard reports
+        if auto_save:
+            save_all_reports()
+        else:
+            log(f"\n✅ Scan complete! (Auto-save disabled)")
+            log(f"📁 Report directory prepared at: {output_path}")
+            return
     
-    # Generate duplicate groups summary
-    generate_duplicate_summary(results, output_path, duplicate_confidence)
-    
-    log(f"\n✅ Scan complete!")
-    log(f"📁 Reports saved to: {output_path}")
+    # Helper function to save all standard reports
+    def save_all_reports():
+        # Save JSON report
+        with open(os.path.join(output_path, "validation_results.json"), "w", encoding="utf-8") as jf:
+            # Remove raw_text from saved results to reduce file size
+            clean_results = []
+            for r in results:
+                clean_result = r.copy()
+                clean_result.pop('raw_text', None)
+                clean_results.append(clean_result)
+            json.dump(clean_results, jf, indent=2, ensure_ascii=False)
+        
+        # Save CSV report
+        with open(os.path.join(output_path, "validation_results.csv"), "w", encoding="utf-8", newline="") as cf:
+            writer = csv.DictWriter(cf, fieldnames=["file_index", "filename", "score", "issues", "duplicate_confidence"])
+            writer.writeheader()
+            for row in results:
+                writer.writerow({
+                    "file_index": row["file_index"],
+                    "filename": row["filename"],
+                    "score": row["score"],
+                    "issues": "; ".join(row["issues"]),
+                    "duplicate_confidence": f"{row.get('duplicate_confidence', 0):.2f}"
+                })
+        
+        # Generate HTML report
+        generate_html_report(results, output_path, duplicate_confidence)
+        
+        # Generate duplicate groups summary
+        generate_duplicate_summary(results, output_path, duplicate_confidence)
+        
+        log(f"\n✅ Scan complete!")
+        log(f"📁 Reports saved to: {output_path}")
 
 def generate_duplicate_summary(results, output_path, duplicate_confidence):
     """Generate a summary of duplicate groups"""
@@ -1653,10 +1762,29 @@ def update_legacy_format_progress(prog, faulty_chapters, log):
     
     log(f"🔧 Removed {removed_count} chapters from legacy completed list")
 
-def scan_html_folder(folder_path, log=print, stop_flag=None, mode='standard'):
-    """Main scanning function with enhanced duplicate detection"""
-    global _stop_flag
-    _stop_flag = False
+def scan_html_folder(folder_path, log=print, stop_flag=None, mode='standard', qa_settings=None):
+    """
+    Scan HTML folder for QA issues with configurable settings
+    
+    Args:
+        folder_path: Path to folder containing HTML files
+        log: Logging function
+        stop_flag: Function that returns True to stop scanning
+        mode: Detection mode ('ai-hunter', 'aggressive', 'standard', 'strict')
+        qa_settings: Dictionary of QA scanner settings
+    """
+    # Load default settings if not provided
+    if qa_settings is None:
+        qa_settings = {
+            'foreign_char_threshold': 10,
+            'excluded_characters': '',
+            'check_encoding_issues': True,
+            'check_repetition': True,
+            'check_translation_artifacts': True,
+            'min_file_length': 100,
+            'report_format': 'detailed',
+            'auto_save_report': True
+        }
     
     # Initialize configuration
     config = DuplicateDetectionConfig(mode)
@@ -1695,8 +1823,10 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='standard'):
             log(f"⚠️ Failed to read {filename}: {e}")
             continue
         
-        if len(raw_text.strip()) < 100:
-            log(f"⚠️ Skipped {filename}: Too short")
+        # Check minimum file length from settings
+        min_length = qa_settings.get('min_file_length', 100)
+        if len(raw_text.strip()) < min_length:
+            log(f"⚠️ Skipped {filename}: Too short (< {min_length} chars)")
             continue
         
         chapter_num, chapter_title = extract_chapter_info(filename, raw_text)
@@ -1709,8 +1839,10 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='standard'):
         # Normalize preview
         preview_normalized = normalize_text(preview)[:300]
         
-        # Detect translation artifacts
-        artifacts = detect_translation_artifacts(raw_text)
+        # Detect translation artifacts only if enabled
+        artifacts = []
+        if qa_settings.get('check_translation_artifacts', True):
+            artifacts = detect_translation_artifacts(raw_text)
         
         results.append({
             "file_index": idx,
@@ -1726,47 +1858,205 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='standard'):
             "translation_artifacts": artifacts
         })
     
-    log("\n✅ Initial scan complete. Performing enhanced duplicate detection...")
+    log("\n✅ Initial scan complete.")
     
-    # Detect duplicates with enhanced methods
-    duplicate_groups, near_duplicate_groups, duplicate_confidence = detect_duplicates(
-        results, log, stop_flag, config
-    )
+    # Second pass: Check for duplicates
+    duplicate_groups = {}
+    near_duplicate_groups = {}
+    checked_pairs = set()
+    duplicate_confidence = {}
     
-    # Process results and check for issues
-    log("\n📊 Checking for other issues...")
+    # Exact duplicate check
+    log("🔍 Checking exact duplicates...")
+    hash_to_files = {}
+    for result in results:
+        h = result["hashes"]["normalized"]
+        if h not in hash_to_files:
+            hash_to_files[h] = []
+        hash_to_files[h].append(result["filename"])
     
-    # Group files by duplicate group
-    groups = {}
-    for filename, group_id in duplicate_groups.items():
-        if group_id not in groups:
-            groups[group_id] = []
-        groups[group_id].append(filename)
+    group_id = 0
+    for h, files in hash_to_files.items():
+        if len(files) > 1:
+            for f in files:
+                duplicate_groups[f] = group_id
+                for f2 in files:
+                    if f != f2:
+                        duplicate_confidence[(f, f2)] = 1.0  # 100% confidence for exact matches
+            group_id += 1
     
-    # Check each file for all issues
+    # Near-duplicate check
+    log("🔍 Checking near-duplicates...")
+    threshold = config.get_threshold('text')
+    
+    for i in range(len(results)):
+        if stop_flag and stop_flag():
+            log("⛔ Near-duplicate check interrupted by user.")
+            break
+            
+        for j in range(i + 1, len(results)):
+            pair = (results[i]['filename'], results[j]['filename'])
+            if pair in checked_pairs:
+                continue
+            checked_pairs.add(pair)
+            
+            # Skip if already exact duplicates
+            if results[i]['filename'] in duplicate_groups and results[j]['filename'] in duplicate_groups:
+                if duplicate_groups[results[i]['filename']] == duplicate_groups[results[j]['filename']]:
+                    continue
+            
+            sim = SequenceMatcher(None, normalize_text(results[i]['raw_text']), normalize_text(results[j]['raw_text'])).ratio()
+            if sim >= threshold:
+                # Check if either file is already in a group
+                if results[i]['filename'] in near_duplicate_groups:
+                    group = near_duplicate_groups[results[i]['filename']]
+                elif results[j]['filename'] in near_duplicate_groups:
+                    group = near_duplicate_groups[results[j]['filename']]
+                else:
+                    group = f"near_group_{len(near_duplicate_groups)}"
+                
+                near_duplicate_groups[results[i]['filename']] = group
+                near_duplicate_groups[results[j]['filename']] = group
+                duplicate_confidence[pair] = sim
+    
+    # Semantic similarity check
+    log("🔍 Checking semantic similarity...")
+    semantic_threshold = config.get_threshold('semantic')
+
+    # AI Hunter mode: more aggressive checking
+    if config.mode == 'ai-hunter':
+        log("🤖 AI Hunter mode: Enhanced semantic and structural checking active")
+        
+        # Check EVERY pair of files
+        for i in range(len(results)):
+            if stop_flag and stop_flag():
+                log("⛔ Semantic check interrupted by user.")
+                break
+                
+            for j in range(i + 1, len(results)):
+                pair = (results[i]['filename'], results[j]['filename'])
+                
+                # Skip if already marked as duplicates
+                if pair in duplicate_confidence and duplicate_confidence[pair] >= 0.95:
+                    continue
+                
+                # Multiple detection methods
+                methods_triggered = []
+                
+                # 1. Character name overlap
+                char_sim = calculate_character_overlap(results[i]['raw_text'], results[j]['raw_text'])
+                if char_sim >= config.get_threshold('character'):
+                    methods_triggered.append(('character', char_sim))
+                
+                # 2. Semantic signatures
+                sem_sim = calculate_semantic_similarity(
+                    results[i].get('semantic_sig', ''),
+                    results[j].get('semantic_sig', '')
+                )
+                if sem_sim >= semantic_threshold:
+                    methods_triggered.append(('semantic', sem_sim))
+                
+                # 3. Structural patterns
+                struct_sim = calculate_structural_similarity(
+                    results[i].get('structural_sig', ''),
+                    results[j].get('structural_sig', '')
+                )
+                if struct_sim >= config.get_threshold('structural'):
+                    methods_triggered.append(('structural', struct_sim))
+                
+                # 4. Pattern analysis
+                pattern_sim = calculate_pattern_similarity(
+                    results[i]['raw_text'],
+                    results[j]['raw_text']
+                )
+                if pattern_sim >= config.get_threshold('pattern'):
+                    methods_triggered.append(('pattern', pattern_sim))
+                
+                # If multiple methods triggered, mark as potential duplicate
+                if len(methods_triggered) >= 2:  # At least 2 methods must agree
+                    avg_confidence = sum(conf for _, conf in methods_triggered) / len(methods_triggered)
+                    
+                    # Update or set confidence
+                    if pair not in duplicate_confidence or avg_confidence > duplicate_confidence[pair]:
+                        duplicate_confidence[pair] = avg_confidence
+                    
+                    # Add to near-duplicate groups
+                    if results[i]['filename'] in near_duplicate_groups:
+                        group = near_duplicate_groups[results[i]['filename']]
+                    elif results[j]['filename'] in near_duplicate_groups:
+                        group = near_duplicate_groups[results[j]['filename']]
+                    else:
+                        group = f"ai_hunter_group_{len(near_duplicate_groups)}"
+                    
+                    near_duplicate_groups[results[i]['filename']] = group
+                    near_duplicate_groups[results[j]['filename']] = group
+                    
+                    log(f"   🤖 AI Hunter: {results[i]['filename']} ↔ {results[j]['filename']}")
+                    log(f"      Methods: {', '.join(f'{m}({c:.2f})' for m, c in methods_triggered)}")
+    
+    else:
+        # Standard semantic checking (existing code)
+        for i in range(len(results)):
+            if stop_flag and stop_flag():
+                log("⛔ Semantic check interrupted by user.")
+                break
+                
+            result = results[i]
+            if 'semantic_sig' not in result:
+                result['semantic_sig'] = extract_semantic_signature(result['raw_text'])
+            if 'structural_sig' not in result:
+                result['structural_sig'] = extract_structural_signature(result['raw_text'])
+            
+            # Only check against next few files for efficiency
+            check_range = min(10, len(results) - i - 1)
+            for j in range(i + 1, i + 1 + check_range):
+                if j >= len(results):
+                    break
+                    
+                if 'semantic_sig' not in results[j]:
+                    results[j]['semantic_sig'] = extract_semantic_signature(results[j]['raw_text'])
+                if 'structural_sig' not in results[j]:
+                    results[j]['structural_sig'] = extract_structural_signature(results[j]['raw_text'])
+                
+                semantic_sim = calculate_semantic_similarity(result['semantic_sig'], results[j]['semantic_sig'])
+                
+                if semantic_sim >= semantic_threshold:
+                    structural_sim = calculate_structural_similarity(
+                        result['structural_sig'], 
+                        results[j]['structural_sig']
+                    )
+                    
+                    combined_confidence = (semantic_sim + structural_sim) / 2
+                    
+                    if combined_confidence >= semantic_threshold:
+                        pair = (result['filename'], results[j]['filename'])
+                        
+                        if pair not in duplicate_confidence or combined_confidence > duplicate_confidence[pair]:
+                            duplicate_confidence[pair] = combined_confidence
+                        
+                        # Add to groups
+                        if result['filename'] in near_duplicate_groups:
+                            group = near_duplicate_groups[result['filename']]
+                        elif results[j]['filename'] in near_duplicate_groups:
+                            group = near_duplicate_groups[results[j]['filename']]
+                        else:
+                            group = f"semantic_group_{len(near_duplicate_groups)}"
+                        
+                        near_duplicate_groups[result['filename']] = group
+                        near_duplicate_groups[results[j]['filename']] = group
+    
+    # Third pass: compile issues
+    log("\n📋 Compiling issues...")
     for result in results:
         issues = []
         
-        # Check duplicates
+        # Check exact duplicates
         if result['filename'] in duplicate_groups:
             group_id = duplicate_groups[result['filename']]
-            group_files = groups[group_id]
+            group_files = [f for f, gid in duplicate_groups.items() if gid == group_id]
             if len(group_files) > 1:
                 others = [f for f in group_files if f != result['filename']]
-                
-                # Get the highest confidence score for this file
-                confidence = 0
-                for other in others:
-                    pair = tuple(sorted([result['filename'], other]))
-                    if pair in duplicate_confidence:
-                        confidence = max(confidence, duplicate_confidence[pair])
-                
-                result['duplicate_confidence'] = confidence
-                
-                if len(others) == 1:
-                    issues.append(f"DUPLICATE: exact_or_near_copy_of_{others[0]}")
-                else:
-                    issues.append(f"DUPLICATE: part_of_{len(group_files)}_file_group")
+                issues.append(f"EXACT_DUPLICATE: {len(group_files)}_file_group")
         
         # Check near-duplicates
         elif result['filename'] in near_duplicate_groups:
@@ -1782,20 +2072,22 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='standard'):
         # Check other issues
         raw_text = result['raw_text']
         
-        # Non-English content (excluding Korean separators)
-        has_non_english, lang_issues = detect_non_english_content(raw_text)
+        # Non-English content (excluding Korean separators) - pass settings
+        has_non_english, lang_issues = detect_non_english_content(raw_text, qa_settings)
         if has_non_english:
             issues.extend(lang_issues)
         
-        # Spacing/formatting issues
-        if has_no_spacing_or_linebreaks(raw_text):
-            issues.append("no_spacing_or_linebreaks")
+        # Spacing/formatting issues - only if encoding check is enabled
+        if qa_settings.get('check_encoding_issues', True):
+            if has_no_spacing_or_linebreaks(raw_text):
+                issues.append("no_spacing_or_linebreaks")
         
-        # Repetitive content
-        if has_repeating_sentences(raw_text):
-            issues.append("excessive_repetition")
+        # Repetitive content - only if repetition check is enabled
+        if qa_settings.get('check_repetition', True):
+            if has_repeating_sentences(raw_text):
+                issues.append("excessive_repetition")
         
-        # Translation artifacts
+        # Translation artifacts - already handled above
         if result.get('translation_artifacts'):
             for artifact in result['translation_artifacts']:
                 if artifact['type'] == 'machine_translation':
@@ -1819,8 +2111,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='standard'):
         result.pop('structural_sig', None)
         result.pop('normalized_text', None)
     
-    # Generate reports with enhanced information
-    generate_reports(results, folder_path, duplicate_confidence, log)
+    # Generate reports with enhanced information and settings
+    generate_reports(results, folder_path, duplicate_confidence, log, qa_settings)
     
     # Update progress file
     update_progress_file(folder_path, results, log)
