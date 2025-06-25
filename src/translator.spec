@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion v2.8.5 - PyInstaller Specification File
+Glossarion v2.8.8 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner and AI Hunter
 """
 
@@ -12,7 +12,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'Glossarion v2.8.5'
+APP_NAME = 'Glossarion v2.8.8'
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -653,7 +653,6 @@ excludes = [
     # 'numpy',  # Required by datasketch - do not exclude
     'sklearn',
     'skimage',
-    'cv2',
     
     # Testing frameworks
     'pytest',
