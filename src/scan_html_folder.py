@@ -250,7 +250,7 @@ def detect_non_english_content(text, qa_settings=None):
         
         # Check characters in this part
         for char in part:
-            # Skip excluded characters
+            # Skip characters in excluded set
             if char in all_excluded_chars:
                 continue
             
@@ -269,13 +269,12 @@ def detect_non_english_content(text, qa_settings=None):
                         script_chars[script_name]['examples'].append(char)
                     break
     
-    # Apply threshold - only flag if count exceeds threshold
+    # Check against threshold
     if total_non_latin > threshold:
         for script, data in script_chars.items():
-            if data['count'] > 0:  # Only include scripts that were found
-                examples = ''.join(data['examples'][:5])
-                count = data['count']
-                issues.append(f"{script}_text_found_{count}_chars_[{examples}]")
+            examples = ''.join(data['examples'][:5])
+            count = data['count']
+            issues.append(f"{script}_text_found_{count}_chars_[{examples}]")
     
     return len(issues) > 0, issues
 
@@ -983,7 +982,7 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
 
 
 def detect_duplicates(results, log, stop_flag, config):
-    """Detect duplicates using multiple strategies with enhanced methods"""
+    """Detect duplicates using multiple strategies with enhanced methods - PERFORMANCE OPTIMIZED"""
     duplicate_groups = {}
     near_duplicate_groups = {}
     duplicate_confidence = defaultdict(float)
@@ -1064,12 +1063,52 @@ def detect_duplicates(results, log, stop_flag, config):
                             merge_duplicate_groups(duplicate_groups, result['filename'], candidate)
                             duplicate_confidence[(result['filename'], candidate)] = jaccard
     
-    # 4. Semantic similarity check
+    # 4. Semantic similarity check - OPTIMIZED
     log("🔍 Checking semantic similarity...")
     semantic_threshold = config.get_threshold('semantic')
 
-    # AI Hunter mode: more aggressive checking
-    if config.mode == 'ai-hunter':
+    # Use MinHash candidates for semantic checking if available
+    if lsh and config.mode != 'ai-hunter':
+        # For non-AI Hunter modes, use MinHash to limit comparisons
+        for result in results:
+            if stop_flag and stop_flag():
+                log("⛔ Semantic check interrupted by user.")
+                break
+                
+            if result['filename'] in minhashes:
+                candidates = lsh.query(minhashes[result['filename']])
+                for candidate_filename in candidates:
+                    if candidate_filename == result['filename']:
+                        continue
+                    
+                    # Find the candidate result
+                    candidate_result = next((r for r in results if r['filename'] == candidate_filename), None)
+                    if not candidate_result:
+                        continue
+                    
+                    # Skip if already in same group
+                    if (result['filename'] in duplicate_groups and 
+                        candidate_filename in duplicate_groups and
+                        duplicate_groups[result['filename']] == duplicate_groups[candidate_filename]):
+                        continue
+                    
+                    sem_sim = calculate_semantic_similarity(result['semantic_sig'], 
+                                                           candidate_result['semantic_sig'])
+                    if sem_sim >= semantic_threshold:
+                        struct_sim = calculate_structural_similarity(result['structural_sig'],
+                                                                   candidate_result['structural_sig'])
+                        
+                        if struct_sim >= config.get_threshold('structural'):
+                            merge_duplicate_groups(duplicate_groups, 
+                                                 result['filename'], 
+                                                 candidate_filename)
+                            confidence = (sem_sim + struct_sim) / 2
+                            duplicate_confidence[(result['filename'], candidate_filename)] = confidence
+                            log(f"   └─ Semantic match: {result['filename']} ≈ {candidate_filename} "
+                                f"(sem: {int(sem_sim*100)}%, struct: {int(struct_sim*100)}%)")
+    
+    # AI Hunter mode or fallback: check all pairs
+    elif config.mode == 'ai-hunter' or not lsh:
         log("🤖 AI Hunter mode: Enhanced semantic and structural checking active")
         
         # Check EVERY pair of files
@@ -1092,43 +1131,32 @@ def detect_duplicates(results, log, stop_flag, config):
                                                            results[j]['structural_sig'])
                 
                 # For AI Hunter, use a combination approach
-                # High semantic + high structural = likely same content
-                if sem_sim >= semantic_threshold and struct_sim >= config.get_threshold('structural'):
-                    # Do a quick text check to see if they're actually different
-                    text_sim = calculate_similarity_ratio(
-                        results[i].get('raw_text', '')[:2000],
-                        results[j].get('raw_text', '')[:2000]
-                    )
-                    
-                    # If text similarity is low but semantic/structural is high, it's likely a retranslation
-                    if text_sim < 0.6:  # Different enough text
-                        log(f"   🎯 AI Hunter: Found potential retranslation")
-                        log(f"      Files: {results[i]['filename']} ≈ {results[j]['filename']}")
-                        log(f"      Text similarity: {int(text_sim*100)}% (low)")
-                        log(f"      Semantic similarity: {int(sem_sim*100)}% (high)")
-                        log(f"      Structural similarity: {int(struct_sim*100)}% (high)")
+                if config.mode == 'ai-hunter':
+                    # High semantic + high structural = likely same content
+                    if sem_sim >= semantic_threshold and struct_sim >= config.get_threshold('structural'):
+                        # Do a quick text check to see if they're actually different
+                        text_sim = calculate_similarity_ratio(
+                            results[i].get('raw_text', '')[:2000],
+                            results[j].get('raw_text', '')[:2000]
+                        )
                         
-                        merge_duplicate_groups(duplicate_groups, 
-                                             results[i]['filename'], 
-                                             results[j]['filename'])
-                        confidence = (sem_sim + struct_sim) / 2
-                        duplicate_confidence[(results[i]['filename'], results[j]['filename'])] = confidence
-                        log(f"   └─ 🤖 Flagged as AI retranslation variant (confidence: {int(confidence*100)}%)")
-    else:
-        # Normal semantic checking for other modes
-        for i in range(len(results)):
-            if stop_flag and stop_flag():
-                log("⛔ Semantic check interrupted by user.")
-                break
-                
-            for j in range(i + 1, len(results)):
-                sem_sim = calculate_semantic_similarity(results[i]['semantic_sig'], 
-                                                       results[j]['semantic_sig'])
-                if sem_sim >= semantic_threshold:
-                    struct_sim = calculate_structural_similarity(results[i]['structural_sig'],
-                                                               results[j]['structural_sig'])
-                    
-                    if struct_sim >= config.get_threshold('structural'):
+                        # If text similarity is low but semantic/structural is high, it's likely a retranslation
+                        if text_sim < 0.6:  # Different enough text
+                            log(f"   🎯 AI Hunter: Found potential retranslation")
+                            log(f"      Files: {results[i]['filename']} ≈ {results[j]['filename']}")
+                            log(f"      Text similarity: {int(text_sim*100)}% (low)")
+                            log(f"      Semantic similarity: {int(sem_sim*100)}% (high)")
+                            log(f"      Structural similarity: {int(struct_sim*100)}% (high)")
+                            
+                            merge_duplicate_groups(duplicate_groups, 
+                                                 results[i]['filename'], 
+                                                 results[j]['filename'])
+                            confidence = (sem_sim + struct_sim) / 2
+                            duplicate_confidence[(results[i]['filename'], results[j]['filename'])] = confidence
+                            log(f"   └─ 🤖 Flagged as AI retranslation variant (confidence: {int(confidence*100)}%)")
+                else:
+                    # Normal semantic checking
+                    if sem_sim >= semantic_threshold and struct_sim >= config.get_threshold('structural'):
                         merge_duplicate_groups(duplicate_groups, 
                                              results[i]['filename'], 
                                              results[j]['filename'])
@@ -1137,44 +1165,80 @@ def detect_duplicates(results, log, stop_flag, config):
                         log(f"   └─ Semantic match: {results[i]['filename']} ≈ {results[j]['filename']} "
                             f"(sem: {int(sem_sim*100)}%, struct: {int(struct_sim*100)}%)")
     
-    # 5. Deep similarity check (content-based)
+    # 5. Deep similarity check (content-based) - OPTIMIZED
     similarity_threshold = config.get_threshold('similarity')
     log(f"🔍 Deep content similarity analysis (threshold: {int(similarity_threshold*100)}%)...")
 
-    # Force check between files that might be misnamed
-    for i in range(len(results)):
-        if stop_flag and stop_flag():
-            log("⛔ Similarity check interrupted by user.")
-            break
-        
-        for j in range(i + 1, len(results)):
-            # Check if already in same group
-            if (results[i]['filename'] in duplicate_groups and 
-                results[j]['filename'] in duplicate_groups and
-                duplicate_groups[results[i]['filename']] == duplicate_groups[results[j]['filename']]):
-                continue
+    # Use MinHash candidates for deep checking if available
+    if lsh and config.mode != 'ai-hunter':
+        for result in results:
+            if stop_flag and stop_flag():
+                log("⛔ Similarity check interrupted by user.")
+                break
             
-            # Always check first 2000 chars for similarity
-            text1_preview = results[i].get('raw_text', '')[:2000]
-            text2_preview = results[j].get('raw_text', '')[:2000]
+            if result['filename'] in minhashes:
+                candidates = lsh.query(minhashes[result['filename']])
+                for candidate_filename in candidates:
+                    if candidate_filename == result['filename']:
+                        continue
+                    
+                    # Skip if already in same group
+                    if (result['filename'] in duplicate_groups and 
+                        candidate_filename in duplicate_groups and
+                        duplicate_groups[result['filename']] == duplicate_groups[candidate_filename]):
+                        continue
+                    
+                    # Find the candidate result
+                    candidate_result = next((r for r in results if r['filename'] == candidate_filename), None)
+                    if not candidate_result:
+                        continue
+                    
+                    # Check similarity
+                    text1_preview = result.get('raw_text', '')[:2000]
+                    text2_preview = candidate_result.get('raw_text', '')[:2000]
+                    
+                    similarity = calculate_similarity_ratio(text1_preview, text2_preview)
+                    
+                    if similarity >= similarity_threshold:
+                        merge_duplicate_groups(duplicate_groups, result['filename'], candidate_filename)
+                        pair = tuple(sorted([result['filename'], candidate_filename]))
+                        duplicate_confidence[pair] = max(duplicate_confidence.get(pair, 0), similarity)
+                        log(f"   └─ Content match: {result['filename']} ≈ {candidate_filename} ({int(similarity*100)}%)")
+    else:
+        # Fallback: check all pairs (slower but thorough)
+        for i in range(len(results)):
+            if stop_flag and stop_flag():
+                log("⛔ Similarity check interrupted by user.")
+                break
             
-            # Quick preview check
-            if text1_preview == text2_preview and len(text1_preview) > 100:
-                # Exact match - definitely duplicates
-                merge_duplicate_groups(duplicate_groups, results[i]['filename'], results[j]['filename'])
-                pair = tuple(sorted([results[i]['filename'], results[j]['filename']]))
-                duplicate_confidence[pair] = 1.0
-                log(f"   └─ Exact match: {results[i]['filename']} ≡ {results[j]['filename']} (100%)")
-                continue
-            
-            # Calculate similarity
-            similarity = calculate_similarity_ratio(text1_preview, text2_preview)
-            
-            if similarity >= similarity_threshold:
-                merge_duplicate_groups(duplicate_groups, results[i]['filename'], results[j]['filename'])
-                pair = tuple(sorted([results[i]['filename'], results[j]['filename']]))
-                duplicate_confidence[pair] = max(duplicate_confidence.get(pair, 0), similarity)
-                log(f"   └─ Content match: {results[i]['filename']} ≈ {results[j]['filename']} ({int(similarity*100)}%)")
+            for j in range(i + 1, len(results)):
+                # Check if already in same group
+                if (results[i]['filename'] in duplicate_groups and 
+                    results[j]['filename'] in duplicate_groups and
+                    duplicate_groups[results[i]['filename']] == duplicate_groups[results[j]['filename']]):
+                    continue
+                
+                # Always check first 2000 chars for similarity
+                text1_preview = results[i].get('raw_text', '')[:2000]
+                text2_preview = results[j].get('raw_text', '')[:2000]
+                
+                # Quick preview check
+                if text1_preview == text2_preview and len(text1_preview) > 100:
+                    # Exact match - definitely duplicates
+                    merge_duplicate_groups(duplicate_groups, results[i]['filename'], results[j]['filename'])
+                    pair = tuple(sorted([results[i]['filename'], results[j]['filename']]))
+                    duplicate_confidence[pair] = 1.0
+                    log(f"   └─ Exact match: {results[i]['filename']} ≡ {results[j]['filename']} (100%)")
+                    continue
+                
+                # Calculate similarity
+                similarity = calculate_similarity_ratio(text1_preview, text2_preview)
+                
+                if similarity >= similarity_threshold:
+                    merge_duplicate_groups(duplicate_groups, results[i]['filename'], results[j]['filename'])
+                    pair = tuple(sorted([results[i]['filename'], results[j]['filename']]))
+                    duplicate_confidence[pair] = max(duplicate_confidence.get(pair, 0), similarity)
+                    log(f"   └─ Content match: {results[i]['filename']} ≈ {results[j]['filename']} ({int(similarity*100)}%)")
     
     # 6. Consecutive chapter check with fuzzy matching
     check_consecutive_chapters(results, duplicate_groups, duplicate_confidence, config, log)
@@ -1385,6 +1449,31 @@ def generate_reports(results, folder_path, duplicate_confidence, log=print, qa_s
             if result['filename'] in pair:
                 result['duplicate_confidence'] = max(result['duplicate_confidence'], confidence)
     
+    # Common function to save all reports
+    def save_all_reports():
+        # Save JSON report
+        with open(os.path.join(output_path, "validation_results.json"), "w", encoding="utf-8") as jf:
+            json.dump(results, jf, indent=2, ensure_ascii=False)
+        
+        # Save CSV report
+        with open(os.path.join(output_path, "validation_results.csv"), "w", encoding="utf-8", newline="") as cf:
+            writer = csv.DictWriter(cf, fieldnames=["file_index", "filename", "score", "issues", "duplicate_confidence"])
+            writer.writeheader()
+            for row in results:
+                writer.writerow({
+                    "file_index": row["file_index"],
+                    "filename": row["filename"],
+                    "score": row["score"],
+                    "issues": "; ".join(row["issues"]),
+                    "duplicate_confidence": f"{row.get('duplicate_confidence', 0):.2f}"
+                })
+        
+        # Generate HTML report
+        generate_html_report(results, output_path, duplicate_confidence)
+        
+        # Generate duplicate groups summary
+        generate_duplicate_summary(results, output_path, duplicate_confidence)
+    
     # Generate reports based on format setting
     if report_format == 'summary':
         # Summary format - only key statistics
@@ -1457,42 +1546,10 @@ def generate_reports(results, folder_path, duplicate_confidence, log=print, qa_s
         if auto_save:
             save_all_reports()
         else:
-            log(f"\n✅ Scan complete! (Auto-save disabled)")
-            log(f"📁 Report directory prepared at: {output_path}")
-            return
+            log(f"\n✅ Scan complete! Reports not saved (auto-save disabled)")
     
-    # Helper function to save all standard reports
-    def save_all_reports():
-        # Save JSON report
-        with open(os.path.join(output_path, "validation_results.json"), "w", encoding="utf-8") as jf:
-            # Remove raw_text from saved results to reduce file size
-            clean_results = []
-            for r in results:
-                clean_result = r.copy()
-                clean_result.pop('raw_text', None)
-                clean_results.append(clean_result)
-            json.dump(clean_results, jf, indent=2, ensure_ascii=False)
-        
-        # Save CSV report
-        with open(os.path.join(output_path, "validation_results.csv"), "w", encoding="utf-8", newline="") as cf:
-            writer = csv.DictWriter(cf, fieldnames=["file_index", "filename", "score", "issues", "duplicate_confidence"])
-            writer.writeheader()
-            for row in results:
-                writer.writerow({
-                    "file_index": row["file_index"],
-                    "filename": row["filename"],
-                    "score": row["score"],
-                    "issues": "; ".join(row["issues"]),
-                    "duplicate_confidence": f"{row.get('duplicate_confidence', 0):.2f}"
-                })
-        
-        # Generate HTML report
-        generate_html_report(results, output_path, duplicate_confidence)
-        
-        # Generate duplicate groups summary
-        generate_duplicate_summary(results, output_path, duplicate_confidence)
-        
-        log(f"\n✅ Scan complete!")
+    log(f"\n✅ Scan complete!")
+    if auto_save:
         log(f"📁 Reports saved to: {output_path}")
 
 def generate_duplicate_summary(results, output_path, duplicate_confidence):
@@ -1773,6 +1830,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='standard', qa
         mode: Detection mode ('ai-hunter', 'aggressive', 'standard', 'strict')
         qa_settings: Dictionary of QA scanner settings
     """
+    global _stop_flag
+    _stop_flag = False
+    
     # Load default settings if not provided
     if qa_settings is None:
         qa_settings = {
@@ -1858,205 +1918,47 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='standard', qa
             "translation_artifacts": artifacts
         })
     
-    log("\n✅ Initial scan complete.")
+    log("\n✅ Initial scan complete. Performing enhanced duplicate detection...")
     
-    # Second pass: Check for duplicates
-    duplicate_groups = {}
-    near_duplicate_groups = {}
-    checked_pairs = set()
-    duplicate_confidence = {}
+    # Detect duplicates with enhanced methods
+    duplicate_groups, near_duplicate_groups, duplicate_confidence = detect_duplicates(
+        results, log, stop_flag, config
+    )
     
-    # Exact duplicate check
-    log("🔍 Checking exact duplicates...")
-    hash_to_files = {}
-    for result in results:
-        h = result["hashes"]["normalized"]
-        if h not in hash_to_files:
-            hash_to_files[h] = []
-        hash_to_files[h].append(result["filename"])
+    # Process results and check for issues
+    log("\n📊 Checking for other issues...")
     
-    group_id = 0
-    for h, files in hash_to_files.items():
-        if len(files) > 1:
-            for f in files:
-                duplicate_groups[f] = group_id
-                for f2 in files:
-                    if f != f2:
-                        duplicate_confidence[(f, f2)] = 1.0  # 100% confidence for exact matches
-            group_id += 1
+    # Group files by duplicate group
+    groups = {}
+    for filename, group_id in duplicate_groups.items():
+        if group_id not in groups:
+            groups[group_id] = []
+        groups[group_id].append(filename)
     
-    # Near-duplicate check
-    log("🔍 Checking near-duplicates...")
-    threshold = config.get_threshold('text')
-    
-    for i in range(len(results)):
-        if stop_flag and stop_flag():
-            log("⛔ Near-duplicate check interrupted by user.")
-            break
-            
-        for j in range(i + 1, len(results)):
-            pair = (results[i]['filename'], results[j]['filename'])
-            if pair in checked_pairs:
-                continue
-            checked_pairs.add(pair)
-            
-            # Skip if already exact duplicates
-            if results[i]['filename'] in duplicate_groups and results[j]['filename'] in duplicate_groups:
-                if duplicate_groups[results[i]['filename']] == duplicate_groups[results[j]['filename']]:
-                    continue
-            
-            sim = SequenceMatcher(None, normalize_text(results[i]['raw_text']), normalize_text(results[j]['raw_text'])).ratio()
-            if sim >= threshold:
-                # Check if either file is already in a group
-                if results[i]['filename'] in near_duplicate_groups:
-                    group = near_duplicate_groups[results[i]['filename']]
-                elif results[j]['filename'] in near_duplicate_groups:
-                    group = near_duplicate_groups[results[j]['filename']]
-                else:
-                    group = f"near_group_{len(near_duplicate_groups)}"
-                
-                near_duplicate_groups[results[i]['filename']] = group
-                near_duplicate_groups[results[j]['filename']] = group
-                duplicate_confidence[pair] = sim
-    
-    # Semantic similarity check
-    log("🔍 Checking semantic similarity...")
-    semantic_threshold = config.get_threshold('semantic')
-
-    # AI Hunter mode: more aggressive checking
-    if config.mode == 'ai-hunter':
-        log("🤖 AI Hunter mode: Enhanced semantic and structural checking active")
-        
-        # Check EVERY pair of files
-        for i in range(len(results)):
-            if stop_flag and stop_flag():
-                log("⛔ Semantic check interrupted by user.")
-                break
-                
-            for j in range(i + 1, len(results)):
-                pair = (results[i]['filename'], results[j]['filename'])
-                
-                # Skip if already marked as duplicates
-                if pair in duplicate_confidence and duplicate_confidence[pair] >= 0.95:
-                    continue
-                
-                # Multiple detection methods
-                methods_triggered = []
-                
-                # 1. Character name overlap
-                char_sim = calculate_character_overlap(results[i]['raw_text'], results[j]['raw_text'])
-                if char_sim >= config.get_threshold('character'):
-                    methods_triggered.append(('character', char_sim))
-                
-                # 2. Semantic signatures
-                sem_sim = calculate_semantic_similarity(
-                    results[i].get('semantic_sig', ''),
-                    results[j].get('semantic_sig', '')
-                )
-                if sem_sim >= semantic_threshold:
-                    methods_triggered.append(('semantic', sem_sim))
-                
-                # 3. Structural patterns
-                struct_sim = calculate_structural_similarity(
-                    results[i].get('structural_sig', ''),
-                    results[j].get('structural_sig', '')
-                )
-                if struct_sim >= config.get_threshold('structural'):
-                    methods_triggered.append(('structural', struct_sim))
-                
-                # 4. Pattern analysis
-                pattern_sim = calculate_pattern_similarity(
-                    results[i]['raw_text'],
-                    results[j]['raw_text']
-                )
-                if pattern_sim >= config.get_threshold('pattern'):
-                    methods_triggered.append(('pattern', pattern_sim))
-                
-                # If multiple methods triggered, mark as potential duplicate
-                if len(methods_triggered) >= 2:  # At least 2 methods must agree
-                    avg_confidence = sum(conf for _, conf in methods_triggered) / len(methods_triggered)
-                    
-                    # Update or set confidence
-                    if pair not in duplicate_confidence or avg_confidence > duplicate_confidence[pair]:
-                        duplicate_confidence[pair] = avg_confidence
-                    
-                    # Add to near-duplicate groups
-                    if results[i]['filename'] in near_duplicate_groups:
-                        group = near_duplicate_groups[results[i]['filename']]
-                    elif results[j]['filename'] in near_duplicate_groups:
-                        group = near_duplicate_groups[results[j]['filename']]
-                    else:
-                        group = f"ai_hunter_group_{len(near_duplicate_groups)}"
-                    
-                    near_duplicate_groups[results[i]['filename']] = group
-                    near_duplicate_groups[results[j]['filename']] = group
-                    
-                    log(f"   🤖 AI Hunter: {results[i]['filename']} ↔ {results[j]['filename']}")
-                    log(f"      Methods: {', '.join(f'{m}({c:.2f})' for m, c in methods_triggered)}")
-    
-    else:
-        # Standard semantic checking (existing code)
-        for i in range(len(results)):
-            if stop_flag and stop_flag():
-                log("⛔ Semantic check interrupted by user.")
-                break
-                
-            result = results[i]
-            if 'semantic_sig' not in result:
-                result['semantic_sig'] = extract_semantic_signature(result['raw_text'])
-            if 'structural_sig' not in result:
-                result['structural_sig'] = extract_structural_signature(result['raw_text'])
-            
-            # Only check against next few files for efficiency
-            check_range = min(10, len(results) - i - 1)
-            for j in range(i + 1, i + 1 + check_range):
-                if j >= len(results):
-                    break
-                    
-                if 'semantic_sig' not in results[j]:
-                    results[j]['semantic_sig'] = extract_semantic_signature(results[j]['raw_text'])
-                if 'structural_sig' not in results[j]:
-                    results[j]['structural_sig'] = extract_structural_signature(results[j]['raw_text'])
-                
-                semantic_sim = calculate_semantic_similarity(result['semantic_sig'], results[j]['semantic_sig'])
-                
-                if semantic_sim >= semantic_threshold:
-                    structural_sim = calculate_structural_similarity(
-                        result['structural_sig'], 
-                        results[j]['structural_sig']
-                    )
-                    
-                    combined_confidence = (semantic_sim + structural_sim) / 2
-                    
-                    if combined_confidence >= semantic_threshold:
-                        pair = (result['filename'], results[j]['filename'])
-                        
-                        if pair not in duplicate_confidence or combined_confidence > duplicate_confidence[pair]:
-                            duplicate_confidence[pair] = combined_confidence
-                        
-                        # Add to groups
-                        if result['filename'] in near_duplicate_groups:
-                            group = near_duplicate_groups[result['filename']]
-                        elif results[j]['filename'] in near_duplicate_groups:
-                            group = near_duplicate_groups[results[j]['filename']]
-                        else:
-                            group = f"semantic_group_{len(near_duplicate_groups)}"
-                        
-                        near_duplicate_groups[result['filename']] = group
-                        near_duplicate_groups[results[j]['filename']] = group
-    
-    # Third pass: compile issues
-    log("\n📋 Compiling issues...")
+    # Check each file for all issues
     for result in results:
         issues = []
         
-        # Check exact duplicates
+        # Check duplicates
         if result['filename'] in duplicate_groups:
             group_id = duplicate_groups[result['filename']]
-            group_files = [f for f, gid in duplicate_groups.items() if gid == group_id]
+            group_files = groups[group_id]
             if len(group_files) > 1:
                 others = [f for f in group_files if f != result['filename']]
-                issues.append(f"EXACT_DUPLICATE: {len(group_files)}_file_group")
+                
+                # Get the highest confidence score for this file
+                confidence = 0
+                for other in others:
+                    pair = tuple(sorted([result['filename'], other]))
+                    if pair in duplicate_confidence:
+                        confidence = max(confidence, duplicate_confidence[pair])
+                
+                result['duplicate_confidence'] = confidence
+                
+                if len(others) == 1:
+                    issues.append(f"DUPLICATE: exact_or_near_copy_of_{others[0]}")
+                else:
+                    issues.append(f"DUPLICATE: part_of_{len(group_files)}_file_group")
         
         # Check near-duplicates
         elif result['filename'] in near_duplicate_groups:
@@ -2147,7 +2049,8 @@ def launch_gui():
     modes = [
         ("Aggressive (75% threshold)", "aggressive"),
         ("Standard (85% threshold)", "standard"),
-        ("Strict (95% threshold)", "strict")
+        ("Strict (95% threshold)", "strict"),
+        ("AI Hunter (30% text, 85% semantic)", "ai-hunter")
     ]
     
     for text, mode in modes:
@@ -2185,4 +2088,6 @@ if __name__ == "__main__":
                 mode = 'strict'
             elif sys.argv[2] == "--standard":
                 mode = 'standard'
+            elif sys.argv[2] == "--ai-hunter":
+                mode = 'ai-hunter'
         scan_html_folder(sys.argv[1], mode=mode)
