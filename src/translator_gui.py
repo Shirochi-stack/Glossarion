@@ -636,7 +636,7 @@ class TranslatorGUI:
         self._modules_loaded = self._modules_loading = False
         self.stop_requested = False
         self.translation_thread = self.glossary_thread = self.qa_thread = self.epub_thread = None
-
+        self.qa_thread = None
         # Glossary tracking
         self.manual_glossary_path = None
         self.auto_loaded_glossary_path = None
@@ -4081,7 +4081,7 @@ class TranslatorGUI:
            else:
                self.glossary_button.config(text="Extract Glossary", command=self.run_glossary_extraction_thread,
                                          bootstyle="warning", state=tk.NORMAL if glossary_main and not any_process_running else tk.DISABLED)
-       
+    
        # EPUB button
        if hasattr(self, 'epub_button'):
            if epub_running:
@@ -4094,6 +4094,12 @@ class TranslatorGUI:
        # QA button
        if hasattr(self, 'qa_button'):
            self.qa_button.config(state=tk.NORMAL if scan_html_folder and not any_process_running else tk.DISABLED)
+       if qa_running:
+           self.qa_button.config(text="Stop Scan", command=self.stop_qa_scan, 
+                                 bootstyle="danger", state=tk.NORMAL)
+       else:
+           self.qa_button.config(text="QA Scan", command=self.run_qa_scan, 
+                                 bootstyle="warning", state=tk.NORMAL if scan_html_folder and not any_process_running else tk.DISABLED)   
 
     def stop_translation(self):
        """Stop translation while preserving loaded file"""
@@ -4148,9 +4154,15 @@ class TranslatorGUI:
        self.update_run_button()
 
     def stop_qa_scan(self):
-       """Stop QA scan"""
-       self.stop_requested = True
-       self.append_log("⛔ QA scan stop requested.")
+        self.stop_requested = True
+        try:
+            from scan_html_folder import stop_scan
+            if stop_scan():
+                self.append_log("✅ Stop scan signal sent successfully")
+        except Exception as e:
+            self.append_log(f"❌ Failed to stop scan: {e}")
+        self.append_log("⛔ QA scan stop requested.")
+       
 
     def on_close(self):
        if messagebox.askokcancel("Quit", "Are you sure you want to exit?"):
