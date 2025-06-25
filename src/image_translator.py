@@ -17,6 +17,8 @@ import logging
 import time
 import queue
 import threading
+import cv2
+import numpy as np
 from unified_api_client import UnifiedClientError
 
 logger = logging.getLogger(__name__)
@@ -69,7 +71,8 @@ def send_image_with_interrupt(client, messages, image_data, temperature, max_tok
 
 class ImageTranslator:
     def __init__(self, client, output_dir: str, profile_name: str = "", system_prompt: str = "", 
-                 temperature: float = 0.3, log_callback=None, progress_manager=None):
+                 temperature: float = 0.3, log_callback=None, progress_manager=None,
+                 history_manager=None, chunk_context_manager=None):
         """
         Initialize the image translator
         
@@ -105,9 +108,9 @@ class ImageTranslator:
         self.chunk_height = int(os.getenv("IMAGE_CHUNK_HEIGHT", "2000"))
         
         # Add context tracking for image chunks
-        self.image_chunk_context = []
         self.contextual_enabled = os.getenv("CONTEXTUAL", "1") == "1"
-        self.context_limit = 2  # Keep last 2 chunks as context
+        self.history_manager = history_manager
+        self.chunk_context_manager = chunk_context_manager
 
         
     def extract_images_from_chapter(self, chapter_html: str) -> List[Dict]:
@@ -327,17 +330,24 @@ class ImageTranslator:
                     except:
                         pass
     
-    def preprocess_image_for_watermarks(self, image_path: str) -> Optional[bytes]:
+    def preprocess_image_for_watermarks(self, image_path: str) -> str:
         """
-        Preprocess images to improve text visibility when watermarks are present
+        Enhanced preprocessing for watermark removal and text clarity
+        Now returns path to processed image instead of bytes
         
         Args:
             image_path: Path to the image file
             
         Returns:
-            Preprocessed image bytes or None
+            Path to processed image (either cleaned permanent file or original)
         """
         try:
+            # Check if watermark removal is enabled
+            if not os.getenv("ENABLE_WATERMARK_REMOVAL", "1") == "1":
+                return image_path  # Return original path
+            
+            print(f"   🧹 Preprocessing image for watermark removal...")
+            
             # Open image
             img = Image.open(image_path)
             
@@ -345,32 +355,235 @@ class ImageTranslator:
             if img.mode not in ('RGB', 'RGBA'):
                 img = img.convert('RGB')
             
-            # Enhance contrast to make text stand out more from watermarks
+            # Check if advanced watermark removal is enabled
+            if os.getenv("ADVANCED_WATERMARK_REMOVAL", "0") == "1":
+                print(f"   🔬 Using advanced watermark removal...")
+                
+                # Convert to numpy array for advanced processing
+                img_array = np.array(img)
+                
+                # Step 1: Detect if image has repeating patterns
+                has_pattern, pattern_mask = self._detect_watermark_pattern(img_array)
+                if has_pattern:
+                    print(f"   🔍 Detected watermark pattern in image")
+                    img_array = self._remove_periodic_watermark(img_array, pattern_mask)
+                
+                # Step 2: Apply adaptive histogram equalization
+                img_array = self._adaptive_histogram_equalization(img_array)
+                
+                # Step 3: Edge-preserving denoising
+                img_array = self._bilateral_filter(img_array)
+                
+                # Step 4: Text-specific enhancement
+                img_array = self._enhance_text_regions(img_array)
+                
+                # Convert back to PIL Image
+                img = Image.fromarray(img_array)
+            
+            # Apply basic PIL enhancements (always)
             enhancer = ImageEnhance.Contrast(img)
             img = enhancer.enhance(1.5)  # Increase contrast
             
-            # Enhance brightness slightly
             enhancer = ImageEnhance.Brightness(img)
             img = enhancer.enhance(1.1)  # Slight brightness increase
             
-            # Optional: Apply slight sharpening to make text clearer
             img = img.filter(ImageFilter.SHARPEN)
             
-            # Convert to bytes
-            img_bytes = io.BytesIO()
-            img.save(img_bytes, format='PNG')
-            img_bytes.seek(0)
+            # Check if we should save cleaned images
+            save_cleaned = os.getenv("SAVE_CLEANED_IMAGES", "1") == "1"
             
-            return img_bytes.read()
+            if save_cleaned:
+                # Save to permanent location
+                cleaned_dir = os.path.join(self.translated_images_dir, "cleaned")
+                os.makedirs(cleaned_dir, exist_ok=True)
+                
+                base_name = os.path.basename(image_path)
+                name, ext = os.path.splitext(base_name)
+                cleaned_path = os.path.join(cleaned_dir, f"{name}_cleaned{ext}")
+                
+                img.save(cleaned_path, optimize=True)
+                print(f"   💾 Saved cleaned image: {cleaned_path}")
+                
+                return cleaned_path  # Return path to cleaned image
+            else:
+                # Save to temporary file
+                import tempfile
+                _, ext = os.path.splitext(image_path)
+                with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                    img.save(tmp.name, optimize=False)
+                    print(f"   📝 Created temp cleaned image")
+                    return tmp.name  # Return temp path
             
         except Exception as e:
             logger.warning(f"Could not preprocess image: {e}")
-            return None
+            return image_path  # Return original on error
+    
+    def _detect_watermark_pattern(self, img_array: np.ndarray) -> Tuple[bool, Optional[np.ndarray]]:
+        """Detect repeating watermark patterns using FFT"""
+        try:
+            # Convert to grayscale for pattern detection
+            if len(img_array.shape) == 3:
+                gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+            else:
+                gray = img_array
+            
+            # Apply FFT to detect periodicity
+            f_transform = np.fft.fft2(gray)
+            f_shift = np.fft.fftshift(f_transform)
+            magnitude = np.log(np.abs(f_shift) + 1)  # Log scale for better visualization
+            
+            # Look for peaks that indicate repeating patterns
+            mean_mag = np.mean(magnitude)
+            std_mag = np.std(magnitude)
+            threshold = mean_mag + 2 * std_mag
+            
+            # Create binary mask of high-frequency components
+            pattern_mask = magnitude > threshold
+            
+            # Exclude center (DC component) - represents average brightness
+            center_y, center_x = pattern_mask.shape[0] // 2, pattern_mask.shape[1] // 2
+            pattern_mask[center_y-10:center_y+10, center_x-10:center_x+10] = False
+            
+            # Count significant peaks
+            pattern_threshold = int(os.getenv("WATERMARK_PATTERN_THRESHOLD", "10"))
+            peak_count = np.sum(pattern_mask)
+            
+            # If we have significant peaks, there's likely a repeating pattern
+            has_pattern = peak_count > pattern_threshold
+            
+            return has_pattern, pattern_mask if has_pattern else None
+            
+        except Exception as e:
+            logger.warning(f"Pattern detection failed: {e}")
+            return False, None
+    
+    def _remove_periodic_watermark(self, img_array: np.ndarray, pattern_mask: np.ndarray) -> np.ndarray:
+        """Remove periodic watermark using frequency domain filtering"""
+        try:
+            result = img_array.copy()
+            
+            # Process each color channel
+            for channel in range(img_array.shape[2] if len(img_array.shape) == 3 else 1):
+                if len(img_array.shape) == 3:
+                    gray = img_array[:, :, channel]
+                else:
+                    gray = img_array
+                
+                # Apply FFT
+                f_transform = np.fft.fft2(gray)
+                f_shift = np.fft.fftshift(f_transform)
+                
+                # Apply notch filter to remove periodic components
+                f_shift[pattern_mask] = 0
+                
+                # Inverse FFT
+                f_ishift = np.fft.ifftshift(f_shift)
+                img_filtered = np.fft.ifft2(f_ishift)
+                img_filtered = np.real(img_filtered)
+                
+                # Ensure values are in valid range
+                img_filtered = np.clip(img_filtered, 0, 255)
+                
+                if len(img_array.shape) == 3:
+                    result[:, :, channel] = img_filtered
+                else:
+                    result = img_filtered
+            
+            return result.astype(np.uint8)
+            
+        except Exception as e:
+            logger.warning(f"Watermark removal failed: {e}")
+            return img_array
+    
+    def _adaptive_histogram_equalization(self, img_array: np.ndarray) -> np.ndarray:
+        """Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)"""
+        try:
+            # Convert to LAB color space for better results
+            lab = cv2.cvtColor(img_array, cv2.COLOR_RGB2LAB)
+            
+            # Split channels
+            l, a, b = cv2.split(lab)
+            
+            # Apply CLAHE to L channel only
+            clahe_limit = float(os.getenv("WATERMARK_CLAHE_LIMIT", "3.0"))
+            clahe = cv2.createCLAHE(clipLimit=clahe_limit, tileGridSize=(8, 8))
+            l = clahe.apply(l)
+            
+            # Merge channels back
+            lab = cv2.merge([l, a, b])
+            
+            # Convert back to RGB
+            enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+            
+            return enhanced
+            
+        except Exception as e:
+            logger.warning(f"Adaptive histogram equalization failed: {e}")
+            return img_array
+    
+    def _bilateral_filter(self, img_array: np.ndarray) -> np.ndarray:
+        """Apply bilateral filter for edge-preserving denoising"""
+        try:
+            # Bilateral filter removes noise while keeping edges sharp
+            filtered = cv2.bilateralFilter(
+                img_array, 
+                d=9,
+                sigmaColor=75,
+                sigmaSpace=75
+            )
+            return filtered
+            
+        except Exception as e:
+            logger.warning(f"Bilateral filtering failed: {e}")
+            return img_array
+    
+    def _enhance_text_regions(self, img_array: np.ndarray) -> np.ndarray:
+        """Specifically enhance regions likely to contain text"""
+        try:
+            # Convert to grayscale for text detection
+            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+            
+            # Step 1: Detect text regions using gradient analysis
+            grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+            grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+            gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+            
+            # Normalize gradient
+            gradient_magnitude = (gradient_magnitude / gradient_magnitude.max() * 255).astype(np.uint8)
+            
+            # Step 2: Create text probability mask
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+            gradient_density = cv2.morphologyEx(gradient_magnitude, cv2.MORPH_CLOSE, kernel)
+            
+            # Threshold to get text regions
+            _, text_mask = cv2.threshold(gradient_density, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            
+            # Dilate to connect text regions
+            text_mask = cv2.dilate(text_mask, kernel, iterations=2)
+            
+            # Step 3: Enhance contrast in text regions
+            enhanced = img_array.copy()
+            
+            # Create 3-channel mask
+            text_mask_3ch = cv2.cvtColor(text_mask, cv2.COLOR_GRAY2RGB) / 255.0
+            
+            # Apply enhancement only to text regions
+            enhanced = enhanced.astype(np.float32)
+            enhanced = enhanced * (1 + (0.2 * text_mask_3ch))  # 20% enhancement in text regions
+            enhanced = np.clip(enhanced, 0, 255).astype(np.uint8)
+            
+            return enhanced
+            
+        except Exception as e:
+            logger.warning(f"Text region enhancement failed: {e}")
+            return img_array
     
     def translate_image(self, image_path: str, context: str = "", check_stop_fn=None) -> Optional[str]:
         """
         Translate text in an image using vision API - with chunking for tall images and stop support
         """
+        processed_path = None
+        
         try:
             self.current_image_path = image_path
             print(f"   🔍 translate_image called for: {image_path}")
@@ -388,8 +601,11 @@ class ImageTranslator:
             # Get configuration
             hide_label = os.getenv("HIDE_IMAGE_TRANSLATION_LABEL", "0") == "1"
             
-            # Open and process the image
-            with Image.open(image_path) as img:
+            # Apply watermark preprocessing
+            processed_path = self.preprocess_image_for_watermarks(image_path)
+            
+            # Open and process the image (now using processed_path)
+            with Image.open(processed_path) as img:
                 width, height = img.size
                 aspect_ratio = width / height if height > 0 else 1
                 print(f"   📐 Image dimensions: {width}x{height}, aspect ratio: {aspect_ratio:.2f}")
@@ -410,14 +626,14 @@ class ImageTranslator:
                 if not translated_text:
                     return None
             
-            # Store the result for caching
+            # Store the result for caching (use original path as key)
             self.processed_images[image_path] = translated_text
             
             # Save translation for debugging
             self._save_translation_debug(image_path, translated_text)
             
-            # Create HTML output
-            img_rel_path = os.path.relpath(image_path, self.output_dir)
+            # Create HTML output - use processed_path for the image reference
+            img_rel_path = os.path.relpath(processed_path, self.output_dir)
             html_output = self._create_html_output(img_rel_path, translated_text, is_long_text, 
                                                  hide_label, check_stop_fn and check_stop_fn())
             
@@ -429,6 +645,18 @@ class ImageTranslator:
             import traceback
             traceback.print_exc()
             return None
+            
+        finally:
+            # Clean up temp file if it was created
+            if processed_path and processed_path != image_path:
+                # Only delete if we're not saving cleaned images
+                if not os.getenv("SAVE_CLEANED_IMAGES", "1") == "1":
+                    try:
+                        if os.path.exists(processed_path):
+                            os.unlink(processed_path)
+                            print(f"   🧹 Cleaned up temp file")
+                    except Exception as e:
+                        logger.warning(f"Could not delete temp file: {e}")
 
     def _process_image_chunks(self, img, width, height, context, check_stop_fn):
         """Process a tall image by splitting it into chunks with contextual support"""
@@ -613,22 +841,17 @@ class ImageTranslator:
             {"role": "system", "content": self.system_prompt}
         ]
         
-        # ===== ADD THIS NEW CODE =====
         # Add context from previous chunks if contextual is enabled
         if hasattr(self, 'contextual_enabled') and self.contextual_enabled:
             if hasattr(self, 'image_chunk_context') and self.image_chunk_context:
-                # Include last 2 chunks as context
-                context_chunks = self.image_chunk_context[-2:]
+                # Include ALL previous chunks from this image, not just last 2
+                print(f"   📚 Including ALL {len(self.image_chunk_context)} previous chunks as context")
                 
-                if context_chunks:
-                    print(f"   📚 Including {len(context_chunks)} previous chunks as context")
-                    
-                for ctx in context_chunks:
+                for ctx in self.image_chunk_context:
                     messages.extend([
                         {"role": "user", "content": ctx["user"]},
                         {"role": "assistant", "content": ctx["assistant"]}
                     ])
-        # ===== END NEW CODE =====
         
         # Add current chunk (this already exists)
         messages.append({
