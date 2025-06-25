@@ -75,7 +75,12 @@ class TranslationConfig:
                        os.getenv("OPENAI_OR_Gemini_API_KEY") or
                        os.getenv("GEMINI_API_KEY"))
         # NEW: Simple chapter number offset
-        self.CHAPTER_NUMBER_OFFSET = int(os.getenv("CHAPTER_NUMBER_OFFSET", "0")) 
+        self.CHAPTER_NUMBER_OFFSET = int(os.getenv("CHAPTER_NUMBER_OFFSET", "0"))
+        self.ENABLE_WATERMARK_REMOVAL = os.getenv("ENABLE_WATERMARK_REMOVAL", "1") == "1"
+        self.SAVE_CLEANED_IMAGES = os.getenv("SAVE_CLEANED_IMAGES", "1") == "1"
+        self.WATERMARK_PATTERN_THRESHOLD = int(os.getenv("WATERMARK_PATTERN_THRESHOLD", "10"))
+        self.WATERMARK_CLAHE_LIMIT = float(os.getenv("WATERMARK_CLAHE_LIMIT", "3.0"))
+        
         
 # =====================================================
 # UNIFIED PATTERNS AND CONSTANTS
@@ -4402,12 +4407,14 @@ def main(log_callback=None, stop_callback=None):
             system, 
             config.TEMP,
             log_callback ,
-            progress_manager
+            progress_manager,
+            history_manager,
+            chunk_context_manager
         )
         
         known_vision_models = [
-            'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-exp', 
-            'gpt-4-turbo', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1-nano', 'o4-mini'
+            'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-2.5-pro',
+            'gpt-4-turbo', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1-nano', 'o4-mini', 'gpt-4.1-mini'
         ]
         
         if config.MODEL.lower() not in known_vision_models:
