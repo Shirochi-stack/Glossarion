@@ -24,3 +24,4 @@ anyio
 sniffio
 regex
 python-dotenv
+opencv-python
