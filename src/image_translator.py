@@ -633,7 +633,40 @@ class ImageTranslator:
             self._save_translation_debug(image_path, translated_text)
             
             # Create HTML output - use processed_path for the image reference
-            img_rel_path = os.path.relpath(processed_path, self.output_dir)
+            # Handle cross-drive paths on Windows
+            try:
+                img_rel_path = os.path.relpath(processed_path, self.output_dir)
+            except ValueError as e:
+                # This happens when paths are on different drives in Windows
+                print(f"   ⚠️ Cross-drive path detected, copying image to output directory")
+                
+                # Copy the processed image to the output directory's images folder
+                import shutil
+                images_output_dir = os.path.join(self.output_dir, "images")
+                os.makedirs(images_output_dir, exist_ok=True)
+                
+                # Generate a unique filename to avoid conflicts
+                base_name = os.path.basename(processed_path)
+                dest_path = os.path.join(images_output_dir, base_name)
+                
+                # Handle potential naming conflicts
+                if os.path.exists(dest_path):
+                    name, ext = os.path.splitext(base_name)
+                    counter = 1
+                    while os.path.exists(dest_path):
+                        dest_path = os.path.join(images_output_dir, f"{name}_{counter}{ext}")
+                        counter += 1
+                
+                # Copy the file
+                shutil.copy2(processed_path, dest_path)
+                print(f"   📋 Copied image to: {dest_path}")
+                
+                # Calculate relative path from the copied location
+                img_rel_path = os.path.relpath(dest_path, self.output_dir)
+                
+                # Update processed_path for cleanup logic
+                processed_path = dest_path
+            
             html_output = self._create_html_output(img_rel_path, translated_text, is_long_text, 
                                                  hide_label, check_stop_fn and check_stop_fn())
             
