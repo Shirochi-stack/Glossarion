@@ -32,25 +32,25 @@ class AIHunterConfigGUI:
             'enabled': True,
             'sample_size': 3000,
             'thresholds': {
-                'exact': 100,     # Only triggers on exact match (not used in retranslation logic)
-                'text': 30,       # 30% - the main text similarity threshold
-                'semantic': 85,   # 85% - must be high
-                'structural': 85, # 85% - must be high
-                'character': 40,  # Character overlap (supplementary)
-                'pattern': 50     # Pattern analysis (supplementary)
+                'exact': 90,
+                'text': 85,
+                'semantic': 85,
+                'structural': 85,
+                'character': 80,
+                'pattern': 80
             },
             'weights': {
                 'exact': 1.5,
-                'text': 0.5,
-                'semantic': 1.5,
-                'structural': 1.5,
+                'text': 1.2,
+                'semantic': 1.0,
+                'structural': 1.0,
                 'character': 0.8,
                 'pattern': 0.8
             },
             'detection_mode': 'multi_method',
             'multi_method_requirements': {
-                'methods_required': 2,  # Need 2 methods
-                'min_methods': ['semantic', 'structural']  # Must include at least one of these
+                'methods_required': 3,
+                'min_methods': ['semantic', 'structural']
             },
             'preprocessing': {
                 'remove_html_spacing': True,
@@ -60,8 +60,8 @@ class AIHunterConfigGUI:
             },
             'edge_filters': {
                 'min_text_length': 500,
-                'max_length_ratio': 2.0,  # Very lenient for AI Hunter
-                'min_length_ratio': 0.5   # Very lenient for AI Hunter
+                'max_length_ratio': 1.3,
+                'min_length_ratio': 0.7
             }
         }
         
@@ -441,267 +441,55 @@ class AIHunterConfigGUI:
 
 
 class ImprovedAIHunterDetection:
-    """AI Hunter detection that matches original scan_html_folder.py logic"""
+    """Improved AI Hunter detection methods for TranslateKRtoEN"""
     
-    def __init__(self, config_dict):
-        """Initialize with reference to main config dictionary"""
-        self.config = config_dict
+    def __init__(self, main_config):
+        """
+        Initialize with reference to main config
         
-        # Get the actual AI Hunter config (not defaults!)
-        self.ai_config = self.config.get('ai_hunter_config', {})
-        self.thresholds = self.ai_config.get('thresholds', {})
-    
-    def calculate_all_similarities(self, text1, text2):
-        """Calculate all similarity scores matching original logic"""
-        # Calculate text similarity
-        text_sim = self._calculate_text_similarity(text1, text2)
+        Args:
+            main_config: Reference to main translator config dictionary
+        """
+        self.main_config = main_config
         
-        # Calculate semantic similarity (character names, dialogue patterns, numbers)
-        semantic_sim = self._calculate_semantic_similarity(text1, text2)
-        
-        # Calculate structural similarity (paragraph patterns)
-        structural_sim = self._calculate_structural_similarity(text1, text2)
-        
-        # Return all scores
-        return {
-            'text': text_sim,
-            'semantic': semantic_sim,
-            'structural': structural_sim,
-            'exact': 1.0 if text1 == text2 else 0.0,
-            'character': self._calculate_character_overlap(text1, text2),
-            'pattern': (semantic_sim + structural_sim) / 2  # Average for pattern
+        # Default AI Hunter settings
+        self.default_ai_hunter = {
+            'enabled': True,
+            'lookback_chapters': 5,
+            'sample_size': 3000,
+            'thresholds': {
+                'exact': 90,
+                'text': 85,
+                'semantic': 85,
+                'structural': 85,
+                'character': 80,
+                'pattern': 80
+            },
+            'weights': {
+                'exact': 1.5,
+                'text': 1.2,
+                'semantic': 1.0,
+                'structural': 1.0,
+                'character': 0.8,
+                'pattern': 0.8
+            },
+            'detection_mode': 'multi_method',
+            'multi_method_requirements': {
+                'methods_required': 2,
+                'min_methods': ['semantic', 'structural']
+            },
+            'preprocessing': {
+                'remove_html_spacing': True,
+                'normalize_unicode': True,
+                'ignore_case': True,
+                'remove_extra_whitespace': True
+            },
+            'edge_filters': {
+                'min_text_length': 500,
+                'max_length_ratio': 1.3,
+                'min_length_ratio': 0.7
+            }
         }
-    
-    def is_retranslation(self, text1, text2):
-        """Check if texts are retranslations using ACTUAL config values"""
-        sims = self.calculate_all_similarities(text1, text2)
-        
-        # Use the thresholds from the actual saved config
-        semantic_threshold = self.thresholds.get('semantic', 0.85)
-        structural_threshold = self.thresholds.get('structural', 0.85)
-        retrans_threshold = self.thresholds.get('retranslation_text', 0.60)
-        
-        # Original AI Hunter logic using config values
-        if (sims['semantic'] >= semantic_threshold and 
-            sims['structural'] >= structural_threshold and
-            sims['text'] < retrans_threshold):
-            return True, sims
-        
-        return False, sims
-    
-    def _calculate_text_similarity(self, text1, text2):
-        """Simple text similarity matching original"""
-        # Normalize texts
-        norm1 = self._normalize_text(text1)
-        norm2 = self._normalize_text(text2)
-        
-        # Use SequenceMatcher for consistency with original
-        return SequenceMatcher(None, norm1[:5000], norm2[:5000]).ratio()
-    
-    def _normalize_text(self, text):
-        """Normalize text exactly like original"""
-        # Remove HTML tags
-        text = re.sub(r'<[^>]+>', '', text)
-        # Convert to lowercase
-        text = text.lower()
-        # Normalize unicode
-        text = unicodedata.normalize('NFKD', text)
-        # Remove extra whitespace
-        text = ' '.join(text.split())
-        # Remove punctuation
-        text = re.sub(r'[^\w\s]', '', text)
-        return text
-    
-    def _calculate_semantic_similarity(self, text1, text2):
-        """Calculate semantic similarity exactly like original"""
-        # Extract character names
-        names1 = self._extract_character_names(text1)
-        names2 = self._extract_character_names(text2)
-        
-        # Character overlap
-        char_overlap = len(names1 & names2) / max(1, len(names1 | names2)) if names1 or names2 else 0
-        
-        # Extract dialogue count
-        dialogue1 = len(re.findall(r'[""]([^""]+)[""]', text1))
-        dialogue2 = len(re.findall(r'[""]([^""]+)[""]', text2))
-        dial_ratio = min(dialogue1, dialogue2) / max(1, max(dialogue1, dialogue2))
-        
-        # Extract numbers
-        nums1 = set(re.findall(r'\b\d+\b', text1))
-        nums2 = set(re.findall(r'\b\d+\b', text2))
-        num_overlap = len(nums1 & nums2) / max(1, len(nums1 | nums2)) if nums1 or nums2 else 1
-        
-        # Weighted average (matching original weights)
-        return (char_overlap * 0.4 + dial_ratio * 0.3 + num_overlap * 0.3)
-    
-    
-    def _calculate_structural_similarity(self, text1, text2):
-        """Calculate structural similarity like original"""
-        # Split into paragraphs
-        paras1 = [p.strip() for p in text1.split('\n') if p.strip()]
-        paras2 = [p.strip() for p in text2.split('\n') if p.strip()]
-        
-        # Create patterns
-        pattern1 = self._create_pattern(paras1)
-        pattern2 = self._create_pattern(paras2)
-        
-        # Compare patterns
-        return SequenceMatcher(None, pattern1, pattern2).ratio()
-    
-    def _create_pattern(self, paragraphs):
-        """Create structural pattern like original"""
-        pattern = []
-        for p in paragraphs[:50]:  # First 50 paragraphs
-            if '"' in p or '"' in p:
-                pattern.append('D')  # Dialogue
-            elif len(p) < 50:
-                pattern.append('S')  # Short
-            elif len(p) < 200:
-                pattern.append('M')  # Medium
-            else:
-                pattern.append('L')  # Long
-        return ''.join(pattern)
-    
-    def _calculate_character_overlap(self, text1, text2):
-        """Calculate character pattern similarity - useful for duplicate detection"""
-        
-        def extract_character_patterns(text):
-            """Extract character usage patterns from text"""
-            # Find potential character names
-            words = re.findall(r'\b[A-Z][a-z]+\b', text)
-            
-            # Expanded list of common words to exclude
-            common_words = {
-                'The', 'A', 'An', 'He', 'She', 'It', 'They', 'We', 'You', 'I', 'Chapter',
-                'But', 'And', 'Or', 'If', 'When', 'Where', 'What', 'Who', 'How', 'Why',
-                'That', 'This', 'These', 'Those', 'There', 'Here', 'Now', 'Then',
-                'Yes', 'No', 'Not', 'All', 'Some', 'Many', 'Few', 'Each', 'Every',
-                'First', 'Second', 'Third', 'Last', 'Next', 'Only', 'Just', 'Even',
-                'However', 'Although', 'Because', 'Since', 'While', 'After', 'Before',
-                'Above', 'Below', 'Between', 'Through', 'During', 'Without', 'Within',
-                'Lord', 'Lady', 'Sir', 'Mr', 'Mrs', 'Miss', 'Master', 'Mister'
-            }
-            
-            # Count character occurrences
-            name_counts = Counter(words)
-            
-            # Filter to likely character names (appear 2+ times, not common words)
-            character_names = {name: count for name, count in name_counts.items() 
-                              if count >= 2 and name not in common_words}
-            
-            if not character_names:
-                return None
-            
-            # Extract patterns
-            patterns = {
-                'frequency_vector': [],
-                'interaction_pairs': [],
-                'first_appearances': {},
-                'total_mentions': sum(character_names.values())
-            }
-            
-            # 1. Frequency vector (normalized)
-            total = sum(character_names.values())
-            patterns['frequency_vector'] = {
-                name: count / total 
-                for name, count in sorted(character_names.items())
-            }
-            
-            # 2. Character interactions (who appears near whom)
-            words_lower = text.split()
-            char_positions = {}
-            
-            # Find positions of each character
-            for i, word in enumerate(words_lower):
-                # Check if word is a character name (case-insensitive)
-                for char_name in character_names:
-                    if word.lower() == char_name.lower() or word.strip('.,!?"\'').lower() == char_name.lower():
-                        if char_name not in char_positions:
-                            char_positions[char_name] = []
-                        char_positions[char_name].append(i)
-            
-            # Find characters that appear within 50 words of each other
-            interaction_pairs = set()
-            for char1 in char_positions:
-                for char2 in char_positions:
-                    if char1 < char2:  # Avoid duplicates
-                        for pos1 in char_positions[char1]:
-                            for pos2 in char_positions[char2]:
-                                if abs(pos1 - pos2) <= 50:  # Within 50 words
-                                    interaction_pairs.add((char1, char2))
-                                    break
-            
-            patterns['interaction_pairs'] = list(interaction_pairs)
-            
-            # 3. First appearance position (normalized)
-            text_length = len(words_lower)
-            for char_name in character_names:
-                if char_name in char_positions and char_positions[char_name]:
-                    first_pos = min(char_positions[char_name])
-                    patterns['first_appearances'][char_name] = first_pos / text_length
-            
-            return patterns
-        
-        # Extract patterns from both texts
-        patterns1 = extract_character_patterns(text1)
-        patterns2 = extract_character_patterns(text2)
-        
-        if not patterns1 or not patterns2:
-            return 0.5  # Neutral score if no patterns found
-        
-        similarities = []
-        
-        # 1. Compare frequency vectors (how often each character appears)
-        freq1 = patterns1['frequency_vector']
-        freq2 = patterns2['frequency_vector']
-        
-        # Get all character names from both texts
-        all_chars = set(freq1.keys()) | set(freq2.keys())
-        
-        if all_chars:
-            # Calculate cosine similarity of frequency vectors
-            dot_product = sum(freq1.get(char, 0) * freq2.get(char, 0) for char in all_chars)
-            norm1 = sum(v**2 for v in freq1.values()) ** 0.5
-            norm2 = sum(v**2 for v in freq2.values()) ** 0.5
-            
-            if norm1 > 0 and norm2 > 0:
-                freq_similarity = dot_product / (norm1 * norm2)
-                similarities.append(freq_similarity)
-        
-        # 2. Compare interaction pairs
-        pairs1 = set(patterns1['interaction_pairs'])
-        pairs2 = set(patterns2['interaction_pairs'])
-        
-        if pairs1 or pairs2:
-            pair_overlap = len(pairs1 & pairs2) / max(1, len(pairs1 | pairs2))
-            similarities.append(pair_overlap)
-        
-        # 3. Compare first appearance patterns
-        appear1 = patterns1['first_appearances']
-        appear2 = patterns2['first_appearances']
-        
-        common_chars = set(appear1.keys()) & set(appear2.keys())
-        if common_chars:
-            # Average difference in first appearance positions
-            appear_diffs = [abs(appear1[char] - appear2[char]) for char in common_chars]
-            appear_similarity = 1 - (sum(appear_diffs) / len(appear_diffs))
-            similarities.append(appear_similarity)
-        
-        # 4. Compare character cast overlap (which characters appear)
-        chars1 = set(freq1.keys())
-        chars2 = set(freq2.keys())
-        
-        if chars1 or chars2:
-            # Jaccard similarity of character sets
-            cast_overlap = len(chars1 & chars2) / max(1, len(chars1 | chars2))
-            # Weight this less since same novel will have similar casts
-            similarities.append(cast_overlap * 0.5 + 0.5)  # Scale to 0.5-1.0 range
-        
-        # Return weighted average of all similarity measures
-        if similarities:
-            return sum(similarities) / len(similarities)
-        else:
-            return 0.5  # Neutral score
     
     def get_ai_config(self):
         """Get AI Hunter configuration from main config"""
@@ -1130,38 +918,9 @@ class ImprovedAIHunterDetection:
         
         return features
     
-    def _calculate_character_similarity(self, chars1, chars2):
-        """Calculate character overlap similarity"""
-        if not chars1 or not chars2:
-            return 0.0
-        
-        # Convert to sets
-        set1 = set(chars1)
-        set2 = set(chars2)
-        
-        # If no overlap at all, return 0
-        intersection = set1 & set2
-        if not intersection:
-            return 0.0
-        
-        # Calculate Jaccard index (intersection over union)
-        union = set1 | set2
-        jaccard = len(intersection) / len(union)
-        
-        # Also consider the proportion of matching characters relative to each set
-        # This prevents small overlaps from scoring too high
-        overlap1 = len(intersection) / len(set1)
-        overlap2 = len(intersection) / len(set2)
-        
-        # Take the minimum overlap to be more conservative
-        min_overlap = min(overlap1, overlap2)
-        
-        # Combine jaccard and overlap scores
-        # Jaccard penalizes when sets are very different sizes
-        # Min overlap ensures both texts share a significant portion of characters
-        score = (jaccard + min_overlap) / 2
-        
-        return score
+    def _calculate_exact_similarity(self, text1, text2):
+        """Calculate exact text similarity"""
+        return SequenceMatcher(None, text1, text2).ratio()
     
     def _calculate_smart_similarity(self, text1, text2, sample_size):
         """Smart similarity with configurable sample size"""
@@ -1260,18 +1019,36 @@ class ImprovedAIHunterDetection:
     
     def _calculate_character_similarity(self, chars1, chars2):
         """Calculate character overlap similarity"""
-        if not chars1 and not chars2:
-            return 1.0
         if not chars1 or not chars2:
             return 0.0
         
+        # Convert to sets
         set1 = set(chars1)
         set2 = set(chars2)
         
-        overlap = len(set1 & set2)
-        total = len(set1 | set2)
+        # If no overlap at all, return 0
+        intersection = set1 & set2
+        if not intersection:
+            return 0.0
         
-        return overlap / max(1, total)
+        # Calculate Jaccard index (intersection over union)
+        union = set1 | set2
+        jaccard = len(intersection) / len(union)
+        
+        # Also consider the proportion of matching characters relative to each set
+        # This prevents small overlaps from scoring too high
+        overlap1 = len(intersection) / len(set1)
+        overlap2 = len(intersection) / len(set2)
+        
+        # Take the minimum overlap to be more conservative
+        min_overlap = min(overlap1, overlap2)
+        
+        # Combine jaccard and overlap scores
+        # Jaccard penalizes when sets are very different sizes
+        # Min overlap ensures both texts share a significant portion of characters
+        score = (jaccard + min_overlap) / 2
+        
+        return score
     
     def _calculate_pattern_similarity(self, pat1, pat2):
         """Calculate pattern similarity (numbers, etc.)"""
