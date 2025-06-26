@@ -228,6 +228,7 @@ image_modules = [
     'PIL.FtexImagePlugin',
     
     'olefile',
+    'cv2',  # OpenCV
 ]
 
 # AI/API Clients
@@ -694,6 +695,14 @@ excludes = [
     'colorama',  # Unless you need colored console output
     'win32com',  # Unless you need Windows COM
     'pythoncom', # Unless you need Windows COM
+    
+    # Optional scipy backends (these cause warnings but are safe to exclude)
+    'dask',
+    'dask.array',
+    'torch',
+    'cupy',
+    'jax',
+    'sparse',
 ]
 
 # ============================================================================
@@ -823,4 +832,7 @@ The executable will be ~150-200MB due to included ML libraries.
 
 For version information:
 Create a version_info.txt file with Windows version resource information
+
+Note: Warnings about missing 'dask', 'torch', 'cupy', etc. are expected
+and safe to ignore. These are optional scipy dependencies.
 """
