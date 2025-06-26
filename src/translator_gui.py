@@ -621,7 +621,7 @@ class TranslatorGUI:
         
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        master.title("Glossarion v2.8.8")
+        master.title("Glossarion v2.9.2")
         
         self.wm.responsive_size(master, BASE_WIDTH, BASE_HEIGHT)
         master.minsize(1600, 1000)
@@ -669,14 +669,63 @@ class TranslatorGUI:
         
         # Default prompts
         self.default_prompts = {
-            "korean": "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title> ,<h1>, <h2>, <p>, <br>, <div>, etc.",
-            "japanese": "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags text while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics like -san, -sama, -chan, -kun.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- retain onomatopoeia in Romaji.\n- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title> ,<h1>, <h2>, <p>, <br>, <div>, etc.",
-            "chinese": "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title> ,<h1>, <h2>, <p>, <br>, <div>, etc.",
-            "korean_OCR": "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics like -nim, -ssi.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- Add HTML tags for proper formatting as expected of a novel.",
-            "japanese_OCR": "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags text while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Retain honorifics like -san, -sama, -chan, -kun.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- Add HTML tags for proper formatting as expected of a novel.",
-            "chinese_OCR": "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n- Use an easy to read and grammatically accurate comedy translation style.\n- Preserve original intent, and speech tone.\n- retain onomatopoeia in Romaji.\n- Add HTML tags for proper formatting as expected of a novel.",
-            "Original": "Return text and html tags exactly as they appear on the source."
+            "korean": "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
+                          "- Use an easy to read and grammatically accurate comedy translation style.\n"
+                          "- Retain honorifics like -nim, -ssi.\n"
+                          "- Preserve original intent, and speech tone.\n"
+                          "- Retain onomatopoeia in Romaji.\n"
+                          "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.",
+            "japanese": "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
+                          "- Use an easy to read and grammatically accurate comedy translation style.\n"
+                          "- Retain honorifics like -san, -sama, -chan, -kun.\n"
+                          "- Preserve original intent, and speech tone.\n"
+                          "- Retain onomatopoeia in Romaji.\n"
+                          "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.",
+            "chinese": "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
+                         "- Use an easy to read and grammatically accurate comedy translation style.\n"
+                         "- Preserve original intent, and speech tone.\n"
+                         "- Retain onomatopoeia in Romaji.\n"
+                         "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.",
+            "korean_OCR": "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
+                          "- Use an easy to read and grammatically accurate comedy translation style.\n"
+                          "- Retain honorifics like -nim, -ssi.\n"
+                          "- Preserve original intent, and speech tone.\n"
+                          "- Retain onomatopoeia in Romaji.\n"
+                          "- Add HTML tags for proper formatting as expected of a novel.",
+            "japanese_OCR": "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
+                            "- Use an easy to read and grammatically accurate comedy translation style.\n"
+                            "- Retain honorifics like -san, -sama, -chan, -kun.\n"
+                            "- Preserve original intent, and speech tone.\n"
+                            "- Retain onomatopoeia in Romaji.\n"
+                            "- Add HTML tags for proper formatting as expected of a novel.",
+            "chinese_OCR": "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
+                           "- Use an easy to read and grammatically accurate comedy translation style.\n"
+                           "- Preserve original intent, and speech tone.\n"
+                           "- Retain onomatopoeia in Romaji.\n"
+                           "- Add HTML tags for proper formatting as expected of a novel.",
+
+            # TXT-only entries
+            "korean_TXT": "You are a professional Korean to English novel translator, you must strictly output only English text while following these rules:\n"
+                           "- Use an easy to read and grammatically accurate comedy translation style.\n"
+                           "- Retain honorifics like -nim, -ssi.\n"
+                           "- Preserve original intent, and speech tone.\n"
+                           "- Retain onomatopoeia in Romaji.\n"
+                           "- Use line breaks for proper formatting as expected of a novel.",
+            "japanese_TXT": "You are a professional Japanese to English novel translator, you must strictly output only English text while following these rules:\n"
+                             "- Use an easy to read and grammatically accurate comedy translation style.\n"
+                             "- Retain honorifics like -san, -sama, -chan, -kun.\n"
+                             "- Preserve original intent, and speech tone.\n"
+                             "- Retain onomatopoeia in Romaji.\n"
+                             "- Use line breaks for proper formatting as expected of a novel.",
+            "chinese_TXT": "You are a professional Chinese to English novel translator, you must strictly output only English text while following these rules:\n"
+                            "- Use an easy to read and grammatically accurate comedy translation style.\n"
+                            "- Preserve original intent, and speech tone.\n"
+                            "- Retain onomatopoeia in Romaji.\n"
+                            "- Use line breaks for proper formatting as expected of a novel.",
+
+            "Original": "Return everything exactly as seen on the source."
         }
+
         
         self._init_default_prompts()
         self._init_variables()
@@ -834,7 +883,7 @@ class TranslatorGUI:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v2.8.8 - Ready to use!")
+        self.append_log("🚀 Glossarion v2.9.2 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -849,10 +898,70 @@ class TranslatorGUI:
         tb.Label(self.frame, text="Model:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
         default_model = self.config.get('model', 'gemini-2.0-flash')
         self.model_var = tk.StringVar(value=default_model)
-        models = ["gpt-4o","gpt-4o-mini","gpt-4-turbo","gpt-4.1-nano","gpt-4.1-mini","gpt-4.1",
-                  "gpt-3.5-turbo","o4-mini","gemini-1.5-pro","gemini-1.5-flash", "gemini-2.0-flash",
-                  "gemini-2.0-flash","gemini-2.5-flash","gemini-2.5-pro",
-                  "deepseek-chat","claude-3-5-sonnet-20241022","claude-3-7-sonnet-20250219"]
+        models = [
+            # OpenAI Models
+            "gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4.1-nano", "gpt-4.1-mini", "gpt-4.1",
+            "gpt-3.5-turbo", "gpt-3.5-turbo-16k", "gpt-4", "gpt-4-32k",
+            "o1-preview", "o1-mini", "o4-mini",
+            
+            # Google Gemini Models
+            "gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash",
+            "gemini-2.5-flash", "gemini-2.5-pro", "gemini-pro", "gemini-pro-vision",
+            
+            # Anthropic Claude Models
+            "claude-opus-4-20250514", "claude-sonnet-4-20250514",
+            "claude-3-5-sonnet-20241022", "claude-3-7-sonnet-20250219",
+            "claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307",
+            "claude-2.1", "claude-2", "claude-instant-1.2",
+            
+            # DeepSeek Models
+            "deepseek-chat", "deepseek-coder", "deepseek-coder-33b-instruct",
+            
+            # Mistral Models
+            "mistral-large", "mistral-medium", "mistral-small", "mistral-tiny",
+            "mixtral-8x7b-instruct", "mixtral-8x22b", "codestral-latest",
+            
+            # Meta Llama Models (via Together/other providers)
+            "llama-2-7b-chat", "llama-2-13b-chat", "llama-2-70b-chat",
+            "llama-3-8b-instruct", "llama-3-70b-instruct", "codellama-34b-instruct",
+            
+            # Yi Models
+            "yi-34b-chat", "yi-34b-chat-200k", "yi-6b-chat",
+            
+            # Qwen Models
+            "qwen-72b-chat", "qwen-14b-chat", "qwen-7b-chat", "qwen-plus", "qwen-turbo",
+            
+            # Cohere Models
+            "command", "command-light", "command-nightly", "command-r", "command-r-plus",
+            
+            # AI21 Models
+            "j2-ultra", "j2-mid", "j2-light", "jamba-instruct",
+            
+            # Perplexity Models
+            "perplexity-70b-online", "perplexity-7b-online", "pplx-70b-online", "pplx-7b-online",
+            
+            # Groq Models (usually with suffix)
+            "llama-3-70b-groq", "llama-3-8b-groq", "mixtral-8x7b-groq",
+            
+            # Chinese Models
+            "glm-4", "glm-3-turbo", "chatglm-6b", "chatglm2-6b", "chatglm3-6b",
+            "baichuan-13b-chat", "baichuan2-13b-chat",
+            "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k",
+            
+            # Other Models
+            "falcon-40b-instruct", "falcon-7b-instruct",
+            "phi-2", "phi-3-mini", "phi-3-small", "phi-3-medium",
+            "orca-2-13b", "orca-2-7b",
+            "vicuna-13b", "vicuna-7b",
+            "alpaca-7b",
+            "wizardlm-70b", "wizardlm-13b",
+            "openchat-3.5",
+            
+            # For ElectronHub, prefix with 'eh/'
+            "eh/gpt-4", "eh/gpt-3.5-turbo", "eh/claude-3-opus", "eh/claude-3-sonnet",
+            "eh/llama-2-70b-chat", "eh/yi-34b-chat-200k", "eh/mistral-large",
+            "eh/gemini-pro", "eh/deepseek-coder-33b",
+        ]
         tb.Combobox(self.frame, textvariable=self.model_var, values=models, state="normal").grid(
             row=1, column=1, columnspan=2, sticky=tk.EW, padx=5, pady=5)
     
@@ -2431,182 +2540,686 @@ class TranslatorGUI:
                    messagebox.showinfo("Info", "No duplicates found")
        
        def smart_trim_dialog():
-           if not self.current_glossary_data:
-               messagebox.showerror("Error", "No glossary loaded")
-               return
-           
-           dialog = self.wm.create_simple_dialog(
-               self.master,
-               "Smart Trim Glossary",
-               width=500,
-               height=700
-           )
-           
-           main_frame = tk.Frame(dialog, padx=20, pady=20)
-           main_frame.pack(fill=tk.BOTH, expand=True)
-           
-           tk.Label(main_frame, text="Smart Glossary Trimming", 
-                   font=('TkDefaultFont', 12, 'bold')).pack(pady=(0, 10))
-           
-           options_frame = tk.LabelFrame(main_frame, text="Trimming Options", padx=10, pady=10)
-           options_frame.pack(fill=tk.X, pady=(0, 10))
-           
-           top_frame = tk.Frame(options_frame)
-           top_frame.pack(fill=tk.X, pady=5)
-           tk.Label(top_frame, text="Keep top").pack(side=tk.LEFT)
-           top_var = tk.StringVar(value="100")
-           tb.Entry(top_frame, textvariable=top_var, width=10).pack(side=tk.LEFT, padx=5)
-           tk.Label(top_frame, text="entries").pack(side=tk.LEFT)
-           
-           tk.Label(options_frame, text="Field-specific limits:", 
-                   font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(10, 5))
-           
-           field_vars = {}
-           fields_to_limit = [
-               ('traits', "Max traits per character:", "5"),
-               ('locations', "Max locations per entry:", "10"),
-               ('group_affiliation', "Max groups per character:", "3")
-           ]
-           
-           for field, label, default in fields_to_limit:
-               frame = tk.Frame(options_frame)
-               frame.pack(fill=tk.X, pady=2)
-               tk.Label(frame, text=label).pack(side=tk.LEFT)
-               var = tk.StringVar(value=default)
-               tb.Entry(frame, textvariable=var, width=10).pack(side=tk.LEFT, padx=5)
-               field_vars[field] = var
-           
-           tk.Label(options_frame, text="Remove fields:", 
-                   font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(10, 5))
-           
-           remove_vars = {}
-           fields_to_remove = ['title', 'how_they_refer_to_others', 'gender']
-           
-           for field in fields_to_remove:
-               var = tk.BooleanVar(value=False)
-               tb.Checkbutton(options_frame, text=f"Remove {field.replace('_', ' ')}", 
-                            variable=var).pack(anchor=tk.W, padx=20)
-               remove_vars[field] = var
-           
-           def apply_smart_trim():
-               try:
-                   top_n = int(top_var.get())
-                   
-                   if self.current_glossary_format == 'list':
-                       if top_n < len(self.current_glossary_data):
-                           self.current_glossary_data = self.current_glossary_data[:top_n]
-                       
-                       for entry in self.current_glossary_data:
-                           for field, var in field_vars.items():
-                               if field in entry and isinstance(entry[field], list):
-                                   limit = int(var.get())
-                                   if len(entry[field]) > limit:
-                                       entry[field] = entry[field][:limit]
-                           
-                           for field, var in remove_vars.items():
-                               if var.get() and field in entry:
-                                   entry.pop(field)
-                   
-                   elif self.current_glossary_format == 'dict':
-                       entries = list(self.current_glossary_data['entries'].items())
-                       if top_n < len(entries):
-                           self.current_glossary_data['entries'] = dict(entries[:top_n])
-                   
-                   if save_current_glossary():
-                       load_glossary_for_editing()
-                       messagebox.showinfo("Success", "Smart trim applied successfully")
-                       dialog.destroy()
-                       
-               except ValueError:
-                   messagebox.showerror("Error", "Please enter valid numbers")
-           
-           button_frame = tk.Frame(main_frame)
-           button_frame.pack(fill=tk.X, pady=(10, 0))
-           
-           tb.Button(button_frame, text="Apply Trim", command=apply_smart_trim,
-                    bootstyle="primary", width=15).pack(side=tk.LEFT, padx=5)
-           tb.Button(button_frame, text="Cancel", command=dialog.destroy,
-                    bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
-           
-           dialog.deiconify()
+            if not self.current_glossary_data:
+                messagebox.showerror("Error", "No glossary loaded")
+                return
+            
+            # Use WindowManager's setup_scrollable for unified scrolling
+            dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
+                self.master,
+                "Smart Trim Glossary",
+                width=600,
+                height=None,  # Will use default height calculation
+                max_width_ratio=0.9,
+                max_height_ratio=0.85
+            )
+            
+            main_frame = scrollable_frame
+            
+            # Title and description
+            tk.Label(main_frame, text="Smart Glossary Trimming", 
+                    font=('TkDefaultFont', 14, 'bold')).pack(pady=(20, 5))
+            
+            tk.Label(main_frame, text="Optimize your glossary by removing unnecessary data and limiting field sizes",
+                    font=('TkDefaultFont', 10), fg='gray', wraplength=550).pack(pady=(0, 15))
+            
+            # Analyze current glossary to detect all fields
+            all_fields = set()
+            list_fields = set()
+            standard_list_fields = ['traits', 'locations', 'group_affiliation']
+            
+            if self.current_glossary_format == 'list':
+                for entry in self.current_glossary_data:
+                    for field, value in entry.items():
+                        all_fields.add(field)
+                        if isinstance(value, list):
+                            list_fields.add(field)
+            elif self.current_glossary_format == 'dict':
+                for key, entry in self.current_glossary_data.get('entries', {}).items():
+                    for field, value in entry.items():
+                        all_fields.add(field)
+                        if isinstance(value, list):
+                            list_fields.add(field)
+            
+            # Detect custom fields
+            standard_fields = {'original_name', 'name', 'gender', 'title', 'group_affiliation', 
+                              'traits', 'how_they_refer_to_others', 'locations'}
+            custom_fields = all_fields - standard_fields
+            
+            # Display current glossary stats
+            stats_frame = tk.LabelFrame(main_frame, text="Current Glossary Statistics", padx=15, pady=10)
+            stats_frame.pack(fill=tk.X, pady=(0, 15), padx=20)
+            
+            entry_count = len(self.current_glossary_data) if self.current_glossary_format == 'list' else len(self.current_glossary_data.get('entries', {}))
+            tk.Label(stats_frame, text=f"Total entries: {entry_count}", font=('TkDefaultFont', 10)).pack(anchor=tk.W)
+            tk.Label(stats_frame, text=f"Total fields detected: {len(all_fields)}", font=('TkDefaultFont', 10)).pack(anchor=tk.W)
+            if custom_fields:
+                tk.Label(stats_frame, text=f"Custom fields: {', '.join(sorted(custom_fields))}", 
+                        font=('TkDefaultFont', 10), fg='blue').pack(anchor=tk.W)
+            
+            # Entry limit section
+            limit_frame = tk.LabelFrame(main_frame, text="Entry Limit", padx=15, pady=10)
+            limit_frame.pack(fill=tk.X, pady=(0, 15), padx=20)
+            
+            tk.Label(limit_frame, text="Limit the total number of glossary entries to reduce size and improve performance",
+                    font=('TkDefaultFont', 9), fg='gray', wraplength=520).pack(anchor=tk.W, pady=(0, 10))
+            
+            top_frame = tk.Frame(limit_frame)
+            top_frame.pack(fill=tk.X, pady=5)
+            tk.Label(top_frame, text="Keep top").pack(side=tk.LEFT)
+            top_var = tk.StringVar(value=str(min(100, entry_count)))
+            tb.Entry(top_frame, textvariable=top_var, width=10).pack(side=tk.LEFT, padx=5)
+            tk.Label(top_frame, text=f"entries (out of {entry_count})").pack(side=tk.LEFT)
+            
+            # Field-specific limits section
+            field_limit_frame = tk.LabelFrame(main_frame, text="List Field Limits", padx=15, pady=10)
+            field_limit_frame.pack(fill=tk.X, pady=(0, 15), padx=20)
+            
+            tk.Label(field_limit_frame, text="Limit the number of items in list fields to reduce redundancy",
+                    font=('TkDefaultFont', 9), fg='gray', wraplength=520).pack(anchor=tk.W, pady=(0, 10))
+            
+            field_vars = {}
+            
+            # Standard list fields
+            if any(field in list_fields for field in standard_list_fields):
+                tk.Label(field_limit_frame, text="Standard Fields:", 
+                        font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(5, 5))
+                
+                standard_field_defaults = {
+                    'traits': ("Character traits", "5"),
+                    'locations': ("Associated locations", "10"),
+                    'group_affiliation': ("Group memberships", "3")
+                }
+                
+                for field, (description, default) in standard_field_defaults.items():
+                    if field in list_fields:
+                        frame = tk.Frame(field_limit_frame)
+                        frame.pack(fill=tk.X, pady=2, padx=(20, 0))
+                        tk.Label(frame, text=f"{description}:", width=25, anchor=tk.W).pack(side=tk.LEFT)
+                        var = tk.StringVar(value=default)
+                        tb.Entry(frame, textvariable=var, width=10).pack(side=tk.LEFT, padx=5)
+                        tk.Label(frame, text="items max", font=('TkDefaultFont', 9), fg='gray').pack(side=tk.LEFT)
+                        field_vars[field] = var
+            
+            # Custom list fields
+            custom_list_fields = [f for f in custom_fields if f in list_fields]
+            if custom_list_fields:
+                tk.Label(field_limit_frame, text="Custom Fields:", 
+                        font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(10, 5))
+                
+                for field in sorted(custom_list_fields):
+                    frame = tk.Frame(field_limit_frame)
+                    frame.pack(fill=tk.X, pady=2, padx=(20, 0))
+                    tk.Label(frame, text=f"{field}:", width=25, anchor=tk.W).pack(side=tk.LEFT)
+                    var = tk.StringVar(value="5")  # Default limit for custom fields
+                    tb.Entry(frame, textvariable=var, width=10).pack(side=tk.LEFT, padx=5)
+                    tk.Label(frame, text="items max", font=('TkDefaultFont', 9), fg='gray').pack(side=tk.LEFT)
+                    field_vars[field] = var
+            
+            if not field_vars:
+                tk.Label(field_limit_frame, text="No list fields detected in the glossary",
+                        font=('TkDefaultFont', 10, 'italic'), fg='gray').pack(pady=10)
+            
+            # Remove fields section
+            remove_frame = tk.LabelFrame(main_frame, text="Remove Fields", padx=15, pady=10)
+            remove_frame.pack(fill=tk.X, pady=(0, 15), padx=20)
+            
+            tk.Label(remove_frame, text="Remove entire fields from all entries to reduce glossary size",
+                    font=('TkDefaultFont', 9), fg='gray', wraplength=520).pack(anchor=tk.W, pady=(0, 10))
+            
+            remove_vars = {}
+            
+            # Group fields by type for better organization
+            if all_fields:
+                # Standard fields that are commonly removed
+                removable_standard = ['title', 'how_they_refer_to_others', 'gender']
+                existing_removable = [f for f in removable_standard if f in all_fields]
+                
+                if existing_removable:
+                    tk.Label(remove_frame, text="Commonly Removed Fields:", 
+                            font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(5, 5))
+                    
+                    for field in existing_removable:
+                        var = tk.BooleanVar(value=False)
+                        cb = tb.Checkbutton(remove_frame, text=f"Remove {field.replace('_', ' ')}", 
+                                          variable=var)
+                        cb.pack(anchor=tk.W, padx=20, pady=1)
+                        remove_vars[field] = var
+                
+                # Other standard fields
+                other_standard = [f for f in all_fields if f in standard_fields and f not in removable_standard]
+                if other_standard:
+                    tk.Label(remove_frame, text="Other Standard Fields:", 
+                            font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(10, 5))
+                    
+                    for field in sorted(other_standard):
+                        var = tk.BooleanVar(value=False)
+                        cb = tb.Checkbutton(remove_frame, text=f"Remove {field.replace('_', ' ')}", 
+                                          variable=var)
+                        cb.pack(anchor=tk.W, padx=20, pady=1)
+                        remove_vars[field] = var
+                
+                # Custom fields
+                if custom_fields:
+                    tk.Label(remove_frame, text="Custom Fields:", 
+                            font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(10, 5))
+                    
+                    for field in sorted(custom_fields):
+                        var = tk.BooleanVar(value=False)
+                        cb = tb.Checkbutton(remove_frame, text=f"Remove {field}", 
+                                          variable=var)
+                        cb.pack(anchor=tk.W, padx=20, pady=1)
+                        remove_vars[field] = var
+            
+            # Preview section
+            preview_frame = tk.LabelFrame(main_frame, text="Preview", padx=15, pady=10)
+            preview_frame.pack(fill=tk.X, pady=(0, 15), padx=20)
+            
+            preview_label = tk.Label(preview_frame, text="Click 'Preview Changes' to see the effect of your settings",
+                                   font=('TkDefaultFont', 10), fg='gray')
+            preview_label.pack(pady=5)
+            
+            def preview_changes():
+                try:
+                    # Count changes
+                    top_n = int(top_var.get())
+                    entries_to_remove = max(0, entry_count - top_n)
+                    
+                    fields_to_remove = sum(1 for var in remove_vars.values() if var.get())
+                    
+                    # Calculate approximate size reduction
+                    items_to_trim = 0
+                    for field, var in field_vars.items():
+                        limit = int(var.get())
+                        if self.current_glossary_format == 'list':
+                            for entry in self.current_glossary_data[:top_n]:
+                                if field in entry and isinstance(entry[field], list):
+                                    items_to_trim += max(0, len(entry[field]) - limit)
+                        
+                    preview_text = f"Preview of changes:\n"
+                    preview_text += f"• Entries: {entry_count} → {top_n} ({entries_to_remove} removed)\n"
+                    if fields_to_remove > 0:
+                        preview_text += f"• Fields to remove: {fields_to_remove}\n"
+                    if items_to_trim > 0:
+                        preview_text += f"• List items to trim: ~{items_to_trim}\n"
+                    
+                    preview_label.config(text=preview_text, fg='blue')
+                    
+                except ValueError:
+                    preview_label.config(text="Please enter valid numbers", fg='red')
+            
+            tb.Button(preview_frame, text="Preview Changes", command=preview_changes,
+                     bootstyle="info").pack()
+            
+            # Action buttons
+            button_frame = tk.Frame(main_frame)
+            button_frame.pack(fill=tk.X, pady=(10, 20), padx=20)
+            
+            def apply_smart_trim():
+                try:
+                    top_n = int(top_var.get())
+                    
+                    if self.current_glossary_format == 'list':
+                        # Keep only top N entries
+                        if top_n < len(self.current_glossary_data):
+                            self.current_glossary_data = self.current_glossary_data[:top_n]
+                        
+                        # Apply field limits
+                        for entry in self.current_glossary_data:
+                            # Limit list fields
+                            for field, var in field_vars.items():
+                                if field in entry and isinstance(entry[field], list):
+                                    limit = int(var.get())
+                                    if len(entry[field]) > limit:
+                                        entry[field] = entry[field][:limit]
+                            
+                            # Remove selected fields
+                            for field, var in remove_vars.items():
+                                if var.get() and field in entry:
+                                    entry.pop(field)
+                    
+                    elif self.current_glossary_format == 'dict':
+                        # For dict format, only support entry limit
+                        entries = list(self.current_glossary_data['entries'].items())
+                        if top_n < len(entries):
+                            self.current_glossary_data['entries'] = dict(entries[:top_n])
+                        
+                        # Apply field operations to dict entries
+                        for key, entry in self.current_glossary_data['entries'].items():
+                            # Limit list fields
+                            for field, var in field_vars.items():
+                                if field in entry and isinstance(entry[field], list):
+                                    limit = int(var.get())
+                                    if len(entry[field]) > limit:
+                                        entry[field] = entry[field][:limit]
+                            
+                            # Remove selected fields
+                            for field, var in remove_vars.items():
+                                if var.get() and field in entry:
+                                    entry.pop(field)
+                    
+                    if save_current_glossary():
+                        load_glossary_for_editing()
+                        
+                        # Generate summary of changes
+                        summary = "Smart trim applied successfully!\n\n"
+                        summary += f"• Kept top {top_n} entries\n"
+                        
+                        if field_vars:
+                            summary += "• Applied list limits:\n"
+                            for field, var in field_vars.items():
+                                summary += f"  - {field}: max {var.get()} items\n"
+                        
+                        removed_fields = [field for field, var in remove_vars.items() if var.get()]
+                        if removed_fields:
+                            summary += f"• Removed fields: {', '.join(removed_fields)}\n"
+                        
+                        messagebox.showinfo("Success", summary)
+                        dialog.destroy()
+                        
+                except ValueError:
+                    messagebox.showerror("Error", "Please enter valid numbers")
+            
+            # Create inner frame for buttons
+            button_inner_frame = tk.Frame(button_frame)
+            button_inner_frame.pack()  # This centers it
+
+            # Now pack the buttons in the inner frame
+            tb.Button(button_inner_frame, text="Apply Trim", command=apply_smart_trim,
+                     bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
+            tb.Button(button_inner_frame, text="Cancel", command=dialog.destroy,
+                     bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
+            
+            # Info section at bottom
+            info_frame = tk.Frame(main_frame)
+            info_frame.pack(fill=tk.X, pady=(0, 20), padx=20)
+            
+            tk.Label(info_frame, text="💡 Tip: Always backup your glossary before applying major changes!",
+                    font=('TkDefaultFont', 9, 'italic'), fg='#666').pack()
+            
+            # Auto-resize the dialog to fit content
+            self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.2)
+       
        
        def filter_entries_dialog():
-           if not self.current_glossary_data:
-               messagebox.showerror("Error", "No glossary loaded")
-               return
-           
-           dialog = self.wm.create_simple_dialog(
-               self.master,
-               "Filter Entries",
-               width=400,
-               height=300
-           )
-           
-           main_frame = tk.Frame(dialog, padx=20, pady=20)
-           main_frame.pack(fill=tk.BOTH, expand=True)
-           
-           tk.Label(main_frame, text="Filter Glossary Entries", 
-                   font=('TkDefaultFont', 12, 'bold')).pack(pady=(0, 10))
-           
-           filter_frame = tk.LabelFrame(main_frame, text="Keep only entries that:", padx=10, pady=10)
-           filter_frame.pack(fill=tk.X, pady=(0, 10))
-           
-           filter_vars = {
-               'name': (tk.BooleanVar(value=True), "Have name/original_name"),
-               'translation': (tk.BooleanVar(value=False), "Have English translation"),
-               'traits': (tk.BooleanVar(value=False), "Have traits"),
-               'locations': (tk.BooleanVar(value=False), "Have locations")
-           }
-           
-           for key, (var, label) in filter_vars.items():
-               tb.Checkbutton(filter_frame, text=label, variable=var).pack(anchor=tk.W)
-           
-           def apply_filter():
-               if self.current_glossary_format == 'list':
-                   filtered = []
-                   for entry in self.current_glossary_data:
-                       keep = True
-                       
-                       if filter_vars['name'][0].get():
-                           if not (entry.get('name') or entry.get('original_name')):
-                               keep = False
-                       
-                       if filter_vars['translation'][0].get():
-                           if not entry.get('name'):
-                               keep = False
-                       
-                       if filter_vars['traits'][0].get():
-                           if not entry.get('traits'):
-                               keep = False
-                       
-                       if filter_vars['locations'][0].get():
-                           if not entry.get('locations'):
-                               keep = False
-                       
-                       if keep:
-                           filtered.append(entry)
-                   
-                   removed = len(self.current_glossary_data) - len(filtered)
-                   self.current_glossary_data[:] = filtered
-                   
-                   if save_current_glossary():
-                       load_glossary_for_editing()
-                       messagebox.showinfo("Success", f"Filtered out {removed} entries")
-                       dialog.destroy()
-               else:
-                   messagebox.showinfo("Info", "Filtering is only available for manual glossary format")
-                   dialog.destroy()
-           
-           button_frame = tk.Frame(main_frame)
-           button_frame.pack(fill=tk.X, pady=(10, 0))
-           
-           tb.Button(button_frame, text="Apply Filter", command=apply_filter,
-                    bootstyle="primary", width=15).pack(side=tk.LEFT, padx=5)
-           tb.Button(button_frame, text="Cancel", command=dialog.destroy,
-                    bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
-           
-           dialog.deiconify()
-       
+            if not self.current_glossary_data:
+                messagebox.showerror("Error", "No glossary loaded")
+                return
+            
+            # Use WindowManager's setup_scrollable for unified scrolling
+            dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
+                self.master,
+                "Filter Entries",
+                width=600,
+                height=None,  # Will use default height calculation
+                max_width_ratio=0.9,
+                max_height_ratio=0.85
+            )
+            
+            main_frame = scrollable_frame
+            
+            # Title and description
+            tk.Label(main_frame, text="Filter Glossary Entries", 
+                    font=('TkDefaultFont', 14, 'bold')).pack(pady=(20, 5))
+            
+            tk.Label(main_frame, text="Create complex filters to find specific entries in your glossary",
+                    font=('TkDefaultFont', 10), fg='gray', wraplength=550).pack(pady=(0, 15))
+            
+            # Analyze current glossary to detect all fields
+            all_fields = set()
+            field_types = {}  # Track field types: 'text', 'list', 'dict'
+            field_samples = {}  # Store sample values for each field
+            
+            if self.current_glossary_format == 'list':
+                for entry in self.current_glossary_data:
+                    for field, value in entry.items():
+                        all_fields.add(field)
+                        if isinstance(value, list):
+                            field_types[field] = 'list'
+                        elif isinstance(value, dict):
+                            field_types[field] = 'dict'
+                        else:
+                            field_types[field] = 'text'
+                        
+                        # Store sample values for text fields
+                        if field_types[field] == 'text' and value and field not in field_samples:
+                            field_samples[field] = str(value)[:50]  # First 50 chars
+            elif self.current_glossary_format == 'dict':
+                for key, entry in self.current_glossary_data.get('entries', {}).items():
+                    for field, value in entry.items():
+                        all_fields.add(field)
+                        if isinstance(value, list):
+                            field_types[field] = 'list'
+                        elif isinstance(value, dict):
+                            field_types[field] = 'dict'
+                        else:
+                            field_types[field] = 'text'
+                        
+                        if field_types[field] == 'text' and value and field not in field_samples:
+                            field_samples[field] = str(value)[:50]
+            
+            # Separate standard and custom fields
+            standard_fields = {'original_name', 'name', 'gender', 'title', 'group_affiliation', 
+                              'traits', 'how_they_refer_to_others', 'locations'}
+            custom_fields = all_fields - standard_fields
+            
+            # Current stats
+            entry_count = len(self.current_glossary_data) if self.current_glossary_format == 'list' else len(self.current_glossary_data.get('entries', {}))
+            
+            stats_frame = tk.LabelFrame(main_frame, text="Current Status", padx=15, pady=10)
+            stats_frame.pack(fill=tk.X, pady=(0, 15), padx=20)
+            tk.Label(stats_frame, text=f"Total entries: {entry_count}", font=('TkDefaultFont', 10)).pack(anchor=tk.W)
+            tk.Label(stats_frame, text=f"Available fields: {len(all_fields)}", font=('TkDefaultFont', 10)).pack(anchor=tk.W)
+            
+            # Filter type selection
+            filter_type_frame = tk.LabelFrame(main_frame, text="Filter Mode", padx=15, pady=10)
+            filter_type_frame.pack(fill=tk.X, pady=(0, 15), padx=20)
+            
+            filter_mode = tk.StringVar(value="all")
+            tk.Radiobutton(filter_type_frame, text="Match ALL conditions (AND)", 
+                          variable=filter_mode, value="all").pack(anchor=tk.W)
+            tk.Radiobutton(filter_type_frame, text="Match ANY condition (OR)", 
+                          variable=filter_mode, value="any").pack(anchor=tk.W)
+            
+            # Filter conditions
+            conditions_frame = tk.LabelFrame(main_frame, text="Filter Conditions", padx=15, pady=10)
+            conditions_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15), padx=20)
+            
+            tk.Label(conditions_frame, text="Select which entries to keep based on field conditions:",
+                    font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(0, 10))
+            
+            # Store filter conditions
+            filter_conditions = []
+            
+            # Presence filters (check if field exists and has content)
+            presence_frame = tk.LabelFrame(conditions_frame, text="Field Presence Filters", padx=10, pady=10)
+            presence_frame.pack(fill=tk.X, pady=(0, 10))
+            
+            presence_vars = {}
+            
+            # Common presence checks
+            common_checks = [
+                ('has_name', "Has name or original_name", True),
+                ('has_translation', "Has English translation (name field)", False),
+                ('has_both_names', "Has BOTH original_name AND name", False),
+            ]
+            
+            for key, label, default in common_checks:
+                var = tk.BooleanVar(value=default)
+                tb.Checkbutton(presence_frame, text=label, variable=var).pack(anchor=tk.W)
+                presence_vars[key] = var
+            
+            # Field-specific presence checks
+            if all_fields:
+                tk.Label(presence_frame, text="Must have these fields:", 
+                        font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(10, 5))
+                
+                # Group by standard/custom
+                if standard_fields.intersection(all_fields):
+                    tk.Label(presence_frame, text="Standard Fields:", 
+                            font=('TkDefaultFont', 9, 'italic')).pack(anchor=tk.W, padx=20)
+                    
+                    field_presence_frame = tk.Frame(presence_frame)
+                    field_presence_frame.pack(fill=tk.X, padx=20)
+                    
+                    col = 0
+                    row = 0
+                    for field in sorted(standard_fields.intersection(all_fields)):
+                        if field not in ['name', 'original_name']:  # Already handled above
+                            var = tk.BooleanVar(value=False)
+                            cb = tb.Checkbutton(field_presence_frame, text=field.replace('_', ' '), 
+                                              variable=var)
+                            cb.grid(row=row, column=col, sticky=tk.W, padx=5, pady=1)
+                            presence_vars[f'has_{field}'] = var
+                            
+                            col += 1
+                            if col > 2:
+                                col = 0
+                                row += 1
+                
+                if custom_fields:
+                    tk.Label(presence_frame, text="Custom Fields:", 
+                            font=('TkDefaultFont', 9, 'italic')).pack(anchor=tk.W, padx=20, pady=(5, 0))
+                    
+                    custom_presence_frame = tk.Frame(presence_frame)
+                    custom_presence_frame.pack(fill=tk.X, padx=20)
+                    
+                    col = 0
+                    row = 0
+                    for field in sorted(custom_fields):
+                        var = tk.BooleanVar(value=False)
+                        cb = tb.Checkbutton(custom_presence_frame, text=field, variable=var)
+                        cb.grid(row=row, column=col, sticky=tk.W, padx=5, pady=1)
+                        presence_vars[f'has_{field}'] = var
+                        
+                        col += 1
+                        if col > 2:
+                            col = 0
+                            row += 1
+            
+            # Text content filters
+            text_filter_frame = tk.LabelFrame(conditions_frame, text="Text Content Filters", padx=10, pady=10)
+            text_filter_frame.pack(fill=tk.X, pady=(0, 10))
+            
+            tk.Label(text_filter_frame, text="Filter by text content (case-insensitive):",
+                    font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(0, 5))
+            
+            text_filters = {}
+            text_fields = [f for f in all_fields if field_types.get(f) == 'text']
+            
+            if text_fields:
+                for field in sorted(text_fields):
+                    frame = tk.Frame(text_filter_frame)
+                    frame.pack(fill=tk.X, pady=2)
+                    
+                    tk.Label(frame, text=f"{field}:", width=20, anchor=tk.W).pack(side=tk.LEFT)
+                    
+                    contains_var = tk.StringVar()
+                    entry = tb.Entry(frame, textvariable=contains_var, width=30)
+                    entry.pack(side=tk.LEFT, padx=5)
+                    
+                    if field in field_samples:
+                        tk.Label(frame, text=f"(e.g., {field_samples[field][:20]}...)", 
+                                font=('TkDefaultFont', 8), fg='gray').pack(side=tk.LEFT)
+                    
+                    text_filters[field] = contains_var
+            else:
+                tk.Label(text_filter_frame, text="No text fields found",
+                        font=('TkDefaultFont', 10, 'italic'), fg='gray').pack(pady=10)
+            
+            # List size filters
+            list_filter_frame = tk.LabelFrame(conditions_frame, text="List Size Filters", padx=10, pady=10)
+            list_filter_frame.pack(fill=tk.X, pady=(0, 10))
+            
+            list_size_filters = {}
+            list_fields = [f for f in all_fields if field_types.get(f) == 'list']
+            
+            if list_fields:
+                tk.Label(list_filter_frame, text="Filter by number of items in list fields:",
+                        font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(0, 5))
+                
+                for field in sorted(list_fields):
+                    frame = tk.Frame(list_filter_frame)
+                    frame.pack(fill=tk.X, pady=2)
+                    
+                    tk.Label(frame, text=f"{field}:", width=20, anchor=tk.W).pack(side=tk.LEFT)
+                    tk.Label(frame, text="Min:").pack(side=tk.LEFT)
+                    
+                    min_var = tk.StringVar()
+                    tb.Entry(frame, textvariable=min_var, width=5).pack(side=tk.LEFT, padx=2)
+                    
+                    tk.Label(frame, text="Max:").pack(side=tk.LEFT, padx=(10, 0))
+                    
+                    max_var = tk.StringVar()
+                    tb.Entry(frame, textvariable=max_var, width=5).pack(side=tk.LEFT, padx=2)
+                    
+                    tk.Label(frame, text="items", font=('TkDefaultFont', 9), fg='gray').pack(side=tk.LEFT, padx=5)
+                    
+                    list_size_filters[field] = (min_var, max_var)
+            else:
+                tk.Label(list_filter_frame, text="No list fields found",
+                        font=('TkDefaultFont', 10, 'italic'), fg='gray').pack(pady=10)
+            
+            # Preview section
+            preview_frame = tk.LabelFrame(main_frame, text="Preview", padx=15, pady=10)
+            preview_frame.pack(fill=tk.X, pady=(0, 15), padx=20)
+            
+            preview_label = tk.Label(preview_frame, text="Click 'Preview Filter' to see how many entries match",
+                                   font=('TkDefaultFont', 10), fg='gray')
+            preview_label.pack(pady=5)
+            
+            def check_entry_matches(entry):
+                """Check if an entry matches the filter conditions"""
+                matches = []
+                
+                # Check presence conditions
+                if presence_vars['has_name'].get():
+                    matches.append(bool(entry.get('name') or entry.get('original_name')))
+                
+                if presence_vars['has_translation'].get():
+                    matches.append(bool(entry.get('name')))
+                
+                if presence_vars['has_both_names'].get():
+                    matches.append(bool(entry.get('name') and entry.get('original_name')))
+                
+                # Check field-specific presence
+                for key, var in presence_vars.items():
+                    if key.startswith('has_') and key not in ['has_name', 'has_translation', 'has_both_names']:
+                        if var.get():
+                            field = key[4:]  # Remove 'has_' prefix
+                            matches.append(bool(entry.get(field)))
+                
+                # Check text content filters
+                for field, var in text_filters.items():
+                    search_text = var.get().strip().lower()
+                    if search_text:
+                        field_value = str(entry.get(field, '')).lower()
+                        matches.append(search_text in field_value)
+                
+                # Check list size filters
+                for field, (min_var, max_var) in list_size_filters.items():
+                    try:
+                        field_list = entry.get(field, [])
+                        if isinstance(field_list, list):
+                            list_len = len(field_list)
+                            
+                            if min_var.get():
+                                min_size = int(min_var.get())
+                                matches.append(list_len >= min_size)
+                            
+                            if max_var.get():
+                                max_size = int(max_var.get())
+                                matches.append(list_len <= max_size)
+                    except ValueError:
+                        pass
+                
+                # Apply filter mode
+                if not matches:
+                    return True  # No conditions set, keep all
+                
+                if filter_mode.get() == "all":
+                    return all(matches)
+                else:  # "any"
+                    return any(matches)
+            
+            def preview_filter():
+                """Preview the filter results"""
+                matching = 0
+                
+                if self.current_glossary_format == 'list':
+                    for entry in self.current_glossary_data:
+                        if check_entry_matches(entry):
+                            matching += 1
+                else:
+                    for key, entry in self.current_glossary_data.get('entries', {}).items():
+                        if check_entry_matches(entry):
+                            matching += 1
+                
+                removed = entry_count - matching
+                preview_label.config(
+                    text=f"Filter matches: {matching} entries ({removed} will be removed)",
+                    fg='blue' if matching > 0 else 'red'
+                )
+            
+            tb.Button(preview_frame, text="Preview Filter", command=preview_filter,
+                     bootstyle="info").pack()
+            
+            # Action buttons
+            button_frame = tk.Frame(main_frame)
+            button_frame.pack(fill=tk.X, pady=(10, 20), padx=20)
+            
+            def apply_filter():
+                if self.current_glossary_format == 'list':
+                    filtered = []
+                    for entry in self.current_glossary_data:
+                        if check_entry_matches(entry):
+                            filtered.append(entry)
+                    
+                    removed = len(self.current_glossary_data) - len(filtered)
+                    self.current_glossary_data[:] = filtered
+                    
+                    if save_current_glossary():
+                        load_glossary_for_editing()
+                        messagebox.showinfo("Success", 
+                            f"Filter applied!\n\nKept: {len(filtered)} entries\nRemoved: {removed} entries")
+                        dialog.destroy()
+                
+                elif self.current_glossary_format == 'dict':
+                    filtered_entries = {}
+                    for key, entry in self.current_glossary_data.get('entries', {}).items():
+                        if check_entry_matches(entry):
+                            filtered_entries[key] = entry
+                    
+                    removed = len(self.current_glossary_data.get('entries', {})) - len(filtered_entries)
+                    self.current_glossary_data['entries'] = filtered_entries
+                    
+                    if save_current_glossary():
+                        load_glossary_for_editing()
+                        messagebox.showinfo("Success", 
+                            f"Filter applied!\n\nKept: {len(filtered_entries)} entries\nRemoved: {removed} entries")
+                        dialog.destroy()
+            
+            def invert_filter():
+                """Apply inverted filter (remove matching entries instead of keeping them)"""
+                if messagebox.askyesno("Invert Filter", 
+                                      "This will REMOVE matching entries instead of keeping them. Continue?"):
+                    if self.current_glossary_format == 'list':
+                        filtered = []
+                        for entry in self.current_glossary_data:
+                            if not check_entry_matches(entry):  # Inverted logic
+                                filtered.append(entry)
+                        
+                        removed = len(self.current_glossary_data) - len(filtered)
+                        self.current_glossary_data[:] = filtered
+                        
+                        if save_current_glossary():
+                            load_glossary_for_editing()
+                            messagebox.showinfo("Success", 
+                                f"Inverted filter applied!\n\nKept: {len(filtered)} entries\nRemoved: {removed} entries")
+                            dialog.destroy()
+            
+            # Create inner frame for buttons
+            button_inner_frame = tk.Frame(button_frame)
+            button_inner_frame.pack()  # This centers it
+
+            # Now pack the buttons in the inner frame
+            tb.Button(button_inner_frame, text="Apply Filter", command=apply_filter,
+                     bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
+            tb.Button(button_inner_frame, text="Invert Filter", command=invert_filter,
+                     bootstyle="warning", width=15).pack(side=tk.LEFT, padx=5)
+            tb.Button(button_inner_frame, text="Cancel", command=dialog.destroy,
+                     bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
+            
+            # Info section
+            info_frame = tk.Frame(main_frame)
+            info_frame.pack(fill=tk.X, pady=(0, 20), padx=20)
+            
+            tk.Label(info_frame, text="💡 Tip: Use text filters to find specific characters or content patterns",
+                    font=('TkDefaultFont', 9, 'italic'), fg='#666').pack()
+            
+            # Auto-resize the dialog to fit content
+            self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.49)
+    
        def export_selection():
            selected = self.glossary_tree.selection()
            if not selected:
@@ -3496,36 +4109,36 @@ class TranslatorGUI:
                     "recommendation": None
                 },
                 {
-                    "value": "standard",
-                    "emoji": "⚖️",
-                    "title": "STANDARD",
-                    "subtitle": "85% threshold",
+                    "value": "quick-scan",
+                    "emoji": "⚡",
+                    "title": "QUICK SCAN",
+                    "subtitle": "85% threshold, Speed optimized",
                     "features": [
-                        "✓ Balanced detection",
-                        "✓ Few false positives",
-                        "✓ Default mode",
-                        "✓ Reliable results",
-                        "✓ Good accuracy",
-                        "✓ Recommended"
+                        "✓ 3-5x faster scanning",
+                        "✓ Checks consecutive chapters only",
+                        "✓ Simplified analysis",
+                        "✓ Skips AI Hunter",
+                        "✓ Good for large libraries",
+                        "✓ Minimal resource usage"
                     ],
                     "bg_color": "#1f2937",  # Dark gray
                     "hover_color": "#374151",  # Medium gray
                     "border_color": "#059669",
                     "accent_color": "#10b981",
-                    "recommendation": "✅ Recommended for most users"
+                    "recommendation": "✅ Recommended for quick checks & large folders"
                 },
                 {
-                    "value": "strict",
-                    "emoji": "🛡️",
-                    "title": "STRICT",
-                    "subtitle": "95% threshold",
+                    "value": "custom",
+                    "emoji": "⚙️",
+                    "title": "CUSTOM",
+                    "subtitle": "Configurable",
                     "features": [
-                        "✓ Very few false positives",
-                        "✓ High precision",
-                        "⚠ May miss some duplicates",
-                        "✓ Near-exact matches only",
-                        "✓ Conservative approach",
-                        "✓ Minimal false alarms"
+                        "✓ Fully customizable",
+                        "✓ Set your own thresholds",
+                        "✓ Advanced controls",
+                        "✓ Fine-tune detection",
+                        "✓ Expert mode",
+                        "✓ Maximum flexibility"
                     ],
                     "bg_color": "#1e3a5f",  # Dark blue
                     "hover_color": "#2c5aa0",  # Medium blue
@@ -3706,6 +4319,169 @@ class TranslatorGUI:
             if selected_mode_value is None:
                 self.append_log("⚠️ QA scan canceled.")
                 return
+
+            # Show custom settings dialog if custom mode is selected
+            if selected_mode_value == "custom":
+                # Use WindowManager's setup_scrollable for proper scrolling support
+                dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
+                    self.master,
+                    "Custom Mode Settings",
+                    width=800,
+                    height=650,
+                    max_width_ratio=0.9,
+                    max_height_ratio=0.85
+                )
+                
+                # Variables for custom settings
+                custom_settings = {
+                    'similarity': tk.IntVar(value=85),
+                    'semantic': tk.IntVar(value=80),
+                    'structural': tk.IntVar(value=90),
+                    'word_overlap': tk.IntVar(value=75),
+                    'minhash_threshold': tk.IntVar(value=80),
+                    'consecutive_chapters': tk.IntVar(value=2),
+                    'check_all_pairs': tk.BooleanVar(value=False),
+                    'sample_size': tk.IntVar(value=3000),
+                    'min_text_length': tk.IntVar(value=500)
+                }
+                
+                # Title using consistent styling
+                title_label = tk.Label(scrollable_frame, text="Configure Custom Detection Settings", 
+                                      font=('Arial', 20, 'bold'))
+                title_label.pack(pady=(0, 20))
+                
+                # Detection Thresholds Section using ttkbootstrap
+                threshold_frame = tb.LabelFrame(scrollable_frame, text="Detection Thresholds (%)", 
+                                                padding=20, bootstyle="secondary")
+                threshold_frame.pack(fill='x', padx=20, pady=(0, 15))
+                
+                threshold_descriptions = {
+                    'similarity': 'Text Similarity - Character-by-character comparison',
+                    'semantic': 'Semantic Analysis - Meaning and context matching',
+                    'structural': 'Structural Patterns - Document structure similarity',
+                    'word_overlap': 'Word Overlap - Common words between texts',
+                    'minhash_threshold': 'MinHash Similarity - Fast approximate matching'
+                }
+                
+                for key, desc in threshold_descriptions.items():
+                    row_frame = tk.Frame(threshold_frame)
+                    row_frame.pack(fill='x', pady=8)
+                    
+                    tk.Label(row_frame, text=f"{desc}:", 
+                            font=('Arial', 10), width=50, anchor='w').pack(side='left')
+                    
+                    value_label = tk.Label(row_frame, text=f"{custom_settings[key].get()}%", 
+                                          font=('Arial', 10, 'bold'), width=5)
+                    value_label.pack(side='right', padx=(10, 0))
+                    
+                    # Use ttkbootstrap Scale
+                    scale = tb.Scale(row_frame, from_=10, to=100, orient='horizontal',
+                                    variable=custom_settings[key], length=200,
+                                    bootstyle="info",
+                                    command=lambda v, l=value_label, var=custom_settings[key]: 
+                                            l.config(text=f"{var.get()}%"))
+                    scale.pack(side='right', padx=(0, 10))
+                
+                # Processing Options Section
+                options_frame = tb.LabelFrame(scrollable_frame, text="Processing Options", 
+                                             padding=20, bootstyle="secondary")
+                options_frame.pack(fill='x', padx=20, pady=15)
+                
+                # Consecutive chapters to check
+                consec_frame = tk.Frame(options_frame)
+                consec_frame.pack(fill='x', pady=8)
+                
+                tk.Label(consec_frame, text="Consecutive chapters to check:", 
+                        font=('Arial', 10)).pack(side='left')
+                
+                tb.Spinbox(consec_frame, from_=1, to=10, 
+                          textvariable=custom_settings['consecutive_chapters'],
+                          width=10, bootstyle="primary").pack(side='left', padx=(10, 0))
+                
+                # Sample size
+                sample_frame = tk.Frame(options_frame)
+                sample_frame.pack(fill='x', pady=8)
+                
+                tk.Label(sample_frame, text="Sample size for comparison (characters):", 
+                        font=('Arial', 10)).pack(side='left')
+                
+                tb.Spinbox(sample_frame, from_=1000, to=10000, increment=500,
+                          textvariable=custom_settings['sample_size'],
+                          width=10, bootstyle="primary").pack(side='left', padx=(10, 0))
+                
+                # Minimum text length
+                min_frame = tk.Frame(options_frame)
+                min_frame.pack(fill='x', pady=8)
+                
+                tk.Label(min_frame, text="Minimum text length to process (characters):", 
+                        font=('Arial', 10)).pack(side='left')
+                
+                tb.Spinbox(min_frame, from_=100, to=2000, increment=100,
+                          textvariable=custom_settings['min_text_length'],
+                          width=10, bootstyle="primary").pack(side='left', padx=(10, 0))
+                
+                # Check all pairs option
+                tb.Checkbutton(options_frame, text="Check all file pairs (slower but more thorough)",
+                              variable=custom_settings['check_all_pairs'],
+                              bootstyle="primary").pack(anchor='w', pady=8)
+                
+                # Create button frame at bottom (inside scrollable_frame)
+                button_frame = tk.Frame(scrollable_frame)
+                button_frame.pack(fill='x', pady=(30, 20))
+                
+                # Center buttons using inner frame
+                button_inner = tk.Frame(button_frame)
+                button_inner.pack()
+                
+                def save_custom_settings():
+                    """Save custom settings"""
+                    qa_settings['custom_mode_settings'] = {
+                        'thresholds': {
+                            'similarity': custom_settings['similarity'].get() / 100,
+                            'semantic': custom_settings['semantic'].get() / 100,
+                            'structural': custom_settings['structural'].get() / 100,
+                            'word_overlap': custom_settings['word_overlap'].get() / 100,
+                            'minhash_threshold': custom_settings['minhash_threshold'].get() / 100
+                        },
+                        'consecutive_chapters': custom_settings['consecutive_chapters'].get(),
+                        'check_all_pairs': custom_settings['check_all_pairs'].get(),
+                        'sample_size': custom_settings['sample_size'].get(),
+                        'min_text_length': custom_settings['min_text_length'].get()
+                    }
+                    dialog._cleanup_scrolling()  # Clean up scrolling bindings
+                    dialog.destroy()
+                
+                def reset_to_defaults():
+                    custom_settings['similarity'].set(85)
+                    custom_settings['semantic'].set(80)
+                    custom_settings['structural'].set(90)
+                    custom_settings['word_overlap'].set(75)
+                    custom_settings['minhash_threshold'].set(80)
+                    custom_settings['consecutive_chapters'].set(2)
+                    custom_settings['check_all_pairs'].set(False)
+                    custom_settings['sample_size'].set(3000)
+                    custom_settings['min_text_length'].set(500)
+                
+                # Use ttkbootstrap buttons
+                tb.Button(button_inner, text="Cancel", 
+                         command=lambda: [dialog._cleanup_scrolling(), dialog.destroy()],
+                         bootstyle="secondary", width=15).pack(side='left', padx=5)
+                
+                tb.Button(button_inner, text="Reset Defaults", 
+                         command=reset_to_defaults,
+                         bootstyle="warning", width=15).pack(side='left', padx=5)
+                
+                tb.Button(button_inner, text="Save Settings", 
+                         command=save_custom_settings,
+                         bootstyle="success", width=15).pack(side='left', padx=5)
+                
+                # Use WindowManager's auto-resize
+                self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=0.85)
+                
+                # Handle window close properly
+                dialog.protocol("WM_DELETE_WINDOW", lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
+                
+                dialog.wait_window()
             
             # Now get the folder
             folder_path = filedialog.askdirectory(title="Select Folder with HTML Files")
@@ -4871,7 +5647,7 @@ class TranslatorGUI:
                       variable=self.disable_zero_detection_var,
                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
         
-        tk.Label(section_frame, text="Always use chapter ranges as specified\n(don't adjust for 0-based novels)",
+        tk.Label(section_frame, text="Always use chapter ranges as specified\n(don't force adjust to chapter 1)",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
                 
         tb.Checkbutton(section_frame, text="Use Header as Output Name", 
@@ -5373,7 +6149,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v2.8.8...")
+    print("🚀 Starting Glossarion v2.9.2...")
     
     # Initialize splash screen
     splash_manager = None
