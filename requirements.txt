@@ -1,22 +1,51 @@
+# PyInstaller for building executables
 pyinstaller
+
+# GUI Framework
 ttkbootstrap
+
+# Image Processing
 pillow
 opencv-python
+olefile
+
+# HTML/EPUB Processing
 beautifulsoup4
 lxml
 html5lib
 ebooklib
+
+# HTTP and Networking
 requests
+certifi
 httpx
+httpcore
+anyio
+sniffio
+
+# Character Detection
 chardet
 charset-normalizer
+
+# Progress Bars
 tqdm
+
+# Language Detection
 langdetect
+
+# AI/ML APIs
 google-generativeai
 openai
 anthropic
+
+# Token Counting
 tiktoken
+regex
+
+# Data Structures & Analysis
 datasketch
 numpy<2.0.0
 scipy
+
+# Environment Variables
 python-dotenv
