@@ -1,74 +1,22 @@
-# PyInstaller for building executables
-pyinstaller>=6.0.0
-
-# GUI Framework
+pyinstaller
 ttkbootstrap
-soupsieve  # Required by beautifulsoup4
-
-# Image Processing
 pillow
 opencv-python
-olefile
-
-# HTML/EPUB Processing
 beautifulsoup4
 lxml
 html5lib
-webencodings  # Required by html5lib
 ebooklib
-
-# HTTP and Networking
 requests
-urllib3  # Required by requests
-certifi
-idna  # Required by requests
 httpx
-httpcore
-anyio
-sniffio
-h11  # Required by httpcore
-
-# Character Detection
 chardet
 charset-normalizer
-
-# Progress Bars
 tqdm
-
-# Language Detection
 langdetect
-
-# AI/ML APIs
 google-generativeai
-google-auth  # Required by google-generativeai
-google-auth-oauthlib
-google-auth-httplib2
-google-api-core
-google-api-python-client
-googleapis-common-protos
-grpcio
-grpcio-status
-proto-plus
-protobuf
-pyasn1
-pyasn1-modules
-rsa
-cachetools
 openai
 anthropic
-pydantic  # Used by modern APIs
-pydantic-core
-typing-extensions  # Required by pydantic
-
-# Token Counting
 tiktoken
-regex
-
-# Data Structures & Analysis
 datasketch
-numpy<2.0.0  # Critical: numpy 2.0 has breaking changes
+numpy<2.0.0
 scipy
-mmh3  # Optional but improves datasketch performance
-
-# Environment Variables
 python-dotenv
