@@ -80,6 +80,8 @@ class TranslationConfig:
         self.SAVE_CLEANED_IMAGES = os.getenv("SAVE_CLEANED_IMAGES", "1") == "1"
         self.WATERMARK_PATTERN_THRESHOLD = int(os.getenv("WATERMARK_PATTERN_THRESHOLD", "10"))
         self.WATERMARK_CLAHE_LIMIT = float(os.getenv("WATERMARK_CLAHE_LIMIT", "3.0"))
+        self.COMPRESSION_FACTOR = float(os.getenv("COMPRESSION_FACTOR", "1.0"))
+
         
         
 # =====================================================
@@ -4516,18 +4518,20 @@ def main(log_callback=None, stop_callback=None):
         if chapter_key in progress_manager.prog["chapters"] and progress_manager.prog["chapters"][chapter_key].get("status") == "in_progress":
             pass
         
-        _tok_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
-        max_tokens_limit, _ = parse_token_limit(_tok_env)
+        # Calculate based on OUTPUT limit only
+        max_output_tokens = config.MAX_OUTPUT_TOKENS 
+        safety_margin_output = 500
         
-        system_tokens = chapter_splitter.count_tokens(system)
-        history_tokens = config.HIST_LIMIT * 2 * 1000
-        safety_margin = 1000
+        # Korean to English typically compresses to 0.7-0.9x
+        compression_factor = config.COMPRESSION_FACTOR
+        available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
         
-        if max_tokens_limit is not None:
-            available_tokens = max_tokens_limit - system_tokens - history_tokens - safety_margin
-            chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
-        else:
-            chunks = [(c["body"], 1, 1)]
+        # Ensure minimum
+        available_tokens = max(available_tokens, 1000)
+        
+        #print(f"📊 Chunk size: {available_tokens:,} tokens (based on {max_output_tokens:,} output limit, compression: {compression_factor})")
+        
+        chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
         
         chapter_key_str = content_hash
         old_key_str = str(idx)
@@ -5004,47 +5008,50 @@ def main(log_callback=None, stop_callback=None):
                 # Check if this chapter is already a chunk from text file splitting
                 if c.get('is_chunk', False):
                     # This is already a pre-split chunk, but still check if it needs further splitting
-                    _tok_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
-                    max_tokens_limit, budget_str = parse_token_limit(_tok_env)
+                    # Calculate based on OUTPUT limit only
+                    max_output_tokens = config.MAX_OUTPUT_TOKENS
+                    safety_margin_output = 500
                     
-                    system_tokens = chapter_splitter.count_tokens(system)
-                    history_tokens = config.HIST_LIMIT * 2 * 1000
-                    safety_margin = 1000
+                    # CJK to English typically compresses to 0.7-0.9x
+                    compression_factor = config.COMPRESSION_FACTOR
+                    available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
                     
-                    if max_tokens_limit is not None:
-                        available_tokens = max_tokens_limit - system_tokens - history_tokens - safety_margin
-                        chapter_tokens = chapter_splitter.count_tokens(c["body"])
-                        
-                        if chapter_tokens > available_tokens:
-                            # Even pre-split chunks might need further splitting
-                            chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
-                            print(f"📄 Section {c['num']} (pre-split from text file) needs further splitting into {len(chunks)} chunks")
-                        else:
-                            chunks = [(c["body"], 1, 1)]
-                            print(f"📄 Section {c['num']} (pre-split from text file)")
+                    # Ensure minimum
+                    available_tokens = max(available_tokens, 1000)
+                    
+                    print(f"📊 Chunk size: {available_tokens:,} tokens (based on {max_output_tokens:,} output limit, compression: {compression_factor})")
+                    
+                    chapter_tokens = chapter_splitter.count_tokens(c["body"])
+                    
+                    if chapter_tokens > available_tokens:
+                        # Even pre-split chunks might need further splitting
+                        chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
+                        print(f"📄 Section {c['num']} (pre-split from text file) needs further splitting into {len(chunks)} chunks")
                     else:
                         chunks = [(c["body"], 1, 1)]
                         print(f"📄 Section {c['num']} (pre-split from text file)")
                 else:
                     # Normal splitting logic for non-text files
-                    _tok_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
-                    max_tokens_limit, budget_str = parse_token_limit(_tok_env)
+                    # Calculate based on OUTPUT limit only
+                    max_output_tokens = config.MAX_OUTPUT_TOKENS
+                    safety_margin_output = 500
                     
-                    system_tokens = chapter_splitter.count_tokens(system)
-                    history_tokens = config.HIST_LIMIT * 2 * 1000
-                    safety_margin = 1000
+                    # CJK to English typically compresses to 0.7-0.9x
+                    compression_factor = config.COMPRESSION_FACTOR
+                    available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
                     
-                    if max_tokens_limit is not None:
-                        available_tokens = max_tokens_limit - system_tokens - history_tokens - safety_margin
-                        chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
-                    else:
-                        chunks = [(c["body"], 1, 1)]
+                    # Ensure minimum
+                    available_tokens = max(available_tokens, 1000)
+                    
+                    print(f"📊 Chunk size: {available_tokens:,} tokens (based on {max_output_tokens:,} output limit, compression: {compression_factor})")
+                    
+                    chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
                     
                     # Use consistent terminology
                     is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
                     terminology = "Section" if is_text_source else "Chapter"
                     print(f"📄 {terminology} will be processed in {len(chunks)} chunk(s)")
-               
+                                  
             if len(chunks) > 1:
                 chapter_tokens = chapter_splitter.count_tokens(c["body"])
                 is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
@@ -5052,10 +5059,9 @@ def main(log_callback=None, stop_callback=None):
                 print(f"   ℹ️ {terminology} size: {chapter_tokens:,} tokens (limit: {available_tokens:,} tokens per chunk)")
             else:
                 chapter_tokens = chapter_splitter.count_tokens(c["body"])
-                if max_tokens_limit is not None:
-                    is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
-                    terminology = "Section" if is_text_source else "Chapter"
-                    print(f"   ℹ️ {terminology} size: {chapter_tokens:,} tokens (within limit of {available_tokens:,} tokens)")
+                is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
+                terminology = "Section" if is_text_source else "Chapter"
+                print(f"   ℹ️ {terminology} size: {chapter_tokens:,} tokens (within limit of {available_tokens:,} tokens)")
             
             chapter_key_str = str(idx)
             if chapter_key_str not in progress_manager.prog["chapter_chunks"]:
