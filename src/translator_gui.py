@@ -678,7 +678,6 @@ class TranslatorGUI:
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
-                "- Wrap every paragraph in <p> tags with an inline CSS first‐line indent of 1em (e.g. <p style=\"text-indent:1em;\">…</p>); do not insert any literal tabs or spaces."
             ),
             "japanese": (
                 "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
@@ -687,7 +686,6 @@ class TranslatorGUI:
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
-                "- Wrap every paragraph in <p> tags with an inline CSS first‐line indent of 1em (e.g. <p style=\"text-indent:1em;\">…</p>); do not insert any literal tabs or spaces."
             ),
             "chinese": (
                 "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
@@ -695,7 +693,6 @@ class TranslatorGUI:
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
-                "- Wrap every paragraph in <p> tags with an inline CSS first‐line indent of 1em (e.g. <p style=\"text-indent:1em;\">…</p>); do not insert any literal tabs or spaces."
             ),
             "korean_OCR": (
                 "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
