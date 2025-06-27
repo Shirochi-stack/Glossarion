@@ -104,7 +104,7 @@ class ImageTranslator:
         # Configuration from environment
         self.process_webnovel = os.getenv("PROCESS_WEBNOVEL_IMAGES", "1") == "1"
         self.webnovel_min_height = int(os.getenv("WEBNOVEL_MIN_HEIGHT", "1000"))
-        self.image_max_tokens = int(os.getenv("IMAGE_MAX_TOKENS", "8192"))
+        self.image_max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
         self.chunk_height = int(os.getenv("IMAGE_CHUNK_HEIGHT", "2000"))
         
         # Add context tracking for image chunks
@@ -796,6 +796,11 @@ class ImageTranslator:
                 # Clean AI artifacts from chunk
                 chunk_text = self._clean_translation_response(translation)
                 all_translations.append(chunk_text)
+                print(f"   🔍 DEBUG: Chunk {i+1} length: {len(chunk_text)} chars")
+                if len(chunk_text) > 10000:  # Flag suspiciously large chunks
+                    print(f"   ⚠️ WARNING: Chunk unusually large!")
+                    print(f"   First 500 chars: {chunk_text[:500]}")
+                    print(f"   Last 500 chars: {chunk_text[-500:]}")
                 
                 # Store context for next chunks
                 if self.contextual_enabled:
@@ -951,6 +956,9 @@ class ImageTranslator:
             except Exception as e:
                 from unified_api_client import UnifiedClientError
                 error_msg = str(e)
+                print(f"\n🔍 DEBUG: Image Translation Failed")
+                print(f"   Error: {error_msg}")
+                print(f"   Error Type: {type(e).__name__}")
                 
                 # Handle user stop
                 if "stopped by user" in error_msg:
@@ -1027,6 +1035,10 @@ class ImageTranslator:
         return cleaned_text
 
     def _create_html_output(self, img_rel_path, translated_text, is_long_text, hide_label, was_stopped):
+        print(f"   🔍 DEBUG: Creating HTML output")
+        print(f"   Total translation length: {len(translated_text)} chars")
+        if len(translated_text) > 50000:
+            print(f"   ⚠️ WARNING: Translation suspiciously large!")
         """Create the final HTML output"""
         # Check if the translation is primarily a URL (only a URL and nothing else)
         url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+(?:\.[^\s<>"{}|\\^`\[\]]+)*'
