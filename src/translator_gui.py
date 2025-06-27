@@ -621,7 +621,7 @@ class TranslatorGUI:
         
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        master.title("Glossarion v2.9.3")
+        master.title("Glossarion v2.9.4")
         
         self.wm.responsive_size(master, BASE_WIDTH, BASE_HEIGHT)
         master.minsize(1600, 1000)
@@ -833,7 +833,6 @@ class TranslatorGUI:
             ('glossary_max_titles_var', 'glossary_max_titles', '30'),
             ('glossary_batch_size_var', 'glossary_batch_size', '50'),
             ('webnovel_min_height_var', 'webnovel_min_height', '1000'),
-            ('image_max_tokens_var', 'image_max_tokens', '16384'),
             ('max_images_per_chapter_var', 'max_images_per_chapter', '1'),
             ('image_chunk_height_var', 'image_chunk_height', '1500'),
             ('chunk_timeout_var', 'chunk_timeout', '900'),
@@ -884,7 +883,7 @@ class TranslatorGUI:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v2.9.3 - Ready to use!")
+        self.append_log("🚀 Glossarion v2.9.4 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -3704,7 +3703,7 @@ class TranslatorGUI:
            'ENABLE_IMAGE_TRANSLATION': "1" if self.enable_image_translation_var.get() else "0",
            'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var.get() else "0",
            'WEBNOVEL_MIN_HEIGHT': self.webnovel_min_height_var.get(),
-           'IMAGE_MAX_TOKENS': self.image_max_tokens_var.get(),
+           'IMAGE_MAX_TOKENS': str(self.max_output_tokens),
            'MAX_IMAGES_PER_CHAPTER': self.max_images_per_chapter_var.get(),
            'IMAGE_API_DELAY': '1.0',
            'SAVE_IMAGE_TRANSLATIONS': '1',
@@ -5862,7 +5861,6 @@ class TranslatorGUI:
         settings = [
             ("Min Image height (px):", self.webnovel_min_height_var),
             ("Max Images per chapter:", self.max_images_per_chapter_var),
-            ("Output token Limit:", self.image_max_tokens_var),
             ("Chunk height:", self.image_chunk_height_var)
         ]
         
@@ -5941,7 +5939,6 @@ class TranslatorGUI:
                 # Validate numeric fields
                 numeric_fields = [
                     ('webnovel_min_height', self.webnovel_min_height_var, 1000),
-                    ('image_max_tokens', self.image_max_tokens_var, 16384),
                     ('max_images_per_chapter', self.max_images_per_chapter_var, 1),
                     ('image_chunk_height', self.image_chunk_height_var, 1500)
                 ]
@@ -6220,7 +6217,6 @@ class TranslatorGUI:
             self.config['enable_image_translation'] = self.enable_image_translation_var.get()
             self.config['process_webnovel_images'] = self.process_webnovel_images_var.get()
             self.config['webnovel_min_height'] = safe_int(self.webnovel_min_height_var.get(), 1000)
-            self.config['image_max_tokens'] = safe_int(self.image_max_tokens_var.get(), 16384)
             self.config['max_images_per_chapter'] = safe_int(self.max_images_per_chapter_var.get(), 1)
             self.config['batch_translation'] = self.batch_translation_var.get()
             self.config['batch_size'] = safe_int(self.batch_size_var.get(), 3)
@@ -6258,7 +6254,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v2.9.3...")
+    print("🚀 Starting Glossarion v2.9.4...")
     
     # Initialize splash screen
     splash_manager = None
