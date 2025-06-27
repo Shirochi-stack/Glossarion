@@ -668,6 +668,8 @@ class TranslatorGUI:
         self.max_output_tokens = self.config.get('max_output_tokens', self.max_output_tokens)
         
         # Default prompts
+        self.default_translation_chunk_prompt = "[PART {chunk_idx}/{total_chunks}]\n{chunk_html}"
+        self.default_image_chunk_prompt = "This is part {chunk_idx} of {total_chunks} of a longer image. check context/format consistency with earlier chunks. {context}"
         self.default_prompts = {
             "korean": "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                           "- Use an easy to read and grammatically accurate comedy translation style.\n"
@@ -780,6 +782,8 @@ class TranslatorGUI:
         self.rolling_summary_system_prompt = self.config.get('rolling_summary_system_prompt', self.default_rolling_summary_system_prompt)
         self.rolling_summary_user_prompt = self.config.get('rolling_summary_user_prompt', self.default_rolling_summary_user_prompt)
         self.append_glossary_prompt = self.config.get('append_glossary_prompt', "Character/Term Glossary (use these translations consistently):")
+        self.translation_chunk_prompt = self.config.get('translation_chunk_prompt', self.default_translation_chunk_prompt)
+        self.image_chunk_prompt = self.config.get('image_chunk_prompt', self.default_image_chunk_prompt)
         
         self.custom_glossary_fields = self.config.get('custom_glossary_fields', [])
         self.token_limit_disabled = self.config.get('token_limit_disabled', False)
@@ -5271,7 +5275,191 @@ class TranslatorGUI:
     def toggle_api_visibility(self):
        show = self.api_key_entry.cget('show')
        self.api_key_entry.config(show='' if show == '*' else '*')
+       
+    def configure_translation_chunk_prompt(self):
+        """Configure the prompt template for translation chunks"""
+        dialog = self.wm.create_simple_dialog(
+            self.master,
+            "Configure Translation Chunk Prompt",
+            width=700,
+            height=None
+        )
+        
+        main_frame = tk.Frame(dialog, padx=20, pady=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        tk.Label(main_frame, text="Translation Chunk Prompt Template", 
+                font=('TkDefaultFont', 14, 'bold')).pack(anchor=tk.W, pady=(0, 5))
+        
+        tk.Label(main_frame, text="Configure how chunks are presented to the AI when chapters are split.",
+                font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, pady=(0, 10))
+        
+        # Instructions
+        instructions_frame = tk.LabelFrame(main_frame, text="Available Placeholders", padx=10, pady=10)
+        instructions_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        placeholders = [
+            ("{chunk_idx}", "Current chunk number (1-based)"),
+            ("{total_chunks}", "Total number of chunks"),
+            ("{chunk_html}", "The actual HTML content to translate")
+        ]
+        
+        for placeholder, desc in placeholders:
+            placeholder_frame = tk.Frame(instructions_frame)
+            placeholder_frame.pack(anchor=tk.W, pady=2)
+            tk.Label(placeholder_frame, text=f"• {placeholder}:", font=('Courier', 10, 'bold')).pack(side=tk.LEFT)
+            tk.Label(placeholder_frame, text=f" {desc}", font=('TkDefaultFont', 10)).pack(side=tk.LEFT)
+        
+        # Prompt input
+        prompt_frame = tk.LabelFrame(main_frame, text="Chunk Prompt Template", padx=10, pady=10)
+        prompt_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+        self.chunk_prompt_text = self.ui.setup_scrollable_text(
+            prompt_frame, height=8, wrap=tk.WORD
+        )
+        self.chunk_prompt_text.pack(fill=tk.BOTH, expand=True)
+        self.chunk_prompt_text.insert('1.0', self.translation_chunk_prompt)
+        
+        # Example
+        example_frame = tk.LabelFrame(main_frame, text="Example Output", padx=10, pady=10)
+        example_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(example_frame, text="With chunk 2 of 5, the prompt would be:",
+                font=('TkDefaultFont', 10)).pack(anchor=tk.W)
+        
+        self.example_label = tk.Label(example_frame, text="", 
+                                     font=('Courier', 9), fg='blue', 
+                                     wraplength=650, justify=tk.LEFT)
+        self.example_label.pack(anchor=tk.W, pady=(5, 0))
+        
+        def update_example(*args):
+            try:
+                template = self.chunk_prompt_text.get('1.0', tk.END).strip()
+                example = template.replace('{chunk_idx}', '2').replace('{total_chunks}', '5').replace('{chunk_html}', '<p>Chapter content here...</p>')
+                self.example_label.config(text=example[:200] + "..." if len(example) > 200 else example)
+            except:
+                self.example_label.config(text="[Invalid template]")
+        
+        self.chunk_prompt_text.bind('<KeyRelease>', update_example)
+        update_example()
+        
+        # Buttons
+        button_frame = tk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        def save_chunk_prompt():
+            self.translation_chunk_prompt = self.chunk_prompt_text.get('1.0', tk.END).strip()
+            self.config['translation_chunk_prompt'] = self.translation_chunk_prompt
+            messagebox.showinfo("Success", "Translation chunk prompt saved!")
+            dialog.destroy()
+        
+        def reset_chunk_prompt():
+            if messagebox.askyesno("Reset Prompt", "Reset to default chunk prompt?"):
+                self.chunk_prompt_text.delete('1.0', tk.END)
+                self.chunk_prompt_text.insert('1.0', self.default_translation_chunk_prompt)
+                update_example()
+        
+        tb.Button(button_frame, text="Save", command=save_chunk_prompt, 
+                 bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
+        tb.Button(button_frame, text="Reset to Default", command=reset_chunk_prompt, 
+                 bootstyle="warning", width=15).pack(side=tk.LEFT, padx=5)
+        tb.Button(button_frame, text="Cancel", command=dialog.destroy, 
+                 bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
+        
+        dialog.deiconify()
 
+    def configure_image_chunk_prompt(self):
+        """Configure the prompt template for image chunks"""
+        dialog = self.wm.create_simple_dialog(
+            self.master,
+            "Configure Image Chunk Prompt",
+            width=700,
+            height=None
+        )
+        
+        main_frame = tk.Frame(dialog, padx=20, pady=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        tk.Label(main_frame, text="Image Chunk Context Template", 
+                font=('TkDefaultFont', 14, 'bold')).pack(anchor=tk.W, pady=(0, 5))
+        
+        tk.Label(main_frame, text="Configure the context provided when tall images are split into chunks.",
+                font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, pady=(0, 10))
+        
+        # Instructions
+        instructions_frame = tk.LabelFrame(main_frame, text="Available Placeholders", padx=10, pady=10)
+        instructions_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        placeholders = [
+            ("{chunk_idx}", "Current chunk number (1-based)"),
+            ("{total_chunks}", "Total number of chunks"),
+            ("{context}", "Additional context (e.g., chapter info)")
+        ]
+        
+        for placeholder, desc in placeholders:
+            placeholder_frame = tk.Frame(instructions_frame)
+            placeholder_frame.pack(anchor=tk.W, pady=2)
+            tk.Label(placeholder_frame, text=f"• {placeholder}:", font=('Courier', 10, 'bold')).pack(side=tk.LEFT)
+            tk.Label(placeholder_frame, text=f" {desc}", font=('TkDefaultFont', 10)).pack(side=tk.LEFT)
+        
+        # Prompt input
+        prompt_frame = tk.LabelFrame(main_frame, text="Image Chunk Prompt Template", padx=10, pady=10)
+        prompt_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+        self.image_chunk_prompt_text = self.ui.setup_scrollable_text(
+            prompt_frame, height=8, wrap=tk.WORD
+        )
+        self.image_chunk_prompt_text.pack(fill=tk.BOTH, expand=True)
+        self.image_chunk_prompt_text.insert('1.0', self.image_chunk_prompt)
+        
+        # Example
+        example_frame = tk.LabelFrame(main_frame, text="Example Output", padx=10, pady=10)
+        example_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(example_frame, text="With chunk 3 of 7 and chapter context, the prompt would be:",
+                font=('TkDefaultFont', 10)).pack(anchor=tk.W)
+        
+        self.image_example_label = tk.Label(example_frame, text="", 
+                                           font=('Courier', 9), fg='blue', 
+                                           wraplength=650, justify=tk.LEFT)
+        self.image_example_label.pack(anchor=tk.W, pady=(5, 0))
+        
+        def update_image_example(*args):
+            try:
+                template = self.image_chunk_prompt_text.get('1.0', tk.END).strip()
+                example = template.replace('{chunk_idx}', '3').replace('{total_chunks}', '7').replace('{context}', 'Chapter 5: The Great Battle')
+                self.image_example_label.config(text=example)
+            except:
+                self.image_example_label.config(text="[Invalid template]")
+        
+        self.image_chunk_prompt_text.bind('<KeyRelease>', update_image_example)
+        update_image_example()
+        
+        # Buttons
+        button_frame = tk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        def save_image_chunk_prompt():
+            self.image_chunk_prompt = self.image_chunk_prompt_text.get('1.0', tk.END).strip()
+            self.config['image_chunk_prompt'] = self.image_chunk_prompt
+            messagebox.showinfo("Success", "Image chunk prompt saved!")
+            dialog.destroy()
+        
+        def reset_image_chunk_prompt():
+            if messagebox.askyesno("Reset Prompt", "Reset to default image chunk prompt?"):
+                self.image_chunk_prompt_text.delete('1.0', tk.END)
+                self.image_chunk_prompt_text.insert('1.0', self.default_image_chunk_prompt)
+                update_image_example()
+        
+        tb.Button(button_frame, text="Save", command=save_image_chunk_prompt, 
+                 bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
+        tb.Button(button_frame, text="Reset to Default", command=reset_image_chunk_prompt, 
+                 bootstyle="warning", width=15).pack(side=tk.LEFT, padx=5)
+        tb.Button(button_frame, text="Cancel", command=dialog.destroy, 
+                 bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
+        
+        dialog.deiconify()
+    
     def prompt_custom_token_limit(self):
        val = simpledialog.askinteger(
            "Set Max Output Token Limit",
@@ -5460,7 +5648,7 @@ class TranslatorGUI:
         tk.Label(section_frame, text="Automatically retry when API response\nis cut off due to token limits",
                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
 
-        # ADD THIS NEW SECTION - Compression Factor
+        # Compression Factor
         # Add separator line for clarity
         ttk.Separator(section_frame, orient='horizontal').pack(fill='x', pady=10)
         
@@ -5474,6 +5662,13 @@ class TranslatorGUI:
         tb.Entry(compression_frame, width=6, textvariable=self.compression_factor_var).pack(side=tk.LEFT, padx=5)
         tk.Label(compression_frame, text="(0.7-1.0)").pack(side=tk.LEFT)
         
+        tb.Button(compression_frame, text=" Chunk Prompt", 
+                 command=self.configure_translation_chunk_prompt,
+                 bootstyle="info-outline", width=15).pack(side=tk.LEFT, padx=(15, 0))
+
+        tk.Label(section_frame, text="Ratio for chunk sizing based on output limits\n",
+               font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+       
         tk.Label(section_frame, text="Ratio for chunk sizing based on output limits\n",
                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
         
@@ -5868,6 +6063,10 @@ class TranslatorGUI:
             tk.Label(settings_frame, text=label).grid(row=row, column=0, sticky=tk.W, pady=3)
             tb.Entry(settings_frame, width=10, textvariable=var).grid(row=row, column=1, sticky=tk.W, pady=3)
         
+        tb.Button(settings_frame, text="Image Chunk Prompt", 
+                 command=self.configure_image_chunk_prompt,
+                 bootstyle="info-outline", width=20).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(10, 0))
+         
         tk.Label(right_column, text="💡 Supported models:\n"
                 "• Gemini 1.5 Pro/Flash, 2.0 Flash\n"
                 "• GPT-4V, GPT-4o, o4-mini",
@@ -5985,7 +6184,9 @@ class TranslatorGUI:
                     "DUPLICATE_DETECTION_MODE": self.duplicate_detection_mode_var.get(),
                     "ENABLE_DECIMAL_CHAPTERS": "1" if self.enable_decimal_chapters_var.get() else "0",
                     'ENABLE_WATERMARK_REMOVAL': "1" if self.enable_watermark_removal_var.get() else "0",
-                    'SAVE_CLEANED_IMAGES': "1" if self.save_cleaned_images_var.get() else "0"
+                    'SAVE_CLEANED_IMAGES': "1" if self.save_cleaned_images_var.get() else "0",
+                    'TRANSLATION_CHUNK_PROMPT': self.translation_chunk_prompt,
+                    'IMAGE_CHUNK_PROMPT': self.image_chunk_prompt,
                 }
                 os.environ.update(env_updates)
                 
@@ -6232,6 +6433,8 @@ class TranslatorGUI:
             self.config['save_cleaned_images'] = self.save_cleaned_images_var.get()
             self.config['advanced_watermark_removal'] = self.advanced_watermark_removal_var.get()
             self.config['compression_factor'] = self.compression_factor_var.get()
+            self.config['translation_chunk_prompt'] = self.translation_chunk_prompt
+            self.config['image_chunk_prompt'] = self.image_chunk_prompt
 
 
             _tl = self.token_limit_entry.get().strip()
