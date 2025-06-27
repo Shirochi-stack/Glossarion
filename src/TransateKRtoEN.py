@@ -2481,6 +2481,7 @@ class BatchTranslationProcessor:
                     final_body_with_images = c["body"]
                 else:
                     text_to_translate = c["body"]
+                    image_translations = {}
                     print(f"✅ Processed {len(image_translations)} images for Chapter {actual_num}")
             
             chapter_msgs = self.base_msg + [{"role": "user", "content": chapter_body}]
@@ -5065,6 +5066,7 @@ def main(log_callback=None, stop_callback=None):
             else:
                 # Set default text to translate
                 text_to_translate = c["body"]
+                image_translations = {}
                 if is_mixed_content and image_translator and config.ENABLE_IMAGE_TRANSLATION:
                     print(f"🖼️ Processing {c.get('image_count', 0)} images first...")
                     
