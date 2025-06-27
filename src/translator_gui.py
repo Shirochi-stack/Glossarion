@@ -669,7 +669,7 @@ class TranslatorGUI:
         
         # Default prompts
         self.default_translation_chunk_prompt = "[PART {chunk_idx}/{total_chunks}]\n{chunk_html}"
-        self.default_image_chunk_prompt = "This is part {chunk_idx} of {total_chunks} of a longer image. check context/format consistency with earlier chunks. {context}"
+        self.default_image_chunk_prompt = "This is part {chunk_idx} of {total_chunks} of a longer image.  Ensure that all formatting (indentation, line breaks, spacing, paragraph structure, markup) exactly matches the style used in the previous chunks. {context}"
         self.default_prompts = {
             "korean": "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                           "- Use an easy to read and grammatically accurate comedy translation style.\n"
@@ -5669,9 +5669,6 @@ class TranslatorGUI:
         tk.Label(section_frame, text="Ratio for chunk sizing based on output limits\n",
                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
        
-        tk.Label(section_frame, text="Ratio for chunk sizing based on output limits\n",
-               font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
-        
         # Add separator after compression factor
         ttk.Separator(section_frame, orient='horizontal').pack(fill='x', pady=10)
         
