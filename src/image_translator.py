@@ -1067,8 +1067,10 @@ class ImageTranslator:
                 # Use the cleaned text (URLs removed, other content preserved)
                 translated_text = cleaned_text
         else:
-            partial_text = " (partial)" if was_stopped else ""
-            label_html = f'<p><em>[Image text translation{partial_text}:]</em></p>\n'
+            if was_stopped:
+                label_html = f'<p><em>(partial)</em></p>\n'
+            else:
+                label_html = ""
         
         # Build the image HTML based on type - or skip it entirely if hide_label is enabled
         if hide_label:
@@ -1172,7 +1174,7 @@ class ImageTranslator:
                 if text_div:
                     # Remove the header paragraph
                     header = text_div.find('p')
-                    if header and '[Image text translation:]' in header.text:
+                    if header and ('(partial)' in header.text or '[Image text translation' in header.text):
                         header.decompose()
                     text = text_div.get_text(separator='\n').strip()
                 else:
