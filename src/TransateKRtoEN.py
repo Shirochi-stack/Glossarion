@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 import json
 import logging
@@ -2470,6 +2469,18 @@ class BatchTranslationProcessor:
                     self.check_stop_fn
                 )
                 if image_translations:
+                        # Create a copy of the processed body
+                    soup_for_text = BeautifulSoup(c["body"], 'html.parser')
+                    
+                    # Remove all translated content
+                    for trans_div in soup_for_text.find_all('div', class_='translated-text-only'):
+                        trans_div.decompose()
+                    
+                    # Use this cleaned version for text translation
+                    text_to_translate = str(soup_for_text)
+                    final_body_with_images = c["body"]
+                else:
+                    text_to_translate = c["body"]
                     print(f"✅ Processed {len(image_translations)} images for Chapter {actual_num}")
             
             chapter_msgs = self.base_msg + [{"role": "user", "content": chapter_body}]
@@ -2508,8 +2519,23 @@ class BatchTranslationProcessor:
                 soup = BeautifulSoup(cleaned, 'html.parser')
                 text_content = soup.get_text(strip=True)
                 
-                with open(os.path.join(self.out_dir, fname_txt), 'w', encoding='utf-8') as f:
-                    f.write(text_content)
+                # Merge image translations back with text translation
+                if 'final_body_with_images' in locals() and image_translations:
+                    # Parse both versions
+                    soup_with_images = BeautifulSoup(final_body_with_images, 'html.parser')
+                    soup_with_text = BeautifulSoup(final_html, 'html.parser')
+                    
+                    # Get the translated text content (without images)
+                    body_content = soup_with_text.body
+                    
+                    # Add image translations to the translated content
+                    for trans_div in soup_with_images.find_all('div', class_='translated-text-only'):
+                        body_content.insert(0, trans_div)
+                    
+                    final_html = str(soup_with_text)
+
+                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                    f.write(final_html)
                 
                 # Update with .txt filename
                 with self.progress_lock:
@@ -3503,6 +3529,11 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
             
         translation_result = image_translator.translate_image(img_path, context, check_stop_fn)
         
+        print(f"\n🔍 DEBUG: Image {idx}/{len(images)}")
+        print(f"   Translation result: {'Success' if translation_result and '[Image Translation Error:' not in translation_result else 'Failed'}")
+        if translation_result and "[Image Translation Error:" in translation_result:
+            print(f"   Error message: {translation_result}")
+        
         if translation_result:
             img_tag = None
             for img in soup.find_all('img'):
@@ -3513,33 +3544,90 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
             if img_tag:
                 hide_label = os.getenv("HIDE_IMAGE_TRANSLATION_LABEL", "0") == "1"
                 
-                container = soup.new_tag('div', **{'class': 'translated-text-only' if hide_label else 'image-with-translation'})
+                print(f"   🔍 DEBUG: Integration Phase")
+                print(f"   🏷️ Hide label mode: {hide_label}")
+                print(f"   📍 Found img tag: {img_tag.get('src')}")
                 
-                img_tag.replace_with(container)
+                # Store the translation result in the dictionary FIRST
+                image_translations[img_path] = translation_result
                 
-                if not hide_label:
-                    container.append(img_tag)
-                
-                translation_div = soup.new_tag('div', **{'class': 'image-translation'})
-                
+                # Parse the translation result to integrate into the chapter HTML
                 if '<div class="image-translation">' in translation_result:
                     trans_soup = BeautifulSoup(translation_result, 'html.parser')
-                    trans_content = trans_soup.find('div', class_='image-translation')
-                    if trans_content:
-                        for element in trans_content.children:
-                            if element.name:
-                                translation_div.append(element)
+                    
+                    # Try to get the full container first
+                    full_container = trans_soup.find('div', class_=['translated-text-only', 'image-with-translation'])
+                    
+                    if full_container:
+                        # Clone the container to avoid issues
+                        new_container = BeautifulSoup(str(full_container), 'html.parser').find('div')
+                        img_tag.replace_with(new_container)
+                        print(f"   ✅ Replaced image with full translation container")
+                    else:
+                        # Fallback: manually build the structure
+                        trans_div = trans_soup.find('div', class_='image-translation')
+                        if trans_div:
+                            container = soup.new_tag('div', **{'class': 'translated-text-only' if hide_label else 'image-with-translation'})
+                            img_tag.replace_with(container)
+                            
+                            if not hide_label:
+                                new_img = soup.new_tag('img', src=img_src)
+                                if img_info.get('alt'):
+                                    new_img['alt'] = img_info.get('alt')
+                                container.append(new_img)
+                            
+                            # Clone the translation div content
+                            new_trans_div = soup.new_tag('div', **{'class': 'image-translation'})
+                            # Copy all children from trans_div to new_trans_div
+                            for child in trans_div.children:
+                                if hasattr(child, 'name'):
+                                    new_trans_div.append(BeautifulSoup(str(child), 'html.parser'))
+                                else:
+                                    new_trans_div.append(str(child))
+                            
+                            container.append(new_trans_div)
+                            print(f"   ✅ Built container with translation div")
+                        else:
+                            print(f"   ⚠️ No translation div found in result")
+                            continue
                 else:
+                    # Plain text translation - build structure manually
+                    container = soup.new_tag('div', **{'class': 'translated-text-only' if hide_label else 'image-with-translation'})
+                    img_tag.replace_with(container)
+                    
+                    if not hide_label:
+                        new_img = soup.new_tag('img', src=img_src)
+                        if img_info.get('alt'):
+                            new_img['alt'] = img_info.get('alt')
+                        container.append(new_img)
+                    
+                    # Create translation div with content
+                    translation_div = soup.new_tag('div', **{'class': 'image-translation'})
+                    if not hide_label:
+                        label_p = soup.new_tag('p')
+                        label_em = soup.new_tag('em')
+                        #label_em.string = "[Image text translation:]"
+                        label_p.append(label_em)
+                        translation_div.append(label_p)
+                    
                     trans_p = soup.new_tag('p')
                     trans_p.string = translation_result
                     translation_div.append(trans_p)
-                
-                container.append(translation_div)
+                    container.append(translation_div)
+                    print(f"   ✅ Created plain text translation structure")
                 
                 translated_count += 1
                 
+                # Save to translated_images folder
                 trans_filename = f"ch{actual_num:03d}_img{idx:02d}_translation.html"
                 trans_filepath = os.path.join(image_translator.translated_images_dir, trans_filename)
+                
+                # Extract just the translation content for saving
+                save_soup = BeautifulSoup(translation_result, 'html.parser')
+                save_div = save_soup.find('div', class_='image-translation')
+                if not save_div:
+                    # Create a simple div for plain text
+                    save_div = f'<div class="image-translation"><p>{translation_result}</p></div>'
                 
                 with open(trans_filepath, 'w', encoding='utf-8') as f:
                     f.write(f"""<!DOCTYPE html>
@@ -3552,7 +3640,7 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
     <h2>Chapter {actual_num} - Image {idx}</h2>
     <p>Original: {os.path.basename(img_path)}</p>
     <hr/>
-    {translation_div}
+    {save_div}
 </body>
 </html>""")
                 
@@ -3562,6 +3650,12 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
     
     if translated_count > 0:
         print(f"   🖼️ Successfully translated {translated_count} images")
+        
+        # Debug output
+        final_html = str(soup)
+        trans_count = final_html.count('<div class="image-translation">')
+        print(f"   📊 Final HTML has {trans_count} translation divs")
+        print(f"   📊 image_translations dict has {len(image_translations)} entries")
         
         prog = image_translator.load_progress()
         if "image_chunks" in prog:
@@ -4531,7 +4625,14 @@ def main(log_callback=None, stop_callback=None):
         
         #print(f"📊 Chunk size: {available_tokens:,} tokens (based on {max_output_tokens:,} output limit, compression: {compression_factor})")
         
-        chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
+        # For mixed content chapters, calculate on clean text
+        # For mixed content chapters, calculate on clean text
+        if c.get('has_images', False) and ContentProcessor.is_meaningful_text_content(c["body"]):
+            # Don't modify c["body"] at all during chunk calculation
+            # Just pass the body as-is, the chunking will be slightly off but that's OK
+            chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
+        else:
+            chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
         
         chapter_key_str = content_hash
         old_key_str = str(idx)
@@ -4906,48 +5007,29 @@ def main(log_callback=None, stop_callback=None):
             
             if is_empty_chapter:
                 print(f"📄 Empty chapter detected")
+
             elif is_image_only_chapter:
+                print(f"📸 Image-only chapter: {c.get('image_count', 0)} images, no meaningful text")
+                
                 if image_translator and config.ENABLE_IMAGE_TRANSLATION:
                     print(f"🖼️ Translating {c.get('image_count', 0)} images...")
                     image_translator.set_current_chapter(chap_num)
+                    
+                    # DEBUG
+                    print(f"🔍 DEBUG: Before process_chapter_images")
+                    print(f"   Original body length: {len(c['body'])}")
+                    
                     translated_html, image_translations = process_chapter_images(
                         c["body"], 
-                        actual_num, 
+                        actual_num,  # FIXED: Use actual_num instead of chap_num
                         image_translator,
                         check_stop
                     )
-                print(f"📸 Image-only chapter: {c.get('image_count', 0)} images, no meaningful text")
-            elif is_mixed_content:
-                print(f"📖📸 Mixed content: {text_size} chars + {c.get('image_count', 0)} images")
-            else:
-                print(f"📖 Text-only chapter: {text_size} characters")
-
-            if is_empty_chapter:
-                print(f"📄 Copying empty chapter as-is")
-                safe_title = make_safe_filename(c['title'], c['num'])
-                if isinstance(c['num'], float):
-                    fname = FileUtilities.create_chapter_filename(c, c['num'])
-                else:
-                    fname = FileUtilities.create_chapter_filename(c, c['num'])
-                
-                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                    f.write(c["body"])
-                
-                print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved empty chapter")
-                progress_manager.update(idx, chap_num, content_hash, fname, status="completed_empty")
-                progress_manager.save()
-                chapters_completed += 1
-                continue
-
-            elif is_image_only_chapter:
-                if image_translator and config.ENABLE_IMAGE_TRANSLATION:
-                    print(f"🖼️ Translating {c.get('image_count', 0)} images...")
-                    translated_html, image_translations = process_chapter_images(
-                        c["body"], 
-                        chap_num, 
-                        image_translator,
-                        check_stop
-                    )
+                    
+                    # DEBUG
+                    print(f"🔍 DEBUG: After process_chapter_images")
+                    print(f"   Translated HTML length: {len(translated_html)}")
+                    print(f"   Has translation divs: {'<div class=\"image-translation\">' in translated_html}")
                     
                     if '<div class="image-translation">' in translated_html:
                         print(f"✅ Successfully translated images")
@@ -4966,6 +5048,11 @@ def main(log_callback=None, stop_callback=None):
                 else:
                     fname = f"response_{c['num']:03d}_{safe_title}.html"
                 
+                # DEBUG: Check what we're about to save
+                print(f"🔍 DEBUG: About to save to {fname}")
+                print(f"   Content length: {len(translated_html)}")
+                print(f"   Content preview: {translated_html[:200]}...")
+                
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
                     f.write(translated_html)
                 
@@ -4976,6 +5063,8 @@ def main(log_callback=None, stop_callback=None):
                 continue
 
             else:
+                # Set default text to translate
+                text_to_translate = c["body"]
                 if is_mixed_content and image_translator and config.ENABLE_IMAGE_TRANSLATION:
                     print(f"🖼️ Processing {c.get('image_count', 0)} images first...")
                     
@@ -4983,22 +5072,55 @@ def main(log_callback=None, stop_callback=None):
                     print(c["body"][:200])
                     print(f"[DEBUG] Has h1 tags: {'<h1>' in c['body']}")
                     print(f"[DEBUG] Has h2 tags: {'<h2>' in c['body']}")
+                    
                     image_translator.set_current_chapter(chap_num)
-                    c["body"], image_translations = process_chapter_images(
+                    
+                    # Store the original body before processing
+                    original_body = c["body"]
+                    
+                    # Calculate original chapter tokens before modification
+                    original_chapter_tokens = chapter_splitter.count_tokens(original_body)
+                    
+                    # Process images and get body with translations
+                    body_with_images, image_translations = process_chapter_images(
                         c["body"], 
                         actual_num,
                         image_translator,
                         check_stop
                     )
-                    print(f"[DEBUG] Content after image processing (first 200 chars):")
-                    print(c["body"][:200])
-                    print(f"[DEBUG] Still has h1 tags: {'<h1>' in c['body']}")
-                    print(f"[DEBUG] Still has h2 tags: {'<h2>' in c['body']}")
                     
                     if image_translations:
                         print(f"✅ Translated {len(image_translations)} images")
+                        
+                        # Store the body with images for later merging
+                        c["body_with_images"] = c["body"]
+                        
+                        # For chapters with only images and title, we still need to translate the title
+                        # Extract clean text for translation from ORIGINAL body
+                        from bs4 import BeautifulSoup
+                        soup_clean = BeautifulSoup(original_body, 'html.parser')
+
+                        # Remove images from the original to get pure text
+                        for img in soup_clean.find_all('img'):
+                            img.decompose()
+
+                        # Set clean text for translation - use prettify() or str() on the full document
+                        c["body"] = str(soup_clean) if soup_clean.body else original_body
+                        
+                        # If there's no meaningful text content after removing images, 
+                        # the text translation will just translate the title, which is correct
+                        print(f"   📝 Clean text for translation: {len(c['body'])} chars")
+                        
+                        # Update text_size to reflect actual text to translate
+                        text_size = len(c["body"])
+                        
+                        # Recalculate the actual token count for clean text
+                        actual_text_tokens = chapter_splitter.count_tokens(c["body"])
+                        print(f"   📊 Actual text tokens: {actual_text_tokens} (was counting {original_chapter_tokens} with images)")
                     else:
                         print(f"ℹ️ No translatable text found in images")
+                        # Keep original body if no image translations
+                        c["body"] = original_body
 
                 print(f"📖 Translating text content ({text_size} characters)")
                 progress_manager.update(idx, chap_num, content_hash, output_file=None, status="in_progress")
@@ -5052,16 +5174,17 @@ def main(log_callback=None, stop_callback=None):
                     terminology = "Section" if is_text_source else "Chapter"
                     print(f"📄 {terminology} will be processed in {len(chunks)} chunk(s)")
                                   
+            # Recalculate tokens on the actual text to be translated
+            actual_chapter_tokens = chapter_splitter.count_tokens(c["body"])
+            
             if len(chunks) > 1:
-                chapter_tokens = chapter_splitter.count_tokens(c["body"])
                 is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
                 terminology = "Section" if is_text_source else "Chapter"
-                print(f"   ℹ️ {terminology} size: {chapter_tokens:,} tokens (limit: {available_tokens:,} tokens per chunk)")
+                print(f"   ℹ️ {terminology} size: {actual_chapter_tokens:,} tokens (limit: {available_tokens:,} tokens per chunk)")
             else:
-                chapter_tokens = chapter_splitter.count_tokens(c["body"])
                 is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
                 terminology = "Section" if is_text_source else "Chapter"
-                print(f"   ℹ️ {terminology} size: {chapter_tokens:,} tokens (within limit of {available_tokens:,} tokens)")
+                print(f"   ℹ️ {terminology} size: {actual_chapter_tokens:,} tokens (within limit of {available_tokens:,} tokens)")
             
             chapter_key_str = str(idx)
             if chapter_key_str not in progress_manager.prog["chapter_chunks"]:
@@ -5338,6 +5461,46 @@ def main(log_callback=None, stop_callback=None):
             cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
 
             cleaned = ContentProcessor.clean_ai_artifacts(cleaned, remove_artifacts=config.REMOVE_AI_ARTIFACTS)
+            
+            if is_mixed_content and image_translations:
+                print(f"🔀 Merging {len(image_translations)} image translations with text...")
+                
+                # Parse the translated text (which has the translated title/header)
+                soup_translated = BeautifulSoup(cleaned, 'html.parser')
+                
+                # For each image translation, insert it into the document
+                for img_path, translation_html in image_translations.items():
+                    if translation_html and '<div' in translation_html:
+                        # Parse the translation HTML
+                        trans_soup = BeautifulSoup(translation_html, 'html.parser')
+                        container = trans_soup.find('div', class_=['translated-text-only', 'image-with-translation'])
+                        
+                        if container:
+                            # Clone the container to avoid issues
+                            new_container = BeautifulSoup(str(container), 'html.parser').find('div')
+                            
+                            # Find where to insert - after header or at beginning of body
+                            if soup_translated.body:
+                                # Try to find a header to insert after
+                                header = soup_translated.body.find(['h1', 'h2', 'h3'])
+                                if header:
+                                    header.insert_after(new_container)
+                                else:
+                                    # No header, insert at beginning of body
+                                    soup_translated.body.insert(0, new_container)
+                            else:
+                                # No body tag, try to find any header
+                                header = soup_translated.find(['h1', 'h2', 'h3'])
+                                if header:
+                                    header.insert_after(new_container)
+                                else:
+                                    # Just append to the document
+                                    soup_translated.append(new_container)
+                
+                # Update cleaned with the merged content
+                cleaned = str(soup_translated)
+                print(f"✅ Successfully merged image translations")
+                
 
             if is_text_file:
                 # For text files, save as plain text instead of HTML
