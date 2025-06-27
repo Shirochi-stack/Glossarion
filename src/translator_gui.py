@@ -669,66 +669,86 @@ class TranslatorGUI:
         
         # Default prompts
         self.default_translation_chunk_prompt = "[PART {chunk_idx}/{total_chunks}]\n{chunk_html}"
-        self.default_image_chunk_prompt = "This is part {chunk_idx} of {total_chunks} of a longer image.  Ensure that all formatting (indentation, line breaks, spacing, paragraph structure, markup) exactly matches the style used in the previous chunks. {context}"
+        self.default_image_chunk_prompt = "This is part {chunk_idx} of {total_chunks} of a longer image. {context}"
         self.default_prompts = {
-            "korean": "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
-                          "- Use an easy to read and grammatically accurate comedy translation style.\n"
-                          "- Retain honorifics like -nim, -ssi.\n"
-                          "- Preserve original intent, and speech tone.\n"
-                          "- Retain onomatopoeia in Romaji.\n"
-                          "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.",
-            "japanese": "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
-                          "- Use an easy to read and grammatically accurate comedy translation style.\n"
-                          "- Retain honorifics like -san, -sama, -chan, -kun.\n"
-                          "- Preserve original intent, and speech tone.\n"
-                          "- Retain onomatopoeia in Romaji.\n"
-                          "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.",
-            "chinese": "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
-                         "- Use an easy to read and grammatically accurate comedy translation style.\n"
-                         "- Preserve original intent, and speech tone.\n"
-                         "- Retain onomatopoeia in Romaji.\n"
-                         "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.",
-            "korean_OCR": "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
-                          "- Use an easy to read and grammatically accurate comedy translation style.\n"
-                          "- Retain honorifics like -nim, -ssi.\n"
-                          "- Preserve original intent, and speech tone.\n"
-                          "- Retain onomatopoeia in Romaji.\n"
-                          "- Add HTML tags for proper formatting as expected of a novel.",
-            "japanese_OCR": "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
-                            "- Use an easy to read and grammatically accurate comedy translation style.\n"
-                            "- Retain honorifics like -san, -sama, -chan, -kun.\n"
-                            "- Preserve original intent, and speech tone.\n"
-                            "- Retain onomatopoeia in Romaji.\n"
-                            "- Add HTML tags for proper formatting as expected of a novel.",
-            "chinese_OCR": "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
-                           "- Use an easy to read and grammatically accurate comedy translation style.\n"
-                           "- Preserve original intent, and speech tone.\n"
-                           "- Retain onomatopoeia in Romaji.\n"
-                           "- Add HTML tags for proper formatting as expected of a novel.",
-
-            # TXT-only entries
-            "korean_TXT": "You are a professional Korean to English novel translator, you must strictly output only English text while following these rules:\n"
-                           "- Use an easy to read and grammatically accurate comedy translation style.\n"
-                           "- Retain honorifics like -nim, -ssi.\n"
-                           "- Preserve original intent, and speech tone.\n"
-                           "- Retain onomatopoeia in Romaji.\n"
-                           "- Use line breaks for proper formatting as expected of a novel.",
-            "japanese_TXT": "You are a professional Japanese to English novel translator, you must strictly output only English text while following these rules:\n"
-                             "- Use an easy to read and grammatically accurate comedy translation style.\n"
-                             "- Retain honorifics like -san, -sama, -chan, -kun.\n"
-                             "- Preserve original intent, and speech tone.\n"
-                             "- Retain onomatopoeia in Romaji.\n"
-                             "- Use line breaks for proper formatting as expected of a novel.",
-            "chinese_TXT": "You are a professional Chinese to English novel translator, you must strictly output only English text while following these rules:\n"
-                            "- Use an easy to read and grammatically accurate comedy translation style.\n"
-                            "- Preserve original intent, and speech tone.\n"
-                            "- Retain onomatopoeia in Romaji.\n"
-                            "- Use line breaks for proper formatting as expected of a novel.",
-
+            "korean": (
+                "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
+                "- Use an easy to read and grammatically accurate comedy translation style.\n"
+                "- Retain honorifics like -nim, -ssi.\n"
+                "- Preserve original intent, and speech tone.\n"
+                "- Retain onomatopoeia in Romaji.\n"
+                "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
+                "- Wrap every paragraph in <p> tags with an inline CSS first‐line indent of 1em (e.g. <p style=\"text-indent:1em;\">…</p>); do not insert any literal tabs or spaces."
+            ),
+            "japanese": (
+                "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
+                "- Use an easy to read and grammatically accurate comedy translation style.\n"
+                "- Retain honorifics like -san, -sama, -chan, -kun.\n"
+                "- Preserve original intent, and speech tone.\n"
+                "- Retain onomatopoeia in Romaji.\n"
+                "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
+                "- Wrap every paragraph in <p> tags with an inline CSS first‐line indent of 1em (e.g. <p style=\"text-indent:1em;\">…</p>); do not insert any literal tabs or spaces."
+            ),
+            "chinese": (
+                "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
+                "- Use an easy to read and grammatically accurate comedy translation style.\n"
+                "- Preserve original intent, and speech tone.\n"
+                "- Retain onomatopoeia in Romaji.\n"
+                "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
+                "- Wrap every paragraph in <p> tags with an inline CSS first‐line indent of 1em (e.g. <p style=\"text-indent:1em;\">…</p>); do not insert any literal tabs or spaces."
+            ),
+            "korean_OCR": (
+                "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
+                "- Use an easy to read and grammatically accurate comedy translation style.\n"
+                "- Retain honorifics like -nim, -ssi.\n"
+                "- Preserve original intent, and speech tone.\n"
+                "- Retain onomatopoeia in Romaji.\n"
+                "- Add HTML tags for proper formatting as expected of a novel.\n"
+                "- Wrap every paragraph in <p> tags with an inline CSS first‐line indent of 1em (e.g. <p style=\"text-indent:1em;\">…</p>); do not insert any literal tabs or spaces."
+            ),
+            "japanese_OCR": (
+                "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
+                "- Use an easy to read and grammatically accurate comedy translation style.\n"
+                "- Retain honorifics like -san, -sama, -chan, -kun.\n"
+                "- Preserve original intent, and speech tone.\n"
+                "- Retain onomatopoeia in Romaji.\n"
+                "- Add HTML tags for proper formatting as expected of a novel.\n"
+                "- Wrap every paragraph in <p> tags with an inline CSS first‐line indent of 1em (e.g. <p style=\"text-indent:1em;\">…</p>); do not insert any literal tabs or spaces."
+            ),
+            "chinese_OCR": (
+                "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
+                "- Use an easy to read and grammatically accurate comedy translation style.\n"
+                "- Preserve original intent, and speech tone.\n"
+                "- Retain onomatopoeia in Romaji.\n"
+                "- Add HTML tags for proper formatting as expected of a novel.\n"
+                "- Wrap every paragraph in <p> tags with an inline CSS first‐line indent of 1em (e.g. <p style=\"text-indent:1em;\">…</p>); do not insert any literal tabs or spaces."
+            ),
+            "korean_TXT": (
+                "You are a professional Korean to English novel translator, you must strictly output only English text while following these rules:\n"
+                "- Use an easy to read and grammatically accurate comedy translation style.\n"
+                "- Retain honorifics like -nim, -ssi.\n"
+                "- Preserve original intent, and speech tone.\n"
+                "- Retain onomatopoeia in Romaji.\n"
+                "- Use line breaks for proper formatting as expected of a novel."
+            ),
+            "japanese_TXT": (
+                "You are a professional Japanese to English novel translator, you must strictly output only English text while following these rules:\n"
+                "- Use an easy to read and grammatically accurate comedy translation style.\n"
+                "- Retain honorifics like -san, -sama, -chan, -kun.\n"
+                "- Preserve original intent, and speech tone.\n"
+                "- Retain onomatopoeia in Romaji.\n"
+                "- Use line breaks for proper formatting as expected of a novel."
+            ),
+            "chinese_TXT": (
+                "You are a professional Chinese to English novel translator, you must strictly output only English text while following these rules:\n"
+                "- Use an easy to read and grammatically accurate comedy translation style.\n"
+                "- Preserve original intent, and speech tone.\n"
+                "- Retain onomatopoeia in Romaji.\n"
+                "- Use line breaks for proper formatting as expected of a novel."
+            ),
             "Original": "Return everything exactly as seen on the source."
         }
-
-        
+    
         self._init_default_prompts()
         self._init_variables()
         self._setup_gui()
