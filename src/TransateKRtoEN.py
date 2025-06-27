@@ -5029,8 +5029,7 @@ def main(log_callback=None, stop_callback=None):
                     # DEBUG
                     print(f"🔍 DEBUG: After process_chapter_images")
                     print(f"   Translated HTML length: {len(translated_html)}")
-                    tag = '<div class="image-translation">'
-                    print(f"   Has translation divs: {tag in translated_html}")
+                    print("   Has translation divs:", '<div class="image-translation">' in translated_html)
                     
                     if '<div class="image-translation">' in translated_html:
                         print(f"✅ Successfully translated images")
