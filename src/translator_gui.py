@@ -621,7 +621,7 @@ class TranslatorGUI:
         
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        master.title("Glossarion v2.9.2")
+        master.title("Glossarion v2.9.3")
         
         self.wm.responsive_size(master, BASE_WIDTH, BASE_HEIGHT)
         master.minsize(1600, 1000)
@@ -838,7 +838,8 @@ class TranslatorGUI:
             ('image_chunk_height_var', 'image_chunk_height', '1500'),
             ('chunk_timeout_var', 'chunk_timeout', '900'),
             ('batch_size_var', 'batch_size', '3'),
-            ('chapter_number_offset_var', 'chapter_number_offset', '0')
+            ('chapter_number_offset_var', 'chapter_number_offset', '0'),
+            ('compression_factor_var', 'compression_factor', '1.0') 
         ]
         
         for var_name, key, default in str_vars:
@@ -883,7 +884,7 @@ class TranslatorGUI:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v2.9.2 - Ready to use!")
+        self.append_log("🚀 Glossarion v2.9.3 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -3723,7 +3724,8 @@ class TranslatorGUI:
            'ENABLE_DECIMAL_CHAPTERS': "1" if self.enable_decimal_chapters_var.get() else "0",
            'ENABLE_WATERMARK_REMOVAL': "1" if self.enable_watermark_removal_var.get() else "0",
            'ADVANCED_WATERMARK_REMOVAL': "1" if self.advanced_watermark_removal_var.get() else "0",
-           'SAVE_CLEANED_IMAGES': "1" if self.save_cleaned_images_var.get() else "0"
+           'SAVE_CLEANED_IMAGES': "1" if self.save_cleaned_images_var.get() else "0",
+           'COMPRESSION_FACTOR': self.compression_factor_var.get()
            
        }
 
@@ -4321,6 +4323,8 @@ class TranslatorGUI:
                 return
 
             # Show custom settings dialog if custom mode is selected
+
+            # Show custom settings dialog if custom mode is selected
             if selected_mode_value == "custom":
                 # Use WindowManager's setup_scrollable for proper scrolling support
                 dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
@@ -4356,74 +4360,105 @@ class TranslatorGUI:
                 threshold_frame.pack(fill='x', padx=20, pady=(0, 15))
                 
                 threshold_descriptions = {
-                    'similarity': 'Text Similarity - Character-by-character comparison',
-                    'semantic': 'Semantic Analysis - Meaning and context matching',
-                    'structural': 'Structural Patterns - Document structure similarity',
-                    'word_overlap': 'Word Overlap - Common words between texts',
-                    'minhash_threshold': 'MinHash Similarity - Fast approximate matching'
+                    'similarity': ('Text Similarity', 'Character-by-character comparison'),
+                    'semantic': ('Semantic Analysis', 'Meaning and context matching'),
+                    'structural': ('Structural Patterns', 'Document structure similarity'),
+                    'word_overlap': ('Word Overlap', 'Common words between texts'),
+                    'minhash_threshold': ('MinHash Similarity', 'Fast approximate matching')
                 }
                 
-                for key, desc in threshold_descriptions.items():
+                # Create percentage labels dictionary to store references
+                percentage_labels = {}
+                
+                for setting_key, (label_text, description) in threshold_descriptions.items():
+                    # Container for each threshold
                     row_frame = tk.Frame(threshold_frame)
                     row_frame.pack(fill='x', pady=8)
                     
-                    tk.Label(row_frame, text=f"{desc}:", 
-                            font=('Arial', 10), width=50, anchor='w').pack(side='left')
+                    # Left side - labels
+                    label_container = tk.Frame(row_frame)
+                    label_container.pack(side='left', fill='x', expand=True)
                     
-                    value_label = tk.Label(row_frame, text=f"{custom_settings[key].get()}%", 
-                                          font=('Arial', 10, 'bold'), width=5)
-                    value_label.pack(side='right', padx=(10, 0))
+                    main_label = tk.Label(label_container, text=f"{label_text} - {description}:",
+                                         font=('TkDefaultFont', 11))
+                    main_label.pack(anchor='w')
                     
-                    # Use ttkbootstrap Scale
-                    scale = tb.Scale(row_frame, from_=10, to=100, orient='horizontal',
-                                    variable=custom_settings[key], length=200,
-                                    bootstyle="info",
-                                    command=lambda v, l=value_label, var=custom_settings[key]: 
-                                            l.config(text=f"{var.get()}%"))
-                    scale.pack(side='right', padx=(0, 10))
+                    # Right side - slider and percentage
+                    slider_container = tk.Frame(row_frame)
+                    slider_container.pack(side='right', padx=(20, 0))
+                    
+                    # Percentage label (shows current value)
+                    percentage_label = tk.Label(slider_container, text=f"{custom_settings[setting_key].get()}%",
+                                               font=('TkDefaultFont', 12, 'bold'), width=5, anchor='e')
+                    percentage_label.pack(side='right', padx=(10, 0))
+                    percentage_labels[setting_key] = percentage_label
+                    
+                    # Create slider
+                    slider = tb.Scale(slider_container, 
+                                     from_=10, to=100,
+                                     variable=custom_settings[setting_key],
+                                     bootstyle="info",
+                                     length=300,
+                                     orient='horizontal')
+                    slider.pack(side='right')
+                    
+                    # Update percentage label when slider moves
+                    def create_update_function(key, label):
+                        def update_percentage(*args):
+                            value = custom_settings[key].get()
+                            label.config(text=f"{value}%")
+                        return update_percentage
+                    
+                    # Bind the update function
+                    update_func = create_update_function(setting_key, percentage_label)
+                    custom_settings[setting_key].trace('w', update_func)
                 
                 # Processing Options Section
                 options_frame = tb.LabelFrame(scrollable_frame, text="Processing Options", 
-                                             padding=20, bootstyle="secondary")
+                                              padding=20, bootstyle="secondary")
                 options_frame.pack(fill='x', padx=20, pady=15)
                 
-                # Consecutive chapters to check
+                # Consecutive chapters option with spinbox
                 consec_frame = tk.Frame(options_frame)
-                consec_frame.pack(fill='x', pady=8)
+                consec_frame.pack(fill='x', pady=5)
                 
                 tk.Label(consec_frame, text="Consecutive chapters to check:", 
-                        font=('Arial', 10)).pack(side='left')
+                         font=('TkDefaultFont', 11)).pack(side='left')
                 
                 tb.Spinbox(consec_frame, from_=1, to=10, 
-                          textvariable=custom_settings['consecutive_chapters'],
-                          width=10, bootstyle="primary").pack(side='left', padx=(10, 0))
+                           textvariable=custom_settings['consecutive_chapters'],
+                           width=10, bootstyle="info").pack(side='left', padx=(10, 0))
                 
-                # Sample size
+                # Sample size option
                 sample_frame = tk.Frame(options_frame)
-                sample_frame.pack(fill='x', pady=8)
+                sample_frame.pack(fill='x', pady=5)
                 
                 tk.Label(sample_frame, text="Sample size for comparison (characters):", 
-                        font=('Arial', 10)).pack(side='left')
+                         font=('TkDefaultFont', 11)).pack(side='left')
                 
-                tb.Spinbox(sample_frame, from_=1000, to=10000, increment=500,
-                          textvariable=custom_settings['sample_size'],
-                          width=10, bootstyle="primary").pack(side='left', padx=(10, 0))
+                # Sample size spinbox with larger range
+                sample_spinbox = tb.Spinbox(sample_frame, from_=1000, to=10000, increment=500,
+                                            textvariable=custom_settings['sample_size'],
+                                            width=10, bootstyle="info")
+                sample_spinbox.pack(side='left', padx=(10, 0))
                 
-                # Minimum text length
-                min_frame = tk.Frame(options_frame)
-                min_frame.pack(fill='x', pady=8)
+                # Minimum text length option
+                min_length_frame = tk.Frame(options_frame)
+                min_length_frame.pack(fill='x', pady=5)
                 
-                tk.Label(min_frame, text="Minimum text length to process (characters):", 
-                        font=('Arial', 10)).pack(side='left')
+                tk.Label(min_length_frame, text="Minimum text length to process (characters):", 
+                         font=('TkDefaultFont', 11)).pack(side='left')
                 
-                tb.Spinbox(min_frame, from_=100, to=2000, increment=100,
-                          textvariable=custom_settings['min_text_length'],
-                          width=10, bootstyle="primary").pack(side='left', padx=(10, 0))
+                # Minimum length spinbox
+                min_length_spinbox = tb.Spinbox(min_length_frame, from_=100, to=5000, increment=100,
+                                                textvariable=custom_settings['min_text_length'],
+                                                width=10, bootstyle="info")
+                min_length_spinbox.pack(side='left', padx=(10, 0))
                 
-                # Check all pairs option
+                # Check all file pairs option
                 tb.Checkbutton(options_frame, text="Check all file pairs (slower but more thorough)",
-                              variable=custom_settings['check_all_pairs'],
-                              bootstyle="primary").pack(anchor='w', pady=8)
+                               variable=custom_settings['check_all_pairs'],
+                               bootstyle="primary").pack(anchor='w', pady=8)
                 
                 # Create button frame at bottom (inside scrollable_frame)
                 button_frame = tk.Frame(scrollable_frame)
@@ -4433,8 +4468,12 @@ class TranslatorGUI:
                 button_inner = tk.Frame(button_frame)
                 button_inner.pack()
                 
+                # Flag to track if settings were saved
+                settings_saved = False
+                
                 def save_custom_settings():
-                    """Save custom settings"""
+                    """Save custom settings and close dialog"""
+                    nonlocal settings_saved
                     qa_settings['custom_mode_settings'] = {
                         'thresholds': {
                             'similarity': custom_settings['similarity'].get() / 100,
@@ -4448,40 +4487,89 @@ class TranslatorGUI:
                         'sample_size': custom_settings['sample_size'].get(),
                         'min_text_length': custom_settings['min_text_length'].get()
                     }
+                    settings_saved = True
+                    self.append_log("✅ Custom detection settings saved")
                     dialog._cleanup_scrolling()  # Clean up scrolling bindings
                     dialog.destroy()
                 
                 def reset_to_defaults():
-                    custom_settings['similarity'].set(85)
-                    custom_settings['semantic'].set(80)
-                    custom_settings['structural'].set(90)
-                    custom_settings['word_overlap'].set(75)
-                    custom_settings['minhash_threshold'].set(80)
-                    custom_settings['consecutive_chapters'].set(2)
-                    custom_settings['check_all_pairs'].set(False)
-                    custom_settings['sample_size'].set(3000)
-                    custom_settings['min_text_length'].set(500)
+                    """Reset all values to default settings"""
+                    if messagebox.askyesno("Reset to Defaults", 
+                                           "Reset all values to default settings?",
+                                           parent=dialog):
+                        custom_settings['similarity'].set(85)
+                        custom_settings['semantic'].set(80)
+                        custom_settings['structural'].set(90)
+                        custom_settings['word_overlap'].set(75)
+                        custom_settings['minhash_threshold'].set(80)
+                        custom_settings['consecutive_chapters'].set(2)
+                        custom_settings['check_all_pairs'].set(False)
+                        custom_settings['sample_size'].set(3000)
+                        custom_settings['min_text_length'].set(500)
+                        self.append_log("ℹ️ Settings reset to defaults")
                 
-                # Use ttkbootstrap buttons
+                def cancel_settings():
+                    """Cancel without saving"""
+                    nonlocal settings_saved
+                    if not settings_saved:
+                        # Check if any settings were changed
+                        defaults = {
+                            'similarity': 85,
+                            'semantic': 80,
+                            'structural': 90,
+                            'word_overlap': 75,
+                            'minhash_threshold': 80,
+                            'consecutive_chapters': 2,
+                            'check_all_pairs': False,
+                            'sample_size': 3000,
+                            'min_text_length': 500
+                        }
+                        
+                        changed = False
+                        for key, default_val in defaults.items():
+                            if custom_settings[key].get() != default_val:
+                                changed = True
+                                break
+                        
+                        if changed:
+                            if messagebox.askyesno("Unsaved Changes", 
+                                                  "You have unsaved changes. Are you sure you want to cancel?",
+                                                  parent=dialog):
+                                dialog._cleanup_scrolling()
+                                dialog.destroy()
+                        else:
+                            dialog._cleanup_scrolling()
+                            dialog.destroy()
+                    else:
+                        dialog._cleanup_scrolling()
+                        dialog.destroy()
+                
+                # Use ttkbootstrap buttons with better styling
                 tb.Button(button_inner, text="Cancel", 
-                         command=lambda: [dialog._cleanup_scrolling(), dialog.destroy()],
+                         command=cancel_settings,
                          bootstyle="secondary", width=15).pack(side='left', padx=5)
                 
                 tb.Button(button_inner, text="Reset Defaults", 
                          command=reset_to_defaults,
                          bootstyle="warning", width=15).pack(side='left', padx=5)
                 
-                tb.Button(button_inner, text="Save Settings", 
+                tb.Button(button_inner, text="Start Scan", 
                          command=save_custom_settings,
                          bootstyle="success", width=15).pack(side='left', padx=5)
                 
                 # Use WindowManager's auto-resize
-                self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=0.85)
+                self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=0.72)
                 
-                # Handle window close properly
-                dialog.protocol("WM_DELETE_WINDOW", lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
+                # Handle window close properly - treat as cancel
+                dialog.protocol("WM_DELETE_WINDOW", cancel_settings)
                 
+                # Wait for dialog to close
                 dialog.wait_window()
+                
+                # If user cancelled at this dialog, cancel the whole scan
+                if not settings_saved:
+                    self.append_log("⚠️ QA scan canceled - no custom settings were saved.")
+                    return
             
             # Now get the folder
             folder_path = filedialog.askdirectory(title="Select Folder with HTML Files")
@@ -5373,6 +5461,26 @@ class TranslatorGUI:
         tk.Label(section_frame, text="Automatically retry when API response\nis cut off due to token limits",
                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
 
+        # ADD THIS NEW SECTION - Compression Factor
+        # Add separator line for clarity
+        ttk.Separator(section_frame, orient='horizontal').pack(fill='x', pady=10)
+        
+        # Compression Factor
+        tk.Label(section_frame, text="Translation Compression Factor", 
+                font=('TkDefaultFont', 11, 'bold')).pack(anchor=tk.W)
+        
+        compression_frame = tk.Frame(section_frame)
+        compression_frame.pack(anchor=tk.W, padx=20, pady=(5, 0))
+        tk.Label(compression_frame, text="CJK→English compression:").pack(side=tk.LEFT)
+        tb.Entry(compression_frame, width=6, textvariable=self.compression_factor_var).pack(side=tk.LEFT, padx=5)
+        tk.Label(compression_frame, text="(0.7-1.0)").pack(side=tk.LEFT)
+        
+        tk.Label(section_frame, text="Ratio for chunk sizing based on output limits\n",
+               font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+        
+        # Add separator after compression factor
+        ttk.Separator(section_frame, orient='horizontal').pack(fill='x', pady=10)
+        
         # Retry Duplicate
         tb.Checkbutton(section_frame, text="Auto-retry Duplicate Content", 
                      variable=self.retry_duplicate_var,
@@ -6127,6 +6235,7 @@ class TranslatorGUI:
             self.config['enable_watermark_removal'] = self.enable_watermark_removal_var.get()
             self.config['save_cleaned_images'] = self.save_cleaned_images_var.get()
             self.config['advanced_watermark_removal'] = self.advanced_watermark_removal_var.get()
+            self.config['compression_factor'] = self.compression_factor_var.get()
 
 
             _tl = self.token_limit_entry.get().strip()
@@ -6149,7 +6258,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v2.9.2...")
+    print("🚀 Starting Glossarion v2.9.3...")
     
     # Initialize splash screen
     splash_manager = None
