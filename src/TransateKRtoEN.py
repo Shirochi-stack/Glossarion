@@ -5029,7 +5029,8 @@ def main(log_callback=None, stop_callback=None):
                     # DEBUG
                     print(f"🔍 DEBUG: After process_chapter_images")
                     print(f"   Translated HTML length: {len(translated_html)}")
-                    print(f"   Has translation divs: {'<div class=\"image-translation\">' in translated_html}")
+                    tag = '<div class="image-translation">'
+                    print(f"   Has translation divs: {tag in translated_html}")
                     
                     if '<div class="image-translation">' in translated_html:
                         print(f"✅ Successfully translated images")
@@ -5299,8 +5300,15 @@ def main(log_callback=None, stop_callback=None):
                         else:
                             log_callback(f"📄 processing chunk {chunk_idx}/{total_chunks} for {terminology_lower} {actual_num} - {progress_percent:.1f}% complete")
                         
+                # Get custom chunk prompt template from environment
+                chunk_prompt_template = os.getenv("TRANSLATION_CHUNK_PROMPT", "[PART {chunk_idx}/{total_chunks}]\n{chunk_html}")
+                
                 if total_chunks > 1:
-                    user_prompt = f"[PART {chunk_idx}/{total_chunks}]\n{chunk_html}"
+                    user_prompt = chunk_prompt_template.format(
+                        chunk_idx=chunk_idx,
+                        total_chunks=total_chunks,
+                        chunk_html=chunk_html
+                    )
                 else:
                     user_prompt = chunk_html
                 
