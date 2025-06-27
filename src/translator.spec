@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion v2.9.2 - PyInstaller Specification File
+Glossarion v2.9.3 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner and AI Hunter
 """
 
@@ -12,7 +12,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'Glossarion v2.9.2'
+APP_NAME = 'Glossarion v2.9.3'
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -274,6 +274,18 @@ api_modules = [
     'openai.version',
     'openai.api_requestor',
     'openai.openai_response',
+	'openai._base_client',
+    'openai._constants',
+    'openai._models',
+    'openai._response',
+    'openai._legacy_response',
+    'openai._streaming',
+    'openai._exceptions',
+    'openai.resources',
+    'openai.resources.chat',
+    'openai.resources.completions',
+    'openai.types',
+    'openai.types.chat',
     
     # Anthropic
     'anthropic',
@@ -297,6 +309,7 @@ api_modules = [
     'hpack',
     'hyperframe',
     'wsproto',
+	'distro',
     
     # Token counting
     'tiktoken',
@@ -526,6 +539,8 @@ system_modules = [
     'ctypes',
     'ctypes.util',
     'ctypes.wintypes',
+	'aiohttp',
+    'aiofiles',
 ]
 
 # Date & Time
@@ -602,6 +617,9 @@ utility_modules = [
     'usercustomize',
     'dotenv',
     'python-dotenv',
+	'os.environ',
+    'dotenv.main',
+    'dotenv.parser',
 ]
 
 # Encoding support
