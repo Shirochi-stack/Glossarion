@@ -142,15 +142,16 @@ class TextFileProcessor:
         """Process chapters and split them if they exceed token limits"""
         final_chapters = []
         
-        # Get token limit settings
-        max_input_tokens_str = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
-        if not max_input_tokens_str or max_input_tokens_str == "":
-            # Token limit disabled - use a very large number
-            max_input_tokens = 10000000  # 10M tokens
-        else:
-            max_input_tokens = int(max_input_tokens_str)
-        safety_margin = 5000  # Leave room for system prompt and history
-        available_tokens = max_input_tokens - safety_margin
+        # Calculate based on OUTPUT token limits
+        max_output_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
+        compression_factor = float(os.getenv("COMPRESSION_FACTOR", "0.8"))
+        safety_margin_output = 500
+        
+        # Calculate chunk size based on output limit
+        available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
+        available_tokens = max(available_tokens, 1000)
+        
+        print(f"📊 Text file chunk size: {available_tokens:,} tokens (based on {max_output_tokens:,} output limit, compression: {compression_factor})")
         
         for chapter_data in raw_chapters:
             # Convert chapter content to HTML format
