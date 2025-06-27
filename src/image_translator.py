@@ -786,8 +786,15 @@ class ImageTranslator:
             chunk = img.crop((0, start_y, width, end_y))
             chunk_bytes = self._image_to_bytes(chunk)
             
+            # Get custom image chunk prompt template from environment
+            image_chunk_prompt_template = os.getenv("IMAGE_CHUNK_PROMPT", "This is part {chunk_idx} of {total_chunks} of a longer image. {context}")
+            
             # Build context for this chunk
-            chunk_context = f"This is part {i+1} of {num_chunks} of a longer image. {context}"
+            chunk_context = image_chunk_prompt_template.format(
+                chunk_idx=i+1,
+                total_chunks=num_chunks,
+                context=context
+            )
             
             # Translate chunk WITH CONTEXT
             translation = self._call_vision_api(chunk_bytes, chunk_context, check_stop_fn)
