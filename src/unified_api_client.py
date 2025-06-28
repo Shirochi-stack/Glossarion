@@ -98,8 +98,11 @@ except ImportError:
 # Gemini SDK
 try:
     import google.generativeai as genai
+    from google.generativeai.types import HarmCategory, HarmBlockThreshold  # ADD THIS LINE
 except ImportError:
     genai = None
+    HarmCategory = None
+    HarmBlockThreshold = None 
 
 # Anthropic SDK (optional - can use requests if not installed)
 try:
@@ -1022,17 +1025,88 @@ class UnifiedClient:
         return params
     
     def _send_gemini(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to Gemini API with enhanced error handling"""
+        """Send request to Gemini API with enhanced error handling and configurable safety settings"""
         formatted_prompt = self._format_gemini_prompt_simple(messages)
-        model = genai.GenerativeModel(self.model)
         
+        # Check if safety settings are disabled via config
+        disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
+        
+        # Configure safety settings based on toggle
+        if disable_safety:
+            # Set all safety categories to BLOCK_NONE (most permissive)
+            safety_settings = {
+                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+            }
+            logger.info("Gemini safety settings disabled - using BLOCK_NONE for all categories")
+        else:
+            # Use default safety settings (let Gemini decide)
+            safety_settings = None
+            logger.info("Using default Gemini safety settings")
+        
+        # Create model with safety settings
+        model = genai.GenerativeModel(
+            self.model,
+            safety_settings=safety_settings if safety_settings else None
+        )
+        # Define BOOST_FACTOR and current_tokens FIRST
         BOOST_FACTOR = 4
         attempts = 4
         attempt = 0
         result = None
-        current_tokens = max_tokens * BOOST_FACTOR
+        current_tokens = max_tokens * BOOST_FACTOR  # <-- Define current_tokens HERE
         finish_reason = None
         error_details = {}
+        
+        # SAVE SAFETY CONFIGURATION FOR VERIFICATION
+        if safety_settings:
+            safety_status = "DISABLED - All categories set to BLOCK_NONE"
+            readable_safety = {
+                "HATE_SPEECH": "BLOCK_NONE",
+                "SEXUALLY_EXPLICIT": "BLOCK_NONE",
+                "HARASSMENT": "BLOCK_NONE",
+                "DANGEROUS_CONTENT": "BLOCK_NONE"
+            }
+        else:
+            safety_status = "ENABLED - Using default Gemini safety settings"
+            readable_safety = "DEFAULT"
+        
+        # Log to console
+        print(f"🔒 Gemini Safety Status: {safety_status}")
+        
+        # Save configuration to file
+        config_data = {
+            "type": "TEXT_REQUEST",
+            "model": self.model,
+            "safety_enabled": not disable_safety,
+            "safety_settings": readable_safety,
+            "temperature": temperature,
+            "max_output_tokens": current_tokens,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Save to Payloads folder
+        os.makedirs("Payloads", exist_ok=True)
+        config_filename = f"gemini_safety_{response_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        config_path = os.path.join("Payloads", config_filename)
+        
+        try:
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(config_data, f, indent=2)
+            #print(f"📄 Safety config saved: {config_filename}")
+        except Exception as e:
+            logger.warning(f"Could not save safety config: {e}")
+        
+        # Log to console for immediate verification
+        #if disable_safety and safety_settings:
+         #   print(f"✅ SAFETY DISABLED - Request includes safety_settings with BLOCK_NONE")
+          #  print(f"   Safety config: {json.dumps(safety_settings, indent=2)}")
+        #else:
+        #    print(f"⚠️ SAFETY ENABLED - Using default Gemini safety settings")
+               
+
 
         while attempt < attempts:
             try:
@@ -1052,7 +1126,10 @@ class UnifiedClient:
                     feedback = response.prompt_feedback
                     if hasattr(feedback, 'block_reason') and feedback.block_reason:
                         error_details['block_reason'] = str(feedback.block_reason)
-                        logger.warning(f"Content blocked: {feedback.block_reason}")
+                        if disable_safety:
+                            logger.warning(f"Content blocked despite safety disabled: {feedback.block_reason}")
+                        else:
+                            logger.warning(f"Content blocked: {feedback.block_reason}")
                         raise Exception(f"Content blocked: {feedback.block_reason}")
                 
                 # Extract text
@@ -1788,6 +1865,8 @@ class UnifiedClient:
                 response = self._send_openai_image(messages, image_base64, temperature, max_tokens, response_name)
             elif self.client_type == 'anthropic':
                 response = self._send_anthropic_image(messages, image_base64, temperature, max_tokens, response_name)
+            elif self.client_type == 'electronhub':
+                response = self._send_electronhub_image(messages, image_base64, temperature, max_tokens, response_name)
             else:
                 raise UnifiedClientError(f"Image input not supported for {self.client_type}")
             
@@ -1817,7 +1896,7 @@ class UnifiedClient:
             return fallback, 'error'
     
     def _send_gemini_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send image request to Gemini API"""
+        """Send image request to Gemini API with configurable safety settings"""
         try:
             # Format prompt
             formatted_parts = []
@@ -1829,8 +1908,64 @@ class UnifiedClient:
             
             text_prompt = "\n\n".join(formatted_parts)
             
-            model = genai.GenerativeModel(self.model)
+            # Check if safety settings are disabled
+            disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
             
+            # Configure safety settings
+            if disable_safety:
+                safety_settings = {
+                    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+                }
+            else:
+                safety_settings = None
+            
+            model = genai.GenerativeModel(
+                self.model,
+                safety_settings=safety_settings if safety_settings else None
+            )
+             # SAVE SAFETY CONFIGURATION FOR VERIFICATION
+            if safety_settings:
+                safety_status = "DISABLED - All categories set to BLOCK_NONE"
+                readable_safety = {
+                    "HATE_SPEECH": "BLOCK_NONE",
+                    "SEXUALLY_EXPLICIT": "BLOCK_NONE",
+                    "HARASSMENT": "BLOCK_NONE",
+                    "DANGEROUS_CONTENT": "BLOCK_NONE"
+                }
+            else:
+                safety_status = "ENABLED - Using default Gemini safety settings"
+                readable_safety = "DEFAULT"
+            
+            # Log to console
+            print(f"\n📷 Gemini Image Safety Status: {safety_status}")
+            
+            # Save configuration to file
+            config_data = {
+                "type": "IMAGE_REQUEST",
+                "model": self.model,
+                "safety_enabled": not disable_safety,
+                "safety_settings": readable_safety,
+                "temperature": temperature,
+                "max_output_tokens": max_tokens,
+                "has_image": True,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Save to Payloads folder
+            os.makedirs("Payloads", exist_ok=True)
+            config_filename = f"gemini_image_safety_{response_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            config_path = os.path.join("Payloads", config_filename)
+            
+            try:
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    json.dump(config_data, f, indent=2)
+               # print(f"📄 Image safety config saved: {config_filename}")
+            except Exception as e:
+                logger.warning(f"Could not save image safety config: {e}")    
+                
             # Decode image
             image_bytes = base64.b64decode(image_base64)
             image = Image.open(io.BytesIO(image_bytes))
@@ -1860,39 +1995,41 @@ class UnifiedClient:
                     for candidate in response.candidates:
                         if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
                             parts = candidate.content.parts
-                            text_parts = []
-                            for part in parts:
-                                if hasattr(part, 'text') and part.text:
-                                    text_parts.append(part.text)
-                            
-                            if text_parts:
-                                result = ''.join(text_parts)
-                                finish_reason = 'stop'  # Successfully extracted text
-                                logger.info(f"Successfully extracted text from candidate parts: {len(text_parts)} parts")
+                            candidate_text = ''.join(part.text for part in parts if hasattr(part, 'text'))
+                            if candidate_text:
+                                result = candidate_text
+                                if hasattr(candidate, 'finish_reason'):
+                                    finish_reason = str(candidate.finish_reason)
+                                    if 'MAX_TOKENS' in finish_reason:
+                                        finish_reason = 'length'
                                 break
-                        
-                        # Alternative: try direct content access
-                        elif hasattr(candidate, 'text'):
-                            result = candidate.text
-                            finish_reason = 'stop'
-                            logger.info("Successfully extracted text directly from candidate")
-                            break
-                
-                # If still no result, log more details for debugging
-                if not result:
-                    logger.error(f"Failed to extract any text from Gemini response")
-                    logger.debug(f"Response type: {type(response)}")
-                    logger.debug(f"Has candidates: {hasattr(response, 'candidates')}")
-                    if hasattr(response, 'candidates'):
-                        logger.debug(f"Number of candidates: {len(response.candidates) if response.candidates else 0}")
-            
-            # Don't save here - send_image() method handles saving
             
             return UnifiedResponse(
                 content=result,
                 finish_reason=finish_reason,
-                raw_response=response
+                raw_response=response,
+                usage=None  # Gemini doesn't provide usage info for images
             )
+            
+        except Exception as e:
+            logger.error(f"Gemini image processing error: {e}")
+            error_msg = str(e)
+            
+            # Check for safety blocks
+            if "safety" in error_msg.lower() or "blocked" in error_msg.lower():
+                if disable_safety:
+                    logger.warning("Content blocked despite safety settings disabled")
+                return UnifiedResponse(
+                    content="",
+                    finish_reason='safety',
+                    error_details={'error': error_msg}
+                )
+            
+            return UnifiedResponse(
+                content="",
+                finish_reason='error',
+                error_details={'error': error_msg}
+        )
             
         except Exception as e:
             logger.error(f"Gemini image API error: {e}")
@@ -2046,6 +2183,118 @@ class UnifiedClient:
             logger.error(f"Anthropic Vision API error: {e}")
             raise UnifiedClientError(f"Anthropic Vision API error: {e}")
     
+    def _send_electronhub_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send image request through ElectronHub API
+        
+        ElectronHub uses OpenAI-compatible format for vision models.
+        The model name has already been stripped of the eh/ prefix in __init__.
+        """
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        # Get ElectronHub endpoint
+        base_url = os.getenv("ELECTRONHUB_API_URL", "https://api.electronhub.ai/v1")
+        
+        # Format messages with image using OpenAI format
+        vision_messages = []
+        for msg in messages:
+            if msg['role'] == 'user':
+                # Add image to user message
+                vision_messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": msg['content']},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{image_base64}"
+                            }
+                        }
+                    ]
+                })
+            else:
+                vision_messages.append(msg)
+        
+        # Store original model and strip prefix for API call
+        original_model = self.model
+        actual_model = self.model
+        
+        # Strip ElectronHub prefixes
+        electronhub_prefixes = ['eh/', 'electronhub/', 'electron/']
+        for prefix in electronhub_prefixes:
+            if actual_model.startswith(prefix):
+                actual_model = actual_model[len(prefix):]
+                logger.info(f"ElectronHub image: Using model '{actual_model}' (stripped from '{original_model}')")
+                break
+        
+        payload = {
+            "model": actual_model,
+            "messages": vision_messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens
+        }
+        
+        # Make the request
+        max_retries = 3
+        api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+        
+        for attempt in range(max_retries):
+            try:
+                if self._cancelled:
+                    raise UnifiedClientError("Operation cancelled")
+                
+                response = requests.post(
+                    f"{base_url}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=self.request_timeout
+                )
+                
+                if response.status_code != 200:
+                    error_msg = f"ElectronHub Vision API error: {response.status_code}"
+                    if response.text:
+                        try:
+                            error_data = response.json()
+                            error_msg += f" - {error_data.get('error', {}).get('message', response.text)}"
+                        except:
+                            error_msg += f" - {response.text}"
+                    
+                    if attempt < max_retries - 1:
+                        logger.warning(f"{error_msg} (attempt {attempt + 1})")
+                        time.sleep(api_delay)
+                        continue
+                    raise UnifiedClientError(error_msg)
+                
+                json_resp = response.json()
+                choice = json_resp['choices'][0]
+                content = choice['message']['content']
+                finish_reason = choice.get('finish_reason', 'stop')
+                
+                usage = None
+                if 'usage' in json_resp:
+                    usage = {
+                        'prompt_tokens': json_resp['usage'].get('prompt_tokens', 0),
+                        'completion_tokens': json_resp['usage'].get('completion_tokens', 0),
+                        'total_tokens': json_resp['usage'].get('total_tokens', 0)
+                    }
+                
+                return UnifiedResponse(
+                    content=content,
+                    finish_reason=finish_reason,
+                    usage=usage,
+                    raw_response=json_resp
+                )
+                
+            except requests.RequestException as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"ElectronHub Vision API error (attempt {attempt + 1}): {e}")
+                    time.sleep(api_delay)
+                    continue
+                logger.error(f"ElectronHub Vision API error after all retries: {e}")
+                raise UnifiedClientError(f"ElectronHub Vision API error: {e}")
+            
     # Additional provider methods for extended model support
     def _send_yi(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to Yi API (01.AI)
