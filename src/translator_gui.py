@@ -621,7 +621,7 @@ class TranslatorGUI:
         
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        master.title("Glossarion v2.9.4")
+        master.title("Glossarion v2.9.6")
         
         self.wm.responsive_size(master, BASE_WIDTH, BASE_HEIGHT)
         master.minsize(1600, 1000)
@@ -835,7 +835,8 @@ class TranslatorGUI:
             ('enable_watermark_removal_var', 'enable_watermark_removal', True),
             ('save_cleaned_images_var', 'save_cleaned_images', False),
             ('advanced_watermark_removal_var', 'advanced_watermark_removal', False),
-            ('enable_decimal_chapters_var', 'enable_decimal_chapters', False)
+            ('enable_decimal_chapters_var', 'enable_decimal_chapters', False),
+            ('disable_gemini_safety_var', 'disable_gemini_safety', False)
         ]
         
         for var_name, key, default in bool_vars:
@@ -867,6 +868,9 @@ class TranslatorGUI:
         
         self.book_title_prompt = self.config.get('book_title_prompt', 
             "Translate this book title to English while retaining any acronyms:")
+        # Initialize book title system prompt
+        if 'book_title_system_prompt' not in self.config:
+            self.config['book_title_system_prompt'] = "You are a translator. Respond with only the translated text, nothing else. Do not add any explanation or additional content."
         
         # Profiles
         self.prompt_profiles = self.config.get('prompt_profiles', self.default_prompts.copy())
@@ -904,7 +908,7 @@ class TranslatorGUI:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v2.9.4 - Ready to use!")
+        self.append_log("🚀 Glossarion v2.9.6 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -1399,21 +1403,36 @@ class TranslatorGUI:
             self.master,
             "Configure Book Title Translation",
             width=950,
-            height=700
+            height=850  # Increased height for two prompts
         )
         
         main_frame = tk.Frame(dialog, padx=20, pady=20)
         main_frame.pack(fill=tk.BOTH, expand=True)
         
-        tk.Label(main_frame, text="Book Title Translation Prompt", 
-                font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W, pady=(0, 10))
+        # System Prompt Section
+        tk.Label(main_frame, text="System Prompt (AI Instructions)", 
+                font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W, pady=(0, 5))
+        
+        tk.Label(main_frame, text="This defines how the AI should behave when translating titles:",
+                font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, pady=(0, 10))
+        
+        self.title_system_prompt_text = self.ui.setup_scrollable_text(
+            main_frame, height=4, wrap=tk.WORD
+        )
+        self.title_system_prompt_text.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+        self.title_system_prompt_text.insert('1.0', self.config.get('book_title_system_prompt', 
+            "You are a translator. Respond with only the translated text, nothing else. Do not add any explanation or additional content."))
+        
+        # User Prompt Section
+        tk.Label(main_frame, text="User Prompt (Translation Request)", 
+                font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W, pady=(10, 5))
         
         tk.Label(main_frame, text="This prompt will be used when translating book titles.\n"
                 "The book title will be appended after this prompt.",
-                font=('TkDefaultFont', 11), fg='gray').pack(anchor=tk.W, pady=(0, 10))
+                font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, pady=(0, 10))
         
         self.title_prompt_text = self.ui.setup_scrollable_text(
-            main_frame, height=8, wrap=tk.WORD
+            main_frame, height=6, wrap=tk.WORD
         )
         self.title_prompt_text.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
         self.title_prompt_text.insert('1.0', self.book_title_prompt)
@@ -1421,7 +1440,7 @@ class TranslatorGUI:
         lang_frame = tk.Frame(main_frame)
         lang_frame.pack(fill=tk.X, pady=(10, 0))
         
-        tk.Label(lang_frame, text="💡 Tip: Modify the prompt above to translate to other languages",
+        tk.Label(lang_frame, text="💡 Tip: Modify the prompts above to translate to other languages",
                 font=('TkDefaultFont', 10), fg='blue').pack(anchor=tk.W)
         
         example_frame = tk.LabelFrame(main_frame, text="Example Prompts", padx=10, pady=10)
@@ -1446,11 +1465,21 @@ class TranslatorGUI:
         def save_title_prompt():
             self.book_title_prompt = self.title_prompt_text.get('1.0', tk.END).strip()
             self.config['book_title_prompt'] = self.book_title_prompt
-            messagebox.showinfo("Success", "Book title prompt saved!")
+            
+            # Save the system prompt too
+            self.config['book_title_system_prompt'] = self.title_system_prompt_text.get('1.0', tk.END).strip()
+            
+            messagebox.showinfo("Success", "Book title prompts saved!")
             dialog.destroy()
         
         def reset_title_prompt():
-            if messagebox.askyesno("Reset Prompt", "Reset to default English translation prompt?"):
+            if messagebox.askyesno("Reset Prompts", "Reset both prompts to defaults?"):
+                # Reset system prompt
+                default_system = "You are a translator. Respond with only the translated text, nothing else. Do not add any explanation or additional content."
+                self.title_system_prompt_text.delete('1.0', tk.END)
+                self.title_system_prompt_text.insert('1.0', default_system)
+                
+                # Reset user prompt
                 default_prompt = "Translate this book title to English while retaining any acronyms:"
                 self.title_prompt_text.delete('1.0', tk.END)
                 self.title_prompt_text.insert('1.0', default_prompt)
@@ -3695,6 +3724,8 @@ class TranslatorGUI:
            'SYSTEM_PROMPT': self.prompt_text.get("1.0", "end").strip(),
            'TRANSLATE_BOOK_TITLE': "1" if self.translate_book_title_var.get() else "0",
            'BOOK_TITLE_PROMPT': self.book_title_prompt,
+           'BOOK_TITLE_SYSTEM_PROMPT': self.config.get('book_title_system_prompt', 
+                "You are a translator. Respond with only the translated text, nothing else. Do not add any explanation or additional content."),
            'REMOVE_AI_ARTIFACTS': "1" if self.REMOVE_AI_ARTIFACTS_var.get() else "0",
            'USE_ROLLING_SUMMARY': "1" if self.config.get('use_rolling_summary') else "0",
            'SUMMARY_ROLE': self.config.get('summary_role', 'user'),
@@ -3744,7 +3775,8 @@ class TranslatorGUI:
            'ENABLE_WATERMARK_REMOVAL': "1" if self.enable_watermark_removal_var.get() else "0",
            'ADVANCED_WATERMARK_REMOVAL': "1" if self.advanced_watermark_removal_var.get() else "0",
            'SAVE_CLEANED_IMAGES': "1" if self.save_cleaned_images_var.get() else "0",
-           'COMPRESSION_FACTOR': self.compression_factor_var.get()
+           'COMPRESSION_FACTOR': self.compression_factor_var.get(),
+           'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower()
            
        }
 
@@ -3810,7 +3842,8 @@ class TranslatorGUI:
                    'GLOSSARY_EXTRACT_TRAITS': '1' if self.config.get('manual_extract_traits', True) else '0',
                    'GLOSSARY_EXTRACT_HOW_THEY_REFER_TO_OTHERS': '1' if self.config.get('manual_extract_how_they_refer_to_others', True) else '0',
                    'GLOSSARY_EXTRACT_LOCATIONS': '1' if self.config.get('manual_extract_locations', True) else '0',
-                   'GLOSSARY_HISTORY_ROLLING': "1" if self.glossary_history_rolling_var.get() else "0"
+                   'GLOSSARY_HISTORY_ROLLING': "1" if self.glossary_history_rolling_var.get() else "0",
+                   'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower()
                }
                
                if self.custom_glossary_fields:
@@ -5595,7 +5628,7 @@ class TranslatorGUI:
        self._create_settings_buttons(scrollable_frame, dialog, canvas)
        
        # Auto-resize and show
-       self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.6)
+       self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.8, max_height_ratio=1.75)
        
        dialog.protocol("WM_DELETE_WINDOW", lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
 
@@ -5676,7 +5709,7 @@ class TranslatorGUI:
         compression_frame.pack(anchor=tk.W, padx=20, pady=(5, 0))
         tk.Label(compression_frame, text="CJK→English compression:").pack(side=tk.LEFT)
         tb.Entry(compression_frame, width=6, textvariable=self.compression_factor_var).pack(side=tk.LEFT, padx=5)
-        tk.Label(compression_frame, text="(0.7-1.0)").pack(side=tk.LEFT)
+        tk.Label(compression_frame, text="(0.7-1.0)", font=('TkDefaultFont', 11)).pack(side=tk.LEFT)
         
         tb.Button(compression_frame, text=" Chunk Prompt", 
                  command=self.configure_translation_chunk_prompt,
@@ -5992,8 +6025,47 @@ class TranslatorGUI:
         tk.Label(offset_frame, text="(+/- adjustment)").pack(side=tk.LEFT)
         
         tk.Label(section_frame, text="Adjust all chapter numbers by this amount.\nUseful for matching file numbers to actual chapters.",
-                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))               
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))    
+                
+        # Add separator before API safety settings
+        ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(15, 10))
         
+        # API Safety Settings subsection
+        tk.Label(section_frame, text="API Safety Settings", 
+                 font=('TkDefaultFont', 11, 'bold')).pack(anchor=tk.W, pady=(5, 5))
+        
+        # Create the Gemini safety checkbox
+        if not hasattr(self, 'disable_gemini_safety_var'):
+            self.disable_gemini_safety_var = tk.BooleanVar(
+                value=self.config.get('disable_gemini_safety', False)
+            )
+        
+        tb.Checkbutton(
+            section_frame,
+            text="Disable Gemini API Safety Filters",
+            variable=self.disable_gemini_safety_var,
+            bootstyle="round-toggle"
+        ).pack(anchor=tk.W, pady=(5, 0))
+        
+        # Add warning text
+        warning_text = ("⚠️ Disables ALL content safety filters for Gemini models.\n"
+                       "This sets all harm categories to BLOCK_NONE.\n")
+        tk.Label(
+            section_frame,
+            text=warning_text,
+            font=('TkDefaultFont', 9),
+            fg='#ff6b6b',
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, padx=(20, 0), pady=(0, 5))
+        
+        # Add note about affected models
+        tk.Label(
+            section_frame,
+            text="Does NOT affect ElectronHub Gemini models (eh/gemini-*)",
+            font=('TkDefaultFont', 8),
+            fg='gray',
+            justify=tk.LEFT
+        ).pack(anchor=tk.W, padx=(20, 0))        
 
     def _create_image_translation_section(self, parent):
         """Create image translation section"""
@@ -6145,7 +6217,8 @@ class TranslatorGUI:
                     'duplicate_detection_mode': self.duplicate_detection_mode_var.get(),
                     'chapter_number_offset': safe_int(self.chapter_number_offset_var.get(), 0),
                     'enable_decimal_chapters': self.enable_decimal_chapters_var.get(),
-                    'use_header_as_output': self.use_header_as_output_var.get()
+                    'use_header_as_output': self.use_header_as_output_var.get(),
+                    'disable_gemini_safety': self.disable_gemini_safety_var.get()
                 })
                 
                 # Validate numeric fields
@@ -6199,6 +6272,7 @@ class TranslatorGUI:
                     'SAVE_CLEANED_IMAGES': "1" if self.save_cleaned_images_var.get() else "0",
                     'TRANSLATION_CHUNK_PROMPT': self.translation_chunk_prompt,
                     'IMAGE_CHUNK_PROMPT': self.image_chunk_prompt,
+                    "DISABLE_GEMINI_SAFETY": str(self.config.get('disable_gemini_safety', False)).lower()
                 }
                 os.environ.update(env_updates)
                 
@@ -6469,7 +6543,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v2.9.4...")
+    print("🚀 Starting Glossarion v2.9.6...")
     
     # Initialize splash screen
     splash_manager = None
