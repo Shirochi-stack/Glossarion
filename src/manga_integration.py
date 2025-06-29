@@ -669,22 +669,22 @@ class MangaTranslationTab:
         config = self.main_gui.config
         
         # Initialize with defaults
-        self.bg_opacity_var = tk.IntVar(value=config.get('manga_bg_opacity', 255))
-        self.bg_style_var = tk.StringVar(value=config.get('manga_bg_style', 'box'))
+        self.bg_opacity_var = tk.IntVar(value=config.get('manga_bg_opacity', 130))
+        self.bg_style_var = tk.StringVar(value=config.get('manga_bg_style', 'circle'))
         self.bg_reduction_var = tk.DoubleVar(value=config.get('manga_bg_reduction', 1.0))
         self.font_size_var = tk.IntVar(value=config.get('manga_font_size', 0))
         self.selected_font_path = config.get('manga_font_path', None)
-        self.skip_inpainting_var = tk.BooleanVar(value=config.get('manga_skip_inpainting', False))
+        self.skip_inpainting_var = tk.BooleanVar(value=config.get('manga_skip_inpainting', True))
         
         # Font color settings
-        manga_text_color = config.get('manga_text_color', [0, 0, 0])
+        manga_text_color = config.get('manga_text_color', [102, 0, 0])
         self.text_color_r = tk.IntVar(value=manga_text_color[0])
         self.text_color_g = tk.IntVar(value=manga_text_color[1])
         self.text_color_b = tk.IntVar(value=manga_text_color[2])
         
         # Shadow settings
-        self.shadow_enabled_var = tk.BooleanVar(value=config.get('manga_shadow_enabled', False))
-        manga_shadow_color = config.get('manga_shadow_color', [128, 128, 128])
+        self.shadow_enabled_var = tk.BooleanVar(value=config.get('manga_shadow_enabled', True))
+        manga_shadow_color = config.get('manga_shadow_color', [204, 128, 128])
         self.shadow_color_r = tk.IntVar(value=manga_shadow_color[0])
         self.shadow_color_g = tk.IntVar(value=manga_shadow_color[1])
         self.shadow_color_b = tk.IntVar(value=manga_shadow_color[2])
