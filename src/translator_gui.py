@@ -628,7 +628,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        master.title("Glossarion v3.0.0")
+        master.title("Glossarion v3.0.2")
         
         self.wm.responsive_size(master, BASE_WIDTH, BASE_HEIGHT)
         master.minsize(1600, 1000)
@@ -790,14 +790,14 @@ class TranslatorGUI:
             width=900,
             height=700,
             max_width_ratio=0.9,
-            max_height_ratio=1.36
+            max_height_ratio=1.45
         )
         
         # Initialize the manga translator interface on the scrollable frame
         self.manga_translator = MangaTranslationTab(scrollable_frame, self, dialog, canvas)
         
         # Auto-resize to fit content
-        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.36)
+        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.6)
         
         # Handle window close
         def on_close():
@@ -966,7 +966,7 @@ class TranslatorGUI:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.0.0 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.0.2 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -6608,7 +6608,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.0.0...")
+    print("🚀 Starting Glossarion v3.0.2...")
     
     # Initialize splash screen
     splash_manager = None
