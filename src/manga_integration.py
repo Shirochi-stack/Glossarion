@@ -123,7 +123,21 @@ class MangaTranslationTab:
             
             # Add Google Cloud credentials selector
             if not has_vision:
-                req_text.append("• Google Cloud Vision credentials not set - use Translation Settings below")
+                cred_frame = tk.Frame(req_frame)
+                cred_frame.pack(fill=tk.X, pady=(10, 0))
+                
+                tk.Label(
+                    cred_frame,
+                    text="Set Google Cloud Vision credentials:",
+                    font=('Arial', 10)
+                ).pack(side=tk.LEFT)
+                
+                tb.Button(
+                    cred_frame,
+                    text="Browse JSON File",
+                    command=self._browse_google_credentials,
+                    bootstyle="primary"
+                ).pack(side=tk.LEFT, padx=10)
         
         # File selection frame
         file_frame = tk.LabelFrame(
@@ -765,30 +779,6 @@ class MangaTranslationTab:
             # Update status if we have a reference
             if hasattr(self, 'status_label'):
                 self.status_label.config(text="✅ Ready", fg="green")
-            
-            messagebox.showinfo("Success", "Google Cloud credentials set successfully!")
-    
-    def _browse_google_credentials(self):
-        """Browse and set Google Cloud Vision credentials"""
-        file_path = filedialog.askopenfilename(
-            title="Select Google Cloud Service Account JSON",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-        )
-        
-        if file_path:
-            # Save to config with both keys for compatibility
-            self.main_gui.config['google_vision_credentials'] = file_path
-            self.main_gui.config['google_cloud_credentials'] = file_path
-            
-            # Save configuration
-            if hasattr(self.main_gui, 'save_configuration'):
-                self.main_gui.save_configuration()
-            
-            # Update button state immediately
-            self.start_button.config(state=tk.NORMAL)
-            
-            # Update status display
-            self._update_status_display()
             
             messagebox.showinfo("Success", "Google Cloud credentials set successfully!")
     
