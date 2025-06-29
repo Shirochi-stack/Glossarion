@@ -8,7 +8,7 @@ Key Design Principles:
 - The client must support cancellation for timeout handling
 
 Supported models and their prefixes:
-- OpenAI: gpt*, o1*, o4*, codex* (e.g., gpt-4, o4-mini)
+- OpenAI: gpt*, o1*, o3*, o4*, codex* (e.g., gpt-4, o3, o4-mini)
 - Google: gemini*, palm*, bard* (e.g., gemini-2.0-flash-exp)
 - Anthropic: claude*, sonnet*, opus*, haiku*
 - DeepSeek: deepseek* (e.g., deepseek-chat)
@@ -180,6 +180,7 @@ class UnifiedClient:
     MODEL_PROVIDERS = {
         'gpt': 'openai',
         'o1': 'openai',
+        'o3': 'openai',
         'o4': 'openai',
         'gemini': 'gemini',
         'claude': 'anthropic',
@@ -249,8 +250,8 @@ class UnifiedClient:
     # Model-specific constraints (for reference and logging only - handled reactively)
     MODEL_CONSTRAINTS = {
         'temperature_fixed': ['o4-mini', 'o1-mini', 'o1-preview'],  # Models that only support specific temperatures
-        'no_system_message': ['o1', 'o1-preview'],    # Models that don't support system messages
-        'max_completion_tokens': ['o4', 'o1'],        # Models using max_completion_tokens
+        'no_system_message': ['o1', 'o1-preview', 'o3'],    # Models that don't support system messages
+        'max_completion_tokens': ['o4', 'o1', 'o3'],        # Models using max_completion_tokens
         'chinese_optimized': ['qwen', 'yi', 'glm', 'chatglm', 'baichuan', 'ernie', 'hunyuan'],  # Models optimized for Chinese
     }
     
@@ -573,7 +574,8 @@ class UnifiedClient:
         logger.info("🛑 Operation cancelled (timeout or user stop)")
         print("🛑 API operation cancelled")
     
-    def send(self, messages, temperature=0.3, max_tokens=8192, context=None) -> Tuple[str, Optional[str]]:
+    def send(self, messages, temperature=None, max_tokens=None, max_completion_tokens=None, context=None) -> Tuple[str, Optional[str]]:
+
         """
         Send messages to the API with enhanced error handling
         Returns: (content, finish_reason) tuple for backward compatibility
@@ -582,6 +584,13 @@ class UnifiedClient:
         - Truncated responses: Returns finish_reason='length' when response is cut off
         - Timeout handling: Respects cancellation from send_with_interrupt wrapper
         - Duplicate detection: Saves all responses for comparison
+        
+        Args:
+            messages: List of message dicts
+            temperature: Sampling temperature
+            max_tokens: Maximum tokens (for non-o series models)
+            max_completion_tokens: Maximum completion tokens (for o-series models)
+            context: Context identifier
         """
         start_time = time.time()
         
@@ -619,7 +628,7 @@ class UnifiedClient:
                 logger.info(f"Timeout monitoring enabled: {timeout_seconds}s limit")
             
             # Get response
-            response = self._get_response(messages, temperature, max_tokens, response_name)
+            response = self._get_response(messages, temperature, max_tokens, max_completion_tokens, response_name)
             
             # Check for cancellation (from timeout or stop button)
             if self._cancelled:
@@ -683,8 +692,18 @@ class UnifiedClient:
             fallback_content = self._handle_empty_result(messages, context, str(e))
             return fallback_content, 'error'
     
-    def _get_response(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Route to appropriate API handler"""
+    def _get_response(self, messages, temperature, max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
+        """
+        Route to appropriate AI provider and get response
+        
+        Args:
+            messages: List of message dicts
+            temperature: Sampling temperature
+            max_tokens: Maximum tokens (for non-o series models)
+            max_completion_tokens: Maximum completion tokens (for o-series models)
+            response_name: Name for saving response
+        """
+        # Map client types to their handler methods
         handlers = {
             'openai': self._send_openai,
             'gemini': self._send_gemini,
@@ -730,7 +749,12 @@ class UnifiedClient:
                 return self._send_together(messages, temperature, max_tokens, response_name)
             raise UnifiedClientError(f"No handler for client type: {self.client_type}")
         
-        return handler(messages, temperature, max_tokens, response_name)
+        # For OpenAI, pass the max_completion_tokens parameter
+        if self.client_type == 'openai':
+            return handler(messages, temperature, max_tokens, max_completion_tokens, response_name)
+        else:
+            # Other providers don't use max_completion_tokens yet
+            return handler(messages, temperature, max_tokens, response_name)
     
     def _send_electronhub(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to ElectronHub API aggregator
@@ -840,8 +864,9 @@ class UnifiedClient:
             # Always restore the original model name
             # This ensures subsequent calls work correctly
             self.model = original_model
-    
-    def _send_openai(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        
+    def _send_openai(self, messages, temperature, max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
+        """Send request to OpenAI API with o-series model support"""
         """Send request to OpenAI API with retry logic"""
         max_retries = 3
         api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
@@ -899,6 +924,19 @@ class UnifiedClient:
                 content = choice.message.content or ""
                 finish_reason = choice.finish_reason
                 
+                if not content and finish_reason == 'length':
+                    logger.warning(f"OpenAI vision API returned empty content with finish_reason='length'")
+                    logger.warning(f"This usually means the token limit is too low. Current limit: {api_params.get('max_completion_tokens') or api_params.get('max_tokens', 'not set')}")
+                    # Return with error details
+                    return UnifiedResponse(
+                        content="",
+                        finish_reason='error',
+                        error_details={'error': 'Response truncated - increase max_completion_tokens', 
+                                     'finish_reason': 'length',
+                                     'token_limit': api_params.get('max_completion_tokens') or api_params.get('max_tokens')}
+                    )
+  
+                    
                 # Normalize OpenAI finish reasons for retry mechanisms
                 if finish_reason == "max_tokens":
                     finish_reason = "length"  # Standard truncation indicator
@@ -999,29 +1037,26 @@ class UnifiedClient:
         
         raise UnifiedClientError("OpenAI API failed after all retries")
     
-    def _build_openai_params(self, messages, temperature, max_tokens):
+    def _build_openai_params(self, messages, temperature, max_tokens, max_completion_tokens=None):
         """Build parameters for OpenAI API call"""
-        model_lower = self.model.lower()
-        
         params = {
             "model": self.model,
             "messages": messages,
             "temperature": temperature
         }
         
-        # Handle different parameter names
-        # Check if model uses max_completion_tokens
-        uses_completion_tokens = False
-        for model_prefix in self.MODEL_CONSTRAINTS.get('max_completion_tokens', []):
-            if model_prefix in model_lower:
-                uses_completion_tokens = True
-                break
-        
-        if uses_completion_tokens:
-            params["max_completion_tokens"] = max_tokens
+        # Determine which token parameter to use based on model
+        if self._is_o_series_model():
+            # o-series models use max_completion_tokens
+            # The manga translator passes the actual value as max_tokens for now
+            if max_tokens is not None:
+                params["max_completion_tokens"] = max_tokens
+                logger.debug(f"Using max_completion_tokens={max_tokens} for o-series model {self.model}")
         else:
-            params["max_tokens"] = max_tokens
-            
+            # Regular models use max_tokens
+            if max_tokens is not None:
+                params["max_tokens"] = max_tokens
+                
         return params
     
     def _send_gemini(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
@@ -1831,22 +1866,61 @@ class UnifiedClient:
                     raise UnifiedClientError(f"{provider} API error: {e}")
     
     # Image handling methods
-    def send_image(self, messages, image_data, temperature=0.3, max_tokens=8192, context=None) -> Tuple[str, Optional[str]]:
+    def send_image(self, messages: List[Dict[str, Any]], image_data: Any,
+                  temperature: Optional[float] = None, 
+                  max_tokens: Optional[int] = None,
+                  max_completion_tokens: Optional[int] = None,
+                  context: str = 'image_translation') -> Tuple[str, str]:
         """
         Send messages with image to vision-capable APIs
         
-        IMPORTANT: Supports same retry mechanisms as text translation:
-        - Returns accurate finish_reason for truncation detection
-        - Supports cancellation for timeout handling
-        - Saves responses for duplicate detection
+        REFACTORED VERSION with:
+        - Proper o-series model support (o1, o3, o4, etc.)
+        - GUI value respect for temperature and tokens
+        - Enhanced error handling
+        - Better logging
+        
+        Args:
+            messages: List of message dicts
+            image_data: Raw image bytes or base64 string
+            temperature: Temperature for generation (None = use default)
+            max_tokens: Max tokens for non-o models (None = use default)
+            max_completion_tokens: Max tokens for o-series models (None = use default)
+            context: Context identifier for logging
+            
+        Returns:
+            Tuple of (content, finish_reason)
         """
         self._cancelled = False
         self.context = context or 'image_translation'
         self.conversation_message_count += 1
         
+        # Use GUI values if not explicitly overridden
+        if temperature is None:
+            temperature = getattr(self, 'default_temperature', 0.3)
+            logger.debug(f"Using default temperature: {temperature}")
+        
+        # Determine if this is an o-series model
+        is_o_series = self._is_o_series_model()
+        
+        # Handle token limits based on model type
+        if is_o_series:
+            # o-series models use max_completion_tokens
+            if max_completion_tokens is None:
+                max_completion_tokens = max_tokens if max_tokens is not None else getattr(self, 'default_max_tokens', 8192)
+            max_tokens = None  # Clear max_tokens for o-series
+            logger.info(f"Using o-series model {self.model} with max_completion_tokens: {max_completion_tokens}")
+        else:
+            # Regular models use max_tokens
+            if max_tokens is None:
+                max_tokens = max_completion_tokens if max_completion_tokens is not None else getattr(self, 'default_max_tokens', 8192)
+            max_completion_tokens = None  # Clear max_completion_tokens for regular models
+            logger.debug(f"Using regular model {self.model} with max_tokens: {max_tokens}")
+        
         # Convert to base64 if needed
         if isinstance(image_data, bytes):
             image_base64 = base64.b64encode(image_data).decode('utf-8')
+            logger.debug(f"Converted {len(image_data)} bytes to base64")
         else:
             image_base64 = image_data
         
@@ -1858,15 +1932,24 @@ class UnifiedClient:
             # Use proper naming for duplicate detection
             payload_name, response_name = self._get_file_names(messages, context)
             
-            # Route to appropriate handler
+            # Log the request details
+            logger.info(f"Sending image request to {self.client_type} ({self.model})")
+            logger.debug(f"Temperature: {temperature}, Max tokens: {max_tokens or max_completion_tokens}")
+            
+            # Route to appropriate handler based on client type
             if self.client_type == 'gemini':
-                response = self._send_gemini_image(messages, image_base64, temperature, max_tokens, response_name)
+                response = self._send_gemini_image(messages, image_base64, temperature, 
+                                                 max_tokens or max_completion_tokens, response_name)
             elif self.client_type == 'openai':
-                response = self._send_openai_image(messages, image_base64, temperature, max_tokens, response_name)
+                response = self._send_openai_image(messages, image_base64, temperature, 
+                                             max_tokens, max_completion_tokens, response_name)
+
             elif self.client_type == 'anthropic':
-                response = self._send_anthropic_image(messages, image_base64, temperature, max_tokens, response_name)
+                response = self._send_anthropic_image(messages, image_base64, temperature, 
+                                                    max_tokens or max_completion_tokens, response_name)
             elif self.client_type == 'electronhub':
-                response = self._send_electronhub_image(messages, image_base64, temperature, max_tokens, response_name)
+                response = self._send_electronhub_image(messages, image_base64, temperature, 
+                                                      max_tokens or max_completion_tokens, response_name)
             else:
                 raise UnifiedClientError(f"Image input not supported for {self.client_type}")
             
@@ -1876,9 +1959,11 @@ class UnifiedClient:
             # Save response for duplicate detection
             if response.content:
                 self._save_response(response.content, response_name)
+                logger.debug(f"Saved response to: {response_name}")
             
             # Handle empty responses
             if not response.content or response.content.strip() == "":
+                logger.warning(f"Empty response from {self.client_type}")
                 fallback = self._handle_empty_result(messages, context, "empty_image_response")
                 return fallback, 'error'
             
@@ -1889,12 +1974,36 @@ class UnifiedClient:
                 
             return response.content, response.finish_reason
                 
-        except Exception as e:
+        except UnifiedClientError as e:
+            # Re-raise our own errors
             logger.error(f"Image processing error: {e}")
+            self._save_failed_request(messages, e, context)
+            raise
+            
+        except Exception as e:
+            # Wrap other errors
+            logger.error(f"Unexpected image processing error: {e}", exc_info=True)
             self._save_failed_request(messages, e, context)
             fallback = self._handle_empty_result(messages, context, str(e))
             return fallback, 'error'
-    
+
+    def _is_o_series_model(self) -> bool:
+        """Check if the current model is an o-series model (o1, o3, o4, etc.)"""
+        if not self.model:
+            return False
+        
+        model_lower = self.model.lower()
+        
+        # Check for specific patterns
+        if 'o1-preview' in model_lower:
+            return True
+        
+        # Check if it starts with o followed by a digit
+        if len(model_lower) >= 2 and model_lower[0] == 'o' and model_lower[1].isdigit():
+            return True
+        
+        return False
+
     def _send_gemini_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send image request to Gemini API with configurable safety settings"""
         try:
@@ -2035,67 +2144,109 @@ class UnifiedClient:
             logger.error(f"Gemini image API error: {e}")
             raise UnifiedClientError(f"Gemini image API error: {e}")
     
-    def _send_openai_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send image request to OpenAI Vision API"""
-        try:
-            # Format messages with image
-            vision_messages = []
-            
-            for msg in messages:
-                if msg['role'] == 'user':
-                    # Add image to user message
-                    vision_messages.append({
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": msg['content']},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{image_base64}"
+
+    def _send_openai_image(self, messages, image_base64, temperature, 
+                              max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
+            """
+            Refactored OpenAI image handler with o-series model support
+            """
+            try:
+                # Format messages with image
+                vision_messages = []
+                
+                for msg in messages:
+                    if msg['role'] == 'user':
+                        # Add image to user message
+                        vision_messages.append({
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": msg['content']},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{image_base64}"
+                                    }
                                 }
-                            }
-                        ]
-                    })
-                else:
-                    vision_messages.append(msg)
-            
-            # Use vision model
-            vision_model = self.model
-            if not any(v in vision_model for v in ['vision', 'gpt-4o', 'gpt-4-turbo']):
-                vision_model = 'gpt-4o'  # Default vision model
-                logger.info(f"Using vision model: {vision_model}")
-            
-            response = openai.chat.completions.create(
-                model=vision_model,
-                messages=vision_messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                timeout=self.request_timeout  # Use configured timeout
-            )
-            
-            content = response.choices[0].message.content
-            finish_reason = response.choices[0].finish_reason
-            
-            usage = None
-            if hasattr(response, 'usage'):
-                usage = {
-                    'prompt_tokens': response.usage.prompt_tokens,
-                    'completion_tokens': response.usage.completion_tokens,
-                    'total_tokens': response.usage.total_tokens
+                            ]
+                        })
+                    else:
+                        vision_messages.append(msg)
+                
+                # Build API parameters
+                api_params = {
+                    "model": self.model,
+                    "messages": vision_messages,
+                    "temperature": temperature
                 }
-            
-            # Don't save here - send_image() method handles saving
-            
-            return UnifiedResponse(
-                content=content,
-                finish_reason=finish_reason,
-                usage=usage,
-                raw_response=response
-            )
-            
-        except Exception as e:
-            logger.error(f"OpenAI Vision API error: {e}")
-            raise UnifiedClientError(f"OpenAI Vision API error: {e}")
+                
+                # Use the appropriate token parameter based on model type
+                if self._is_o_series_model():
+                    # o-series models use max_completion_tokens
+                    token_limit = max_completion_tokens or max_tokens or 16384  # Higher default for vision
+                    api_params["max_completion_tokens"] = token_limit
+                    logger.info(f"Using max_completion_tokens={token_limit} for o-series vision model {self.model}")
+                else:
+                    # Regular models use max_tokens
+                    if max_tokens:
+                        api_params["max_tokens"] = max_tokens
+                        logger.debug(f"Using max_tokens: {max_tokens} for {self.model}")
+                
+                logger.info(f"Calling OpenAI vision API with model: {self.model}")
+                
+                response = openai.chat.completions.create(**api_params)
+                
+                content = response.choices[0].message.content
+                finish_reason = response.choices[0].finish_reason
+                
+                usage = None
+                if hasattr(response, 'usage'):
+                    usage = {
+                        'prompt_tokens': response.usage.prompt_tokens,
+                        'completion_tokens': response.usage.completion_tokens,
+                        'total_tokens': response.usage.total_tokens
+                    }
+                    logger.debug(f"Token usage: {usage}")
+                
+                return UnifiedResponse(
+                    content=content,
+                    finish_reason=finish_reason,
+                    usage=usage,
+                    raw_response=response
+                )
+              
+            except Exception as e:
+                error_msg = str(e)
+                
+                # Check for specific o-series model errors
+                if "max_tokens" in error_msg and "not supported" in error_msg:
+                    logger.error(f"Token parameter error for {self.model}: {error_msg}")
+                    logger.info("Retrying without token limits...")
+                    
+                    # Build new params without token limits
+                    retry_params = {
+                        "model": self.model,
+                        "messages": vision_messages,
+                        "temperature": temperature
+                    }
+                    
+                    try:
+                        response = openai.chat.completions.create(**retry_params)
+                        content = response.choices[0].message.content
+                        finish_reason = response.choices[0].finish_reason
+                        
+                        return UnifiedResponse(
+                            content=content,
+                            finish_reason=finish_reason,
+                            usage=None,
+                            raw_response=response
+                        )
+                    except Exception as retry_error:
+                        logger.error(f"Retry failed: {retry_error}")
+                        raise UnifiedClientError(f"OpenAI Vision API error: {retry_error}")
+                
+                logger.error(f"OpenAI Vision API error: {e}")
+                raise UnifiedClientError(f"OpenAI Vision API error: {e}")
+        
     
     def _send_anthropic_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send image request to Anthropic API"""
@@ -2294,6 +2445,337 @@ class UnifiedClient:
                     continue
                 logger.error(f"ElectronHub Vision API error after all retries: {e}")
                 raise UnifiedClientError(f"ElectronHub Vision API error: {e}")
+   
+    def generate_image(self, prompt: str, size: str = "1024x1024", n: int = 1, 
+                      quality: str = "standard", style: str = "vivid", 
+                      model: str = "dall-e-3") -> Dict[str, Any]:
+        """
+        Generate images using DALL-E
+        
+        Args:
+            prompt: Text description of the image to generate
+            size: Image size (1024x1024, 1024x1792, 1792x1024 for DALL-E 3)
+            n: Number of images to generate (1 for DALL-E 3, 1-10 for DALL-E 2)
+            quality: "standard" or "hd" (DALL-E 3 only)
+            style: "vivid" or "natural" (DALL-E 3 only)
+            model: "dall-e-3" or "dall-e-2"
+        
+        Returns:
+            Dict with 'images' list containing URLs or base64 data
+        """
+        if self.client_type != 'openai':
+            raise UnifiedClientError(f"DALL-E is only available for OpenAI clients, not {self.client_type}")
+        
+        if not openai:
+            raise UnifiedClientError("OpenAI library not installed. Install with: pip install openai")
+        
+        try:
+            # Initialize OpenAI client if needed
+            client = openai.OpenAI(api_key=self.api_key, timeout=float(self.request_timeout))
+            
+            # Adjust parameters based on model
+            params = {
+                "model": model,
+                "prompt": prompt,
+                "size": size,
+                "n": n
+            }
+            
+            if model == "dall-e-3":
+                params["quality"] = quality
+                params["style"] = style
+                if n > 1:
+                    logger.warning("DALL-E 3 only supports n=1, adjusting")
+                    params["n"] = 1
+            
+            # Make the API call
+            response = client.images.generate(**params)
+            
+            # Extract image data
+            images = []
+            for img_data in response.data:
+                image_info = {
+                    "url": img_data.url if hasattr(img_data, 'url') else None,
+                    "b64_json": img_data.b64_json if hasattr(img_data, 'b64_json') else None,
+                    "revised_prompt": img_data.revised_prompt if hasattr(img_data, 'revised_prompt') else None
+                }
+                images.append(image_info)
+            
+            # Track stats
+            self.stats['total_requests'] += 1
+            
+            return {
+                "images": images,
+                "model": model,
+                "created": datetime.now().isoformat()
+            }
+            
+        except openai.OpenAIError as e:
+            logger.error(f"DALL-E generation error: {e}")
+            self.stats['errors']['dalle_generate'] = self.stats['errors'].get('dalle_generate', 0) + 1
+            raise UnifiedClientError(f"DALL-E generation error: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected DALL-E error: {e}")
+            raise UnifiedClientError(f"Unexpected DALL-E error: {e}")
+    
+    def edit_image(self, image: Any, mask: Any, prompt: str, 
+                   size: str = "1024x1024", n: int = 1, model: str = "dall-e-2") -> Dict[str, Any]:
+        """
+        Edit images using DALL-E (image editing is primarily supported by dall-e-2)
+        
+        Args:
+            image: PIL Image, file path, or bytes of the image to edit
+            mask: PIL Image, file path, or bytes of the mask (transparent areas will be edited)
+            prompt: Text description of what should be generated in the masked area
+            size: Output size (256x256, 512x512, or 1024x1024)
+            n: Number of images to generate (1-10)
+            model: Model to use (default: dall-e-2, but configurable for future models)
+        
+        Returns:
+            Dict with 'images' list containing URLs or base64 data
+        """
+        if self.client_type != 'openai':
+            raise UnifiedClientError(f"DALL-E is only available for OpenAI clients, not {self.client_type}")
+        
+        if not openai:
+            raise UnifiedClientError("OpenAI library not installed. Install with: pip install openai")
+        
+        try:
+            # Initialize OpenAI client
+            client = openai.OpenAI(api_key=self.api_key, timeout=float(self.request_timeout))
+            
+            # Convert image to bytes if needed
+            logger.info(f"Preparing image for DALL-E edit (type: {type(image)})")
+            image_bytes = self._prepare_image_bytes(image, "image")
+            
+            logger.info(f"Preparing mask for DALL-E edit (type: {type(mask)})")
+            mask_bytes = self._prepare_image_bytes(mask, "mask")
+            
+            # Log details for debugging
+            logger.debug(f"Image bytes size: {len(image_bytes.getvalue())} bytes")
+            logger.debug(f"Mask bytes size: {len(mask_bytes.getvalue())} bytes")
+            logger.debug(f"Using model: {model}, size: {size}")
+            
+            # Make the API call with specified model
+            response = client.images.edit(
+                model=model,  # Use the configurable model
+                image=image_bytes,
+                mask=mask_bytes,
+                prompt=prompt,
+                size=size,
+                n=n
+            )
+            
+            # Extract image data
+            images = []
+            for img_data in response.data:
+                image_info = {
+                    "url": img_data.url if hasattr(img_data, 'url') else None,
+                    "b64_json": img_data.b64_json if hasattr(img_data, 'b64_json') else None
+                }
+                images.append(image_info)
+            
+            # Track stats
+            self.stats['total_requests'] += 1
+            
+            logger.info(f"DALL-E edit successful, received {len(images)} images")
+            
+            return {
+                "images": images,
+                "model": model,
+                "operation": "edit",
+                "created": datetime.now().isoformat()
+            }
+            
+        except openai.OpenAIError as e:
+            logger.error(f"DALL-E edit error with model {model}: {e}")
+            self.stats['errors']['dalle_edit'] = self.stats['errors'].get('dalle_edit', 0) + 1
+            raise UnifiedClientError(f"DALL-E edit error: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected DALL-E edit error with model {model}: {e}")
+            raise UnifiedClientError(f"Unexpected DALL-E edit error: {e}")
+    
+    def create_variation(self, image: Any, size: str = "1024x1024", n: int = 1) -> Dict[str, Any]:
+        """
+        Create variations of an image using DALL-E 2
+        
+        Args:
+            image: PIL Image, file path, or bytes of the image to create variations of
+            size: Output size (256x256, 512x512, or 1024x1024)
+            n: Number of variations to generate (1-10)
+        
+        Returns:
+            Dict with 'images' list containing URLs or base64 data
+        """
+        if self.client_type != 'openai':
+            raise UnifiedClientError(f"DALL-E is only available for OpenAI clients, not {self.client_type}")
+        
+        if not openai:
+            raise UnifiedClientError("OpenAI library not installed. Install with: pip install openai")
+        
+        try:
+            # Initialize OpenAI client
+            client = openai.OpenAI(api_key=self.api_key, timeout=float(self.request_timeout))
+            
+            # Convert image to bytes if needed
+            image_bytes = self._prepare_image_bytes(image, "image")
+            
+            # Make the API call
+            response = client.images.create_variation(
+                model="dall-e-2",
+                image=image_bytes,
+                size=size,
+                n=n
+            )
+            
+            # Extract image data
+            images = []
+            for img_data in response.data:
+                image_info = {
+                    "url": img_data.url if hasattr(img_data, 'url') else None,
+                    "b64_json": img_data.b64_json if hasattr(img_data, 'b64_json') else None
+                }
+                images.append(image_info)
+            
+            # Track stats
+            self.stats['total_requests'] += 1
+            
+            return {
+                "images": images,
+                "model": "dall-e-2",
+                "operation": "variation",
+                "created": datetime.now().isoformat()
+            }
+            
+        except openai.OpenAIError as e:
+            logger.error(f"DALL-E variation error: {e}")
+            self.stats['errors']['dalle_variation'] = self.stats['errors'].get('dalle_variation', 0) + 1
+            raise UnifiedClientError(f"DALL-E variation error: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected DALL-E variation error: {e}")
+            raise UnifiedClientError(f"Unexpected DALL-E variation error: {e}")
+    
+    def _prepare_image_bytes(self, image: Any, image_type: str = "image") -> io.BytesIO:
+        """
+        Convert various image inputs to bytes for DALL-E API
+        
+        Args:
+            image: PIL Image, file path string, or bytes
+            image_type: "image" or "mask" for error messages
+        
+        Returns:
+            BytesIO object ready for API
+        """
+        try:
+            if isinstance(image, str):
+                # File path
+                with Image.open(image) as img:
+                    img_bytes = io.BytesIO()
+                    # Always save as PNG for DALL-E
+                    if img.mode == 'RGBA':
+                        img.save(img_bytes, format='PNG')
+                    else:
+                        # Convert to RGB for non-transparent images
+                        if img.mode != 'RGB':
+                            img = img.convert('RGB')
+                        # Save as PNG (DALL-E prefers PNG)
+                        img.save(img_bytes, format='PNG')
+                    img_bytes.seek(0)
+                    # Set proper name for the BytesIO object
+                    img_bytes.name = f'{image_type}.png'
+                    return img_bytes
+            
+            elif isinstance(image, bytes):
+                # Already bytes - load and ensure it's PNG
+                img = Image.open(io.BytesIO(image))
+                img_bytes = io.BytesIO()
+                if img.mode == 'RGBA':
+                    img.save(img_bytes, format='PNG')
+                else:
+                    if img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    img.save(img_bytes, format='PNG')
+                img_bytes.seek(0)
+                img_bytes.name = f'{image_type}.png'
+                return img_bytes
+            
+            elif hasattr(image, 'save'):
+                # PIL Image or similar
+                img_bytes = io.BytesIO()
+                # Ensure RGBA for masks, RGB for images
+                if image_type == "mask":
+                    if image.mode != 'RGBA' and image.mode != 'L':
+                        # Convert to RGBA for masks
+                        if image.mode == 'L':
+                            # Grayscale mask - keep as is
+                            image.save(img_bytes, format='PNG')
+                        else:
+                            image = image.convert('RGBA')
+                            image.save(img_bytes, format='PNG')
+                    else:
+                        image.save(img_bytes, format='PNG')
+                else:
+                    # Regular image
+                    if image.mode == 'RGBA':
+                        image.save(img_bytes, format='PNG')
+                    else:
+                        if image.mode != 'RGB':
+                            image = image.convert('RGB')
+                        image.save(img_bytes, format='PNG')
+                
+                img_bytes.seek(0)
+                img_bytes.name = f'{image_type}.png'
+                return img_bytes
+            
+            elif isinstance(image, io.BytesIO):
+                # Already BytesIO - ensure it has a name
+                image.seek(0)
+                # Load and re-save as PNG to ensure format
+                img = Image.open(image)
+                img_bytes = io.BytesIO()
+                if img.mode == 'RGBA' or (image_type == "mask" and img.mode == 'L'):
+                    img.save(img_bytes, format='PNG')
+                else:
+                    if img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    img.save(img_bytes, format='PNG')
+                img_bytes.seek(0)
+                img_bytes.name = f'{image_type}.png'
+                return img_bytes
+            
+            else:
+                raise ValueError(f"Unsupported {image_type} type: {type(image)}")
+                
+        except Exception as e:
+            raise UnifiedClientError(f"Failed to prepare {image_type} for DALL-E: {e}")
+    
+    def download_dalle_image(self, url: str, save_path: Optional[str] = None) -> bytes:
+        """
+        Download image from DALL-E URL
+        
+        Args:
+            url: The image URL from DALL-E response
+            save_path: Optional path to save the image
+            
+        Returns:
+            Image bytes
+        """
+        try:
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            
+            image_bytes = response.content
+            
+            if save_path:
+                with open(save_path, 'wb') as f:
+                    f.write(image_bytes)
+                logger.info(f"Saved DALL-E image to: {save_path}")
+            
+            return image_bytes
+            
+        except requests.RequestException as e:
+            raise UnifiedClientError(f"Failed to download DALL-E image: {e}")
+
             
     # Additional provider methods for extended model support
     def _send_yi(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
