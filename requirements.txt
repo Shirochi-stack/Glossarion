@@ -26,3 +26,4 @@ sniffio
 regex
 python-dotenv
 opencv-python
+google-cloud-vision
