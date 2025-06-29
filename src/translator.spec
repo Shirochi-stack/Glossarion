@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion v2.9.6 - PyInstaller Specification File
-Enhanced Translation Tool with QA Scanner and AI Hunter
+Glossarion v3.0.0 - PyInstaller Specification File
+Enhanced Translation Tool with QA Scanner, AI Hunter, and Manga Translation
 """
 
 import sys
@@ -12,7 +12,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'Glossarion v2.9.6'
+APP_NAME = 'Glossarion v3.0.0'
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -76,6 +76,10 @@ app_files = [
     # AI Hunter Enhanced
     ('ai_hunter_enhanced.py', '.'),
     
+    # Manga Translation modules
+    ('manga_translator.py', '.'),
+    ('manga_integration.py', '.'),
+    
     # Resources
     ('Halgakos.ico', '.'),
 ]
@@ -103,6 +107,8 @@ app_modules = [
     'direct_imports',
     'splash_utils',
     'ai_hunter_enhanced',  # AI Hunter Enhanced module
+    'manga_translator',    # Manga translator module
+    'manga_integration',   # Manga GUI integration
 ]
 
 # GUI Framework
@@ -177,7 +183,7 @@ epub_modules = [
     'xml.parsers.expat',
 ]
 
-# Image Processing
+# Image Processing (Enhanced for Manga)
 image_modules = [
     'PIL',
     'PIL.Image',
@@ -228,10 +234,11 @@ image_modules = [
     'PIL.FtexImagePlugin',
     
     'olefile',
-    'cv2',  # OpenCV
+    'cv2',  # OpenCV for manga processing
+    'numpy',  # Required for OpenCV and image processing
 ]
 
-# AI/API Clients
+# AI/API Clients (Including Google Cloud Vision)
 api_modules = [
     # Google AI
     'google',
@@ -260,6 +267,15 @@ api_modules = [
     'google.protobuf.reflection',
     'google.rpc',
     'google.type',
+    
+    # Google Cloud Vision (for manga OCR)
+    'google.cloud',
+    'google.cloud.vision',
+    'google.cloud.vision_v1',
+    'google.cloud.vision_v1.types',
+    'google.cloud.vision_v1.services',
+    'google.cloud.vision_v1.services.image_annotator',
+    
     'proto',
     'proto.message',
     'grpcio',
@@ -274,7 +290,7 @@ api_modules = [
     'openai.version',
     'openai.api_requestor',
     'openai.openai_response',
-	'openai._base_client',
+    'openai._base_client',
     'openai._constants',
     'openai._models',
     'openai._response',
@@ -290,36 +306,48 @@ api_modules = [
     # Anthropic
     'anthropic',
     'anthropic._client',
+    'anthropic._base_client',
+    'anthropic._constants',
+    'anthropic._models',
+    'anthropic._response',
     'anthropic._streaming',
     'anthropic._exceptions',
+    'anthropic.resources',
+    'anthropic.resources.messages',
     'anthropic.types',
+    'anthropic.types.message',
+    'anthropic.types.content_block',
+    'anthropic.types.usage',
+    
+    # HTTP clients
     'httpx',
     'httpx._client',
-    'httpx._models',
-    'httpx._types',
     'httpx._config',
+    'httpx._models',
+    'httpx._transports',
+    'httpx._types',
     'httpcore',
     'httpcore._sync',
     'httpcore._async',
+    'h11',
+    'h11._connection',
+    'h11._events',
+    'h11._state',
+    'h11._util',
+    'h11._writers',
+    'h2',
+    'hyperframe',
+    'hpack',
+    'socksio',
+    'sniffio',
     'anyio',
     'anyio._core',
-    'sniffio',
-    'h11',
-    'h2',
-    'hpack',
-    'hyperframe',
-    'wsproto',
-	'distro',
-    
-    # Token counting
-    'tiktoken',
-    'tiktoken_ext',
-    'tiktoken_ext.openai_public',
-    'tiktoken.core',
-    'tiktoken.registry',
+    'anyio._core._eventloop',
+    'anyio.streams',
+    'anyio.streams.memory',
 ]
 
-# Text Processing & Analysis
+# Text Processing & NLP
 text_modules = [
     # Language detection
     'langdetect',
@@ -328,195 +356,179 @@ text_modules = [
     'langdetect.language',
     'langdetect.detector_factory',
     'langdetect.utils',
-    'langdetect.profiles',
     
-    # Text analysis
-    'difflib',
-    'unicodedata',
-    'string',
-    'textwrap',
-    're',
-    'regex',
+    # Token counting
+    'tiktoken',
+    'tiktoken_ext',
+    'tiktoken_ext.openai_public',
+    'tiktoken.core',
+    'tiktoken.registry',
+    'tiktoken.load',
+    'tiktoken.model',
     
-    # Datasketch for enhanced QA Scanner performance
+    # AI Hunter (Datasketch)
     'datasketch',
     'datasketch.minhash',
     'datasketch.lsh',
     'datasketch.lshensemble',
-    'datasketch.hashfunc',
-    'datasketch.storage',
-    'datasketch.lean_minhash',
     'datasketch.weighted_minhash',
     'datasketch.hyperloglog',
-    'datasketch.hyperloglogplusplus',
     'datasketch.lshforest',
-    'datasketch.b_bit_minhash',
-    'datasketch.counting',
-    'datasketch.hnsw',
-    'datasketch.utils',
+    'datasketch.lean_minhash',
+    'datasketch.hashfunc',
+    'datasketch.storage',
+    'datasketch.experimental',
+    'datasketch.version',
     
-    # NumPy - Required by datasketch
-    'numpy',
-    'numpy.core',
-    'numpy.core._multiarray_umath',
-    'numpy.core.multiarray',
-    'numpy.core.numeric',
-    'numpy.core.shape_base',
-    'numpy.core.fromnumeric',
-    'numpy.core.getlimits',
-    'numpy.core.arrayprint',
-    'numpy.core._dtype',
-    'numpy.core._type_aliases',
-    'numpy.core._internal',
-    'numpy.core._methods',
-    'numpy.lib',
-    'numpy.lib.type_check',
-    'numpy.lib.npyio',
-    'numpy.lib.format',
-    'numpy.lib.arrayterator',
-    'numpy.lib.arraypad',
-    'numpy.lib.utils',
-    'numpy.lib.stride_tricks',
-    'numpy.linalg',
-    'numpy.fft',
-    'numpy.random',
-    'numpy.random._common',
-    'numpy.random.mtrand',
-    'numpy.ctypeslib',
-    'numpy.ma',
-    'numpy.matrixlib',
+    # Regex
+    'regex',
+    'regex._regex',
+    'regex._regex_core',
+    're',
+    '_sre',
+    'sre_compile',
+    'sre_parse',
+    'sre_constants',
     
-    # SciPy - Required by datasketch
-    'scipy',
-    'scipy.integrate',
-    'scipy.integrate._quadpack',
-    'scipy.integrate._odepack',
-    'scipy.integrate._quad_vec',
-    'scipy.special',
-    'scipy.special._ufuncs',
-    'scipy.special._ufuncs_cxx',
-    'scipy.special._basic',
-    'scipy.special._logsumexp',
-    'scipy.sparse',
-    'scipy.sparse.linalg',
-    'scipy.sparse.csgraph',
-    'scipy._lib',
-    'scipy._lib._util',
-    'scipy._lib._ccallback',
-    'scipy.version',
+    # JSON processing
+    'json',
+    'json.decoder',
+    'json.encoder',
+    'json.scanner',
+    '_json',
+    'simplejson',  # fallback
 ]
 
-# Networking & HTTP
+# Network & System
 network_modules = [
     'requests',
-    'requests.adapters',
     'requests.models',
     'requests.sessions',
-    'requests.structures',
-    'requests.utils',
+    'requests.auth',
     'requests.cookies',
     'requests.exceptions',
-    'requests.auth',
-    'requests.api',
     'requests.packages',
     'requests.packages.urllib3',
-    'chardet',
-    'chardet.universaldetector',
-    'chardet.enums',
-    'charset_normalizer',
-    'charset_normalizer.api',
-    'charset_normalizer.md',
-    'certifi',
-    'urllib3',
-    'urllib3.util',
-    'urllib3.util.retry',
-    'urllib3.util.timeout',
-    'urllib3.poolmanager',
-    'urllib3.connectionpool',
-    'urllib3.connection',
-    'urllib3.response',
-    'urllib3.exceptions',
-    'urllib3.fields',
-    'urllib3.filepost',
-    'urllib3.contrib',
-    'urllib3.contrib.pyopenssl',
-    'urllib3.contrib.socks',
-    'urllib3.packages',
-    'urllib3.packages.ssl_match_hostname',
+    'requests.adapters',
+    'requests.api',
+    'requests.structures',
+    'requests.utils',
     'urllib',
     'urllib.parse',
     'urllib.request',
     'urllib.error',
     'urllib.response',
-    'idna',
+    'urllib3',
+    'urllib3.connection',
+    'urllib3.connectionpool',
+    'urllib3.poolmanager',
+    'urllib3.response',
+    'urllib3.util',
+    'urllib3.util.ssl_',
+    'urllib3.util.retry',
+    'urllib3.contrib',
+    'certifi',
+    'certifi.core',
     'ssl',
+    '_ssl',
     'socket',
+    '_socket',
     'select',
     'selectors',
+    'socketserver',
     'http',
     'http.client',
+    'http.server',
     'http.cookies',
     'http.cookiejar',
-    'http.server',
     'email',
     'email.utils',
     'email.message',
     'email.header',
-    'email.mime',
-    'email.mime.text',
-    'email.parser',
-    'email.errors',
     'email.charset',
     'email.encoders',
-]
-
-# Data Handling & Serialization
-data_modules = [
-    'json',
-    'csv',
-    'configparser',
-    'pickle',
-    'shelve',
-    'sqlite3',
-    'hashlib',
-    'hmac',
-    'secrets',
+    'email.errors',
+    'email.generator',
+    'email.iterators',
+    'email.mime',
+    'email.parser',
+    'email.policy',
+    'mimetypes',
     'base64',
     'binascii',
-    'struct',
+    'quopri',
+    'uu',
+]
+
+# Data Processing
+data_modules = [
+    'csv',
+    '_csv',
+    'pickle',
+    '_pickle',
+    'cPickle',
+    'cpickle',
+    'shelve',
+    'dbm',
+    'sqlite3',
+    '_sqlite3',
+    'gzip',
+    'zlib',
+    'bz2',
+    '_bz2',
+    'lzma',
+    '_lzma',
+    'zipfile',
+    'tarfile',
+    'shutil',
+    'glob',
+    'fnmatch',
+    'pathlib',
+    'tempfile',
+    'io',
+    '_io',
+    'StringIO',
+    'BytesIO',
+    'hashlib',
+    '_hashlib',
+    '_blake2',
+    '_sha3',
+    'hmac',
+    'secrets',
+    '_random',
+    'bisect',
+    '_bisect',
+    'heapq',
+    '_heapq',
     'array',
     'collections',
     'collections.abc',
-    'dataclasses',
-    'enum',
-    'typing',
-    'typing_extensions',
-    'types',
-    'pydantic',
-    'pydantic.main',
-    'pydantic.fields',
-    'pydantic.validators',
+    '_collections',
+    '_collections_abc',
 ]
 
-# File & System Operations
+# System & OS
 system_modules = [
     'os',
     'os.path',
-    'sys',
-    'pathlib',
-    'shutil',
-    'tempfile',
-    'zipfile',
-    'tarfile',
-    'gzip',
-    'io',
-    'mimetypes',
-    'glob',
-    'fnmatch',
-    'filecmp',
+    'ntpath',
+    'posixpath',
+    'genericpath',
     'stat',
+    '_stat',
+    'sys',
     'platform',
     'subprocess',
+    '_subprocess',
+    '_winapi',
+    'msvcrt',
+    '_msvcrt',
+    'errno',
+    'signal',
+    '_signal',
+    'atexit',
+    'gc',
+    '_gc',
     'multiprocessing',
     'multiprocessing.freeze_support',
     'multiprocessing.connection',
@@ -539,7 +551,7 @@ system_modules = [
     'ctypes',
     'ctypes.util',
     'ctypes.wintypes',
-	'aiohttp',
+    'aiohttp',
     'aiofiles',
 ]
 
@@ -617,9 +629,10 @@ utility_modules = [
     'usercustomize',
     'dotenv',
     'python-dotenv',
-	'os.environ',
+    'os.environ',
     'dotenv.main',
     'dotenv.parser',
+    'dataclasses',  # For manga TextRegion dataclass
 ]
 
 # Encoding support
@@ -669,7 +682,7 @@ excludes = [
     'matplotlib',
     'pandas',
     # 'scipy',  # Required by datasketch - do not exclude
-    # 'numpy',  # Required by datasketch - do not exclude
+    # 'numpy',  # Required by datasketch and OpenCV - do not exclude
     'sklearn',
     'skimage',
     
@@ -845,12 +858,19 @@ This build includes:
 - AI Hunter Enhanced for improved duplicate detection
 - Complete API client support (Google, OpenAI, Anthropic)
 - Full text processing and analysis capabilities
+- Manga translation with Google Cloud Vision OCR support
+- OpenCV for advanced image processing
 
-The executable will be ~150-200MB due to included ML libraries.
+The executable will be ~200-250MB due to included ML libraries and OpenCV.
 
 For version information:
 Create a version_info.txt file with Windows version resource information
 
 Note: Warnings about missing 'dask', 'torch', 'cupy', etc. are expected
 and safe to ignore. These are optional scipy dependencies.
+
+For manga translation:
+- Google Cloud Vision API credentials required (JSON file)
+- OpenCV (cv2) included for image processing
+- Supports manga panel text detection and translation
 """
