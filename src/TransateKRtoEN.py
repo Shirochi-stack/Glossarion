@@ -4645,7 +4645,7 @@ def main(log_callback=None, stop_callback=None):
         if chapter_key_str not in progress_manager.prog.get("chapter_chunks", {}) and old_key_str in progress_manager.prog.get("chapter_chunks", {}):
             progress_manager.prog["chapter_chunks"][chapter_key_str] = progress_manager.prog["chapter_chunks"][old_key_str]
             del progress_manager.prog["chapter_chunks"][old_key_str]
-            print(f"[PROGRESS] Migrated chunks for chapter {actual_num} to new tracking system")
+            #print(f"[PROGRESS] Migrated chunks for chapter {actual_num} to new tracking system")
 
         if chapter_key_str in progress_manager.prog.get("chapter_chunks", {}):
             completed_chunks = len(progress_manager.prog["chapter_chunks"][chapter_key_str].get("completed", []))
