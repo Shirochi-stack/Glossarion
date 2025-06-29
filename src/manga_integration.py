@@ -121,23 +121,6 @@ class MangaTranslationTab:
                 justify=tk.LEFT
             ).pack(anchor=tk.W)
             
-            # Add Google Cloud credentials selector
-            if not has_vision:
-                cred_frame = tk.Frame(req_frame)
-                cred_frame.pack(fill=tk.X, pady=(10, 0))
-                
-                tk.Label(
-                    cred_frame,
-                    text="Set Google Cloud Vision credentials:",
-                    font=('Arial', 10)
-                ).pack(side=tk.LEFT)
-                
-                tb.Button(
-                    cred_frame,
-                    text="Browse JSON File",
-                    command=self._browse_google_credentials,
-                    bootstyle="primary"
-                ).pack(side=tk.LEFT, padx=10)
         
         # File selection frame
         file_frame = tk.LabelFrame(
