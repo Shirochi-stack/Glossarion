@@ -14,7 +14,15 @@ if getattr(sys, 'frozen', False):
         import multiprocessing
         multiprocessing.freeze_support()
     except: pass
-
+    
+# Manga translation support (optional)
+try:
+    from manga_integration import MangaTranslationTab
+    MANGA_SUPPORT = True
+except ImportError:
+    MANGA_SUPPORT = False
+    print("Manga translation modules not found.")
+    
 # Deferred modules
 translation_main = translation_stop_flag = translation_stop_check = None
 glossary_main = glossary_stop_flag = glossary_stop_check = None
@@ -618,10 +626,9 @@ class TranslatorGUI:
         self.ui = UIHelper()
         master.attributes('-topmost', False)
         master.lift()
-        
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        master.title("Glossarion v2.9.6")
+        master.title("Glossarion v3.0.0")
         
         self.wm.responsive_size(master, BASE_WIDTH, BASE_HEIGHT)
         master.minsize(1600, 1000)
@@ -743,13 +750,64 @@ class TranslatorGUI:
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Use line breaks for proper formatting as expected of a novel."
             ),
+            "Manga": (
+                "You are a professional Japanese/Korean/Chinese manga translator.\n"
+                "You have both the image of the manga panel and the extracted text to work with.\n"
+
+                "VISUAL CONTEXT:\n"
+                "- Analyze the character’s facial expressions and body language in the image.\n"
+                "- Consider the scene’s mood and atmosphere.\n"
+                "- Note any action or movement depicted.\n"
+                "- Use visual cues to determine the appropriate tone and emotion.\n"
+                "- USE THE IMAGE to inform your translation choices. The image is not decorative - it contains essential context for accurate translation.\n"
+
+                "DIALOGUE REQUIREMENTS:\n"
+                "- Match the translation tone to the character’s expression.\n"
+                "- If a character looks angry, use appropriately intense language.\n"
+                "- If a character looks shy or embarrassed, reflect that in the translation.\n"
+                "- Keep speech patterns consistent with the character’s appearance and demeanor.\n"
+                "- Retain honorifics and onomatopoeia in Romaji.\n"
+
+                "IMPORTANT: Use both the visual context and text to create the most accurate and natural-sounding translation.\n"
+            ),            
             "Original": "Return everything exactly as seen on the source."
         }
-    
+
         self._init_default_prompts()
         self._init_variables()
         self._setup_gui()
-    
+        
+    def open_manga_translator(self):
+        """Open manga translator in a new window using WindowManager"""
+        if not MANGA_SUPPORT:
+            messagebox.showwarning("Not Available", "Manga translation modules not found.")
+            return
+        
+        # Use WindowManager to create scrollable dialog
+        dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
+            self.master,
+            "Manga Panel Translator",
+            width=900,
+            height=700,
+            max_width_ratio=0.9,
+            max_height_ratio=1.36
+        )
+        
+        # Initialize the manga translator interface on the scrollable frame
+        self.manga_translator = MangaTranslationTab(scrollable_frame, self, dialog, canvas)
+        
+        # Auto-resize to fit content
+        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.36)
+        
+        # Handle window close
+        def on_close():
+            dialog._cleanup_scrolling()
+            dialog.destroy()
+            self.manga_translator = None
+        
+        dialog.protocol("WM_DELETE_WINDOW", on_close)
+      
+        
     def _init_default_prompts(self):
         """Initialize all default prompt templates"""
         self.default_manual_glossary_prompt = """Output exactly a JSON array of objects and nothing else.
@@ -895,7 +953,7 @@ class TranslatorGUI:
         # Create UI elements using helper methods
         self._create_file_section()
         self._create_model_section()
-        self._create_language_section()
+        self._create_profile_section()
         self._create_settings_section()
         self._create_api_section()
         self._create_prompt_section()
@@ -908,7 +966,7 @@ class TranslatorGUI:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v2.9.6 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.0.0 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -927,7 +985,7 @@ class TranslatorGUI:
             # OpenAI Models
             "gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4.1-nano", "gpt-4.1-mini", "gpt-4.1",
             "gpt-3.5-turbo", "gpt-3.5-turbo-16k", "gpt-4", "gpt-4-32k",
-            "o1-preview", "o1-mini", "o4-mini",
+            "o1-preview", "o1-mini", "o3", "o4-mini",
             
             # Google Gemini Models
             "gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash",
@@ -990,16 +1048,16 @@ class TranslatorGUI:
         tb.Combobox(self.frame, textvariable=self.model_var, values=models, state="normal").grid(
             row=1, column=1, columnspan=2, sticky=tk.EW, padx=5, pady=5)
     
-    def _create_language_section(self):
-        """Create language/profile section"""
-        tb.Label(self.frame, text="Language:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
+    def _create_profile_section(self):
+        """Create profile/profile section"""
+        tb.Label(self.frame, text="Profile:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
         self.profile_menu = tb.Combobox(self.frame, textvariable=self.profile_var,
                                        values=list(self.prompt_profiles.keys()), state="normal")
         self.profile_menu.grid(row=2, column=1, sticky=tk.EW, padx=5, pady=5)
         self.profile_menu.bind("<<ComboboxSelected>>", self.on_profile_select)
         self.profile_menu.bind("<Return>", self.on_profile_select)
-        tb.Button(self.frame, text="Save Language", command=self.save_profile, width=14).grid(row=2, column=2, sticky=tk.W, padx=5, pady=5)
-        tb.Button(self.frame, text="Delete Language", command=self.delete_profile, width=14).grid(row=2, column=3, sticky=tk.W, padx=5, pady=5)
+        tb.Button(self.frame, text="Save Profile", command=self.save_profile, width=14).grid(row=2, column=2, sticky=tk.W, padx=5, pady=5)
+        tb.Button(self.frame, text="Delete Profile", command=self.delete_profile, width=14).grid(row=2, column=3, sticky=tk.W, padx=5, pady=5)
     
     def _create_settings_section(self):
         """Create all settings controls"""
@@ -3517,34 +3575,41 @@ class TranslatorGUI:
            messagebox.showinfo("Info", "Location aggregation only works with manual glossary format")
 
     def _make_bottom_toolbar(self):
-       """Create the bottom toolbar with all action buttons"""
-       btn_frame = tb.Frame(self.frame)
-       btn_frame.grid(row=11, column=0, columnspan=5, sticky=tk.EW, pady=5)
-       
-       self.qa_button = tb.Button(btn_frame, text="QA Scan", command=self.run_qa_scan, bootstyle="warning")
-       self.qa_button.grid(row=0, column=99, sticky=tk.EW, padx=5)
-       
-       toolbar_items = [
-           ("EPUB Converter", self.epub_converter, "info"),
-           ("Extract Glossary", self.run_glossary_extraction_thread, "warning"),
-           ("Glossary Manager", self.glossary_manager, "secondary"),
-           ("Retranslate", self.force_retranslation, "warning"),
-           ("Save Config", self.save_config, "secondary"),
-           ("Load Glossary", self.load_glossary, "secondary"),
-           ("Import Profiles", self.import_profiles, "secondary"),
-           ("Export Profiles", self.export_profiles, "secondary"),
-       ]
-       
-       for idx, (lbl, cmd, style) in enumerate(toolbar_items):
-           btn_frame.columnconfigure(idx, weight=1)
-           btn = tb.Button(btn_frame, text=lbl, command=cmd, bootstyle=style)
-           btn.grid(row=0, column=idx, sticky=tk.EW, padx=2)
-           if lbl == "Extract Glossary":
-               self.glossary_button = btn
-           elif lbl == "EPUB Converter":
-               self.epub_button = btn
-       
-       self.frame.grid_rowconfigure(12, weight=0)
+        """Create the bottom toolbar with all action buttons"""
+        btn_frame = tb.Frame(self.frame)
+        btn_frame.grid(row=11, column=0, columnspan=5, sticky=tk.EW, pady=5)
+        
+        self.qa_button = tb.Button(btn_frame, text="QA Scan", command=self.run_qa_scan, bootstyle="warning")
+        self.qa_button.grid(row=0, column=99, sticky=tk.EW, padx=5)
+        
+        toolbar_items = [
+            ("EPUB Converter", self.epub_converter, "info"),
+            ("Extract Glossary", self.run_glossary_extraction_thread, "warning"),
+            ("Glossary Manager", self.glossary_manager, "secondary"),
+        ]
+        
+        # Add Manga Translator if available
+        if MANGA_SUPPORT:
+            toolbar_items.append(("Manga Translator", self.open_manga_translator, "primary"))
+        
+        toolbar_items.extend([
+            ("Retranslate", self.force_retranslation, "warning"),
+            ("Save Config", self.save_config, "secondary"),
+            ("Load Glossary", self.load_glossary, "secondary"),
+            ("Import Profiles", self.import_profiles, "secondary"),
+            ("Export Profiles", self.export_profiles, "secondary"),
+        ])
+        
+        for idx, (lbl, cmd, style) in enumerate(toolbar_items):
+            btn_frame.columnconfigure(idx, weight=1)
+            btn = tb.Button(btn_frame, text=lbl, command=cmd, bootstyle=style)
+            btn.grid(row=0, column=idx, sticky=tk.EW, padx=2)
+            if lbl == "Extract Glossary":
+                self.glossary_button = btn
+            elif lbl == "EPUB Converter":
+                self.epub_button = btn
+        
+        self.frame.grid_rowconfigure(12, weight=0)
 
     # Thread management methods
     def run_translation_thread(self):
@@ -6353,21 +6418,21 @@ class TranslatorGUI:
         """Save current prompt under selected profile and persist."""
         name = self.profile_var.get().strip()
         if not name:
-            messagebox.showerror("Error", "Language name cannot be empty.")
+            messagebox.showerror("Error", "Profile cannot be empty.")
             return
         content = self.prompt_text.get('1.0', tk.END).strip()
         self.prompt_profiles[name] = content
         self.config['prompt_profiles'] = self.prompt_profiles
         self.config['active_profile'] = name
         self.profile_menu['values'] = list(self.prompt_profiles.keys())
-        messagebox.showinfo("Saved", f"Language '{name}' saved.")
+        messagebox.showinfo("Saved", f"Profile '{name}' saved.")
         self.save_profiles()
 
     def delete_profile(self):
-        """Delete the selected language/profile."""
+        """Delete the selected profile."""
         name = self.profile_var.get()
         if name not in self.prompt_profiles:
-            messagebox.showerror("Error", f"Language '{name}' not found.")
+            messagebox.showerror("Error", f"Profile '{name}' not found.")
             return
         if messagebox.askyesno("Delete", f"Are you sure you want to delete language '{name}'?"):
             del self.prompt_profiles[name]
@@ -6543,7 +6608,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v2.9.6...")
+    print("🚀 Starting Glossarion v3.0.0...")
     
     # Initialize splash screen
     splash_manager = None
