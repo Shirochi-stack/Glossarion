@@ -101,7 +101,7 @@ class MangaTranslator:
         self.shadow_offset_x = config.get('manga_shadow_offset_x', 2)
         self.shadow_offset_y = config.get('manga_shadow_offset_y', 2)
         self.shadow_blur = config.get('manga_shadow_blur', 0)  # 0 = sharp shadow, higher = more blur
-        self.skip_inpainting = config.get('manga_skip_inpainting', False)
+        self.skip_inpainting = config.get('manga_skip_inpainting', True)
         
         self._log("\n🔧 MangaTranslator initialized with settings:")
         self._log(f"   API Delay: {self.api_delay}s")
@@ -112,6 +112,16 @@ class MangaTranslator:
         self._log(f"   Font Path: {self.font_path or 'Default'}")
         self._log(f"   Text Rendering: BG {self.text_bg_style}, Opacity {int(self.text_bg_opacity/255*100)}%")
         self._log(f"   Shadow: {'ENABLED' if self.shadow_enabled else 'DISABLED'}\n")
+ 
+    def set_stop_flag(self, stop_flag):
+        """Set the stop flag for checking interruptions"""
+        self.stop_flag = stop_flag
+
+    def _check_stop(self):
+        """Check if stop has been requested"""
+        if self.stop_flag and self.stop_flag.is_set():
+            return True
+        return False
     
     def update_text_rendering_settings(self, 
                                      bg_opacity: int = None,
@@ -377,19 +387,64 @@ class MangaTranslator:
                 else:
                     messages = [messages[0], {"role": "user", "content": text}]
             
-            # Call API with GUI settings
-            self._log(f"🚀 Calling API...")
-            self._log(f"   - Temperature: {self.temperature}")
-            self._log(f"   - Max tokens: {self.max_tokens}")
-            
             start_time = time.time()
-            response = self.client.send(
-                messages=messages,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens
-            )
-            api_time = time.time() - start_time
-            self._log(f"✅ API responded in {api_time:.2f} seconds")
+            api_time = 0  # Initialize to avoid NameError
+            
+            try:
+                response = self.client.send(
+                    messages=messages,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens
+                )
+                api_time = time.time() - start_time
+                self._log(f"✅ API responded in {api_time:.2f} seconds")
+                
+            except Exception as api_error:
+                api_time = time.time() - start_time
+                error_str = str(api_error).lower()
+                error_type = type(api_error).__name__
+                
+                # Check for specific error types
+                if "429" in error_str or "rate limit" in error_str:
+                    self._log(f"⚠️ RATE LIMIT ERROR (429) after {api_time:.2f}s", "error")
+                    self._log(f"   The API rate limit has been exceeded", "error")
+                    self._log(f"   Please wait before retrying or reduce request frequency", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Rate limit exceeded (429): {str(api_error)}")
+                    
+                elif "401" in error_str or "unauthorized" in error_str:
+                    self._log(f"❌ AUTHENTICATION ERROR (401) after {api_time:.2f}s", "error")
+                    self._log(f"   Invalid API key or authentication failed", "error")
+                    self._log(f"   Please check your API key in settings", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Authentication failed (401): {str(api_error)}")
+                    
+                elif "403" in error_str or "forbidden" in error_str:
+                    self._log(f"❌ FORBIDDEN ERROR (403) after {api_time:.2f}s", "error")
+                    self._log(f"   Access denied - check API permissions", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Access forbidden (403): {str(api_error)}")
+                    
+                elif "400" in error_str or "bad request" in error_str:
+                    self._log(f"❌ BAD REQUEST ERROR (400) after {api_time:.2f}s", "error")
+                    self._log(f"   Invalid request format or parameters", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Bad request (400): {str(api_error)}")
+                    
+                elif "timeout" in error_str:
+                    self._log(f"⏱️ TIMEOUT ERROR after {api_time:.2f}s", "error")
+                    self._log(f"   API request timed out", "error")
+                    self._log(f"   Consider increasing timeout or retry", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Request timeout: {str(api_error)}")
+                    
+                else:
+                    # Generic API error
+                    self._log(f"❌ API ERROR ({error_type}) after {api_time:.2f}s", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    self._log(f"   Full traceback:", "error")
+                    self._log(traceback.format_exc(), "error")
+                    raise
             
             # Extract content from response
             if hasattr(response, 'content'):
@@ -966,7 +1021,15 @@ class MangaTranslator:
         """Translate all text regions with API delay"""
         self._log(f"\n📝 Translating {len(regions)} text regions...")
         
+        # Check stop before even starting
+        if self._check_stop():
+            self._log(f"\n⏹️ Translation stopped before processing any regions", "warning")
+            return regions
+        
         for i, region in enumerate(regions):
+            if self._check_stop():
+                self._log(f"\n⏹️ Translation stopped by user after {i}/{len(regions)} regions", "warning")
+                break            
             if region.text.strip():
                 self._log(f"\n[{i+1}/{len(regions)}] Original: {region.text}")
                 
@@ -987,7 +1050,12 @@ class MangaTranslator:
                 # Apply API delay
                 if i < len(regions) - 1:  # Don't delay after last translation
                     self._log(f"⏳ Waiting {self.api_delay}s before next translation...")
-                    time.sleep(self.api_delay)
+                    # Check stop flag every 0.1 seconds during delay
+                    for _ in range(int(self.api_delay * 10)):
+                        if self._check_stop():
+                            self._log(f"\n⏹️ Translation stopped during delay", "warning")
+                            return regions
+                        time.sleep(0.1)
         
         return regions
 
@@ -998,8 +1066,17 @@ class MangaTranslator:
             'input_path': image_path,
             'output_path': None,
             'regions': [],
-            'errors': []
+            'errors': [],
+            'interrupted': False
         }
+        
+        # Check if we should continue after translation
+        if self._check_stop():
+            result['interrupted'] = True
+            self._log("⏹️ Translation cancelled before image processing", "warning")
+            # Still save what we translated
+            result['regions'] = [r.to_dict() for r in regions]
+            return result
         
         try:
             self._log(f"\n{'='*60}")
@@ -1007,6 +1084,12 @@ class MangaTranslator:
             self._log(f"📄 Input: {image_path}")
             self._log(f"{'='*60}\n")
             
+            # Check stop before starting
+            if self._check_stop():
+                result['interrupted'] = True
+                self._log("⏹️ Translation cancelled before starting", "warning")
+                return result   
+                
             # Step 1: Detect text regions
             self._log(f"\n📍 [STEP 1] Text Detection Phase")
             regions = self.detect_text_regions(image_path)
@@ -1016,9 +1099,23 @@ class MangaTranslator:
                 result['errors'].append("No text detected")
                 return result
             
-            # Step 2: Translate text
+            # Step 2: Translate text with stop checks
             self._log(f"\n📍 [STEP 2] Translation Phase")
             regions = self.translate_regions(regions, image_path)
+
+            # Check if we should continue after translation
+            if self._check_stop():
+                result['interrupted'] = True
+                self._log("⏹️ Translation cancelled before image processing", "warning")
+                result['regions'] = [r.to_dict() for r in regions]
+                return result
+
+            # Also check if any regions were actually translated
+            if not any(region.translated_text for region in regions):
+                result['interrupted'] = True
+                self._log("⏹️ No regions were translated - translation was interrupted", "warning")
+                result['regions'] = [r.to_dict() for r in regions]
+                return result
             
             # Step 3: Render translated text
             self._log(f"\n📍 [STEP 3] Image Processing Phase")
@@ -1061,12 +1158,16 @@ class MangaTranslator:
                 result['output_path'] = output_path
             
             self._log(f"\n💾 Saved output to: {output_path}")
-            
+
             # Update result
-            result['success'] = True
             result['regions'] = [r.to_dict() for r in regions]
-            
-            self._log(f"\n✅ TRANSLATION PIPELINE COMPLETE", "success")
+            # Only mark as success if we completed everything
+            if not result.get('interrupted', False):
+                result['success'] = True
+                self._log(f"\n✅ TRANSLATION PIPELINE COMPLETE", "success")
+            else:
+                self._log(f"\n⚠️ TRANSLATION INTERRUPTED - Partial output saved", "warning")
+
             self._log(f"{'='*60}\n")
             
             # Clear context if it gets too large
