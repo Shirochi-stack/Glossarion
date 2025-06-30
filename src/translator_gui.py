@@ -628,7 +628,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        master.title("Glossarion v3.0.5")
+        master.title("Glossarion v3.0.6")
         
         self.wm.responsive_size(master, BASE_WIDTH, BASE_HEIGHT)
         master.minsize(1600, 1000)
@@ -1154,7 +1154,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.0.5 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.0.6 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -7385,7 +7385,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.0.5...")
+    print("🚀 Starting Glossarion v3.0.6...")
     
     # Initialize splash screen
     splash_manager = None
