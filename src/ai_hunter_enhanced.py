@@ -33,10 +33,10 @@ class AIHunterConfigGUI:
             'sample_size': 3000,
             'thresholds': {
                 'exact': 90,
-                'text': 85,
+                'text': 35,
                 'semantic': 85,
                 'structural': 85,
-                'character': 80,
+                'character': 90,
                 'pattern': 80
             },
             'weights': {
@@ -47,7 +47,7 @@ class AIHunterConfigGUI:
                 'character': 0.8,
                 'pattern': 0.8
             },
-            'detection_mode': 'multi_method',
+            'detection_mode': 'weighted_average',
             'multi_method_requirements': {
                 'methods_required': 3,
                 'min_methods': ['semantic', 'structural']
