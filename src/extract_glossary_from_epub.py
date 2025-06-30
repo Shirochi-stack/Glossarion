@@ -417,8 +417,11 @@ Text:
         return prompt
 
 # Updated merge_glossary_entries to handle custom fields:
-
 def merge_glossary_entries(glossary):
+    """
+    Merge duplicate glossary entries based on configurable key field.
+    Respects GLOSSARY_EXTRACT_ORIGINAL_NAME and GLOSSARY_DUPLICATE_KEY_MODE settings.
+    """
     merged = {}
     
     # Get list of custom fields
@@ -431,26 +434,79 @@ def merge_glossary_entries(glossary):
     # Standard fields that use list merging
     list_fields = ['locations', 'traits', 'group_affiliation'] + custom_fields_list
     
-    for entry in glossary:
-        # Check if original_name field is enabled
-        extract_original_name = os.getenv('GLOSSARY_EXTRACT_ORIGINAL_NAME', '1') == '1'
-        
-        # Determine the key to use for merging
-        key = None
-        if extract_original_name and 'original_name' in entry:
-            key = entry['original_name']
-        elif not extract_original_name and 'name' in entry:
-            key = entry['name']  # Use name as key if original_name is disabled
-        elif 'original_name' in entry:  # Fallback to original_name if it exists
-            key = entry['original_name']
-        elif 'name' in entry:  # Fallback to name
-            key = entry['name']
+    # Check configuration - try to load from config file first
+    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config.json')
+    duplicate_key_mode = 'auto'
+    custom_field = ''
+    
+    try:
+        if os.path.exists(config_path):
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                duplicate_key_mode = config.get('glossary_duplicate_key_mode', 
+                                              os.getenv('GLOSSARY_DUPLICATE_KEY_MODE', 'auto'))
+                custom_field = config.get('glossary_duplicate_custom_field',
+                                        os.getenv('GLOSSARY_DUPLICATE_CUSTOM_FIELD', ''))
         else:
-            # Skip entries without any identifier
+            duplicate_key_mode = os.getenv('GLOSSARY_DUPLICATE_KEY_MODE', 'auto')
+            custom_field = os.getenv('GLOSSARY_DUPLICATE_CUSTOM_FIELD', '')
+    except:
+        duplicate_key_mode = os.getenv('GLOSSARY_DUPLICATE_KEY_MODE', 'auto')
+        custom_field = os.getenv('GLOSSARY_DUPLICATE_CUSTOM_FIELD', '')
+    
+    extract_original_name = os.getenv('GLOSSARY_EXTRACT_ORIGINAL_NAME', '1') == '1'
+    
+    # Track statistics for logging
+    merge_stats = {
+        'total_entries': len(glossary),
+        'unique_entries': 0,
+        'merged_entries': 0,
+        'key_field_used': None
+    }
+    
+    for entry in glossary:
+        # Determine the key to use for merging based on mode
+        key = None
+        
+        if duplicate_key_mode == 'original_name':
+            # Force use of original_name only
+            key = entry.get('original_name')
+            merge_stats['key_field_used'] = 'original_name'
+        elif duplicate_key_mode == 'name':
+            # Force use of name only
+            key = entry.get('name')
+            merge_stats['key_field_used'] = 'name'
+        elif duplicate_key_mode == 'custom':
+            # Use custom field
+            if custom_field:
+                key = entry.get(custom_field)
+                merge_stats['key_field_used'] = f'custom ({custom_field})'
+            else:
+                # Fallback to auto if no custom field specified
+                key = entry.get('original_name') or entry.get('name')
+                merge_stats['key_field_used'] = 'fallback (no custom field specified)'
+        elif duplicate_key_mode == 'auto':
+            # Auto mode: respect the extraction setting
+            if extract_original_name and 'original_name' in entry:
+                key = entry['original_name']
+                merge_stats['key_field_used'] = 'original_name (auto)'
+            elif not extract_original_name and 'name' in entry:
+                key = entry['name']
+                merge_stats['key_field_used'] = 'name (auto)'
+            else:
+                # Fallback: try original_name first, then name
+                key = entry.get('original_name') or entry.get('name')
+                merge_stats['key_field_used'] = 'fallback'
+        
+        # Skip entries without any identifier
+        if not key:
+            print(f"⚠️  Skipping entry without key field: {entry}")
             continue
             
         if key not in merged:
             merged[key] = entry.copy()
+            merge_stats['unique_entries'] += 1
+            
             # Initial normalize all list fields
             for field in list_fields:
                 if field in merged[key]:
@@ -458,6 +514,8 @@ def merge_glossary_entries(glossary):
                         entry.get(field) or [], []
                     )
         else:
+            merge_stats['merged_entries'] += 1
+            
             # Merge list fields
             for field in list_fields:
                 old = merged[key].get(field) or []
@@ -501,9 +559,13 @@ def merge_glossary_entries(glossary):
         else:
             entry.pop('how_they_refer_to_others', None)
     
+    # Log merge statistics
+    if merge_stats['merged_entries'] > 0:
+        print(f"🔀 Merged {merge_stats['merged_entries']} duplicate entries")
+        print(f"   Key field: {merge_stats['key_field_used']}")
+        print(f"   Total entries: {merge_stats['total_entries']} → {merge_stats['unique_entries']}")
+    
     return list(merged.values())
-
-
 
 # Update main function to log custom fields:
 
@@ -578,6 +640,10 @@ def main(log_callback=None, stop_callback=None):
                config.get('api_key'))
 
     client = UnifiedClient(model=model, api_key=api_key)
+    
+    #API call delay
+    api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+    print(f"⏱️  API call delay: {api_delay} seconds")
     
     # Initialize chapter splitter
     chapter_splitter = ChapterSplitter(model_name=model)
@@ -852,7 +918,31 @@ def main(log_callback=None, stop_callback=None):
             save_progress(completed, glossary, history)
             save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
             save_glossary_md(glossary, os.path.join(glossary_dir, os.path.basename(args.output).replace('.json', '.md')))
-
+            
+            # Add delay before next API call (but not after the last chapter)
+            if idx < len(chapters) - 1:
+                # Check if we're within the range or if there are more chapters to process
+                next_chapter_in_range = True
+                if range_start is not None and range_end is not None:
+                    next_chapter_num = idx + 2  # idx+1 is current, idx+2 is next
+                    next_chapter_in_range = (range_start <= next_chapter_num <= range_end)
+                else:
+                    # No range filter, check if next chapter is already completed
+                    next_chapter_in_range = (idx + 1) not in completed
+                
+                if next_chapter_in_range:
+                    print(f"⏱️  Waiting {api_delay}s before next chapter...")
+                    
+                    # Use interruptible sleep
+                    sleep_elapsed = 0
+                    sleep_interval = 0.5
+                    while sleep_elapsed < api_delay:
+                        if check_stop():
+                            print(f"❌ Glossary extraction stopped during delay")
+                            return
+                        time.sleep(min(sleep_interval, api_delay - sleep_elapsed))
+                        sleep_elapsed += sleep_interval
+                        
             # Check for stop after processing chapter
             if check_stop():
                 print(f"❌ Glossary extraction stopped after processing chapter {idx+1}")
