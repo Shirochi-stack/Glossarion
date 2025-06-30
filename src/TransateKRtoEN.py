@@ -604,13 +604,23 @@ class ProgressManager:
         status = chapter_info.get("status")
         output_file = chapter_info.get("output_file")
         
+        # Handle file_deleted status - always needs retranslation
+        if status == "file_deleted":
+            return True, None, None
+        
         # Check various conditions for skipping
         if status == "completed" and output_file:
             output_path = os.path.join(output_dir, output_file)
             if os.path.exists(output_path):
                 return False, f"Chapter {actual_num} already translated: {output_file}", output_file
             else:
+                # File is missing but not yet marked - this shouldn't happen if cleanup_missing_files ran
                 print(f"⚠️ Chapter {actual_num} marked as completed but file missing: {output_file}")
+                # Mark it now
+                chapter_info["status"] = "file_deleted"
+                chapter_info["deletion_detected"] = time.time()
+                chapter_info["previous_status"] = "completed"
+                self.save()
                 return True, None, None
         
         if status == "completed_empty":
@@ -629,32 +639,38 @@ class ProgressManager:
                 if duplicate_output:
                     duplicate_path = os.path.join(output_dir, duplicate_output)
                     if os.path.exists(duplicate_path):
-                        print(f"📋 Copying duplicate content from chapter {duplicate_info.get('actual_num')}")
-                        
-                        safe_title = f"Chapter_{actual_num}"
-                        if 'num' in chapter_info:
-                            if isinstance(chapter_info['num'], float):
-                                fname = f"response_{chapter_info['num']:06.1f}_{safe_title}.html"
+                        # Only copy duplicate content if the current file also exists
+                        # If the file was deleted, respect the user's action and retranslate
+                        if output_file and os.path.exists(os.path.join(output_dir, output_file)):
+                            print(f"📋 Copying duplicate content from chapter {duplicate_info.get('actual_num')}")
+                            
+                            safe_title = f"Chapter_{actual_num}"
+                            if 'num' in chapter_info:
+                                if isinstance(chapter_info['num'], float):
+                                    fname = f"response_{chapter_info['num']:06.1f}_{safe_title}.html"
+                                else:
+                                    fname = f"response_{chapter_info['num']:03d}_{safe_title}.html"
                             else:
-                                fname = f"response_{chapter_info['num']:03d}_{safe_title}.html"
+                                fname = f"response_{actual_num:03d}_{safe_title}.html"
+                            
+                            output_path = os.path.join(output_dir, fname)
+                            shutil.copy2(duplicate_path, output_path)
+                            
+                            self.update(chapter_idx, actual_num, content_hash, fname, status="completed")
+                            self.save()
+                            
+                            return False, f"Chapter {actual_num} has same content as chapter {duplicate_info.get('actual_num')} (already translated)", None
                         else:
-                            fname = f"response_{actual_num:03d}_{safe_title}.html"
-                        
-                        output_path = os.path.join(output_dir, fname)
-                        shutil.copy2(duplicate_path, output_path)
-                        
-                        self.update(chapter_idx, actual_num, content_hash, fname, status="completed")
-                        self.save()
-                        
-                        return False, f"Chapter {actual_num} has same content as chapter {duplicate_info.get('actual_num')} (already translated)", None
+                            # File was deleted - respect user's action and retranslate
+                            print(f"📝 Chapter {actual_num} was deleted - will retranslate")
+                            return True, None, None
                     else:
                         return True, None, None
-        
-        return True, None, None
     
     def cleanup_missing_files(self, output_dir):
         """Scan progress tracking and clean up any references to missing files"""
         cleaned_count = 0
+        marked_count = 0
         
         for chapter_key, chapter_info in list(self.prog["chapters"].items()):
             output_file = chapter_info.get("output_file")
@@ -662,24 +678,44 @@ class ProgressManager:
             if output_file:
                 output_path = os.path.join(output_dir, output_file)
                 if not os.path.exists(output_path):
-                    print(f"🧹 Found missing file for chapter {chapter_info.get('actual_num', chapter_key)}: {output_file}")
+                    # Get the status to determine what to do
+                    current_status = chapter_info.get("status")
                     
-                    # COMPLETELY REMOVE the chapter entry instead of marking as file_deleted
-                    del self.prog["chapters"][chapter_key]
-                    
-                    # Remove from content_hashes
-                    content_hash = chapter_info.get("content_hash")
-                    if content_hash and content_hash in self.prog["content_hashes"]:
-                        del self.prog["content_hashes"][content_hash]
-                    
-                    # Remove chunk data
-                    if chapter_key in self.prog.get("chapter_chunks", {}):
-                        del self.prog["chapter_chunks"][chapter_key]
-                    
-                    cleaned_count += 1
+                    # If already marked as file_deleted, check if it's been long enough to clean up
+                    if current_status == "file_deleted":
+                        deletion_time = chapter_info.get("deletion_detected", 0)
+                        # If marked as deleted more than 24 hours ago, remove from tracking
+                        if time.time() - deletion_time > 86400:  # 24 hours
+                            print(f"🗑️ Removing stale entry for chapter {chapter_info.get('actual_num', chapter_key)}: {output_file}")
+                            
+                            # Remove the chapter entry
+                            del self.prog["chapters"][chapter_key]
+                            
+                            # Remove from content_hashes
+                            content_hash = chapter_info.get("content_hash")
+                            if content_hash and content_hash in self.prog["content_hashes"]:
+                                del self.prog["content_hashes"][content_hash]
+                            
+                            # Remove chunk data
+                            if chapter_key in self.prog.get("chapter_chunks", {}):
+                                del self.prog["chapter_chunks"][chapter_key]
+                            
+                            cleaned_count += 1
+                        # Otherwise, leave it marked as file_deleted
+                    else:
+                        # First time detecting missing file - mark it
+                        print(f"🧹 Found missing file for chapter {chapter_info.get('actual_num', chapter_key)}: {output_file}")
+                        
+                        chapter_info["status"] = "file_deleted"
+                        chapter_info["deletion_detected"] = time.time()
+                        chapter_info["previous_status"] = current_status  # Save what it was before
+                        
+                        marked_count += 1
         
         if cleaned_count > 0:
-            print(f"🔄 Removed {cleaned_count} chapters with missing files from progress tracking")
+            print(f"🔄 Removed {cleaned_count} stale entries from progress tracking")
+        if marked_count > 0:
+            print(f"📝 Marked {marked_count} chapters with missing files for re-translation")
     
     def migrate_to_content_hash(self, chapters):
         """Migrate old index-based progress to content-hash-based"""
@@ -3454,8 +3490,9 @@ def extract_chapter_number_from_filename(filename):
 def process_chapter_images(chapter_html: str, actual_num: int, image_translator: ImageTranslator, 
                          check_stop_fn=None) -> Tuple[str, Dict[str, str]]:
     """Process and translate images in a chapter"""
+    from bs4 import BeautifulSoup
     images = image_translator.extract_images_from_chapter(chapter_html)
-    
+
     if not images:
         return chapter_html, {}
         
@@ -5211,7 +5248,7 @@ def main(log_callback=None, stop_callback=None):
                 if chapter_key_str not in progress_manager.prog.get("chapter_chunks", {}) and old_key_str in progress_manager.prog.get("chapter_chunks", {}):
                     progress_manager.prog["chapter_chunks"][chapter_key_str] = progress_manager.prog["chapter_chunks"][old_key_str]
                     del progress_manager.prog["chapter_chunks"][old_key_str]
-                    print(f"[PROGRESS] Migrated chunks for chapter {chap_num} to new tracking system")
+                    #print(f"[PROGRESS] Migrated chunks for chapter {chap_num} to new tracking system")
                 
                 if chapter_key_str not in progress_manager.prog["chapter_chunks"]:
                     progress_manager.prog["chapter_chunks"][chapter_key_str] = {
@@ -5477,7 +5514,7 @@ def main(log_callback=None, stop_callback=None):
             
             if is_mixed_content and image_translations:
                 print(f"🔀 Merging {len(image_translations)} image translations with text...")
-                
+                from bs4 import BeautifulSoup
                 # Parse the translated text (which has the translated title/header)
                 soup_translated = BeautifulSoup(cleaned, 'html.parser')
                 
