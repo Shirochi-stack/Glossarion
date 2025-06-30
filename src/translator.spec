@@ -858,10 +858,11 @@ This build includes:
 - AI Hunter Enhanced for improved duplicate detection
 - Complete API client support (Google, OpenAI, Anthropic)
 - Full text processing and analysis capabilities
-- Manga translation with Google Cloud Vision OCR support
+- Manga text detection with Google Cloud Vision OCR support
+- Manga text translation with API key
 - OpenCV for advanced image processing
 
-The executable will be ~200-250MB due to included ML libraries and OpenCV.
+The executable will be ~160MB due to included ML libraries and OpenCV.
 
 For version information:
 Create a version_info.txt file with Windows version resource information
