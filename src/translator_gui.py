@@ -1046,6 +1046,11 @@ Recent translations to summarize:
         self.custom_glossary_fields = self.config.get('custom_glossary_fields', [])
         self.token_limit_disabled = self.config.get('token_limit_disabled', False)
         
+        if 'glossary_duplicate_key_mode' not in self.config:
+            self.config['glossary_duplicate_key_mode'] = 'fuzzy'
+        if 'glossary_fuzzy_threshold' not in self.config:
+            self.config['glossary_fuzzy_threshold'] = '60'        
+        
         # Create all config variables with helper
         def create_var(var_type, key, default):
             return var_type(value=self.config.get(key, default))
@@ -2846,7 +2851,7 @@ Recent translations to summarize:
                 
                 # Get duplicate detection mode from config first, then environment
                 duplicate_key_mode = self.config.get('glossary_duplicate_key_mode',
-                                                   os.getenv('GLOSSARY_DUPLICATE_KEY_MODE', 'auto'))
+                                                   os.getenv('GLOSSARY_DUPLICATE_KEY_MODE', 'fuzzy'))
                 
                 # Debug logging
                 self.append_log(f"🔍 Duplicate detection mode: {duplicate_key_mode}")
@@ -2855,7 +2860,7 @@ Recent translations to summarize:
                 # Group entries by their key to find duplicates
                 entry_groups = {}
                 fuzzy_threshold = float(self.config.get('glossary_fuzzy_threshold',
-                                                       os.getenv('GLOSSARY_FUZZY_THRESHOLD', '85'))) / 100.0
+                                                       os.getenv('GLOSSARY_FUZZY_THRESHOLD', '60'))) / 100.0
                 
                 for i, entry in enumerate(self.current_glossary_data):
                     # Determine which field to use as the key based on mode
