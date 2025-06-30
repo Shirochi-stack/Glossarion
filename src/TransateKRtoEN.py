@@ -604,23 +604,13 @@ class ProgressManager:
         status = chapter_info.get("status")
         output_file = chapter_info.get("output_file")
         
-        # Handle file_deleted status - always needs retranslation
-        if status == "file_deleted":
-            return True, None, None
-        
         # Check various conditions for skipping
         if status == "completed" and output_file:
             output_path = os.path.join(output_dir, output_file)
             if os.path.exists(output_path):
                 return False, f"Chapter {actual_num} already translated: {output_file}", output_file
             else:
-                # File is missing but not yet marked - this shouldn't happen if cleanup_missing_files ran
                 print(f"⚠️ Chapter {actual_num} marked as completed but file missing: {output_file}")
-                # Mark it now
-                chapter_info["status"] = "file_deleted"
-                chapter_info["deletion_detected"] = time.time()
-                chapter_info["previous_status"] = "completed"
-                self.save()
                 return True, None, None
         
         if status == "completed_empty":
@@ -670,7 +660,6 @@ class ProgressManager:
     def cleanup_missing_files(self, output_dir):
         """Scan progress tracking and clean up any references to missing files"""
         cleaned_count = 0
-        marked_count = 0
         
         for chapter_key, chapter_info in list(self.prog["chapters"].items()):
             output_file = chapter_info.get("output_file")
@@ -678,44 +667,24 @@ class ProgressManager:
             if output_file:
                 output_path = os.path.join(output_dir, output_file)
                 if not os.path.exists(output_path):
-                    # Get the status to determine what to do
-                    current_status = chapter_info.get("status")
+                    print(f"🧹 Found missing file for chapter {chapter_info.get('actual_num', chapter_key)}: {output_file}")
                     
-                    # If already marked as file_deleted, check if it's been long enough to clean up
-                    if current_status == "file_deleted":
-                        deletion_time = chapter_info.get("deletion_detected", 0)
-                        # If marked as deleted more than 24 hours ago, remove from tracking
-                        if time.time() - deletion_time > 86400:  # 24 hours
-                            print(f"🗑️ Removing stale entry for chapter {chapter_info.get('actual_num', chapter_key)}: {output_file}")
-                            
-                            # Remove the chapter entry
-                            del self.prog["chapters"][chapter_key]
-                            
-                            # Remove from content_hashes
-                            content_hash = chapter_info.get("content_hash")
-                            if content_hash and content_hash in self.prog["content_hashes"]:
-                                del self.prog["content_hashes"][content_hash]
-                            
-                            # Remove chunk data
-                            if chapter_key in self.prog.get("chapter_chunks", {}):
-                                del self.prog["chapter_chunks"][chapter_key]
-                            
-                            cleaned_count += 1
-                        # Otherwise, leave it marked as file_deleted
-                    else:
-                        # First time detecting missing file - mark it
-                        print(f"🧹 Found missing file for chapter {chapter_info.get('actual_num', chapter_key)}: {output_file}")
-                        
-                        chapter_info["status"] = "file_deleted"
-                        chapter_info["deletion_detected"] = time.time()
-                        chapter_info["previous_status"] = current_status  # Save what it was before
-                        
-                        marked_count += 1
+                    # COMPLETELY REMOVE the chapter entry instead of marking as file_deleted
+                    del self.prog["chapters"][chapter_key]
+                    
+                    # Remove from content_hashes
+                    content_hash = chapter_info.get("content_hash")
+                    if content_hash and content_hash in self.prog["content_hashes"]:
+                        del self.prog["content_hashes"][content_hash]
+                    
+                    # Remove chunk data
+                    if chapter_key in self.prog.get("chapter_chunks", {}):
+                        del self.prog["chapter_chunks"][chapter_key]
+                    
+                    cleaned_count += 1
         
         if cleaned_count > 0:
-            print(f"🔄 Removed {cleaned_count} stale entries from progress tracking")
-        if marked_count > 0:
-            print(f"📝 Marked {marked_count} chapters with missing files for re-translation")
+            print(f"🔄 Removed {cleaned_count} chapters with missing files from progress tracking")
     
     def migrate_to_content_hash(self, chapters):
         """Migrate old index-based progress to content-hash-based"""
