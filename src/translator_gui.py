@@ -628,7 +628,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        master.title("Glossarion v3.0.2")
+        master.title("Glossarion v3.0.5")
         
         self.wm.responsive_size(master, BASE_WIDTH, BASE_HEIGHT)
         master.minsize(1600, 1000)
@@ -670,7 +670,14 @@ class TranslatorGUI:
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 self.config = json.load(f)
-        except: self.config = {}
+        except: 
+            self.config = {}
+            # Save the default config immediately so it exists
+            try:
+                with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(self.config, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                print(f"Warning: Could not create config.json: {e}")
         
         self.max_output_tokens = self.config.get('max_output_tokens', self.max_output_tokens)
         
@@ -750,9 +757,52 @@ class TranslatorGUI:
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Use line breaks for proper formatting as expected of a novel."
             ),
-            "Manga": (
-                "You are a professional Japanese/Korean/Chinese manga translator.\n"
-                "You have both the image of the manga panel and the extracted text to work with.\n"
+            "Manga_JP": (
+                "You are a professional Japanese to English Manga translator.\n"
+                "You have both the image of the Manga panel and the extracted text to work with.\n"
+                "Output only English text while following these rules: \n\n"
+
+                "VISUAL CONTEXT:\n"
+                "- Analyze the character’s facial expressions and body language in the image.\n"
+                "- Consider the scene’s mood and atmosphere.\n"
+                "- Note any action or movement depicted.\n"
+                "- Use visual cues to determine the appropriate tone and emotion.\n"
+                "- USE THE IMAGE to inform your translation choices. The image is not decorative - it contains essential context for accurate translation.\n\n"
+
+                "DIALOGUE REQUIREMENTS:\n"
+                "- Match the translation tone to the character’s expression.\n"
+                "- If a character looks angry, use appropriately intense language.\n"
+                "- If a character looks shy or embarrassed, reflect that in the translation.\n"
+                "- Keep speech patterns consistent with the character’s appearance and demeanor.\n"
+                "- Retain honorifics and onomatopoeia in Romaji.\n\n"
+
+                "IMPORTANT: Use both the visual context and text to create the most accurate and natural-sounding translation.\n"
+            ), 
+            "Manga_KR": (
+                "You are a professional Korean to English Manhwa translator.\n"
+                "You have both the image of the Manhwa panel and the extracted text to work with.\n"
+                "Output only English text while following these rules: \n\n"
+
+                "VISUAL CONTEXT:\n"
+                "- Analyze the character’s facial expressions and body language in the image.\n"
+                "- Consider the scene’s mood and atmosphere.\n"
+                "- Note any action or movement depicted.\n"
+                "- Use visual cues to determine the appropriate tone and emotion.\n"
+                "- USE THE IMAGE to inform your translation choices. The image is not decorative - it contains essential context for accurate translation.\n\n"
+
+                "DIALOGUE REQUIREMENTS:\n"
+                "- Match the translation tone to the character’s expression.\n"
+                "- If a character looks angry, use appropriately intense language.\n"
+                "- If a character looks shy or embarrassed, reflect that in the translation.\n"
+                "- Keep speech patterns consistent with the character’s appearance and demeanor.\n"
+                "- Retain honorifics and onomatopoeia in Romaji.\n\n"
+
+                "IMPORTANT: Use both the visual context and text to create the most accurate and natural-sounding translation.\n"
+            ), 
+            "Manga_CN": (
+                "You are a professional Chinese to English Manga translator.\n"
+                "You have both the image of the Manga panel and the extracted text to work with.\n"
+                "Output only English text while following these rules: \n\n"
 
                 "VISUAL CONTEXT:\n"
                 "- Analyze the character’s facial expressions and body language in the image.\n"
@@ -766,16 +816,136 @@ class TranslatorGUI:
                 "- If a character looks angry, use appropriately intense language.\n"
                 "- If a character looks shy or embarrassed, reflect that in the translation.\n"
                 "- Keep speech patterns consistent with the character’s appearance and demeanor.\n"
-                "- Retain honorifics and onomatopoeia in Romaji.\n"
+                "- Retain honorifics and onomatopoeia in Romaji.\n\n"
 
                 "IMPORTANT: Use both the visual context and text to create the most accurate and natural-sounding translation.\n"
-            ),            
+            ),             
             "Original": "Return everything exactly as seen on the source."
         }
 
         self._init_default_prompts()
         self._init_variables()
         self._setup_gui()
+
+    def append_log_with_api_error_detection(self, message):
+        """Enhanced log appending that detects and highlights API errors"""
+        # First append the regular log message
+        self.append_log(message)
+        
+        # Check for API error patterns
+        message_lower = message.lower()
+        
+        if "429" in message or "rate limit" in message_lower:
+            # Rate limit error detected
+            self.append_log("⚠️ RATE LIMIT ERROR DETECTED (HTTP 429)")
+            self.append_log("   The API is throttling your requests.")
+            self.append_log("   Please wait before continuing or increase the delay between requests.")
+            self.append_log("   You can increase 'Delay between API calls' in settings.")
+            
+        elif "401" in message or "unauthorized" in message_lower:
+            # Authentication error
+            self.append_log("❌ AUTHENTICATION ERROR (HTTP 401)")
+            self.append_log("   Your API key is invalid or missing.")
+            self.append_log("   Please check your API key in the settings.")
+            
+        elif "403" in message or "forbidden" in message_lower:
+            # Forbidden error
+            self.append_log("❌ ACCESS FORBIDDEN ERROR (HTTP 403)")
+            self.append_log("   You don't have permission to access this API.")
+            self.append_log("   Please check your API subscription and permissions.")
+            
+        elif "400" in message or "bad request" in message_lower:
+            # Bad request error
+            self.append_log("❌ BAD REQUEST ERROR (HTTP 400)")
+            self.append_log("   The API request was malformed or invalid.")
+            self.append_log("   This might be due to unsupported model settings.")
+            
+        elif "timeout" in message_lower:
+            # Timeout error
+            self.append_log("⏱️ TIMEOUT ERROR")
+            self.append_log("   The API request took too long to respond.")
+            self.append_log("   Consider increasing timeout settings or retrying.")
+        
+    def create_glossary_backup(self, operation_name="manual"):
+        """Create a backup of the current glossary if auto-backup is enabled"""
+        if not self.config.get('glossary_auto_backup', False):
+            return True
+        
+        if not self.current_glossary_data or not self.editor_file_var.get():
+            return True
+        
+        try:
+            # Get the original glossary file path
+            original_path = self.editor_file_var.get()
+            original_dir = os.path.dirname(original_path)
+            original_name = os.path.basename(original_path)
+            
+            # Create backup directory - use a different approach
+            backup_dir = os.path.join(original_dir, "Backups")
+            
+            # Try to create directory only if it doesn't exist
+            if not os.path.isdir(backup_dir):
+                try:
+                    os.mkdir(backup_dir)  # Use mkdir instead of makedirs
+                except FileExistsError:
+                    pass  # Directory was created between check and creation
+                except Exception as e:
+                    # Log the actual error for debugging
+                    self.append_log(f"⚠️ Directory creation issue: {str(e)}")
+                    # Continue anyway since we might still be able to write
+            
+            # Generate timestamp-based backup filename
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            backup_name = f"{os.path.splitext(original_name)[0]}_{operation_name}_{timestamp}.json"
+            backup_path = os.path.join(backup_dir, backup_name)
+            
+            # Try to save backup
+            with open(backup_path, 'w', encoding='utf-8') as f:
+                json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
+            
+            self.append_log(f"💾 Backup created: {backup_name}")
+            
+            # Optional: Clean old backups if more than limit
+            max_backups = self.config.get('glossary_max_backups', 50)
+            if max_backups > 0:
+                self._clean_old_backups(backup_dir, original_name, max_backups)
+            
+            return True
+            
+        except Exception as e:
+            # Only show error if backup actually failed
+            if not os.path.exists(backup_path):
+                self.append_log(f"⚠️ Backup failed: {str(e)}")
+                return messagebox.askyesno("Backup Failed", 
+                                          f"Failed to create backup: {str(e)}\n\nContinue anyway?")
+            else:
+                # Backup was created despite the error
+                self.append_log(f"💾 Backup created despite warning: {backup_name}")
+                return True
+
+    def _clean_old_backups(self, backup_dir, original_name, max_backups):
+        """Remove old backups exceeding the limit"""
+        try:
+            # Find all backups for this glossary
+            prefix = os.path.splitext(original_name)[0]
+            backups = []
+            
+            for file in os.listdir(backup_dir):
+                if file.startswith(prefix) and file.endswith('.json'):
+                    file_path = os.path.join(backup_dir, file)
+                    backups.append((file_path, os.path.getmtime(file_path)))
+            
+            # Sort by modification time (oldest first)
+            backups.sort(key=lambda x: x[1])
+            
+            # Remove oldest backups if exceeding limit
+            while len(backups) > max_backups:
+                old_backup = backups.pop(0)
+                os.remove(old_backup[0])
+                self.append_log(f"🗑️ Removed old backup: {os.path.basename(old_backup[0])}")
+                
+        except Exception as e:
+            self.append_log(f"⚠️ Error cleaning old backups: {str(e)}")
         
     def open_manga_translator(self):
         """Open manga translator in a new window using WindowManager"""
@@ -810,44 +980,57 @@ class TranslatorGUI:
         
     def _init_default_prompts(self):
         """Initialize all default prompt templates"""
-        self.default_manual_glossary_prompt = """Output exactly a JSON array of objects and nothing else.
-        You are a glossary extractor for Korean, Japanese, or Chinese novels.
-        - Extract character information (e.g., name, traits), locations (countries, regions, cities), and translate them into English (romanization or equivalent).
-        - Romanize all untranslated honorifics (e.g., 님 to '-nim', さん to '-san').
-        - all output must be in english, unless specified otherwise
-        For each character, provide JSON fields:
-        {fields}
-        Sort by appearance order; respond with a JSON array only.
+        self.default_manual_glossary_prompt = """Use {fields} for field list and {chapter_text} for content placeholder
 
-        Text:
-        {chapter_text}"""
+Output exactly a JSON array of objects and nothing else.
+You are a glossary extractor for Korean, Japanese, or Chinese novels.
+- Extract character information with the following fields:
+  • original name in source language  
+  • English/romanized name translation  
+  • character gender  
+  • title or rank (with romanized suffix)  
+  • organization/group affiliation  
+  • character traits and descriptions  
+  • how they address other characters  
+  • place names mentioned  
+- Romanize all honorifics (e.g., 님 to '-nim', さん to '-san').
+- All output must be in English, unless specified otherwise.
+For each character, provide JSON fields:
+{fields}
+Sort by appearance order; respond with a JSON array only.
+
+Text:
+{chapter_text}
+}"""
         
         self.default_auto_glossary_prompt = """You are extracting a targeted glossary from a {language} novel.
-        Focus on identifying:
-        1. Character names with their honorifics
-        2. Important titles and ranks
-        3. Frequently mentioned terms (min frequency: {min_frequency})
+Focus on identifying:
+1. Character names with their honorifics
+2. Important titles and ranks
+3. Frequently mentioned terms (min frequency: {min_frequency})
 
-        Extract up to {max_names} character names and {max_titles} titles.
-        Prioritize names that appear with honorifics or in important contexts.
-        Return the glossary in a simple key-value format."""
+Extract up to {max_names} character names and {max_titles} titles.
+Prioritize names that appear with honorifics or in important contexts.
+Return the glossary in a simple key-value format.
+        """
         
         self.default_rolling_summary_system_prompt = """You are a context summarization assistant. Create concise, informative summaries that preserve key story elements for translation continuity."""
         
         self.default_rolling_summary_user_prompt = """Analyze the recent translation exchanges and create a structured summary for context continuity.
 
-        Focus on extracting and preserving:
-        1. **Character Information**: Names (with original forms), relationships, roles, and important character developments
-        2. **Plot Points**: Key events, conflicts, and story progression
-        3. **Locations**: Important places and settings
-        4. **Terminology**: Special terms, abilities, items, or concepts (with original forms)
-        5. **Tone & Style**: Writing style, mood, and any notable patterns
-        6. **Unresolved Elements**: Questions, mysteries, or ongoing situations
+Focus on extracting and preserving:
+1. **Character Information**: Names (with original forms), relationships, roles, and important character developments
+2. **Plot Points**: Key events, conflicts, and story progression
+3. **Locations**: Important places and settings
+4. **Terminology**: Special terms, abilities, items, or concepts (with original forms)
+5. **Tone & Style**: Writing style, mood, and any notable patterns
+6. **Unresolved Elements**: Questions, mysteries, or ongoing situations
 
-        Format the summary clearly with sections. Be concise but comprehensive.
+Format the summary clearly with sections. Be concise but comprehensive.
 
-        Recent translations to summarize:
-        {translations}"""
+Recent translations to summarize:
+{translations}
+        """
     
     def _init_variables(self):
         """Initialize all configuration variables"""
@@ -966,7 +1149,7 @@ class TranslatorGUI:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.0.2 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.0.5 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -2405,51 +2588,52 @@ class TranslatorGUI:
 
 
     def _setup_glossary_editor_tab(self, parent):
-       """Set up the glossary editor/trimmer tab"""
-       container = tk.Frame(parent)
-       container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-       
-       file_frame = tk.Frame(container)
-       file_frame.pack(fill=tk.X, pady=(0, 10))
-       
-       tk.Label(file_frame, text="Glossary File:").pack(side=tk.LEFT, padx=(0, 5))
-       self.editor_file_var = tk.StringVar()
-       tb.Entry(file_frame, textvariable=self.editor_file_var, state='readonly').pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-       
-       stats_frame = tk.Frame(container)
-       stats_frame.pack(fill=tk.X, pady=(0, 5))
-       self.stats_label = tk.Label(stats_frame, text="No glossary loaded", font=('TkDefaultFont', 10, 'italic'))
-       self.stats_label.pack(side=tk.LEFT)
-       
-       content_frame = tk.LabelFrame(container, text="Glossary Entries", padx=10, pady=10)
-       content_frame.pack(fill=tk.BOTH, expand=True)
-       
-       tree_frame = tk.Frame(content_frame)
-       tree_frame.pack(fill=tk.BOTH, expand=True)
-       
-       vsb = ttk.Scrollbar(tree_frame, orient="vertical")
-       hsb = ttk.Scrollbar(tree_frame, orient="horizontal")
-       
-       self.glossary_tree = ttk.Treeview(tree_frame, show='tree headings',
+        """Set up the glossary editor/trimmer tab"""
+        container = tk.Frame(parent)
+        container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        file_frame = tk.Frame(container)
+        file_frame.pack(fill=tk.X, pady=(0, 10))
+
+        tk.Label(file_frame, text="Glossary File:").pack(side=tk.LEFT, padx=(0, 5))
+        self.editor_file_var = tk.StringVar()
+        tb.Entry(file_frame, textvariable=self.editor_file_var, state='readonly').pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+
+        stats_frame = tk.Frame(container)
+        stats_frame.pack(fill=tk.X, pady=(0, 5))
+        self.stats_label = tk.Label(stats_frame, text="No glossary loaded", font=('TkDefaultFont', 10, 'italic'))
+        self.stats_label.pack(side=tk.LEFT)
+
+        content_frame = tk.LabelFrame(container, text="Glossary Entries", padx=10, pady=10)
+        content_frame.pack(fill=tk.BOTH, expand=True)
+
+        tree_frame = tk.Frame(content_frame)
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical")
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal")
+
+        self.glossary_tree = ttk.Treeview(tree_frame, show='tree headings',
                                         yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-       
-       vsb.config(command=self.glossary_tree.yview)
-       hsb.config(command=self.glossary_tree.xview)
-       
-       self.glossary_tree.grid(row=0, column=0, sticky='nsew')
-       vsb.grid(row=0, column=1, sticky='ns')
-       hsb.grid(row=1, column=0, sticky='ew')
-       
-       tree_frame.grid_rowconfigure(0, weight=1)
-       tree_frame.grid_columnconfigure(0, weight=1)
-       
-       self.glossary_tree.bind('<Double-Button-1>', self._on_tree_double_click)
-       
-       self.current_glossary_data = None
-       self.current_glossary_format = None
-       
-       # Editor functions
-       def load_glossary_for_editing():
+
+        vsb.config(command=self.glossary_tree.yview)
+        hsb.config(command=self.glossary_tree.xview)
+
+        self.glossary_tree.grid(row=0, column=0, sticky='nsew')
+        vsb.grid(row=0, column=1, sticky='ns')
+        hsb.grid(row=1, column=0, sticky='ew')
+
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+
+        self.glossary_tree.bind('<Double-Button-1>', self._on_tree_double_click)
+
+        self.current_glossary_data = None
+        self.current_glossary_format = None
+
+        # Editor functions
+        def load_glossary_for_editing():
            path = self.editor_file_var.get()
            if not path or not os.path.exists(path):
                messagebox.showerror("Error", "Please select a valid glossary file")
@@ -2544,7 +2728,7 @@ class TranslatorGUI:
                messagebox.showerror("Error", f"Failed to load glossary: {e}")
                self.append_log(f"❌ Failed to load glossary: {e}")
        
-       def browse_glossary():
+        def browse_glossary():
            path = filedialog.askopenfilename(
                title="Select glossary.json",
                filetypes=[("JSON files", "*.json")]
@@ -2553,8 +2737,8 @@ class TranslatorGUI:
                self.editor_file_var.set(path)
                load_glossary_for_editing()
        
-       # Common save helper
-       def save_current_glossary():
+        # Common save helper
+        def save_current_glossary():
            path = self.editor_file_var.get()
            if not path or not self.current_glossary_data:
                return False
@@ -2566,88 +2750,638 @@ class TranslatorGUI:
                messagebox.showerror("Error", f"Failed to save: {e}")
                return False
        
-       def clean_empty_fields():
-           if not self.current_glossary_data:
-               messagebox.showerror("Error", "No glossary loaded")
-               return
-           
-           count = 0
-           if self.current_glossary_format == 'list':
-               for entry in self.current_glossary_data:
-                   fields_to_remove = []
-                   for field, value in entry.items():
-                       if value is None or value == '' or (isinstance(value, list) and not value) or (isinstance(value, dict) and not value):
-                           fields_to_remove.append(field)
-                   for field in fields_to_remove:
-                       entry.pop(field)
-                       count += 1
-           
-           elif self.current_glossary_format == 'dict':
-               messagebox.showinfo("Info", "Empty field cleaning is only available for manual glossary format")
-               return
-           
-           if count > 0 and save_current_glossary():
-               load_glossary_for_editing()
-               messagebox.showinfo("Success", f"Removed {count} empty fields and saved")
-               self.append_log(f"✅ Cleaned {count} empty fields from glossary")
-       
-       def delete_selected_entries():
-           selected = self.glossary_tree.selection()
-           if not selected:
-               messagebox.showwarning("Warning", "No entries selected")
-               return
-           
-           if messagebox.askyesno("Confirm Delete", f"Delete {len(selected)} selected entries?"):
-               indices_to_delete = []
-               for item in selected:
+        def clean_empty_fields():
+            if not self.current_glossary_data:
+                messagebox.showerror("Error", "No glossary loaded")
+                return
+            
+            if self.current_glossary_format == 'list':
+                # First, check if there are any empty fields
+                empty_fields_found = False
+                fields_cleaned = {}
+                
+                # Count empty fields first
+                for entry in self.current_glossary_data:
+                    for field in list(entry.keys()):
+                        value = entry[field]
+                        if value is None or value == "" or (isinstance(value, list) and len(value) == 0) or (isinstance(value, dict) and len(value) == 0):
+                            empty_fields_found = True
+                            fields_cleaned[field] = fields_cleaned.get(field, 0) + 1
+                
+                # If no empty fields found, show message and return
+                if not empty_fields_found:
+                    messagebox.showinfo("Info", "No empty fields found in glossary")
+                    return
+                
+                # Only create backup if there are fields to clean
+                if not self.create_glossary_backup("before_clean"):
+                    return
+                
+                # Now actually clean the fields
+                total_cleaned = 0
+                for entry in self.current_glossary_data:
+                    for field in list(entry.keys()):
+                        value = entry[field]
+                        if value is None or value == "" or (isinstance(value, list) and len(value) == 0) or (isinstance(value, dict) and len(value) == 0):
+                            entry.pop(field)
+                            total_cleaned += 1
+                
+                if save_current_glossary():
+                    load_glossary_for_editing()
+                    
+                    # Provide detailed feedback
+                    msg = f"Cleaned {total_cleaned} empty fields\n\n"
+                    msg += "Fields cleaned:\n"
+                    for field, count in sorted(fields_cleaned.items(), key=lambda x: x[1], reverse=True):
+                        msg += f"• {field}: {count} entries\n"
+                    
+                    messagebox.showinfo("Success", msg)
+        
+        def delete_selected_entries():
+            selected = self.glossary_tree.selection()
+            if not selected:
+                messagebox.showwarning("No Selection", "Please select entries to delete")
+                return
+            
+            count = len(selected)
+            if messagebox.askyesno("Confirm Delete", f"Delete {count} selected entries?"):
+                # automatic backup
+                if not self.create_glossary_backup(f"before_delete_{count}"):
+                    return
+                    
+                indices_to_delete = []
+                for item in selected:
                    idx = int(self.glossary_tree.item(item)['text']) - 1
                    indices_to_delete.append(idx)
-               
-               indices_to_delete.sort(reverse=True)
-               
-               if self.current_glossary_format == 'list':
+
+                indices_to_delete.sort(reverse=True)
+
+                if self.current_glossary_format == 'list':
                    for idx in indices_to_delete:
                        if 0 <= idx < len(self.current_glossary_data):
                            del self.current_glossary_data[idx]
-               
-               elif self.current_glossary_format == 'dict':
+
+                elif self.current_glossary_format == 'dict':
                    entries_list = list(self.current_glossary_data.get('entries', {}).items())
                    for idx in indices_to_delete:
                        if 0 <= idx < len(entries_list):
                            key = entries_list[idx][0]
                            self.current_glossary_data['entries'].pop(key, None)
-               
-               if save_current_glossary():
+
+                if save_current_glossary():
                    load_glossary_for_editing()
                    messagebox.showinfo("Success", f"Deleted {len(indices_to_delete)} entries")
-       
-       def remove_duplicates():
-           if not self.current_glossary_data:
-               messagebox.showerror("Error", "No glossary loaded")
-               return
-           
-           if self.current_glossary_format == 'list':
-               seen = {}
-               unique_entries = []
-               duplicates = 0
-               
-               for entry in self.current_glossary_data:
-                   key = entry.get('original_name') or entry.get('name')
-                   if key and key not in seen:
-                       seen[key] = True
-                       unique_entries.append(entry)
-                   else:
-                       duplicates += 1
-               
-               self.current_glossary_data[:] = unique_entries
-               
-               if duplicates > 0 and save_current_glossary():
-                   load_glossary_for_editing()
-                   messagebox.showinfo("Success", f"Removed {duplicates} duplicate entries")
-               else:
-                   messagebox.showinfo("Info", "No duplicates found")
-       
-       def smart_trim_dialog():
+                
+        def remove_duplicates():
+            if not self.current_glossary_data:
+                messagebox.showerror("Error", "No glossary loaded")
+                return
+            
+            if self.current_glossary_format == 'list':
+                # Import for fuzzy matching
+                from difflib import SequenceMatcher
+                
+                # Check if original_name extraction is enabled
+                extract_original_name = os.getenv('GLOSSARY_EXTRACT_ORIGINAL_NAME', '1') == '1'
+                
+                # Get duplicate detection mode from config first, then environment
+                duplicate_key_mode = self.config.get('glossary_duplicate_key_mode',
+                                                   os.getenv('GLOSSARY_DUPLICATE_KEY_MODE', 'auto'))
+                
+                # Debug logging
+                self.append_log(f"🔍 Duplicate detection mode: {duplicate_key_mode}")
+                self.append_log(f"🔍 Original name extraction enabled: {extract_original_name}")
+                
+                # Group entries by their key to find duplicates
+                entry_groups = {}
+                fuzzy_threshold = float(self.config.get('glossary_fuzzy_threshold',
+                                                       os.getenv('GLOSSARY_FUZZY_THRESHOLD', '85'))) / 100.0
+                
+                for i, entry in enumerate(self.current_glossary_data):
+                    # Determine which field to use as the key based on mode
+                    key = None
+                    
+                    if duplicate_key_mode == 'original_name':
+                        key = entry.get('original_name')
+                    elif duplicate_key_mode == 'name':
+                        key = entry.get('name')
+                    elif duplicate_key_mode == 'custom':
+                        custom_field = self.config.get('glossary_duplicate_custom_field',
+                                                      os.getenv('GLOSSARY_DUPLICATE_CUSTOM_FIELD', ''))
+                        if custom_field:
+                            key = entry.get(custom_field)
+                        else:
+                            key = entry.get('original_name') or entry.get('name')
+                    elif duplicate_key_mode == 'auto':
+                        if extract_original_name and 'original_name' in entry:
+                            key = entry['original_name']
+                        elif not extract_original_name and 'name' in entry:
+                            key = entry['name']
+                        else:
+                            key = entry.get('original_name') or entry.get('name')
+                    elif duplicate_key_mode == 'fuzzy':
+                        if extract_original_name and 'original_name' in entry:
+                            key = entry['original_name']
+                        else:
+                            key = entry.get('original_name') or entry.get('name')
+                    
+                    # Normalize the key for comparison
+                    if key:
+                        key = str(key).strip()
+                    
+                    # Debug first few entries
+                    if i < 5:
+                        self.append_log(f"   Entry {i+1}: key='{key}', original_name='{entry.get('original_name', '')}', name='{entry.get('name', '')}'")
+                    
+                    if not key:
+                        continue
+                        
+                    # For fuzzy matching, find the best matching group
+                    if duplicate_key_mode == 'fuzzy':
+                        best_match_key = None
+                        best_similarity = 0
+                        
+                        for existing_key in entry_groups.keys():
+                            similarity = SequenceMatcher(None, key, existing_key).ratio()
+                            if similarity >= fuzzy_threshold and similarity > best_similarity:
+                                best_similarity = similarity
+                                best_match_key = existing_key
+                        
+                        if best_match_key:
+                            entry_groups[best_match_key].append((i, entry))
+                            if i < 10:  # Log details for first few
+                                self.append_log(f"   → Fuzzy match: '{key}' ≈ '{best_match_key}' (similarity: {best_similarity:.1%})")
+                        else:
+                            entry_groups[key] = [(i, entry)]
+                    else:
+                        # Exact matching
+                        if key in entry_groups:
+                            entry_groups[key].append((i, entry))
+                        else:
+                            entry_groups[key] = [(i, entry)]
+                
+                # Function to calculate entry completeness score
+                def calculate_entry_score(entry):
+                    """Calculate a score based on how complete/detailed an entry is"""
+                    score = 0
+                    
+                    # Count non-empty fields
+                    for field, value in entry.items():
+                        if value:
+                            if isinstance(value, str):
+                                # String fields: score based on length
+                                score += min(len(value.strip()), 100)  # Cap at 100 per field
+                            elif isinstance(value, list):
+                                # List fields: score based on items and their content
+                                score += len(value) * 10
+                                for item in value:
+                                    if isinstance(item, str):
+                                        score += min(len(item.strip()), 50)
+                            elif isinstance(value, dict):
+                                # Dict fields: score based on keys
+                                score += len(value) * 20
+                            else:
+                                # Other fields just add a base score
+                                score += 10
+                    
+                    # Bonus for important fields
+                    if entry.get('name'):
+                        score += 50
+                    if entry.get('title'):
+                        score += 30
+                    if entry.get('group_affiliation'):
+                        score += 40
+                    if entry.get('locations'):
+                        score += 30 * len(entry.get('locations', []))
+                    
+                    return score
+                
+                # Now process duplicates, keeping the most complete entry
+                unique_entries = []
+                indices_to_keep = set()
+                duplicates = 0
+                duplicate_details = []
+                
+                for key, group in entry_groups.items():
+                    if len(group) > 1:
+                        # Found duplicates - sort by completeness score (highest first)
+                        scored_group = [(idx, entry, calculate_entry_score(entry)) for idx, entry in group]
+                        scored_group.sort(key=lambda x: x[2], reverse=True)
+                        
+                        # Keep the most complete entry
+                        keeper_idx, keeper_entry, keeper_score = scored_group[0]
+                        indices_to_keep.add(keeper_idx)
+                        
+                        # Log what we're removing
+                        for idx, entry, score in scored_group[1:]:
+                            duplicates += 1
+                            duplicate_details.append({
+                                'key': key,
+                                'original_name': entry.get('original_name', ''),
+                                'name': entry.get('name', ''),
+                                'index': idx + 1,
+                                'score': score,
+                                'keeper_score': keeper_score,
+                                'keeper_index': keeper_idx + 1
+                            })
+                        
+                        if len(group) <= 5:  # Log details for small groups
+                            self.append_log(f"   Duplicate group '{key}': keeping entry #{keeper_idx+1} (score: {keeper_score})")
+                            for idx, entry, score in scored_group[1:]:
+                                self.append_log(f"     → Removing entry #{idx+1} (score: {score})")
+                    else:
+                        # No duplicates for this key
+                        indices_to_keep.add(group[0][0])
+                
+                # Build the final list keeping original order
+                for i, entry in enumerate(self.current_glossary_data):
+                    if i in indices_to_keep:
+                        unique_entries.append(entry)
+                
+                self.current_glossary_data[:] = unique_entries
+                
+                if duplicates > 0:
+                    # Create backup before saving if enabled
+                    if self.config.get('glossary_auto_backup', False):
+                        self.create_glossary_backup(f"before_remove_{duplicates}_dupes")
+                    
+                    if save_current_glossary():
+                        load_glossary_for_editing()
+                    
+                    # Provide detailed feedback
+                    msg = f"Removed {duplicates} duplicate entries"
+                    if duplicate_key_mode == 'auto':
+                        if extract_original_name:
+                            msg += " (using original_name as key)"
+                        else:
+                            msg += " (using name as key)"
+                    elif duplicate_key_mode == 'custom':
+                        custom_field = self.config.get('glossary_duplicate_custom_field',
+                                                     os.getenv('GLOSSARY_DUPLICATE_CUSTOM_FIELD', ''))
+                        msg += f" (using {custom_field} as key)"
+                    elif duplicate_key_mode == 'fuzzy':
+                        msg += f" (fuzzy matching at {int(fuzzy_threshold * 100)}% similarity)"
+                    else:
+                        msg += f" (using {duplicate_key_mode} as key)"
+                    
+                    messagebox.showinfo("Success", msg)
+                    
+                    # Log details
+                    self.append_log(f"🗑️ {msg}")
+                    self.append_log(f"   Strategy: Kept entries with more complete information")
+                    if duplicates <= 20:  # Show more details since we have scoring info
+                        for detail in duplicate_details:
+                            if duplicate_key_mode == 'fuzzy':
+                                self.append_log(f"   • Removed #{detail['index']} (score: {detail['score']}) - kept #{detail['keeper_index']} (score: {detail['keeper_score']})")
+                            else:
+                                self.append_log(f"   • Removed #{detail['index']}: {detail['key']} (score: {detail['score']}) - kept better entry")
+                else:
+                    self.append_log("ℹ️ No duplicates found")
+                    self.append_log(f"   Checked {len(self.current_glossary_data)} entries using '{duplicate_key_mode}' mode")
+                    if duplicate_key_mode == 'fuzzy':
+                        self.append_log(f"   Fuzzy threshold: {int(fuzzy_threshold * 100)}%")
+                    messagebox.showinfo("Info", "No duplicates found")
+
+        # dialog function for configuring duplicate detection mode
+        def duplicate_detection_settings():
+            """Show dialog for configuring duplicate detection settings"""
+            # Use setup_scrollable with custom ratios
+            dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
+                self.master,
+                "Duplicate Detection Settings",
+                width=600,
+                height=None,
+                max_width_ratio=0.5,
+                max_height_ratio=0.6
+            )
+            
+            # Main frame (use scrollable_frame instead of dialog)
+            main_frame = ttk.Frame(scrollable_frame, padding="20")
+            main_frame.pack(fill=tk.BOTH, expand=True)
+            
+            # Title
+            ttk.Label(main_frame, text="Duplicate Detection Settings", 
+                      font=('TkDefaultFont', 12, 'bold')).pack(pady=(0, 20))
+            
+            # Current mode and custom field from config first, then env as fallback
+            current_mode = self.config.get('glossary_duplicate_key_mode', 
+                                           os.getenv('GLOSSARY_DUPLICATE_KEY_MODE', 'auto'))
+            custom_field = self.config.get('glossary_duplicate_custom_field',
+                                           os.getenv('GLOSSARY_DUPLICATE_CUSTOM_FIELD', ''))
+            fuzzy_threshold = self.config.get('glossary_fuzzy_threshold',
+                                             os.getenv('GLOSSARY_FUZZY_THRESHOLD', '85'))
+            
+            mode_var = tk.StringVar(value=current_mode)
+            custom_field_var = tk.StringVar(value=custom_field)
+            
+            # Radio buttons for mode selection
+            modes = [
+                ('auto', 'Automatic', 'Use original_name if extraction is enabled, otherwise use name'),
+                ('original_name', 'Original Name Only', 'Always use original_name field (entries without it will be kept)'),
+                ('name', 'Name Only', 'Always use name field (for manually edited glossaries)'),
+                ('custom', 'Custom Field', 'Use a custom field for duplicate detection'),
+                ('fuzzy', 'Fuzzy Matching', 'Detect near-duplicates with similarity threshold')
+            ]
+            
+            # Frame for custom field input
+            custom_field_frame = None
+            fuzzy_threshold_frame = None
+            
+            def toggle_mode_options(*args):
+                mode = mode_var.get()
+                if mode == 'custom':
+                    custom_field_frame.pack(fill=tk.X, pady=(0, 10), after=radio_frames[-2])
+                    fuzzy_threshold_frame.pack_forget()
+                    custom_field_entry.focus_set()
+                elif mode == 'fuzzy':
+                    fuzzy_threshold_frame.pack(fill=tk.X, pady=(0, 10), after=radio_frames[-1])
+                    custom_field_frame.pack_forget()
+                else:
+                    custom_field_frame.pack_forget()
+                    fuzzy_threshold_frame.pack_forget()
+            
+            radio_frames = []
+            for value, label, description in modes:
+                frame = ttk.Frame(main_frame)
+                frame.pack(fill=tk.X, pady=5)
+                radio_frames.append(frame)
+                
+                ttk.Radiobutton(frame, text=label, variable=mode_var, 
+                                value=value, command=toggle_mode_options).pack(anchor=tk.W)
+                ttk.Label(frame, text=description, 
+                          font=('TkDefaultFont', 9), 
+                          foreground='gray').pack(anchor=tk.W, padx=(20, 0))
+            
+            # Custom field input frame
+            custom_field_frame = ttk.Frame(main_frame)
+            
+            custom_inner_frame = ttk.Frame(custom_field_frame)
+            custom_inner_frame.pack(fill=tk.X, padx=(20, 0))
+            
+            ttk.Label(custom_inner_frame, text="Field name:").pack(side=tk.LEFT, padx=(0, 10))
+            custom_field_entry = ttk.Entry(custom_inner_frame, textvariable=custom_field_var, width=30)
+            custom_field_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            
+            # Help text for custom fields
+            help_text = ttk.Label(custom_field_frame, 
+                                 text="Enter the exact field name (e.g., 'title', 'role', or any custom field you've added)",
+                                 font=('TkDefaultFont', 8), 
+                                 foreground='gray')
+            help_text.pack(anchor=tk.W, padx=(20, 0), pady=(5, 0))
+            
+            # Fuzzy threshold frame
+            fuzzy_threshold_frame = ttk.Frame(main_frame)
+            fuzzy_threshold_var = tk.DoubleVar(value=float(fuzzy_threshold))
+            
+            fuzzy_inner_frame = ttk.Frame(fuzzy_threshold_frame)
+            fuzzy_inner_frame.pack(fill=tk.X, padx=(20, 0))
+            
+            ttk.Label(fuzzy_inner_frame, text="Similarity threshold (%):").pack(side=tk.LEFT, padx=(0, 10))
+            fuzzy_scale = ttk.Scale(fuzzy_inner_frame, from_=50, to=100, orient=tk.HORIZONTAL, 
+                                   variable=fuzzy_threshold_var, length=200)
+            fuzzy_scale.pack(side=tk.LEFT, padx=(0, 10))
+            fuzzy_label = ttk.Label(fuzzy_inner_frame, text=f"{int(fuzzy_threshold_var.get())}%")
+            fuzzy_label.pack(side=tk.LEFT)
+            
+            def update_fuzzy_label(*args):
+                fuzzy_label.config(text=f"{int(fuzzy_threshold_var.get())}%")
+            
+            fuzzy_threshold_var.trace('w', update_fuzzy_label)
+            
+            fuzzy_help = ttk.Label(fuzzy_threshold_frame,
+                                  text="Lower values will catch more variations but may create false positives",
+                                  font=('TkDefaultFont', 8),
+                                  foreground='gray')
+            fuzzy_help.pack(anchor=tk.W, padx=(20, 0), pady=(5, 0))
+            
+            # Show/hide frames based on initial mode
+            if current_mode == 'custom':
+                custom_field_frame.pack(fill=tk.X, pady=(0, 10), after=radio_frames[-2])
+            elif current_mode == 'fuzzy':
+                fuzzy_threshold_frame.pack(fill=tk.X, pady=(0, 10), after=radio_frames[-1])
+            
+            # Separator
+            ttk.Separator(main_frame, orient='horizontal').pack(fill=tk.X, pady=(20, 10))
+            
+            # Info section
+            info_frame = ttk.Frame(main_frame)
+            info_frame.pack(fill=tk.X, pady=(0, 10))
+            
+            info_label = ttk.Label(info_frame, text="ℹ️ Note: Duplicate detection affects both extraction merging and manual removal.",
+                                  font=('TkDefaultFont', 9), foreground='#0066cc')
+            info_label.pack(anchor=tk.W)
+            
+            # Buttons
+            button_frame = ttk.Frame(main_frame)
+            button_frame.pack(fill=tk.X, pady=(20, 0))
+            
+            # Inner frame for centering buttons
+            button_inner_frame = ttk.Frame(button_frame)
+            button_inner_frame.pack(anchor=tk.CENTER)
+            
+            def save_settings():
+                selected_mode = mode_var.get()
+                
+                # Validate custom field if selected
+                if selected_mode == 'custom':
+                    custom_field_name = custom_field_var.get().strip()
+                    if not custom_field_name:
+                        messagebox.showerror("Error", "Please enter a field name for custom mode")
+                        custom_field_entry.focus_set()
+                        return
+                    os.environ['GLOSSARY_DUPLICATE_CUSTOM_FIELD'] = custom_field_name
+                    self.config['glossary_duplicate_custom_field'] = custom_field_name
+                elif selected_mode == 'fuzzy':
+                    os.environ['GLOSSARY_FUZZY_THRESHOLD'] = str(int(fuzzy_threshold_var.get()))
+                    self.config['glossary_fuzzy_threshold'] = str(int(fuzzy_threshold_var.get()))
+                
+                os.environ['GLOSSARY_DUPLICATE_KEY_MODE'] = selected_mode
+                self.config['glossary_duplicate_key_mode'] = selected_mode
+                
+                # Save to config file
+                with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(self.config, f, ensure_ascii=False, indent=2)
+                
+                # Show what will be used
+                if selected_mode == 'custom':
+                    msg = f"Duplicate detection will use the '{custom_field_name}' field"
+                elif selected_mode == 'fuzzy':
+                    msg = f"Duplicate detection set to fuzzy matching at {int(fuzzy_threshold_var.get())}% similarity"
+                else:
+                    msg = f"Duplicate detection mode set to: {selected_mode}"
+                
+                messagebox.showinfo("Success", msg)
+                dialog.destroy()
+                
+                # Refresh the glossary display if it's loaded
+                if hasattr(self, 'current_glossary_data') and self.current_glossary_data:
+                    try:
+                        # Just refresh the tree view without reloading the file
+                        self._refresh_glossary_tree_view()
+                    except:
+                        pass
+            
+            tb.Button(button_inner_frame, text="Save", command=save_settings, 
+                      bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
+            tb.Button(button_inner_frame, text="Cancel", command=dialog.destroy,
+                      bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
+            
+            # Auto-resize and show
+            self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.5, max_height_ratio=0.55)
+
+        def backup_settings_dialog():
+            """Show dialog for configuring automatic backup settings"""
+            # Use setup_scrollable with custom ratios
+            dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
+                self.master,
+                "Automatic Backup Settings",
+                width=500,
+                height=None,
+                max_width_ratio=0.45,
+                max_height_ratio=0.5
+            )
+            
+            # Main frame
+            main_frame = ttk.Frame(scrollable_frame, padding="20")
+            main_frame.pack(fill=tk.BOTH, expand=True)
+            
+            # Title
+            ttk.Label(main_frame, text="Automatic Backup Settings", 
+                      font=('TkDefaultFont', 22, 'bold')).pack(pady=(0, 20))
+            
+            # Backup toggle
+            backup_var = tk.BooleanVar(value=self.config.get('glossary_auto_backup', True))
+            backup_frame = ttk.Frame(main_frame)
+            backup_frame.pack(fill=tk.X, pady=5)
+            
+            backup_check = ttk.Checkbutton(backup_frame, 
+                                           text="Enable automatic backups before modifications",
+                                           variable=backup_var)
+            backup_check.pack(anchor=tk.W)
+            
+            # Settings frame (indented)
+            settings_frame = ttk.Frame(main_frame)
+            settings_frame.pack(fill=tk.X, pady=(10, 0), padx=(20, 0))
+            
+            # Max backups setting
+            max_backups_frame = ttk.Frame(settings_frame)
+            max_backups_frame.pack(fill=tk.X, pady=5)
+            
+            ttk.Label(max_backups_frame, text="Maximum backups to keep:").pack(side=tk.LEFT, padx=(0, 10))
+            max_backups_var = tk.IntVar(value=self.config.get('glossary_max_backups', 50))
+            max_backups_spin = ttk.Spinbox(max_backups_frame, from_=0, to=999, 
+                                           textvariable=max_backups_var, width=10)
+            max_backups_spin.pack(side=tk.LEFT)
+            ttk.Label(max_backups_frame, text="(0 = unlimited)", 
+                      font=('TkDefaultFont', 9), 
+                      foreground='gray').pack(side=tk.LEFT, padx=(10, 0))
+            
+            # Backup naming pattern info
+            pattern_frame = ttk.Frame(settings_frame)
+            pattern_frame.pack(fill=tk.X, pady=(15, 5))
+            
+            ttk.Label(pattern_frame, text="Backup naming pattern:", 
+                      font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W)
+            ttk.Label(pattern_frame, 
+                      text="[original_name]_[operation]_[YYYYMMDD_HHMMSS].json",
+                      font=('TkDefaultFont', 9, 'italic'),
+                      foreground='#666').pack(anchor=tk.W, padx=(10, 0))
+            
+            # Example
+            example_text = "Example: my_glossary_before_delete_5_20240115_143052.json"
+            ttk.Label(pattern_frame, text=example_text,
+                      font=('TkDefaultFont', 8),
+                      foreground='gray').pack(anchor=tk.W, padx=(10, 0), pady=(2, 0))
+            
+            # Separator
+            ttk.Separator(main_frame, orient='horizontal').pack(fill=tk.X, pady=(20, 15))
+            
+            # Backup location info
+            location_frame = ttk.Frame(main_frame)
+            location_frame.pack(fill=tk.X)
+            
+            ttk.Label(location_frame, text="📁 Backup Location:", 
+                      font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W)
+            
+            if self.editor_file_var.get():
+                glossary_dir = os.path.dirname(self.editor_file_var.get())
+                backup_path = os.path.join("Glossary", "Backups")
+                full_path = os.path.join(glossary_dir, backup_path)
+                
+                path_label = ttk.Label(location_frame, 
+                                      text=f"{backup_path}/",
+                                      font=('TkDefaultFont', 9),
+                                      foreground='#0066cc')
+                path_label.pack(anchor=tk.W, padx=(10, 0))
+                
+                # Check if backup folder exists and show count
+                if os.path.exists(full_path):
+                    backup_count = len([f for f in os.listdir(full_path) if f.endswith('.json')])
+                    ttk.Label(location_frame, 
+                             text=f"Currently contains {backup_count} backup(s)",
+                             font=('TkDefaultFont', 8),
+                             foreground='gray').pack(anchor=tk.W, padx=(10, 0))
+            else:
+                ttk.Label(location_frame, 
+                         text="Glossary/Backups",
+                         font=('TkDefaultFont', 9),
+                         foreground='gray').pack(anchor=tk.W, padx=(10, 0))
+            
+            def toggle_settings_state(*args):
+                state = tk.NORMAL if backup_var.get() else tk.DISABLED
+                max_backups_spin.config(state=state)
+            
+            backup_var.trace('w', toggle_settings_state)
+            toggle_settings_state()  # Set initial state
+            
+            # Buttons
+            button_frame = ttk.Frame(main_frame)
+            button_frame.pack(fill=tk.X, pady=(25, 0))
+            
+            # Inner frame for centering buttons
+            button_inner_frame = ttk.Frame(button_frame)
+            button_inner_frame.pack(anchor=tk.CENTER)
+            
+            def save_settings():
+                # Save backup settings
+                self.config['glossary_auto_backup'] = backup_var.get()
+                self.config['glossary_max_backups'] = max_backups_var.get()
+                
+                # Save to config file
+                with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(self.config, f, ensure_ascii=False, indent=2)
+                
+                status = "enabled" if backup_var.get() else "disabled"
+                if backup_var.get():
+                    limit = max_backups_var.get()
+                    limit_text = "unlimited" if limit == 0 else f"max {limit}"
+                    msg = f"Automatic backups {status} ({limit_text})"
+                else:
+                    msg = f"Automatic backups {status}"
+                    
+                messagebox.showinfo("Success", msg)
+                dialog.destroy()
+            
+            def create_manual_backup():
+                """Create a manual backup right now"""
+                if not self.current_glossary_data:
+                    messagebox.showerror("Error", "No glossary loaded")
+                    return
+                    
+                if self.create_glossary_backup("manual"):
+                    messagebox.showinfo("Success", "Manual backup created successfully!")
+            
+            tb.Button(button_inner_frame, text="Save Settings", command=save_settings, 
+                      bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
+            tb.Button(button_inner_frame, text="Backup Now", command=create_manual_backup,
+                      bootstyle="info", width=15).pack(side=tk.LEFT, padx=5)
+            tb.Button(button_inner_frame, text="Cancel", command=dialog.destroy,
+                      bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
+            
+            # Auto-resize and show
+            self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.45, max_height_ratio=0.4)
+    
+        def smart_trim_dialog():
             if not self.current_glossary_data:
                 messagebox.showerror("Error", "No glossary loaded")
                 return
@@ -2736,7 +3470,7 @@ class TranslatorGUI:
                 standard_field_defaults = {
                     'traits': ("Character traits", "5"),
                     'locations': ("Associated locations", "10"),
-                    'group_affiliation': ("Group memberships", "3")
+                    'group_affiliation': ("Group affiliation", "3")
                 }
                 
                 for field, (description, default) in standard_field_defaults.items():
@@ -2867,6 +3601,12 @@ class TranslatorGUI:
                 try:
                     top_n = int(top_var.get())
                     
+                    # Calculate how many entries will be removed
+                    entries_to_remove = len(self.current_glossary_data) - top_n
+                    if entries_to_remove > 0:
+                        if not self.create_glossary_backup(f"before_trim_{entries_to_remove}"):
+                            return
+                    
                     if self.current_glossary_format == 'list':
                         # Keep only top N entries
                         if top_n < len(self.current_glossary_data):
@@ -2927,29 +3667,29 @@ class TranslatorGUI:
                         
                 except ValueError:
                     messagebox.showerror("Error", "Please enter valid numbers")
-            
-            # Create inner frame for buttons
-            button_inner_frame = tk.Frame(button_frame)
-            button_inner_frame.pack()  # This centers it
 
-            # Now pack the buttons in the inner frame
-            tb.Button(button_inner_frame, text="Apply Trim", command=apply_smart_trim,
+                # Create inner frame for buttons
+                button_inner_frame = tk.Frame(button_frame)
+                button_inner_frame.pack()  # This centers it
+
+                # Now pack the buttons in the inner frame
+                tb.Button(button_inner_frame, text="Apply Trim", command=apply_smart_trim,
                      bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
-            tb.Button(button_inner_frame, text="Cancel", command=dialog.destroy,
+                tb.Button(button_inner_frame, text="Cancel", command=dialog.destroy,
                      bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
-            
-            # Info section at bottom
-            info_frame = tk.Frame(main_frame)
-            info_frame.pack(fill=tk.X, pady=(0, 20), padx=20)
-            
-            tk.Label(info_frame, text="💡 Tip: Always backup your glossary before applying major changes!",
+
+                # Info section at bottom
+                info_frame = tk.Frame(main_frame)
+                info_frame.pack(fill=tk.X, pady=(0, 20), padx=20)
+
+                tk.Label(info_frame, text="💡 Tip: Always backup your glossary before applying major changes!",
                     font=('TkDefaultFont', 9, 'italic'), fg='#666').pack()
-            
-            # Auto-resize the dialog to fit content
-            self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.2)
+
+                # Auto-resize the dialog to fit content
+                self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.2)
        
        
-       def filter_entries_dialog():
+        def filter_entries_dialog():
             if not self.current_glossary_data:
                 messagebox.showerror("Error", "No glossary loaded")
                 return
@@ -3264,6 +4004,12 @@ class TranslatorGUI:
                             filtered.append(entry)
                     
                     removed = len(self.current_glossary_data) - len(filtered)
+                    
+                    # Add backup before modifying data (only if entries will be removed)
+                    if removed > 0:
+                        if not self.create_glossary_backup(f"before_filter_remove_{removed}"):
+                            return
+                    
                     self.current_glossary_data[:] = filtered
                     
                     if save_current_glossary():
@@ -3279,6 +4025,12 @@ class TranslatorGUI:
                             filtered_entries[key] = entry
                     
                     removed = len(self.current_glossary_data.get('entries', {})) - len(filtered_entries)
+                    
+                    # Add backup before modifying data (only if entries will be removed)
+                    if removed > 0:
+                        if not self.create_glossary_backup(f"before_filter_remove_{removed}"):
+                            return
+                    
                     self.current_glossary_data['entries'] = filtered_entries
                     
                     if save_current_glossary():
@@ -3286,7 +4038,7 @@ class TranslatorGUI:
                         messagebox.showinfo("Success", 
                             f"Filter applied!\n\nKept: {len(filtered_entries)} entries\nRemoved: {removed} entries")
                         dialog.destroy()
-            
+        
             def invert_filter():
                 """Apply inverted filter (remove matching entries instead of keeping them)"""
                 if messagebox.askyesno("Invert Filter", 
@@ -3298,6 +4050,12 @@ class TranslatorGUI:
                                 filtered.append(entry)
                         
                         removed = len(self.current_glossary_data) - len(filtered)
+                        
+                        # Only create backup if entries will be removed
+                        if removed > 0:
+                            if not self.create_glossary_backup(f"before_invert_filter_remove_{removed}"):
+                                return
+                        
                         self.current_glossary_data[:] = filtered
                         
                         if save_current_glossary():
@@ -3328,7 +4086,7 @@ class TranslatorGUI:
             # Auto-resize the dialog to fit content
             self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.49)
     
-       def export_selection():
+        def export_selection():
            selected = self.glossary_tree.selection()
            if not selected:
                messagebox.showwarning("Warning", "No entries selected")
@@ -3371,12 +4129,12 @@ class TranslatorGUI:
            except Exception as e:
                messagebox.showerror("Error", f"Failed to export: {e}")
        
-       def save_edited_glossary():
+        def save_edited_glossary():
            if save_current_glossary():
                messagebox.showinfo("Success", "Glossary saved successfully")
                self.append_log(f"✅ Saved glossary to: {self.editor_file_var.get()}")
        
-       def save_as_glossary():
+        def save_as_glossary():
            if not self.current_glossary_data:
                messagebox.showerror("Error", "No glossary loaded")
                return
@@ -3401,47 +4159,51 @@ class TranslatorGUI:
            except Exception as e:
                messagebox.showerror("Error", f"Failed to save: {e}")
        
-       # Buttons
-       tb.Button(file_frame, text="Browse", command=browse_glossary, width=15).pack(side=tk.LEFT)
+        # Buttons
+        tb.Button(file_frame, text="Browse", command=browse_glossary, width=15).pack(side=tk.LEFT)
+        
        
-       editor_controls = tk.Frame(container)
-       editor_controls.pack(fill=tk.X, pady=(10, 0))
+        editor_controls = tk.Frame(container)
+        editor_controls.pack(fill=tk.X, pady=(10, 0))
        
-       # Row 1
-       row1 = tk.Frame(editor_controls)
-       row1.pack(fill=tk.X, pady=2)
+        # Row 1
+        row1 = tk.Frame(editor_controls)
+        row1.pack(fill=tk.X, pady=2)
        
-       buttons_row1 = [
+        buttons_row1 = [
            ("Reload", load_glossary_for_editing, "info"),
            ("Delete Selected", delete_selected_entries, "danger"),
            ("Clean Empty Fields", clean_empty_fields, "warning"),
-           ("Remove Duplicates", remove_duplicates, "warning")
-       ]
+           ("Remove Duplicates", remove_duplicates, "warning"),
+           ("Backup Settings", backup_settings_dialog, "success")
+        ]
        
-       for text, cmd, style in buttons_row1:
+        for text, cmd, style in buttons_row1:
            tb.Button(row1, text=text, command=cmd, bootstyle=style, width=15).pack(side=tk.LEFT, padx=2)
        
-       # Row 2
-       row2 = tk.Frame(editor_controls)
-       row2.pack(fill=tk.X, pady=2)
-       
-       buttons_row2 = [
+        # Row 2
+        row2 = tk.Frame(editor_controls)
+        row2.pack(fill=tk.X, pady=2)
+
+        buttons_row2 = [
            ("Smart Trim", smart_trim_dialog, "primary"),
            ("Filter Entries", filter_entries_dialog, "primary"),
            ("Aggregate Locations", lambda: self._aggregate_locations(load_glossary_for_editing), "info"),
-           ("Export Selection", export_selection, "secondary")
-       ]
-       
-       for text, cmd, style in buttons_row2:
+           ("Export Selection", export_selection, "secondary"),
+           ("Duplicate Settings", duplicate_detection_settings, "info")
+
+        ]
+
+        for text, cmd, style in buttons_row2:
            tb.Button(row2, text=text, command=cmd, bootstyle=style, width=15).pack(side=tk.LEFT, padx=2)
-       
-       # Row 3
-       row3 = tk.Frame(editor_controls)
-       row3.pack(fill=tk.X, pady=2)
-       
-       tb.Button(row3, text="Save Changes", command=save_edited_glossary,
+
+        # Row 3
+        row3 = tk.Frame(editor_controls)
+        row3.pack(fill=tk.X, pady=2)
+
+        tb.Button(row3, text="Save Changes", command=save_edited_glossary,
                 bootstyle="success", width=20).pack(side=tk.LEFT, padx=2)
-       tb.Button(row3, text="Save As...", command=save_as_glossary,
+        tb.Button(row3, text="Save As...", command=save_as_glossary,
                 bootstyle="success-outline", width=20).pack(side=tk.LEFT, padx=2)
 
     def _on_tree_double_click(self, event):
@@ -3534,45 +4296,49 @@ class TranslatorGUI:
        dialog.deiconify()
 
     def _aggregate_locations(self, reload_callback):
-       """Aggregate all location entries into a single entry"""
-       if not self.current_glossary_data:
-           messagebox.showerror("Error", "No glossary loaded")
-           return
-       
-       if isinstance(self.current_glossary_data, list):
-           all_locs = []
-           for char in self.current_glossary_data:
-               locs = char.get('locations', [])
-               if isinstance(locs, list):
+        """Aggregate all location entries into a single entry"""
+        if not self.current_glossary_data:
+            messagebox.showerror("Error", "No glossary loaded")
+            return
+        
+
+        if not self.create_glossary_backup("before_aggregate"):
+            return
+        
+        if isinstance(self.current_glossary_data, list):
+            all_locs = []
+            for char in self.current_glossary_data:
+                locs = char.get('locations', [])
+                if isinstance(locs, list):
                    all_locs.extend(locs)
-               char.pop('locations', None)
-           
-           seen = set()
-           unique_locs = []
-           for loc in all_locs:
+                char.pop('locations', None)
+
+            seen = set()
+            unique_locs = []
+            for loc in all_locs:
                if loc not in seen:
                    seen.add(loc)
                    unique_locs.append(loc)
-           
-           self.current_glossary_data = [
+
+            self.current_glossary_data = [
                entry for entry in self.current_glossary_data 
                if entry.get('original_name') != "📍 Location Summary"
-           ]
-           
-           self.current_glossary_data.append({
+            ]
+
+            self.current_glossary_data.append({
                "original_name": "📍 Location Summary",
                "name": "Location Summary",
                "locations": unique_locs
-           })
-           
-           path = self.editor_file_var.get()
-           with open(path, 'w', encoding='utf-8') as f:
+            })
+
+            path = self.editor_file_var.get()
+            with open(path, 'w', encoding='utf-8') as f:
                json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
-           
-           messagebox.showinfo("Success", f"Aggregated {len(unique_locs)} unique locations")
-           reload_callback()
-       else:
-           messagebox.showinfo("Info", "Location aggregation only works with manual glossary format")
+
+            messagebox.showinfo("Success", f"Aggregated {len(unique_locs)} unique locations")
+            reload_callback()
+        else:
+            messagebox.showinfo("Info", "Location aggregation only works with manual glossary format")
 
     def _make_bottom_toolbar(self):
         """Create the bottom toolbar with all action buttons"""
@@ -3613,161 +4379,162 @@ class TranslatorGUI:
 
     # Thread management methods
     def run_translation_thread(self):
-       """Start translation in a separate thread"""
-       if hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive():
-           self.append_log("⚠️ Cannot run translation while glossary extraction is in progress.")
-           messagebox.showwarning("Process Running", "Please wait for glossary extraction to complete before starting translation.")
-           return
-       
-       if self.translation_thread and self.translation_thread.is_alive():
-           self.stop_translation()
-           return
-       
-       self.stop_requested = False
-       if translation_stop_flag:
-           translation_stop_flag(False)
-       
-       self.translation_thread = threading.Thread(target=self.run_translation_direct, daemon=True)
-       self.translation_thread.start()
-       self.master.after(100, self.update_run_button)
+        """Start translation in a separate thread"""
+        if hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive():
+            self.append_log("⚠️ Cannot run translation while glossary extraction is in progress.")
+            messagebox.showwarning("Process Running", "Please wait for glossary extraction to complete before starting translation.")
+            return
+        
+        if self.translation_thread and self.translation_thread.is_alive():
+            self.stop_translation()
+            return
+        
+        self.stop_requested = False
+        if translation_stop_flag:
+            translation_stop_flag(False)
+        
+        self.translation_thread = threading.Thread(target=self.run_translation_direct, daemon=True)
+        self.translation_thread.start()
+        self.master.after(100, self.update_run_button)
 
     def run_translation_direct(self):
-       """Run translation directly without subprocess"""
-       try:
-           self.append_log("🔄 Loading translation modules...")
-           if not self._lazy_load_modules():
+        """Run translation directly without subprocess"""
+        try:
+            self.append_log("🔄 Loading translation modules...")
+            if not self._lazy_load_modules():
                self.append_log("❌ Failed to load translation modules")
                return
-           
-           if translation_main is None:
+
+            if translation_main is None:
                self.append_log("❌ Translation module is not available")
                messagebox.showerror("Module Error", "Translation module is not available. Please ensure all files are present.")
                return
-           
-           epub_path = self.entry_epub.get()
-           if not epub_path or not os.path.isfile(epub_path):
+
+            epub_path = self.entry_epub.get()
+            if not epub_path or not os.path.isfile(epub_path):
                self.append_log("❌ Error: Please select a valid EPUB file.")
                return
-           
-           api_key = self.api_key_entry.get()
-           if not api_key:
+
+            api_key = self.api_key_entry.get()
+            if not api_key:
                self.append_log("❌ Error: Please enter your API key.")
                return
+
+            old_argv = sys.argv
+            old_env = dict(os.environ)
            
-           old_argv = sys.argv
-           old_env = dict(os.environ)
-           
-           try:
-               self.append_log(f"🔧 Setting up environment variables...")
-               self.append_log(f"📖 EPUB: {os.path.basename(epub_path)}")
-               self.append_log(f"🤖 Model: {self.model_var.get()}")
-               self.append_log(f"🔑 API Key: {api_key[:10]}...")
-               self.append_log(f"📤 Output Token Limit: {self.max_output_tokens}")
+            try:
+                self.append_log(f"🔧 Setting up environment variables...")
+                self.append_log(f"📖 EPUB: {os.path.basename(epub_path)}")
+                self.append_log(f"🤖 Model: {self.model_var.get()}")
+                self.append_log(f"🔑 API Key: {api_key[:10]}...")
+                self.append_log(f"📤 Output Token Limit: {self.max_output_tokens}")
                
                # Log key settings
-               if self.enable_auto_glossary_var.get():
+                if self.enable_auto_glossary_var.get():
                    self.append_log("✅ Automatic glossary generation ENABLED")
                    self.append_log(f"📑 Targeted Glossary Settings:")
                    self.append_log(f"   • Min frequency: {self.glossary_min_frequency_var.get()} occurrences")
                    self.append_log(f"   • Max character names: {self.glossary_max_names_var.get()}")
                    self.append_log(f"   • Max titles/ranks: {self.glossary_max_titles_var.get()}")
                    self.append_log(f"   • Translation batch size: {self.glossary_batch_size_var.get()}")
-               else:
+                else:
                    self.append_log("⚠️ Automatic glossary generation DISABLED")
-               
-               if self.batch_translation_var.get():
-                   self.append_log(f"📦 Batch translation ENABLED - processing {self.batch_size_var.get()} chapters per API call")
-                   self.append_log("   💡 This can improve speed but may reduce per-chapter customization")
-               else:
-                   self.append_log("📄 Standard translation mode - processing one chapter at a time")
-               
-               # Set environment variables
-               env_vars = self._get_environment_variables(epub_path, api_key)
-               os.environ.update(env_vars)
-               
-               chap_range = self.chapter_range_entry.get().strip()
-               if chap_range:
+
+                if self.batch_translation_var.get():
+                    self.append_log(f"📦 Batch translation ENABLED - processing {self.batch_size_var.get()} chapters per API call")
+                    self.append_log("   💡 This can improve speed but may reduce per-chapter customization")
+                else:
+                    self.append_log("📄 Standard translation mode - processing one chapter at a time")
+
+                # Set environment variables
+                env_vars = self._get_environment_variables(epub_path, api_key)
+                os.environ.update(env_vars)
+
+                chap_range = self.chapter_range_entry.get().strip()
+                if chap_range:
                    os.environ['CHAPTER_RANGE'] = chap_range
                    self.append_log(f"📊 Chapter Range: {chap_range}")
-               
-               # Handle token limit
-               if self.token_limit_disabled:
+
+                # Handle token limit
+                if self.token_limit_disabled:
                    os.environ['MAX_INPUT_TOKENS'] = ''
                    self.append_log("🎯 Input Token Limit: Unlimited (disabled)")
-               else:
-                   token_val = self.token_limit_entry.get().strip()
-                   if token_val and token_val.isdigit():
+                else:
+                    token_val = self.token_limit_entry.get().strip()
+                    if token_val and token_val.isdigit():
                        os.environ['MAX_INPUT_TOKENS'] = token_val
                        self.append_log(f"🎯 Input Token Limit: {token_val}")
-                   else:
+                    else:
                        default_limit = '1000000'
                        os.environ['MAX_INPUT_TOKENS'] = default_limit
                        self.append_log(f"🎯 Input Token Limit: {default_limit} (default)")
                
-               # Log image translation status
-               if self.enable_image_translation_var.get():
-                   self.append_log("🖼️ Image translation ENABLED")
-                   vision_models = ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash', 
+                # Log image translation status
+                if self.enable_image_translation_var.get():
+                    self.append_log("🖼️ Image translation ENABLED")
+                    vision_models = ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash', 
                                   'gemini-2.0-flash-exp', 'gpt-4-turbo', 'gpt-4o']
-                   if self.model_var.get().lower() in vision_models:
-                       self.append_log(f"   ✅ Using vision-capable model: {self.model_var.get()}")
-                       self.append_log(f"   • Max images per chapter: {self.max_images_per_chapter_var.get()}")
-                       if self.process_webnovel_images_var.get():
-                           self.append_log(f"   • Web novel images: Enabled (min height: {self.webnovel_min_height_var.get()}px)")
-                   else:
-                       self.append_log(f"   ⚠️ Model {self.model_var.get()} does not support vision")
-                       self.append_log("   ⚠️ Image translation will be skipped")
-               else:
-                   self.append_log("🖼️ Image translation disabled")
+                    if self.model_var.get().lower() in vision_models:
+                        self.append_log(f"   ✅ Using vision-capable model: {self.model_var.get()}")
+                        self.append_log(f"   • Max images per chapter: {self.max_images_per_chapter_var.get()}")
+                        if self.process_webnovel_images_var.get():
+                            self.append_log(f"   • Web novel images: Enabled (min height: {self.webnovel_min_height_var.get()}px)")
+                    else:
+                        self.append_log(f"   ⚠️ Model {self.model_var.get()} does not support vision")
+                        self.append_log("   ⚠️ Image translation will be skipped")
+                else:
+                    self.append_log("🖼️ Image translation disabled")
                
-               # Validate glossary path before passing to backend
-               if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path:
+                # Validate glossary path before passing to backend
+                if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path:
                    # If this is an auto-loaded glossary, check if it matches the current file
-                   if (hasattr(self, 'auto_loaded_glossary_path') and 
+                    if (hasattr(self, 'auto_loaded_glossary_path') and 
                        self.manual_glossary_path == self.auto_loaded_glossary_path):
                        # This is an auto-loaded glossary
-                       if (hasattr(self, 'auto_loaded_glossary_for_file') and 
+                        if (hasattr(self, 'auto_loaded_glossary_for_file') and 
                            hasattr(self, 'file_path') and 
                            self.file_path == self.auto_loaded_glossary_for_file):
                            # The glossary matches the current file
                            os.environ['MANUAL_GLOSSARY'] = self.manual_glossary_path
                            self.append_log(f"📑 Using auto-loaded glossary: {os.path.basename(self.manual_glossary_path)}")
-                       else:
+                        else:
                            # The glossary is from a different file, don't use it
                            self.append_log("📑 Skipping auto-loaded glossary (different novel)")
-                   else:
+                    else:
                        # This is a manually loaded glossary, always use it
                        os.environ['MANUAL_GLOSSARY'] = self.manual_glossary_path
                        self.append_log(f"📑 Using manual glossary: {os.path.basename(self.manual_glossary_path)}")
                
-               sys.argv = ['TransateKRtoEN.py', epub_path]
-               
-               self.append_log("🚀 Starting translation...")
-               
-               os.makedirs("Payloads", exist_ok=True)
-               
-               translation_main(
+                sys.argv = ['TransateKRtoEN.py', epub_path]
+
+                self.append_log("🚀 Starting translation...")
+
+                os.makedirs("Payloads", exist_ok=True)
+
+                translation_main(
                    log_callback=self.append_log,
                    stop_callback=lambda: self.stop_requested
-               )
+                )
                
-               if not self.stop_requested:
+                if not self.stop_requested:
                    self.append_log("✅ Translation completed successfully!")
                
-           except Exception as e:
-               self.append_log(f"❌ Translation error: {e}")
-               import traceback
-               self.append_log(f"❌ Full error: {traceback.format_exc()}")
+            except Exception as e:
+                self.append_log(f"❌ Translation error: {e}")
+                self.append_log_with_api_error_detection(str(e))
+                import traceback
+                self.append_log(f"❌ Full error: {traceback.format_exc()}")
            
-           finally:
-               sys.argv = old_argv
-               os.environ.clear()
-               os.environ.update(old_env)
-       
-       except Exception as e:
+            finally:
+                sys.argv = old_argv
+                os.environ.clear()
+                os.environ.update(old_env)
+
+        except Exception as e:
            self.append_log(f"❌ Translation setup error: {e}")
-       
-       finally:
+
+        finally:
            self.stop_requested = False
            if translation_stop_flag:
                translation_stop_flag(False)
@@ -3841,7 +4608,9 @@ class TranslatorGUI:
            'ADVANCED_WATERMARK_REMOVAL': "1" if self.advanced_watermark_removal_var.get() else "0",
            'SAVE_CLEANED_IMAGES': "1" if self.save_cleaned_images_var.get() else "0",
            'COMPRESSION_FACTOR': self.compression_factor_var.get(),
-           'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower()
+           'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower(),
+           'GLOSSARY_DUPLICATE_KEY_MODE': self.config.get('glossary_duplicate_key_mode', 'auto'),
+           'GLOSSARY_DUPLICATE_CUSTOM_FIELD': self.config.get('glossary_duplicate_custom_field', '')
            
        }
 
@@ -3908,7 +4677,10 @@ class TranslatorGUI:
                    'GLOSSARY_EXTRACT_HOW_THEY_REFER_TO_OTHERS': '1' if self.config.get('manual_extract_how_they_refer_to_others', True) else '0',
                    'GLOSSARY_EXTRACT_LOCATIONS': '1' if self.config.get('manual_extract_locations', True) else '0',
                    'GLOSSARY_HISTORY_ROLLING': "1" if self.glossary_history_rolling_var.get() else "0",
-                   'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower()
+                   'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower(),
+                   'GLOSSARY_DUPLICATE_KEY_MODE': self.config.get('glossary_duplicate_key_mode', 'auto'),
+                   'GLOSSARY_DUPLICATE_CUSTOM_FIELD': self.config.get('glossary_duplicate_custom_field', ''),
+                   'SEND_INTERVAL_SECONDS': str(self.delay_entry.get())
                }
                
                if self.custom_glossary_fields:
@@ -6608,7 +7380,7 @@ class TranslatorGUI:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.0.2...")
+    print("🚀 Starting Glossarion v3.0.5...")
     
     # Initialize splash screen
     splash_manager = None
