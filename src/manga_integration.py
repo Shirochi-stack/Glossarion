@@ -266,7 +266,8 @@ class MangaTranslationTab:
         # Skip inpainting toggle
         tb.Checkbutton(render_frame, text="Skip Inpainting (Preserve Original Art)", 
                       variable=self.skip_inpainting_var,
-                      bootstyle="round-toggle").pack(anchor='w', pady=5)
+                      bootstyle="round-toggle",
+                      command=self._save_rendering_settings).pack(anchor='w', pady=5)
         
         tk.Label(render_frame, text="Keep original manga art under translated text",
                 font=('TkDefaultFont', 9), fg='gray').pack(anchor='w', padx=20, pady=(0, 10))
@@ -1073,10 +1074,12 @@ class MangaTranslationTab:
             self._log(f"  Font: {os.path.basename(self.selected_font_path) if self.selected_font_path else 'Default'}", "info")
             self._log(f"  Text Color: RGB({text_color[0]}, {text_color[1]}, {text_color[2]})", "info")
             self._log(f"  Shadow: {'Enabled' if self.shadow_enabled_var.get() else 'Disabled'}", "info")
-    
+
     def _translation_worker(self):
         """Worker thread for translation"""
         try:
+            self.translator.set_stop_flag(self.stop_flag)
+            
             for index, filepath in enumerate(self.selected_files):
                 if self.stop_flag.is_set():
                     self._log("\n⏹️ Translation stopped by user", "warning")
@@ -1092,25 +1095,89 @@ class MangaTranslationTab:
                     f"Processing {index + 1}/{self.total_files}: {filename}"
                 )
                 
-                # Determine output path
-                if self.create_subfolder_var.get():
-                    output_dir = os.path.join(os.path.dirname(filepath), 'translated')
-                    os.makedirs(output_dir, exist_ok=True)
-                    output_path = os.path.join(output_dir, filename)
-                else:
-                    base, ext = os.path.splitext(filepath)
-                    output_path = f"{base}_translated{ext}"
-                
-                # Process the image
-                result = self.translator.process_image(filepath, output_path)
-                
-                if result['success']:
-                    self.completed_files += 1
-                    self._log(f"✅ Successfully translated: {filename}", "success")
-                else:
+                try:
+                    # Determine output path
+                    if self.create_subfolder_var.get():
+                        output_dir = os.path.join(os.path.dirname(filepath), 'translated')
+                        os.makedirs(output_dir, exist_ok=True)
+                        output_path = os.path.join(output_dir, filename)
+                    else:
+                        base, ext = os.path.splitext(filepath)
+                        output_path = f"{base}_translated{ext}"
+                    
+                    # Process the image
+                    result = self.translator.process_image(filepath, output_path)
+                    
+                    # Check if translation was interrupted
+                    if result.get('interrupted', False):
+                        self._log(f"⏸️ Translation of {filename} was interrupted", "warning")
+                        self.failed_files += 1
+                        if self.stop_flag.is_set():
+                            break
+                    elif result['success']:
+                        self.completed_files += 1
+                        self._log(f"✅ Successfully translated: {filename}", "success")
+                    else:
+                        self.failed_files += 1
+                        errors = '\n'.join(result['errors'])
+                        self._log(f"❌ Failed to translate {filename}:\n{errors}", "error")
+                        
+                        # Check for specific error types in the error messages
+                        errors_lower = errors.lower()
+                        if '429' in errors or 'rate limit' in errors_lower:
+                            self._log(f"⚠️ RATE LIMIT DETECTED - Please wait before continuing", "error")
+                            self._log(f"   The API provider is limiting your requests", "error")
+                            self._log(f"   Consider increasing delay between requests in settings", "error")
+                            
+                            # Optionally pause for a bit
+                            self._log(f"   Pausing for 60 seconds...", "warning")
+                            for sec in range(60):
+                                if self.stop_flag.is_set():
+                                    break
+                                time.sleep(1)
+                                if sec % 10 == 0:
+                                    self._log(f"   Waiting... {60-sec} seconds remaining", "warning")
+                    
+                except Exception as e:
                     self.failed_files += 1
-                    errors = '\n'.join(result['errors'])
-                    self._log(f"❌ Failed to translate {filename}:\n{errors}", "error")
+                    error_str = str(e)
+                    error_type = type(e).__name__
+                    
+                    self._log(f"❌ Error processing {filename}:", "error")
+                    self._log(f"   Error type: {error_type}", "error")
+                    self._log(f"   Details: {error_str}", "error")
+                    
+                    # Check for specific API errors
+                    if "429" in error_str or "rate limit" in error_str.lower():
+                        self._log(f"⚠️ RATE LIMIT ERROR (429) - API is throttling requests", "error")
+                        self._log(f"   Please wait before continuing or reduce request frequency", "error")
+                        self._log(f"   Consider increasing the API delay in settings", "error")
+                        
+                        # Pause for rate limit
+                        self._log(f"   Pausing for 60 seconds...", "warning")
+                        for sec in range(60):
+                            if self.stop_flag.is_set():
+                                break
+                            time.sleep(1)
+                            if sec % 10 == 0:
+                                self._log(f"   Waiting... {60-sec} seconds remaining", "warning")
+                        
+                    elif "401" in error_str or "unauthorized" in error_str.lower():
+                        self._log(f"❌ AUTHENTICATION ERROR (401) - Check your API key", "error")
+                        self._log(f"   The API key appears to be invalid or expired", "error")
+                        
+                    elif "403" in error_str or "forbidden" in error_str.lower():
+                        self._log(f"❌ FORBIDDEN ERROR (403) - Access denied", "error")
+                        self._log(f"   Check your API subscription and permissions", "error")
+                        
+                    elif "timeout" in error_str.lower():
+                        self._log(f"⏱️ TIMEOUT ERROR - Request took too long", "error")
+                        self._log(f"   Consider increasing timeout settings", "error")
+                        
+                    else:
+                        # Generic error with full traceback
+                        self._log(f"   Full traceback:", "error")
+                        self._log(traceback.format_exc(), "error")
             
             # Final summary
             self._log(f"\n{'='*60}", "info")
