@@ -4220,7 +4220,11 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
             print(f"⚠️ API returned multi-line content, keeping original title")
             return title           
             
-        if any(char in translated_title for char in ['{', '}', '[', ']', '"role":', '"content":']):
+        # Check for JSON-like structured content, but allow simple brackets like [END]
+        if (any(char in translated_title for char in ['{', '}']) or 
+            '"role":' in translated_title or 
+            '"content":' in translated_title or
+            ('[[' in translated_title and ']]' in translated_title)):  # Only flag double brackets
             print(f"⚠️ API returned structured content, keeping original title")
             return title
             
