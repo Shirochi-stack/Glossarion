@@ -1440,52 +1440,52 @@ class MangaTranslator:
     
     def _fit_text_to_region(self, text: str, max_width: int, max_height: int, draw: ImageDraw) -> Tuple[int, List[str]]:
             """Find optimal font size and text wrapping"""
-            # Use 90% of the region for text (leave margins)
-            usable_width = int(max_width * 0.9)
-            usable_height = int(max_height * 0.9)
+            # Use 80% of the region for text (leave margins)
+            usable_width = int(max_width * 0.8)
+            usable_height = int(max_height * 0.8)
             
-            # Base font size range
+            # Standard font size range
             min_font_size = self.min_font_size
             max_font_size = self.max_font_size
             
-            # Try different font sizes
-            for font_size in range(max_font_size, min_font_size, -1):
-                # Calculate actual font size to use
-                if self.font_size_mode == 'multiplier':
-                    actual_font_size = int(font_size * self.font_size_multiplier)
-                    # Ensure we don't go beyond reasonable limits
-                    actual_font_size = min(max(actual_font_size, self.min_font_size), self.max_font_size * 2)
-                else:
-                    actual_font_size = font_size
-                    
-                font = self._get_font(actual_font_size)
+            # First, find the best base font size (without multiplier)
+            best_base_size = min_font_size
+            best_lines = []
+            
+            for font_size in range(max_font_size, min_font_size - 1, -1):
+                font = self._get_font(font_size)
                 
                 # Wrap text
                 lines = self._wrap_text(text, font, usable_width, draw)
                 
                 # Check if it fits vertically
-                line_height = actual_font_size * 1.2
+                line_height = font_size * 1.2
                 total_height = len(lines) * line_height
                 
                 if total_height <= usable_height:
-                    return actual_font_size, lines
+                    best_base_size = font_size
+                    best_lines = lines
+                    break
             
-            # If nothing fits, use minimum size with multiplier
+            # Now apply multiplier if in multiplier mode
             if self.font_size_mode == 'multiplier':
-                final_size = int(min_font_size * self.font_size_multiplier)
-                final_size = max(final_size, self.min_font_size)
-            else:
-                final_size = min_font_size
+                final_size = int(best_base_size * self.font_size_multiplier)
+                # Clamp to reasonable bounds
+                final_size = max(self.min_font_size, min(final_size, self.max_font_size * 3))
                 
-            font = self._get_font(final_size)
-            lines = self._wrap_text(text, font, usable_width, draw)
-            
-            # Truncate if needed
-            max_lines = int(usable_height // (final_size * 1.2))
-            if len(lines) > max_lines:
-                lines = lines[:max_lines-1] + [lines[max_lines-1][:10] + '...']
-            
-            return final_size, lines
+                # Re-calculate lines with the multiplied size
+                font = self._get_font(final_size)
+                best_lines = self._wrap_text(text, font, usable_width, draw)
+                
+                # Check if we need to truncate with new size
+                line_height = final_size * 1.2
+                max_lines = int(usable_height // line_height)
+                if len(best_lines) > max_lines and max_lines > 0:
+                    best_lines = best_lines[:max_lines-1] + [best_lines[max_lines-1][:10] + '...']
+            else:
+                final_size = best_base_size
+                
+            return final_size, best_lines
     
     def _wrap_text(self, text: str, font: ImageFont, max_width: int, draw: ImageDraw) -> List[str]:
         """Wrap text to fit within max_width"""
