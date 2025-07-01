@@ -116,12 +116,18 @@ class MangaTranslator:
             "You will receive multiple text segments from a manga page. "
             "Translate each segment considering the context of all segments together. "
             "Maintain consistency in character names, tone, and style across all translations.\n\n"
-            "IMPORTANT: Return your response as a JSON object where each key is the original text "
-            "and each value is the translation. Example:\n"
+            "IMPORTANT: Return your response as a valid JSON object where each key is the EXACT original text "
+            "(without the [0], [1] index prefixes) and each value is the translation.\n"
+            "Make sure to properly escape any special characters in the JSON:\n"
+            "- Use \\n for newlines\n"
+            "- Use \\\" for quotes\n"
+            "- Use \\\\ for backslashes\n\n"
+            "Example:\n"
             '{\n'
             '  "こんにちは": "Hello",\n'
             '  "ありがとう": "Thank you"\n'
-            '}'
+            '}\n\n'
+            'Do NOT include the [0], [1], etc. prefixes in the JSON keys.'
         )
         
         # Store context for contextual translation (backwards compatibility)
@@ -1043,8 +1049,49 @@ class MangaTranslator:
                 self._log(f"⚠️ Failed to parse JSON response: {str(e)}", "warning")
                 self._log(f"Response preview: {response_text[:200]}...", "warning")
                 
-                # Fallback: try to extract translations manually
-                return {}
+                # Fallback: try to fix common JSON issues
+                try:
+                    self._log("🔧 Attempting to fix JSON by escaping control characters...", "info")
+                    
+                    # Method 1: Use json.dumps to properly escape the string, then parse it
+                    import re
+                    
+                    # First, try to extract key-value pairs manually
+                    translations = {}
+                    
+                    # Pattern to match "key": "value" pairs, handling quotes and newlines
+                    pattern = r'"([^"]+)"\s*:\s*"([^"]*(?:\\.[^"]*)*)"'
+                    matches = re.findall(pattern, response_text)
+                    
+                    for key, value in matches:
+                        # Unescape the value
+                        try:
+                            # Replace literal \n with actual newlines
+                            value = value.replace('\\n', '\n')
+                            value = value.replace('\\"', '"')
+                            value = value.replace('\\\\', '\\')
+                            translations[key] = value
+                            self._log(f"  ✅ Extracted: '{key[:30]}...' → '{value[:30]}...'", "info")
+                        except Exception as ex:
+                            self._log(f"  ⚠️ Failed to process pair: {ex}", "warning")
+                    
+                    if translations:
+                        self._log(f"✅ Recovered {len(translations)} translations using regex", "success")
+                    else:
+                        # Method 2: Try to clean and re-parse
+                        cleaned = response_text
+                        # Remove any actual newlines within string values
+                        cleaned = re.sub(r'(?<="[^"]*)\n(?=[^"]*")', '\\n', cleaned)
+                        cleaned = re.sub(r'(?<="[^"]*)\r(?=[^"]*")', '\\r', cleaned)
+                        cleaned = re.sub(r'(?<="[^"]*)\t(?=[^"]*")', '\\t', cleaned)
+                        
+                        translations = json.loads(cleaned)
+                        self._log(f"✅ Successfully parsed after cleaning: {len(translations)} translations", "success")
+                        
+                except Exception as e2:
+                    self._log(f"❌ Failed to recover JSON: {str(e2)}", "error")
+                    self._log(f"   Returning empty translations", "error")
+                    return {}
             
             # Map translations back to regions
             result = {}
