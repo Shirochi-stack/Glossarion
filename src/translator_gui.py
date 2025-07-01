@@ -616,11 +616,10 @@ class WindowManager:
         
         window.after_idle(do_center)
 class TranslatorGUI:
-    def __init__(self, master):
+    def __init__(self, master):        
+        # Initialization
         master.configure(bg='#2b2b2b')
         self.master = master
-        
-        # Initialize managers
         self.base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
         self.wm = WindowManager(self.base_dir)
         self.ui = UIHelper()
@@ -628,12 +627,13 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        master.title("Glossarion v3.1.1")
+        __version__ = "3.1.3"
+        self.__version__ = __version__  # Store as instance variable
+        master.title(f"Glossarion v{__version__}")
         
         self.wm.responsive_size(master, BASE_WIDTH, BASE_HEIGHT)
         master.minsize(1600, 1000)
         self.wm.center_window(master)
-        
         
         # Setup fullscreen support
         self.wm.setup_fullscreen_support(master)
@@ -650,7 +650,7 @@ class TranslatorGUI:
         self.auto_loaded_glossary_for_file = None
         
         self.master.protocol("WM_DELETE_WINDOW", self.on_close)
-
+        
         # Load icon
         ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
         if os.path.isfile(ico_path):
@@ -665,21 +665,45 @@ class TranslatorGUI:
         except Exception as e:
             logging.error(f"Failed to load logo: {e}")
         
-        
         # Load config
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 self.config = json.load(f)
         except: 
             self.config = {}
+            
+        # Ensure default values exist
+        if 'auto_update_check' not in self.config:
+            self.config['auto_update_check'] = True
             # Save the default config immediately so it exists
             try:
                 with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                     json.dump(self.config, f, ensure_ascii=False, indent=2)
             except Exception as e:
-                print(f"Warning: Could not create config.json: {e}")
+                print(f"Warning: Could not save config.json: {e}")
+        
+        # Initialize auto-update check variable
+        self.auto_update_check_var = tk.BooleanVar(value=self.config.get('auto_update_check', True))
         
         self.max_output_tokens = self.config.get('max_output_tokens', self.max_output_tokens)
+        
+        # Initialize update manager AFTER config is loaded
+        try:
+            from update_manager import UpdateManager
+            self.update_manager = UpdateManager(self, self.base_dir)
+            
+            # Check for updates on startup if enabled
+            auto_check_enabled = self.config.get('auto_update_check', True)
+            print(f"[DEBUG] Auto-update check enabled: {auto_check_enabled}")
+            
+            if auto_check_enabled:
+                print("[DEBUG] Scheduling update check for 5 seconds from now...")
+                self.master.after(5000, self._check_updates_on_startup)
+            else:
+                print("[DEBUG] Auto-update check is disabled")
+        except ImportError as e:
+            self.update_manager = None
+            print(f"[DEBUG] Update manager not available: {e}")
         
         # Default prompts
         self.default_translation_chunk_prompt = "[PART {chunk_idx}/{total_chunks}]\n{chunk_html}"
@@ -826,7 +850,31 @@ class TranslatorGUI:
         self._init_default_prompts()
         self._init_variables()
         self._setup_gui()
-
+  
+    def _check_updates_on_startup(self):
+        """Check for updates on startup with debug logging"""
+        print("[DEBUG] Running startup update check...")
+        if self.update_manager:
+            try:
+                update_available, release_info = self.update_manager.check_for_updates(silent=True)
+                print(f"[DEBUG] Update check result: available={update_available}")
+                if release_info:
+                    print(f"[DEBUG] Latest version: {release_info.get('tag_name', 'unknown')}")
+            except Exception as e:
+                print(f"[DEBUG] Update check failed: {e}")
+        else:
+            print("[DEBUG] Update manager is None")
+        
+    def check_for_updates_manual(self):
+        """Manually check for updates from the Other Settings dialog"""
+        if hasattr(self, 'update_manager') and self.update_manager:
+            self.update_manager.check_for_updates(silent=False)
+        else:
+            messagebox.showerror("Update Check", 
+                               "Update manager is not available.\n"
+                               "Please check the GitHub releases page manually:\n"
+                               "https://github.com/Shirochi-stack/Glossarion/releases")
+                               
     def append_log_with_api_error_detection(self, message):
         """Enhanced log appending that detects and highlights API errors"""
         # First append the regular log message
@@ -1147,7 +1195,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.1.1 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.1.3 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -6463,7 +6511,7 @@ Recent translations to summarize:
        self._create_settings_buttons(scrollable_frame, dialog, canvas)
        
        # Auto-resize and show
-       self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.8, max_height_ratio=1.75)
+       self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.78, max_height_ratio=1.82)
        
        dialog.protocol("WM_DELETE_WINDOW", lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
 
@@ -6778,6 +6826,27 @@ Recent translations to summarize:
         
         tk.Label(section_frame, text="Check if all required EPUB files are\npresent for compilation",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 5))
+                
+        ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
+        
+        tk.Label(section_frame, text="Application Updates:", font=('TkDefaultFont', 11, 'bold')).pack(anchor=tk.W, pady=(5, 5))
+        
+        # Create a frame for update-related controls
+        update_frame = tk.Frame(section_frame)
+        update_frame.pack(anchor=tk.W, fill=tk.X)
+        
+        tb.Button(update_frame, text="🔄 Check for Updates", 
+                 command=lambda: self.check_for_updates_manual(), 
+                 bootstyle="info-outline",
+                 width=25).pack(side=tk.LEFT, pady=2)
+        
+        # Add auto-update checkbox
+        tb.Checkbutton(update_frame, text="Check on startup", 
+                      variable=self.auto_update_check_var,
+                      bootstyle="round-toggle").pack(side=tk.LEFT, padx=(10, 0))
+        
+        tk.Label(section_frame, text="Check GitHub for new Glossarion releases\nand download updates",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 5))
 
     def _create_processing_options_section(self, parent):
         """Create processing options section"""
@@ -7053,7 +7122,8 @@ Recent translations to summarize:
                     'chapter_number_offset': safe_int(self.chapter_number_offset_var.get(), 0),
                     'enable_decimal_chapters': self.enable_decimal_chapters_var.get(),
                     'use_header_as_output': self.use_header_as_output_var.get(),
-                    'disable_gemini_safety': self.disable_gemini_safety_var.get()
+                    'disable_gemini_safety': self.disable_gemini_safety_var.get(),
+                    'auto_update_check': self.auto_update_check_var.get()
                 })
                 
                 # Validate numeric fields
@@ -7107,7 +7177,8 @@ Recent translations to summarize:
                     'SAVE_CLEANED_IMAGES': "1" if self.save_cleaned_images_var.get() else "0",
                     'TRANSLATION_CHUNK_PROMPT': self.translation_chunk_prompt,
                     'IMAGE_CHUNK_PROMPT': self.image_chunk_prompt,
-                    "DISABLE_GEMINI_SAFETY": str(self.config.get('disable_gemini_safety', False)).lower()
+                    "DISABLE_GEMINI_SAFETY": str(self.config.get('disable_gemini_safety', False)).lower(),
+                    'auto_update_check': self.auto_update_check_var.get() 
                 }
                 os.environ.update(env_updates)
                 
@@ -7278,7 +7349,7 @@ Recent translations to summarize:
         self.append_glossary_var.set(True)
         self.append_log("✅ Automatically enabled 'Append Glossary to System Prompt'")
 
-    def save_config(self):
+    def save_config(self, show_message=True):
         """Persist all settings to config.json."""
         try:
             def safe_int(value, default):
@@ -7366,11 +7437,14 @@ Recent translations to summarize:
             
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, ensure_ascii=False, indent=2)
-            messagebox.showinfo("Saved", "Configuration saved.")
-            self.append_log("✅ Configuration saved successfully")
+            
+            # Only show message if requested
+            if show_message:
+                messagebox.showinfo("Saved", "Configuration saved.")
+                
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to save config: {e}")
-            self.append_log(f"❌ Failed to save configuration: {e}")
+            # Always show error messages regardless of show_message
+            messagebox.showerror("Error", f"Failed to save configuration: {e}")
 
     def log_debug(self, message):
         self.append_log(f"[DEBUG] {message}")
@@ -7378,7 +7452,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.1.1...")
+    print("🚀 Starting Glossarion v3.1.3...")
     
     # Initialize splash screen
     splash_manager = None
