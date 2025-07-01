@@ -2,6 +2,7 @@
 """
 Enhanced Manga Translation Pipeline with improved text visibility controls
 Handles OCR, translation, and advanced text rendering for manga panels
+Now with proper history management and full page context support
 """
 
 import os
@@ -22,6 +23,13 @@ try:
 except ImportError:
     GOOGLE_CLOUD_VISION_AVAILABLE = False
     print("Warning: Google Cloud Vision not installed. Install with: pip install google-cloud-vision")
+
+# Import HistoryManager for proper context management
+try:
+    from history_manager import HistoryManager
+except ImportError:
+    HistoryManager = None
+    print("Warning: HistoryManager not available. Context tracking will be limited.")
 
 logger = logging.getLogger(__name__)
 
@@ -67,10 +75,48 @@ class MangaTranslator:
         self.api_delay = float(self.main_gui.delay_entry.get() if hasattr(main_gui, 'delay_entry') else 2.0)
         self.temperature = float(main_gui.trans_temp.get() if hasattr(main_gui, 'trans_temp') else 0.3)
         self.max_tokens = int(main_gui.max_output_tokens if hasattr(main_gui, 'max_output_tokens') else 4000)
-        self.input_token_limit = int(main_gui.token_limit_entry.get() if hasattr(main_gui, 'token_limit_entry') else 120000)
-        self.contextual_enabled = main_gui.contextual_var.get() if hasattr(main_gui, 'contextual_var') else False
+        if hasattr(main_gui, 'token_limit_disabled') and main_gui.token_limit_disabled:
+            self.input_token_limit = None  # None means no limit
+            self._log("📊 Input token limit: DISABLED (unlimited)")
+        else:
+            token_limit_value = main_gui.token_limit_entry.get() if hasattr(main_gui, 'token_limit_entry') else '120000'
+            if token_limit_value and token_limit_value.strip().isdigit():
+                self.input_token_limit = int(token_limit_value.strip())
+            else:
+                self.input_token_limit = 120000  # Default
+            self._log(f"📊 Input token limit: {self.input_token_limit} tokens")
         
-        # Store context for contextual translation
+        # Get contextual settings from GUI
+        self.contextual_enabled = main_gui.contextual_var.get() if hasattr(main_gui, 'contextual_var') else False
+        self.translation_history_limit = int(main_gui.trans_history.get() if hasattr(main_gui, 'trans_history') else 3)
+        self.rolling_history_enabled = main_gui.translation_history_rolling_var.get() if hasattr(main_gui, 'translation_history_rolling_var') else False
+        
+        # Initialize HistoryManager for proper context tracking
+        self.history_manager = None
+        if HistoryManager:
+            # Create a manga-specific directory for history
+            manga_history_dir = os.path.join(os.getcwd(), "manga_translation_history")
+            os.makedirs(manga_history_dir, exist_ok=True)
+            self.history_manager = HistoryManager(manga_history_dir)
+            self._log(f"📚 Initialized HistoryManager with directory: {manga_history_dir}")
+        
+        # Full page context translation settings
+        self.full_page_context_enabled = True
+        
+        # Default prompt for full page context mode
+        self.full_page_context_prompt = (
+            "You will receive multiple text segments from a manga page. "
+            "Translate each segment considering the context of all segments together. "
+            "Maintain consistency in character names, tone, and style across all translations.\n\n"
+            "IMPORTANT: Return your response as a JSON object where each key is the original text "
+            "and each value is the translation. Example:\n"
+            '{\n'
+            '  "こんにちは": "Hello",\n'
+            '  "ありがとう": "Thank you"\n'
+            '}'
+        )
+        
+        # Store context for contextual translation (backwards compatibility)
         self.translation_context = []
         
         # Font settings for text rendering
@@ -102,13 +148,22 @@ class MangaTranslator:
         self.shadow_offset_y = config.get('manga_shadow_offset_y', 2)
         self.shadow_blur = config.get('manga_shadow_blur', 0)  # 0 = sharp shadow, higher = more blur
         self.skip_inpainting = config.get('manga_skip_inpainting', True)
+
+        # Font size multiplier mode
+        self.font_size_mode = 'fixed'  # 'fixed' or 'multiplier'
+        self.font_size_multiplier = 1.0  # Default multiplier        
+        
+        # Stop flag for interruption
+        self.stop_flag = None
         
         self._log("\n🔧 MangaTranslator initialized with settings:")
         self._log(f"   API Delay: {self.api_delay}s")
         self._log(f"   Temperature: {self.temperature}")
         self._log(f"   Max Output Tokens: {self.max_tokens}")
-        self._log(f"   Input Token Limit: {self.input_token_limit}")
+        self._log(f"   Input Token Limit: {'DISABLED' if self.input_token_limit is None else self.input_token_limit}")
         self._log(f"   Contextual Translation: {'ENABLED' if self.contextual_enabled else 'DISABLED'}")
+        self._log(f"   Translation History Limit: {self.translation_history_limit}")
+        self._log(f"   Rolling History: {'ENABLED' if self.rolling_history_enabled else 'DISABLED'}")
         self._log(f"   Font Path: {self.font_path or 'Default'}")
         self._log(f"   Text Rendering: BG {self.text_bg_style}, Opacity {int(self.text_bg_opacity/255*100)}%")
         self._log(f"   Shadow: {'ENABLED' if self.shadow_enabled else 'DISABLED'}\n")
@@ -122,6 +177,23 @@ class MangaTranslator:
         if self.stop_flag and self.stop_flag.is_set():
             return True
         return False
+    
+    def set_full_page_context(self, enabled: bool, custom_prompt: str = None):
+        """Configure full page context translation mode
+        
+        Args:
+            enabled: Whether to translate all text regions in a single contextual request
+            custom_prompt: Optional custom prompt for full page context mode
+        """
+        self.full_page_context_enabled = enabled
+        if custom_prompt:
+            self.full_page_context_prompt = custom_prompt
+        
+        self._log(f"📄 Full page context mode: {'ENABLED' if enabled else 'DISABLED'}")
+        if enabled:
+            self._log("   All text regions will be sent together for contextual translation")
+        else:
+            self._log("   Text regions will be translated individually")
     
     def update_text_rendering_settings(self, 
                                      bg_opacity: int = None,
@@ -152,9 +224,17 @@ class MangaTranslator:
             font_name = os.path.basename(font_style) if font_style else 'Default'
             self._log(f"  Font: {font_name}", "info")
         if font_size is not None:
-            self.custom_font_size = font_size if font_size > 0 else None
-            self._log(f"  Font size: {font_size if font_size > 0 else 'Auto'}", "info")
-        if text_color is not None:
+            if font_size < 0:
+                # Negative value indicates multiplier mode
+                self.font_size_mode = 'multiplier'
+                self.font_size_multiplier = abs(font_size)
+                self.custom_font_size = None  # Clear fixed size
+                self._log(f"  Font size mode: Dynamic multiplier ({self.font_size_multiplier:.1f}x)", "info")
+            else:
+                # Positive value or 0 indicates fixed mode
+                self.font_size_mode = 'fixed'
+                self.custom_font_size = font_size if font_size > 0 else None
+                self._log(f"  Font size mode: Fixed ({font_size if font_size > 0 else 'Auto'})", "info")
             self.text_color = text_color
             self._log(f"  Text color: RGB{text_color}", "info")
         if shadow_enabled is not None:
@@ -241,35 +321,88 @@ class MangaTranslator:
             self._log(f"❌ Error detecting text: {str(e)}", "error")
             raise
     
+    def _get_translation_history_context(self) -> List[Dict[str, str]]:
+        """Get translation history context from HistoryManager"""
+        if not self.history_manager or not self.contextual_enabled:
+            return []
+        
+        try:
+            # Load full history
+            full_history = self.history_manager.load_history()
+            
+            if not full_history:
+                return []
+            
+            # Extract only the contextual messages up to the limit
+            context = []
+            exchange_count = 0
+            
+            # Process history in pairs (user + assistant messages)
+            for i in range(0, len(full_history), 2):
+                if i + 1 < len(full_history):
+                    user_msg = full_history[i]
+                    assistant_msg = full_history[i + 1]
+                    
+                    if user_msg.get("role") == "user" and assistant_msg.get("role") == "assistant":
+                        context.extend([user_msg, assistant_msg])
+                        exchange_count += 1
+                        
+                        # Only keep up to the history limit
+                        if exchange_count >= self.translation_history_limit:
+                            # Get only the most recent exchanges
+                            context = context[-(self.translation_history_limit * 2):]
+                            break
+            
+            return context
+            
+        except Exception as e:
+            self._log(f"⚠️ Error loading history context: {str(e)}", "warning")
+            return []
+    
     def translate_text(self, text: str, context: Optional[List[Dict]] = None, image_path: str = None, region: TextRegion = None) -> str:
         """Translate text using API with GUI system prompt and full image context"""
         try:
             self._log(f"\n🌐 Starting translation for text: '{text[:50]}...'")
+            # CHECK 1: Before starting
+            if self._check_stop():
+                self._log("⏹️ Translation stopped before full page context processing", "warning")
+                return {}
             
-            # Build messages using system prompt from GUI
-            system_prompt = self.main_gui.prompt_profiles.get(
-                self.main_gui.profile_var.get(), 
-                "Translate the following text."
-            )
+            # Get system prompt from GUI profile
+            profile_name = self.main_gui.profile_var.get()
             
-            self._log(f"📋 Using profile: {self.main_gui.profile_var.get()}")
-            self._log(f"📝 System prompt: {system_prompt[:100]}...")
+            # The main GUI stores prompts directly as attributes, not in a dictionary
+            if profile_name == "Manga_JP":
+                system_prompt = getattr(self.main_gui, 'Manga_JP', '')
+            elif profile_name == "Manga_KR":
+                system_prompt = getattr(self.main_gui, 'Manga_KR', '')
+            elif profile_name == "Manga_CN":
+                system_prompt = getattr(self.main_gui, 'Manga_CN', '')
+            else:
+                # For other profiles, try to get from PROFILES dict
+                system_prompt = self.main_gui.PROFILES.get(profile_name, {}).get('system_prompt', '')
             
-            messages = [{"role": "system", "content": system_prompt}]
+            self._log(f"📋 Using profile: {profile_name}")
+            if system_prompt:
+                self._log(f"📝 System prompt: {system_prompt[:100]}...")
+                messages = [{"role": "system", "content": system_prompt}]
+            else:
+                self._log(f"📝 No system prompt configured")
+                messages = []
             
             # Add contextual translations if enabled
-            if self.contextual_enabled and self.translation_context:
-                context_count = len(self.translation_context[-3:])
-                self._log(f"🔗 Contextual enabled: Adding {context_count} previous translations")
+            if self.contextual_enabled and self.history_manager:
+                # Get history from HistoryManager
+                history_context = self._get_translation_history_context()
                 
-                # Include previous translations as context
-                for ctx in self.translation_context[-3:]:  # Last 3 translations
-                    messages.extend([
-                        {"role": "user", "content": ctx["original"]},
-                        {"role": "assistant", "content": ctx["translated"]}
-                    ])
+                if history_context:
+                    context_count = len(history_context) // 2  # Each exchange is 2 messages
+                    self._log(f"🔗 Adding {context_count} previous exchanges from history (limit: {self.translation_history_limit})")
+                    messages.extend(history_context)
+                else:
+                    self._log(f"🔗 Contextual enabled but no history available yet")
             else:
-                self._log(f"🔗 Contextual: {'Enabled but no context yet' if self.contextual_enabled else 'Disabled'}")
+                self._log(f"🔗 Contextual: {'Disabled' if not self.contextual_enabled else 'No HistoryManager'}")
             
             # Add full image context if available
             if image_path:
@@ -377,15 +510,28 @@ class MangaTranslator:
                             image_tokens += 258
 
             estimated_tokens = text_tokens + image_tokens
-            self._log(f"📊 Token estimate - Text: {text_tokens}, Images: {image_tokens} (Total: {estimated_tokens} / {self.input_token_limit})")
-            
-            if estimated_tokens > self.input_token_limit:
-                self._log(f"⚠️ Token limit exceeded, trimming context", "warning")
-                # Keep system prompt, image, and current text only
-                if image_path:
-                    messages = [messages[0], messages[-1]]  
-                else:
-                    messages = [messages[0], {"role": "user", "content": text}]
+
+            # Check token limit only if it's enabled
+            if self.input_token_limit is None:
+                self._log(f"📊 Token estimate - Text: {text_tokens}, Images: {image_tokens} (Total: {estimated_tokens} / unlimited)")
+            else:
+                self._log(f"📊 Token estimate - Text: {text_tokens}, Images: {image_tokens} (Total: {estimated_tokens} / {self.input_token_limit})")
+                
+                if estimated_tokens > self.input_token_limit:
+                    self._log(f"⚠️ Token limit exceeded, trimming context", "warning")
+                    # Keep system prompt, image, and current text only
+                    if image_path:
+                        messages = [messages[0], messages[-1]]  
+                    else:
+                        messages = [messages[0], {"role": "user", "content": text}]
+                    # Recalculate tokens after trimming
+                    text_tokens = len(messages[0]["content"]) // 4
+                    if isinstance(messages[-1].get("content"), str):
+                        text_tokens += len(messages[-1]["content"]) // 4
+                    else:
+                        text_tokens += len(messages[-1]["content"][0]["text"]) // 4
+                    estimated_tokens = text_tokens + image_tokens
+                    self._log(f"📊 Trimmed token estimate: {estimated_tokens}")
             
             start_time = time.time()
             api_time = 0  # Initialize to avoid NameError
@@ -524,13 +670,34 @@ class MangaTranslator:
                 if replacements > 0:
                     self._log(f"   ✏️ Made {replacements} glossary replacements")
             
-            # Store in context for future translations
-            if self.contextual_enabled:
-                self.translation_context.append({
-                    "original": text,
-                    "translated": translated
-                })
-                self._log(f"💾 Stored in context (total: {len(self.translation_context)} entries)")
+            # Store in history if HistoryManager is available
+            if self.history_manager and self.contextual_enabled:
+                try:
+                    # Append to history with proper limit handling
+                    self.history_manager.append_to_history(
+                        user_content=text,
+                        assistant_content=translated,
+                        hist_limit=self.translation_history_limit,
+                        reset_on_limit=not self.rolling_history_enabled,
+                        rolling_window=self.rolling_history_enabled
+                    )
+                    
+                    # Check if we're about to hit the limit
+                    if self.history_manager.will_reset_on_next_append(
+                        self.translation_history_limit, 
+                        self.rolling_history_enabled
+                    ):
+                        mode = "roll over" if self.rolling_history_enabled else "reset"
+                        self._log(f"📚 History will {mode} on next translation (at limit: {self.translation_history_limit})")
+                    
+                except Exception as e:
+                    self._log(f"⚠️ Failed to save to history: {str(e)}", "warning")
+            
+            # Also store in legacy context for compatibility
+            self.translation_context.append({
+                "original": text,
+                "translated": translated
+            })
             
             return translated
             
@@ -540,7 +707,400 @@ class MangaTranslator:
             import traceback
             self._log(f"   Traceback: {traceback.format_exc()}", "error")
             return text
-    
+
+    def translate_full_page_context(self, regions: List[TextRegion], image_path: str) -> Dict[str, str]:
+        """Translate all text regions with full page context in a single request"""
+        try:
+            import time
+            import traceback
+            
+            self._log(f"\n📄 Full page context translation of {len(regions)} text regions")
+            
+            # Get system prompt from GUI profile
+            profile_name = self.main_gui.profile_var.get()
+            
+            # Try to get the prompt from prompt_profiles dictionary (for all profiles including custom ones)
+            system_prompt = ''
+            if hasattr(self.main_gui, 'prompt_profiles') and profile_name in self.main_gui.prompt_profiles:
+                system_prompt = self.main_gui.prompt_profiles[profile_name]
+                self._log(f"📋 Using profile: {profile_name}")
+            else:
+                # Fallback to check if it's stored as a direct attribute (legacy support)
+                system_prompt = getattr(self.main_gui, profile_name.replace(' ', '_'), '')
+                if system_prompt:
+                    self._log(f"📋 Using profile (legacy): {profile_name}")
+                else:
+                    self._log(f"⚠️ Profile '{profile_name}' not found, using empty prompt", "warning")
+            
+            # Combine with full page context instructions
+            if system_prompt:
+                system_prompt = f"{system_prompt}\n\n{self.full_page_context_prompt}"
+            else:
+                system_prompt = self.full_page_context_prompt
+            
+            messages = [{"role": "system", "content": system_prompt}]
+            
+            # CHECK 2: Before adding context
+            if self._check_stop():
+                self._log("⏹️ Translation stopped during context preparation", "warning")
+                return {}
+            
+            # Add contextual translations if enabled
+            if self.contextual_enabled and self.history_manager:
+                history_context = self._get_translation_history_context()
+                if history_context:
+                    context_count = len(history_context) // 2
+                    self._log(f"🔗 Adding {context_count} previous exchanges from history")
+                    messages.extend(history_context)
+            
+            # Prepare text segments with indices
+            all_texts = {}
+            text_list = []
+            for i, region in enumerate(regions):
+                # Use index-based key to handle duplicate texts
+                key = f"[{i}] {region.text}"
+                all_texts[key] = region.text
+                text_list.append(f"{key}")
+                
+            # CHECK 3: Before image processing
+            if self._check_stop():
+                self._log("⏹️ Translation stopped before image processing", "warning")
+                return {}
+                    
+            # Create the request with image
+            try:
+                import base64
+                from PIL import Image as PILImage
+                
+                self._log(f"📷 Adding full page visual context for translation")
+                
+                # Read and encode the image
+                with open(image_path, 'rb') as img_file:
+                    img_data = img_file.read()
+                
+                # Check image size
+                img_size_mb = len(img_data) / (1024 * 1024)
+                self._log(f"📊 Image size: {img_size_mb:.2f} MB")
+                
+                # Get image dimensions
+                pil_image = PILImage.open(image_path)
+                self._log(f"   Image dimensions: {pil_image.width}x{pil_image.height}")
+ 
+                # CHECK 4: Before resizing (which can take time)
+                if self._check_stop():
+                    self._log("⏹️ Translation stopped during image preparation", "warning")
+                    return {}
+                
+                # Resize if needed
+                if img_size_mb > 10:
+                    self._log(f"📉 Resizing large image for API limits...")
+                    max_size = 2048
+                    ratio = min(max_size / pil_image.width, max_size / pil_image.height)
+                    if ratio < 1:
+                        new_size = (int(pil_image.width * ratio), int(pil_image.height * ratio))
+                        pil_image = pil_image.resize(new_size, PILImage.Resampling.LANCZOS)
+                        from io import BytesIO
+                        buffered = BytesIO()
+                        pil_image.save(buffered, format="PNG", optimize=True)
+                        img_data = buffered.getvalue()
+                        self._log(f"✅ Resized to {new_size[0]}x{new_size[1]}px ({len(img_data)/(1024*1024):.2f} MB)")
+                
+                # Convert to base64
+                img_b64 = base64.b64encode(img_data).decode('utf-8')
+                
+                # Create the full context message
+                context_text = "\n".join(text_list)
+                
+                # Log text content info
+                total_chars = sum(len(region.text) for region in regions)
+                self._log(f"📝 Text content: {len(regions)} regions, {total_chars} total characters")
+                
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": context_text},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
+                    ]
+                })
+                
+                self._log(f"✅ Added full page image as visual context")
+                
+            except Exception as e:
+                self._log(f"⚠️ Failed to add image context: {str(e)}", "warning")
+                self._log(f"   Error type: {type(e).__name__}", "warning")
+                import traceback
+                self._log(traceback.format_exc(), "warning")
+                # Fall back to text-only translation
+                messages.append({"role": "user", "content": context_text})
+
+            # CHECK 5: Before API call
+            if self._check_stop():
+                self._log("⏹️ Translation stopped before API call", "warning")
+                return {}
+            
+            # Check input token limit
+            # For Gemini, images cost approximately 258 tokens per image (for Gemini 1.5)
+            # Text tokens are roughly 1 token per 4 characters
+            text_tokens = 0
+            image_tokens = 0
+
+            for msg in messages:
+                if isinstance(msg.get("content"), str):
+                    # Simple text message
+                    text_tokens += len(msg["content"]) // 4
+                elif isinstance(msg.get("content"), list):
+                    # Message with mixed content (text + image)
+                    for content_part in msg["content"]:
+                        if content_part.get("type") == "text":
+                            text_tokens += len(content_part.get("text", "")) // 4
+                        elif content_part.get("type") == "image_url":
+                            # Gemini charges a flat rate per image regardless of size
+                            # For Gemini 1.5 Flash: 258 tokens per image
+                            # For Gemini 1.5 Pro: 258 tokens per image
+                            image_tokens += 258
+
+            estimated_tokens = text_tokens + image_tokens
+
+            # Check token limit only if it's enabled
+            if self.input_token_limit is None:
+                self._log(f"📊 Token estimate - Text: {text_tokens}, Images: {image_tokens} (Total: {estimated_tokens} / unlimited)")
+            else:
+                self._log(f"📊 Token estimate - Text: {text_tokens}, Images: {image_tokens} (Total: {estimated_tokens} / {self.input_token_limit})")
+                
+                if estimated_tokens > self.input_token_limit:
+                    self._log(f"⚠️ Token limit exceeded, trimming context", "warning")
+                    # Keep system prompt, image, and current text only
+                    messages = [messages[0], messages[-1]]  
+                    # Recalculate tokens
+                    text_tokens = len(messages[0]["content"]) // 4 + len(context_text) // 4
+                    estimated_tokens = text_tokens + image_tokens
+                    self._log(f"📊 Trimmed token estimate: {estimated_tokens}")
+            
+            # Make API call using the client's send method (matching translate_text)
+            self._log(f"🌐 Sending full page context to API...")
+            self._log(f"   API Model: {self.client.model if hasattr(self.client, 'model') else 'unknown'}")
+            self._log(f"   Temperature: {self.temperature}")
+            self._log(f"   Max Output Tokens: {self.max_tokens}")
+            
+            start_time = time.time()
+            api_time = 0  # Initialize to avoid NameError
+            
+            try:
+                response = self.client.send(
+                    messages=messages,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens  # Use the configured max tokens without multiplication
+                )
+                api_time = time.time() - start_time
+                
+                # CHECK 6: Immediately after API response
+                if self._check_stop():
+                    self._log(f"⏹️ Translation stopped after API call ({api_time:.2f}s)", "warning")
+                    return {}
+                
+                self._log(f"✅ API responded in {api_time:.2f} seconds")
+                
+            except Exception as api_error:
+                api_time = time.time() - start_time
+                
+                # CHECK 7: After API error
+                if self._check_stop():
+                    self._log(f"⏹️ Translation stopped during API error handling", "warning")
+                    return {}
+                
+                error_str = str(api_error).lower()
+                error_type = type(api_error).__name__
+                
+                # Check for specific error types
+                if "429" in error_str or "rate limit" in error_str:
+                    self._log(f"⚠️ RATE LIMIT ERROR (429) after {api_time:.2f}s", "error")
+                    self._log(f"   The API rate limit has been exceeded", "error")
+                    self._log(f"   Please wait before retrying or reduce request frequency", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Rate limit exceeded (429): {str(api_error)}")
+                    
+                elif "401" in error_str or "unauthorized" in error_str:
+                    self._log(f"❌ AUTHENTICATION ERROR (401) after {api_time:.2f}s", "error")
+                    self._log(f"   Invalid API key or authentication failed", "error")
+                    self._log(f"   Please check your API key in settings", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Authentication failed (401): {str(api_error)}")
+                    
+                elif "403" in error_str or "forbidden" in error_str:
+                    self._log(f"❌ FORBIDDEN ERROR (403) after {api_time:.2f}s", "error")
+                    self._log(f"   Access denied - check API permissions", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Access forbidden (403): {str(api_error)}")
+                    
+                elif "400" in error_str or "bad request" in error_str:
+                    self._log(f"❌ BAD REQUEST ERROR (400) after {api_time:.2f}s", "error")
+                    self._log(f"   Invalid request format or parameters", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Bad request (400): {str(api_error)}")
+                    
+                elif "timeout" in error_str:
+                    self._log(f"⏱️ TIMEOUT ERROR after {api_time:.2f}s", "error")
+                    self._log(f"   API request timed out", "error")
+                    self._log(f"   Consider increasing timeout or retry", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Request timeout: {str(api_error)}")
+                    
+                else:
+                    # Generic API error
+                    self._log(f"❌ API ERROR ({error_type}) after {api_time:.2f}s", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    self._log(f"   Full traceback:", "error")
+                    self._log(traceback.format_exc(), "error")
+                    raise
+            
+            # Extract content from response (matching translate_text method)
+            if hasattr(response, 'content'):
+                response_text = response.content.strip()
+            else:
+                response_text = str(response).strip()
+            
+            self._log(f"📥 Received response ({len(response_text)} chars)")
+            
+            # CHECK 8: Before parsing response
+            if self._check_stop():
+                self._log("⏹️ Translation stopped before parsing response", "warning")
+                return {}
+            
+            self._log(f"🔍 Raw response type: {type(response)}")
+            self._log(f"🔍 Raw response preview: '{response_text[:100]}...'")
+            
+            # Check if the response looks like a Python literal (tuple/string representation)
+            if response_text.startswith("('") or response_text.startswith('("') or response_text.startswith("('''"):
+                self._log(f"⚠️ Detected Python literal in response, attempting to extract actual text", "warning")
+                original_response = response_text
+                try:
+                    # Try to evaluate it as a Python literal
+                    import ast
+                    evaluated = ast.literal_eval(response_text)
+                    self._log(f"📦 Evaluated type: {type(evaluated)}")
+                    
+                    if isinstance(evaluated, tuple):
+                        # Take the first element of the tuple
+                        response_text = str(evaluated[0])
+                        self._log(f"📦 Extracted from tuple: '{response_text[:50]}...'")
+                    elif isinstance(evaluated, str):
+                        response_text = evaluated
+                        self._log(f"📦 Extracted string: '{response_text[:50]}...'")
+                    else:
+                        self._log(f"⚠️ Unexpected type after eval: {type(evaluated)}", "warning")
+                        
+                except Exception as e:
+                    self._log(f"⚠️ Failed to parse Python literal: {e}", "warning")
+                    self._log(f"⚠️ Original content: {original_response[:200]}", "warning")
+                    
+                    # Try regex as fallback
+                    import re
+                    match = re.search(r"^\(['\"](.+)['\"]\)$", response_text, re.DOTALL)
+                    if match:
+                        response_text = match.group(1)
+                        self._log(f"📦 Regex extracted: '{response_text[:50]}...'")
+            
+            # Additional check for escaped content
+            if '\\\\' in response_text or '\\n' in response_text:
+                self._log(f"⚠️ Detected escaped content, unescaping...", "warning")
+                try:
+                    # Unescape the string
+                    before = response_text
+                    response_text = response_text.encode().decode('unicode_escape')
+                    self._log(f"📦 Unescaped content")
+                except Exception as e:
+                    self._log(f"⚠️ Failed to unescape: {e}", "warning")
+            
+            # Try to parse as JSON
+            translations = {}
+            try:
+                # Clean up response if needed
+                if "```json" in response_text:
+                    import re
+                    match = re.search(r'```json\s*(.*?)```', response_text, re.DOTALL)
+                    if match:
+                        response_text = match.group(1)
+                elif "```" in response_text:
+                    import re
+                    match = re.search(r'```\s*(.*?)```', response_text, re.DOTALL)
+                    if match:
+                        response_text = match.group(1)
+                
+                # Parse JSON
+                import json
+                translations = json.loads(response_text)
+                self._log(f"✅ Successfully parsed {len(translations)} translations")
+                
+            except json.JSONDecodeError as e:
+                self._log(f"⚠️ Failed to parse JSON response: {str(e)}", "warning")
+                self._log(f"Response preview: {response_text[:200]}...", "warning")
+                
+                # Fallback: try to extract translations manually
+                return {}
+            
+            # Map translations back to regions
+            result = {}
+            for i, region in enumerate(regions):
+                
+                # CHECK 9: During mapping (in case there are many regions)
+                if i % 10 == 0 and self._check_stop():  # Check every 10 regions
+                    self._log(f"⏹️ Translation stopped during mapping (processed {i}/{len(regions)} regions)", "warning")
+                    return result  #
+                
+                key = f"[{i}] {region.text}"
+                
+                # First try with the indexed key
+                if key in translations:
+                    translated = translations[key]
+                    self._log(f"  ✅ Found translation with indexed key for region {i}")
+                # Then try with just the text (without index)
+                elif region.text in translations:
+                    translated = translations[region.text]
+                    self._log(f"  ✅ Found translation with text-only key for region {i}")
+                else:
+                    self._log(f"⚠️ No translation found for region {i}", "warning")
+                    self._log(f"   Tried keys: '{key}' and '{region.text}'", "warning")
+                    self._log(f"   Available keys sample: {list(translations.keys())[:2]}...", "warning")
+                    translated = region.text  # Use original as fallback
+                
+                # Apply glossary
+                if translated != region.text and hasattr(self.main_gui, 'manual_glossary') and self.main_gui.manual_glossary:
+                    for entry in self.main_gui.manual_glossary:
+                        if 'source' in entry and 'target' in entry:
+                            if entry['source'] in translated:
+                                translated = translated.replace(entry['source'], entry['target'])
+                
+                result[region.text] = translated
+                
+                if translated != region.text:
+                    self._log(f"  ✅ Mapped translation: '{region.text[:30]}...' → '{translated[:30]}...'")
+                
+                # Store in history
+                if self.history_manager and self.contextual_enabled and translated != region.text:
+                    try:
+                        self.history_manager.append_to_history(
+                            user_content=region.text,
+                            assistant_content=translated,
+                            hist_limit=self.translation_history_limit,
+                            reset_on_limit=not self.rolling_history_enabled,
+                            rolling_window=self.rolling_history_enabled
+                        )
+                    except Exception as e:
+                        self._log(f"⚠️ Failed to save to history: {str(e)}", "warning")
+            
+            return result
+            
+        except Exception as e:
+            
+            # CHECK 10: In exception handler
+            if self._check_stop():
+                self._log("⏹️ Translation stopped due to user request", "warning")
+                return {}  
+                
+            self._log(f"❌ Full page context translation error: {str(e)}", "error")
+            self._log(traceback.format_exc(), "error")
+            return {}
+            
     def create_text_mask(self, image: np.ndarray, regions: List[TextRegion]) -> np.ndarray:
         """Create a binary mask for text regions using exact vertices from Cloud Vision"""
         mask = np.zeros(image.shape[:2], dtype=np.uint8)
@@ -640,11 +1200,18 @@ class MangaTranslator:
                     
                     # Find optimal font size
                     if self.custom_font_size:
+                        # Fixed size specified
                         font_size = self.custom_font_size
                         lines = self._wrap_text(region.translated_text, 
                                               self._get_font(font_size), 
                                               int(w * 0.8), region_draw)
+                    elif self.font_size_mode == 'multiplier':
+                        # Use dynamic sizing with multiplier
+                        font_size, lines = self._fit_text_to_region(
+                            region.translated_text, w, h, region_draw
+                        )
                     else:
+                        # Auto mode - use standard fitting
                         font_size, lines = self._fit_text_to_region(
                             region.translated_text, w, h, region_draw
                         )
@@ -877,8 +1444,24 @@ class MangaTranslator:
         usable_width = int(max_width * 0.8)
         usable_height = int(max_height * 0.8)
         
+        # Apply multiplier to font size range if in multiplier mode
+        min_font_size = self.min_font_size
+        max_font_size = self.max_font_size
+        
+        if self.font_size_mode == 'multiplier':
+            # Calculate base font size based on region dimensions
+            # Base size is proportional to the smaller dimension
+            base_size = min(max_width, max_height) // 8  # Adjust divisor as needed
+            
+            # Apply multiplier
+            target_size = int(base_size * self.font_size_multiplier)
+            
+            # Clamp to reasonable bounds
+            min_font_size = max(self.min_font_size, int(target_size * 0.7))
+            max_font_size = min(self.max_font_size * 2, int(target_size * 1.3))  # Allow larger max in multiplier mode
+        
         # Try different font sizes
-        for font_size in range(self.max_font_size, self.min_font_size, -1):
+        for font_size in range(max_font_size, min_font_size, -1):
             font = self._get_font(font_size)
             
             # Wrap text
@@ -892,15 +1475,15 @@ class MangaTranslator:
                 return font_size, lines
         
         # If nothing fits, use minimum size
-        font = self._get_font(self.min_font_size)
+        font = self._get_font(min_font_size)
         lines = self._wrap_text(text, font, usable_width, draw)
         
         # Truncate if needed
-        max_lines = int(usable_height // (self.min_font_size * 1.2))
+        max_lines = int(usable_height // (min_font_size * 1.2))
         if len(lines) > max_lines:
             lines = lines[:max_lines-1] + [lines[max_lines-1][:10] + '...']
         
-        return self.min_font_size, lines
+        return min_font_size, lines
     
     def _wrap_text(self, text: str, font: ImageFont, max_width: int, draw: ImageDraw) -> List[str]:
         """Wrap text to fit within max_width"""
@@ -1060,48 +1643,94 @@ class MangaTranslator:
         return regions
 
     def process_image(self, image_path: str, output_path: Optional[str] = None) -> Dict[str, Any]:
-        """Main processing pipeline for a single manga image"""
+        """Process a single manga image through the full pipeline"""
+        
+        self._log(f"\n{'='*60}")
+        self._log(f"🖼️ STARTING MANGA TRANSLATION PIPELINE")
+        self._log(f"📁 Input: {image_path}")
+        self._log(f"📁 Output: {output_path or 'Auto-generated'}")
+        self._log(f"{'='*60}\n")
+        
         result = {
             'success': False,
             'input_path': image_path,
-            'output_path': None,
+            'output_path': output_path,
             'regions': [],
             'errors': [],
             'interrupted': False
         }
         
-        # Check if we should continue after translation
-        if self._check_stop():
-            result['interrupted'] = True
-            self._log("⏹️ Translation cancelled before image processing", "warning")
-            # Still save what we translated
-            result['regions'] = [r.to_dict() for r in regions]
-            return result
-        
         try:
-            self._log(f"\n{'='*60}")
-            self._log(f"🚀 STARTING MANGA TRANSLATION PIPELINE")
-            self._log(f"📄 Input: {image_path}")
-            self._log(f"{'='*60}\n")
-            
-            # Check stop before starting
+            # Check for stop signal
             if self._check_stop():
                 result['interrupted'] = True
-                self._log("⏹️ Translation cancelled before starting", "warning")
-                return result   
-                
-            # Step 1: Detect text regions
-            self._log(f"\n📍 [STEP 1] Text Detection Phase")
+                self._log("⏹️ Translation stopped before processing", "warning")
+                return result
+            
+            # Step 1: Detect text regions using Google Cloud Vision
+            self._log(f"📍 [STEP 1] Text Detection Phase")
             regions = self.detect_text_regions(image_path)
             
             if not regions:
-                self._log("⚠️ No text regions detected in image", "warning")
-                result['errors'].append("No text detected")
+                error_msg = "No text regions detected by Cloud Vision"
+                self._log(f"⚠️ {error_msg}", "warning")
+                result['errors'].append(error_msg)
+                # Still save the original image as "translated" if no text found
+                if output_path:
+                    import shutil
+                    shutil.copy2(image_path, output_path)
+                    result['output_path'] = output_path
+                result['success'] = True  # Consider it a success if no text to translate
                 return result
             
-            # Step 2: Translate text with stop checks
+            self._log(f"\n✅ Detection complete: {len(regions)} regions found")
+            
+            # Step 2: Translate regions (full page context or individual based on settings)
             self._log(f"\n📍 [STEP 2] Translation Phase")
-            regions = self.translate_regions(regions, image_path)
+            
+            if self.full_page_context_enabled:
+                # Full page context translation mode
+                self._log(f"\n📄 Using FULL PAGE CONTEXT mode")
+                self._log("   This mode sends all text together for more consistent translations", "info")
+                self._log(f"   ⚠️ Note: Full page context uses a single API call - stopping may take a moment")
+                
+                # Check for stop signal
+                if self._check_stop():
+                    result['interrupted'] = True
+                    self._log("\n⏹️ Translation stopped before processing", "warning")
+                    return result
+
+                
+                # Check for stop signal
+                if self._check_stop():
+                    result['interrupted'] = True
+                    self._log("\n⏹️ Translation stopped before processing", "warning")
+                    return result
+                
+                # Translate all regions at once with full context
+                translations = self.translate_full_page_context(regions, image_path)
+                
+                if translations:
+                    # Apply translations to regions
+                    translated_count = 0
+                    for region in regions:
+                        if region.text in translations:
+                            region.translated_text = translations[region.text]
+                            translated_count += 1
+                            self._log(f"   ✅ Applied translation for: '{region.text[:30]}...'")
+                        else:
+                            self._log(f"   ⚠️ No translation found for: '{region.text[:30]}...'", "warning")
+                    
+                    self._log(f"\n📊 Full page context translation complete: {translated_count}/{len(regions)} regions translated")
+                else:
+                    self._log("❌ Full page context translation failed - no translations returned", "error")
+                    result['errors'].append("Full page context translation failed")
+                    
+            else:
+                # Individual translation mode (original behavior)
+                self._log(f"\n📝 Using INDIVIDUAL translation mode")
+                
+                regions = self.translate_regions(regions, image_path)
 
             # Check if we should continue after translation
             if self._check_stop():
@@ -1142,8 +1771,6 @@ class MangaTranslator:
             # Render translated text
             self._log(f"✍️ Rendering translated text...")
             self._log(f"   Using enhanced renderer with custom settings", "info")
-            self._log(f"   Background opacity before render: {self.text_bg_opacity}", "info")
-            self._log(f"   Background style before render: {self.text_bg_style}", "info")
             final_image = self.render_translated_text(inpainted, regions)
             
             # Save output
@@ -1169,120 +1796,6 @@ class MangaTranslator:
                 self._log(f"\n⚠️ TRANSLATION INTERRUPTED - Partial output saved", "warning")
 
             self._log(f"{'='*60}\n")
-            
-            # Clear context if it gets too large
-            if len(self.translation_context) > 10:
-                old_count = len(self.translation_context)
-                self.translation_context = self.translation_context[-5:]
-                self._log(f"🧹 Trimmed context from {old_count} to {len(self.translation_context)} entries")
-            
-        except Exception as e:
-            error_msg = f"Error processing image: {str(e)}\n{traceback.format_exc()}"
-            self._log(f"\n❌ PIPELINE ERROR:", "error")
-            self._log(f"   {str(e)}", "error")
-            self._log(f"   Type: {type(e).__name__}", "error")
-            self._log(traceback.format_exc(), "error")
-            result['errors'].append(error_msg)
-        
-        return result
-
-        
-    def process_single_image(self, image_path: str, output_path: Optional[str] = None) -> Dict[str, Any]:
-        """Process a single manga image through the full pipeline"""
-        
-        self._log(f"\n{'='*60}")
-        self._log(f"🖼️ STARTING MANGA TRANSLATION PIPELINE")
-        self._log(f"📁 Input: {image_path}")
-        self._log(f"📁 Output: {output_path or 'Auto-generated'}")
-        self._log(f"{'='*60}\n")
-        
-        result = {
-            'success': False,
-            'input_path': image_path,
-            'output_path': output_path,
-            'regions': [],
-            'errors': []
-        }
-        
-        try:
-            # Step 1: Detect text regions using Google Cloud Vision
-            self._log(f"📍 [STEP 1] Text Detection Phase")
-            regions = self.detect_text_regions(image_path)
-            
-            if not regions:
-                error_msg = "No text regions detected by Cloud Vision"
-                self._log(f"⚠️ {error_msg}", "warning")
-                result['errors'].append(error_msg)
-                return result
-            
-            self._log(f"\n✅ Detection complete: {len(regions)} regions found")
-            
-            # Step 2: Translate each region
-            self._log(f"\n📍 [STEP 2] Translation Phase")
-            
-            for i, region in enumerate(regions):
-                self._log(f"\n🔄 Region {i+1}/{len(regions)}:")
-                self._log(f"   Original: '{region.text[:50]}...'")
-                self._log(f"   Location: {region.bounding_box}")
-                
-                region.translated_text = self.translate_text(
-                region.text, 
-                image_path=image_path,
-                region=region
-                )
-                
-                self._log(f"   Translated: '{region.translated_text[:50]}...'")
-                
-                # Respect API delay between translations
-                if i < len(regions) - 1:
-                    self._log(f"⏱️ Waiting {self.api_delay}s before next translation...")
-                    time.sleep(self.api_delay)
-            
-            # Step 3: Process image
-            self._log(f"\n📍 [STEP 3] Image Processing Phase")
-            
-            import cv2
-            self._log(f"🖼️ Loading image with OpenCV...")
-            image = cv2.imread(image_path)
-            self._log(f"   Image dimensions: {image.shape[1]}x{image.shape[0]}")
-            
-            # Create mask for text regions
-           # self._log(f"🎭 Creating text mask...")
-            #mask = self.create_text_mask(image, regions)
-            
-            # Inpaint to remove original text
-            #self._log(f"🎨 Inpainting to remove original text...")
-            #inpainted = self.inpaint_regions(image, mask)
-            
-            # Render translated text
-            self._log(f"✍️ Rendering translated text...")
-            final_image = self.render_translated_text(inpainted, regions)
-            
-            # Save output
-            if output_path:
-                cv2.imwrite(output_path, final_image)
-                result['output_path'] = output_path
-            else:
-                # Generate output path
-                base, ext = os.path.splitext(image_path)
-                output_path = f"{base}_translated{ext}"
-                cv2.imwrite(output_path, final_image)
-                result['output_path'] = output_path
-            
-            self._log(f"\n💾 Saved output to: {output_path}")
-            
-            # Update result
-            result['success'] = True
-            result['regions'] = [r.to_dict() for r in regions]
-            
-            self._log(f"\n✅ TRANSLATION PIPELINE COMPLETE", "success")
-            self._log(f"{'='*60}\n")
-            
-            # Clear context if it gets too large
-            if len(self.translation_context) > 10:
-                old_count = len(self.translation_context)
-                self.translation_context = self.translation_context[-5:]
-                self._log(f"🧹 Trimmed context from {old_count} to {len(self.translation_context)} entries")
             
         except Exception as e:
             error_msg = f"Error processing image: {str(e)}\n{traceback.format_exc()}"
