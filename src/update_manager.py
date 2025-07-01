@@ -24,6 +24,8 @@ class UpdateManager:
         self.latest_release = None
         self.download_progress = 0
         self.is_downloading = False
+        self._last_check_time = 0
+        self._check_cache_duration = 3600  # Cache for 1 hour
         
         # Get version from the main GUI's __version__ variable
         if hasattr(main_gui, '__version__'):
