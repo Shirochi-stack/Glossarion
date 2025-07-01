@@ -1761,7 +1761,34 @@ class MangaTranslator:
             
             import cv2
             self._log(f"🖼️ Loading image with OpenCV...")
-            image = cv2.imread(image_path)
+            # Use numpy and PIL as a workaround
+            try:
+                # Method 1: Try cv2.imread first
+                image = cv2.imread(image_path)
+                
+                if image is None:
+                    # Method 2: Use PIL for Unicode paths
+                    self._log(f"   Using PIL to handle Unicode path...", "info")
+                    from PIL import Image as PILImage
+                    import numpy as np
+                    
+                    pil_image = PILImage.open(image_path)
+                    # Convert PIL image to OpenCV format (BGR)
+                    image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+                    self._log(f"   ✅ Successfully loaded with PIL", "info")
+                    
+            except Exception as e:
+                error_msg = f"Failed to load image: {image_path} - {str(e)}"
+                self._log(f"❌ {error_msg}", "error")
+                self._log(f"   Error type: {type(e).__name__}", "error")
+                result['errors'].append(error_msg)
+                return result
+
+            if image is None:
+                error_msg = f"Failed to load image: {image_path}"
+                self._log(f"❌ {error_msg}", "error")
+                result['errors'].append(error_msg)
+                return result        
             self._log(f"   Image dimensions: {image.shape[1]}x{image.shape[0]}")
             
             # Check if we should skip inpainting based on user preference
