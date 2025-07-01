@@ -94,11 +94,19 @@ class MangaTranslator:
         # Initialize HistoryManager for proper context tracking
         self.history_manager = None
         if HistoryManager:
-            # Create a manga-specific directory for history
-            manga_history_dir = os.path.join(os.getcwd(), "manga_translation_history")
-            os.makedirs(manga_history_dir, exist_ok=True)
-            self.history_manager = HistoryManager(manga_history_dir)
-            self._log(f"📚 Initialized HistoryManager with directory: {manga_history_dir}")
+            # Create a manga-specific directory for history relative to the script location
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            manga_history_dir = os.path.join(script_dir, "manga_translation_history")
+            
+            # Ensure the directory exists with additional error handling
+            try:
+                os.makedirs(manga_history_dir, exist_ok=True)
+                self.history_manager = HistoryManager(manga_history_dir)
+                self._log(f"📚 Initialized HistoryManager with directory: {manga_history_dir}")
+            except Exception as e:
+                self._log(f"⚠️ Failed to create history directory: {str(e)}", "warning")
+                self._log(f"   Attempted path: {manga_history_dir}", "warning")
+                self.history_manager = None
         
         # Full page context translation settings
         self.full_page_context_enabled = True
