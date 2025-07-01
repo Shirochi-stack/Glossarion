@@ -1,5 +1,6 @@
 # update_manager.py - Auto-update functionality for Glossarion
 import os
+import sys
 import json
 import requests
 import threading
@@ -45,6 +46,9 @@ class UpdateManager:
             Tuple of (update_available, release_info)
         """
         try:
+            # Check if this version was previously skipped
+            skipped_versions = self.main_gui.config.get('skipped_versions', [])
+            
             headers = {
                 'Accept': 'application/vnd.github.v3+json',
                 'User-Agent': 'Glossarion-Updater'
@@ -56,42 +60,99 @@ class UpdateManager:
             release_data = response.json()
             latest_version = release_data['tag_name'].lstrip('v')
             
+            # Check if this version was skipped by user
+            if release_data['tag_name'] in skipped_versions:
+                return False, None
+            
             # Compare versions
             if version.parse(latest_version) > version.parse(self.CURRENT_VERSION):
                 self.update_available = True
                 self.latest_release = release_data
                 
+                # Pre-process release notes to improve dialog loading speed
+                if 'body' in release_data and release_data['body']:
+                    # Limit release notes length and clean up markdown
+                    max_length = 2000
+                    body = release_data['body']
+                    
+                    # Remove excessive newlines
+                    body = '\n'.join(line for line in body.split('\n') if line.strip())
+                    
+                    # Truncate if too long
+                    if len(body) > max_length:
+                        body = body[:max_length] + "\n\n... (see full notes on GitHub)"
+                    
+                    release_data['body'] = body
+                
                 if not silent:
-                    self.show_update_dialog()
+                    # Show dialog after a short delay to ensure UI is responsive
+                    self.main_gui.master.after(100, self.show_update_dialog)
                     
                 return True, release_data
             else:
+                # We're up to date
                 if not silent:
                     messagebox.showinfo("Update Check", 
                                       f"You are running the latest version ({self.CURRENT_VERSION})")
                 return False, None
                 
-        except requests.RequestException as e:
+        except requests.Timeout:
             if not silent:
                 messagebox.showerror("Update Check Failed", 
-                                   f"Could not check for updates:\n{str(e)}")
+                                   "Connection timed out. Please check your internet connection.")
+            return False, None
+            
+        except requests.ConnectionError:
+            if not silent:
+                messagebox.showerror("Update Check Failed", 
+                                   "Could not connect to GitHub. Please check your internet connection.")
+            return False, None
+            
+        except requests.HTTPError as e:
+            if not silent:
+                if e.response.status_code == 403:
+                    messagebox.showerror("Update Check Failed", 
+                                       "GitHub API rate limit exceeded. Please try again later.")
+                else:
+                    messagebox.showerror("Update Check Failed", 
+                                       f"GitHub returned error: {e.response.status_code}")
+            return False, None
+            
+        except ValueError as e:
+            if not silent:
+                messagebox.showerror("Update Check Failed", 
+                                   "Invalid response from GitHub. The update service may be temporarily unavailable.")
+            return False, None
+            
+        except Exception as e:
+            if not silent:
+                messagebox.showerror("Update Check Failed", 
+                                   f"An unexpected error occurred:\n{str(e)}")
             return False, None
     
     def show_update_dialog(self):
         """Show update available dialog using WindowManager style"""
         if not self.latest_release:
             return
-            
-        # Create dialog using WindowManager
+        
+        # Create dialog first without content
         dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
             self.main_gui.master,
             "Update Available",
             width=600,
             height=400,
-            max_width_ratio=0.4,  # 40% of screen width
-            max_height_ratio=0.5  # 50% of screen height
+            max_width_ratio=0.4,
+            max_height_ratio=0.5
         )
         
+        # Show dialog immediately
+        dialog.update_idletasks()
+        
+        # Then populate content
+        self.main_gui.master.after(10, lambda: self._populate_update_dialog(dialog, scrollable_frame, canvas))
+
+    def _populate_update_dialog(self, dialog, scrollable_frame, canvas):
+        """Populate the update dialog content"""
         # Main container
         main_frame = ttk.Frame(scrollable_frame)
         main_frame.pack(fill='both', expand=True, padx=20, pady=20)
@@ -110,15 +171,25 @@ class UpdateManager:
         notes_frame = ttk.LabelFrame(main_frame, text="What's New", padding=10)
         notes_frame.pack(fill='both', expand=True, pady=(0, 10))
         
-        # Use UIHelper for scrollable text
-        notes_text = self.main_gui.ui.setup_scrollable_text(
-            notes_frame, 
-            height=10, 
-            wrap='word'
-        )
-        notes_text.pack(fill='both', expand=True)
-        notes_text.insert('1.0', self.latest_release.get('body', 'No release notes available'))
-        self.main_gui.ui.block_text_editing(notes_text)
+        # Create text widget without using setup_scrollable_text (which might be slow)
+        notes_text = tk.Text(notes_frame, height=10, wrap='word')
+        notes_scroll = ttk.Scrollbar(notes_frame, command=notes_text.yview)
+        notes_text.config(yscrollcommand=notes_scroll.set)
+        
+        notes_text.pack(side='left', fill='both', expand=True)
+        notes_scroll.pack(side='right', fill='y')
+        
+        # Insert text in chunks to avoid blocking
+        release_notes = self.latest_release.get('body', 'No release notes available')
+        if len(release_notes) > 1000:
+            # Insert first chunk
+            notes_text.insert('1.0', release_notes[:1000])
+            # Insert rest after a moment
+            dialog.after(50, lambda: notes_text.insert('end', release_notes[1000:]))
+        else:
+            notes_text.insert('1.0', release_notes)
+        
+        notes_text.config(state='disabled')  # Make read-only
         
         # Download progress (initially hidden)
         self.progress_frame = ttk.Frame(main_frame)
@@ -153,9 +224,9 @@ class UpdateManager:
                  command=lambda: self.skip_version(dialog), 
                  bootstyle="link").pack(side='left', padx=5)
         
-        # Auto-resize and show
-        self.main_gui.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.4, max_height_ratio=0.62)
-        
+        # Auto-resize at the end
+        dialog.after(100, lambda: self.main_gui.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.4, max_height_ratio=0.62))
+    
         # Handle window close
         dialog.protocol("WM_DELETE_WINDOW", lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
     
@@ -174,19 +245,26 @@ class UpdateManager:
                                                            "No Windows executable found in release"))
                 return
             
+            # Get the current executable path
+            if getattr(sys, 'frozen', False):
+                # Running as compiled executable
+                current_exe = sys.executable
+                download_dir = os.path.dirname(current_exe)
+            else:
+                # Running as script
+                current_exe = None
+                download_dir = self.base_dir
+            
             # Use the exact filename from GitHub
             original_filename = asset['name']  # e.g., "Glossarion v3.1.1.exe"
-            download_path = os.path.join(self.base_dir, original_filename)
+            new_exe_path = os.path.join(download_dir, original_filename)
             
-            # Check if old version exists and delete it
-            for file in os.listdir(self.base_dir):
-                if file.endswith('.exe') and file.startswith('Glossarion') and file != original_filename:
-                    try:
-                        old_file = os.path.join(self.base_dir, file)
-                        os.remove(old_file)
-                        print(f"Deleted old version: {file}")
-                    except Exception as e:
-                        print(f"Could not delete old version {file}: {e}")
+            # If new file would overwrite current executable, download to temp name first
+            if current_exe and os.path.normpath(new_exe_path) == os.path.normpath(current_exe):
+                temp_path = new_exe_path + ".new"
+                download_path = temp_path
+            else:
+                download_path = new_exe_path
             
             # Download with progress tracking
             response = requests.get(asset['browser_download_url'], stream=True)
@@ -208,10 +286,9 @@ class UpdateManager:
             dialog.after(0, lambda: self.download_complete(dialog, download_path))
             
         except Exception as e:
-            dialog.after(0, lambda: messagebox.showerror("Download Failed", str(e)))
-            
-        except Exception as e:
-            dialog.after(0, lambda: messagebox.showerror("Download Failed", str(e)))
+            # Capture the error message immediately
+            error_msg = str(e)
+            dialog.after(0, lambda: messagebox.showerror("Download Failed", error_msg))
     
     def download_complete(self, dialog, file_path):
         """Handle completed download"""
@@ -233,12 +310,32 @@ class UpdateManager:
             # Save current state/config if needed
             self.main_gui.save_config()
             
-            # Launch the installer
-            import subprocess
-            subprocess.Popen([update_file], shell=True)
+            # Create a batch file to replace the executable
+            if getattr(sys, 'frozen', False) and update_file.endswith('.new'):
+                current_exe = sys.executable
+                batch_content = f"""@echo off
+    echo Updating Glossarion...
+    timeout /t 2 /nobreak > nul
+    del "{current_exe}"
+    move "{update_file}" "{current_exe}"
+    start "" "{current_exe}"
+    del "%~f0"
+    """
+                batch_path = os.path.join(os.path.dirname(current_exe), "update.bat")
+                with open(batch_path, 'w') as f:
+                    f.write(batch_content)
+                
+                # Run the batch file
+                import subprocess
+                subprocess.Popen([batch_path], shell=True)
+            else:
+                # Just run the new executable directly
+                import subprocess
+                subprocess.Popen([update_file], shell=True)
             
             # Exit current application
-            self.main_gui.on_close()  # Changed from on_closing to on_close
+            self.main_gui.master.quit()
+            sys.exit(0)
             
         except Exception as e:
             messagebox.showerror("Installation Error", 
