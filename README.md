@@ -18,21 +18,6 @@
 
 ## ✨ Key Features
 
-### 🎌 Manga Translation (NEW!)
-* **Hybrid OCR + Translation Pipeline**
-  * Google Cloud Vision API for text detection
-  * AI-powered translation with visual context awareness
-  * Full page context mode for accurate multi-bubble translations
-* **Advanced Text Rendering**
-  * Customizable fonts, colors, and backgrounds
-  * Text shadows and outlines for readability
-  * Smart inpainting to remove original text
-  * Preserve original art option
-* **Batch Processing**
-  * Process entire manga chapters automatically
-  * Stop/resume functionality
-  * Progress tracking and error recovery
-
 ### 📖 Novel Translation Engine
 * **Multi-Provider AI Support**
   * OpenAI (GPT-4, o1-preview, o1-mini)
@@ -49,6 +34,25 @@
   * Automatic retry for timeouts and errors
   * Intelligent truncation detection and recovery
   * Rate limit handling with exponential backoff
+ 
+### 🎌 Manga Translation Engine
+* **Dual API System: OCR + AI Translation**
+  * Google Cloud Vision API for text detection (OCR)
+  * Your chosen AI provider (OpenAI/Gemini/Claude/etc.) for actual translation
+  * Requires BOTH: Google Cloud credentials AND your AI API key
+* **Visual Context-Aware Translation**
+  * AI sees the full manga page image for accurate context
+  * Full page context mode for multi-bubble consistency
+  * Character expressions inform translation tone
+* **Advanced Text Rendering**
+  * Customizable fonts, colors, and backgrounds
+  * Text shadows and outlines for readability
+  * Smart inpainting to remove original text
+  * Preserve original art option
+* **Batch Processing**
+  * Process entire manga chapters automatically
+  * Stop/resume functionality
+  * Progress tracking and error recovery
 
 ### 🧠 AI Hunter
 * **Advanced Duplicate Detection**
