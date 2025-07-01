@@ -442,7 +442,7 @@ class MangaTranslationTab:
         reduction_scale = tk.Scale(
             reduction_frame,
             from_=0.5,
-            to=1.0,
+            to=2.0,
             resolution=0.05,
             orient=tk.HORIZONTAL,
             variable=self.bg_reduction_var,
