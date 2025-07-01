@@ -258,7 +258,7 @@ class UpdateManager:
                 download_dir = self.base_dir
             
             # Use the exact filename from GitHub
-            original_filename = asset['name']  # e.g., "Glossarion v3.1.1.exe"
+            original_filename = asset['name']  # e.g., "Glossarion v3.1.3.exe"
             new_exe_path = os.path.join(download_dir, original_filename)
             
             # If new file would overwrite current executable, download to temp name first
