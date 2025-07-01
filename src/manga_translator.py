@@ -1810,16 +1810,36 @@ class MangaTranslator:
             self._log(f"   Using enhanced renderer with custom settings", "info")
             final_image = self.render_translated_text(inpainted, regions)
             
-            # Save output
-            if output_path:
-                cv2.imwrite(output_path, final_image)
+            # Save output (handle Unicode paths)
+            try:
+                if not output_path:
+                    # Generate output path
+                    base, ext = os.path.splitext(image_path)
+                    output_path = f"{base}_translated{ext}"
+                
+                # Try cv2.imwrite first
+                success = cv2.imwrite(output_path, final_image)
+                
+                if not success:
+                    # Use PIL for Unicode paths
+                    self._log(f"   Using PIL to save with Unicode path...", "info")
+                    from PIL import Image as PILImage
+                    
+                    # Convert BGR to RGB for PIL
+                    rgb_image = cv2.cvtColor(final_image, cv2.COLOR_BGR2RGB)
+                    pil_image = PILImage.fromarray(rgb_image)
+                    pil_image.save(output_path)
+                    self._log(f"   ✅ Successfully saved with PIL", "info")
+                
                 result['output_path'] = output_path
-            else:
-                # Generate output path
-                base, ext = os.path.splitext(image_path)
-                output_path = f"{base}_translated{ext}"
-                cv2.imwrite(output_path, final_image)
-                result['output_path'] = output_path
+                self._log(f"\n💾 Saved output to: {output_path}")
+                
+            except Exception as e:
+                error_msg = f"Failed to save output image: {str(e)}"
+                self._log(f"❌ {error_msg}", "error")
+                result['errors'].append(error_msg)
+                result['success'] = False
+                return result
             
             self._log(f"\n💾 Saved output to: {output_path}")
 
