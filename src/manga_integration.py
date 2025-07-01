@@ -65,13 +65,17 @@ class MangaTranslationTab:
         self._load_rendering_settings()
         
         # Initialize the full page context prompt
-        self.full_page_context_prompt = self.main_gui.config.get(
-            'manga_full_page_context_prompt',
+        self.full_page_context_prompt = (
             "You will receive multiple text segments from a manga page. "
             "Translate each segment considering the context of all segments together. "
             "Maintain consistency in character names, tone, and style across all translations.\n\n"
-            "IMPORTANT: Return your response as a JSON object where each key is the EXACT original text "
-            "(without the [0], [1] index prefixes) and each value is the translation. Example:\n"
+            "IMPORTANT: Return your response as a valid JSON object where each key is the EXACT original text "
+            "(without the [0], [1] index prefixes) and each value is the translation.\n"
+            "Make sure to properly escape any special characters in the JSON:\n"
+            "- Use \\n for newlines\n"
+            "- Use \\\" for quotes\n"
+            "- Use \\\\ for backslashes\n\n"
+            "Example:\n"
             '{\n'
             '  "こんにちは": "Hello",\n'
             '  "ありがとう": "Thank you"\n'
