@@ -40,7 +40,7 @@ class UpdateManager:
         """Check GitHub for newer releases
         
         Args:
-            silent: If True, only show dialog if update available
+            silent: If True, don't show "up to date" message, but STILL show update dialog
             
         Returns:
             Tuple of (update_available, release_info)
@@ -84,13 +84,13 @@ class UpdateManager:
                     
                     release_data['body'] = body
                 
-                if not silent:
-                    # Show dialog after a short delay to ensure UI is responsive
-                    self.main_gui.master.after(100, self.show_update_dialog)
+                # ALWAYS show update dialog when update is available
+                print(f"[DEBUG] Showing update dialog for version {latest_version}")
+                self.main_gui.master.after(100, self.show_update_dialog)
                     
                 return True, release_data
             else:
-                # We're up to date
+                # We're up to date - only show message if not silent
                 if not silent:
                     messagebox.showinfo("Update Check", 
                                       f"You are running the latest version ({self.CURRENT_VERSION})")
@@ -308,35 +308,58 @@ class UpdateManager:
         """Launch the update installer and exit current app"""
         try:
             # Save current state/config if needed
-            self.main_gui.save_config()
+            self.main_gui.save_config(show_message=False)
             
-            # Create a batch file to replace the executable
-            if getattr(sys, 'frozen', False) and update_file.endswith('.new'):
+            # Get current executable path
+            if getattr(sys, 'frozen', False):
                 current_exe = sys.executable
+                current_dir = os.path.dirname(current_exe)
+                
+                # Create a batch file to handle the update
                 batch_content = f"""@echo off
     echo Updating Glossarion...
-    timeout /t 2 /nobreak > nul
-    del "{current_exe}"
-    move "{update_file}" "{current_exe}"
-    start "" "{current_exe}"
+    echo Waiting for current version to close...
+    timeout /t 3 /nobreak > nul
+
+    :: Delete the old executable
+    echo Deleting old version...
+    if exist "{current_exe}" (
+        del /f /q "{current_exe}"
+        if exist "{current_exe}" (
+            echo Failed to delete old version, retrying...
+            timeout /t 2 /nobreak > nul
+            del /f /q "{current_exe}"
+        )
+    )
+
+    :: Start the new version
+    echo Starting new version...
+    start "" "{update_file}"
+
+    :: Clean up this batch file
     del "%~f0"
     """
-                batch_path = os.path.join(os.path.dirname(current_exe), "update.bat")
+                batch_path = os.path.join(current_dir, "update_glossarion.bat")
                 with open(batch_path, 'w') as f:
                     f.write(batch_content)
                 
                 # Run the batch file
                 import subprocess
-                subprocess.Popen([batch_path], shell=True)
+                subprocess.Popen([batch_path], shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                
+                print(f"[DEBUG] Update batch file created: {batch_path}")
+                print(f"[DEBUG] Will delete: {current_exe}")
+                print(f"[DEBUG] Will start: {update_file}")
             else:
-                # Just run the new executable directly
+                # Running as script, just start the new exe
                 import subprocess
                 subprocess.Popen([update_file], shell=True)
             
             # Exit current application
+            print("[DEBUG] Closing application for update...")
             self.main_gui.master.quit()
             sys.exit(0)
             
         except Exception as e:
             messagebox.showerror("Installation Error", 
-                               f"Could not start installer:\n{str(e)}")
+                               f"Could not start update process:\n{str(e)}")
