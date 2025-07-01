@@ -174,11 +174,23 @@ class UpdateManager:
                                                            "No Windows executable found in release"))
                 return
             
+            # Use the exact filename from GitHub
+            original_filename = asset['name']  # e.g., "Glossarion v3.1.1.exe"
+            download_path = os.path.join(self.base_dir, original_filename)
+            
+            # Check if old version exists and delete it
+            for file in os.listdir(self.base_dir):
+                if file.endswith('.exe') and file.startswith('Glossarion') and file != original_filename:
+                    try:
+                        old_file = os.path.join(self.base_dir, file)
+                        os.remove(old_file)
+                        print(f"Deleted old version: {file}")
+                    except Exception as e:
+                        print(f"Could not delete old version {file}: {e}")
+            
             # Download with progress tracking
             response = requests.get(asset['browser_download_url'], stream=True)
             total_size = int(response.headers.get('content-length', 0))
-            
-            download_path = os.path.join(self.base_dir, f"Glossarion_update_{self.latest_release['tag_name']}.exe")
             
             downloaded = 0
             with open(download_path, 'wb') as f:
@@ -194,6 +206,9 @@ class UpdateManager:
             
             # Download complete
             dialog.after(0, lambda: self.download_complete(dialog, download_path))
+            
+        except Exception as e:
+            dialog.after(0, lambda: messagebox.showerror("Download Failed", str(e)))
             
         except Exception as e:
             dialog.after(0, lambda: messagebox.showerror("Download Failed", str(e)))
@@ -223,7 +238,7 @@ class UpdateManager:
             subprocess.Popen([update_file], shell=True)
             
             # Exit current application
-            self.main_gui.on_closing()
+            self.main_gui.on_close()  # Changed from on_closing to on_close
             
         except Exception as e:
             messagebox.showerror("Installation Error", 
