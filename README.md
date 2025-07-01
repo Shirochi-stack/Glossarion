@@ -311,45 +311,6 @@ Glossarion/
 
 ---
 
-## 🤝 Contributing
-
-We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.
-
-### Development Setup
-```bash
-# Clone with submodules
-git clone --recursive https://github.com/Shirochi-stack/Glossarion.git
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dev dependencies
-pip install -r requirements-dev.txt
-```
-
----
-
-## 📝 Changelog
-
-### v3.1.0 (Latest)
-- ✨ Added comprehensive manga translation support
-- 🚀 Implemented AI Hunter duplicate detection
-- 🔄 Added rolling history window for better context
-- 🎨 New customizable text rendering system
-- 🛠️ Improved error handling and recovery
-- 📊 Enhanced progress tracking and reporting
-
-### v3.0.0
-- 🤖 Multi-provider AI support
-- 📚 Glossary system v2.0
-- 🔍 Advanced QA scanning
-- 💾 Session management
-
-[See full changelog](CHANGELOG.md)
-
----
-
 ## 🙏 Acknowledgments
 
 Built with ❤️ using:
