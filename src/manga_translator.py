@@ -217,7 +217,7 @@ class MangaTranslator:
             self.text_bg_style = bg_style
             self._log(f"  Background style: {bg_style}", "info")
         if bg_reduction is not None:
-            self.text_bg_reduction = max(0.5, min(1.0, bg_reduction))
+            self.text_bg_reduction = max(0.5, min(2.0, bg_reduction))
             self._log(f"  Background size: {int(self.text_bg_reduction*100)}%", "info")
         if font_style is not None:
             self.selected_font_style = font_style
