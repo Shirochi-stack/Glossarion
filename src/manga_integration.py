@@ -1323,21 +1323,19 @@ class MangaTranslationTab:
         self.parent_frame.after(100, self._process_updates)
     
     def _start_translation(self):
-        """Start the translation process"""
-        if not self.selected_files:
-            messagebox.showwarning("No Files", "Please select manga images to translate.")
-            return
-        
-        # Check both possible config keys for backward compatibility
-        google_creds = self.main_gui.config.get('google_vision_credentials', '') or self.main_gui.config.get('google_cloud_credentials', '')
-        
-        if not google_creds or not os.path.exists(google_creds):
-            messagebox.showerror("Error", "Google Cloud Vision credentials not found.\nPlease set up credentials in the main settings.")
-            return
-        
-        # Initialize API client if needed
-        if not hasattr(self.main_gui, 'client') or not self.main_gui.client:
-            # Try to create the client from saved config
+            """Start the translation process"""
+            if not self.selected_files:
+                messagebox.showwarning("No Files", "Please select manga images to translate.")
+                return
+            
+            # Check both possible config keys for backward compatibility
+            google_creds = self.main_gui.config.get('google_vision_credentials', '') or self.main_gui.config.get('google_cloud_credentials', '')
+            
+            if not google_creds or not os.path.exists(google_creds):
+                messagebox.showerror("Error", "Google Cloud Vision credentials not found.\nPlease set up credentials in the main settings.")
+                return
+            
+            # Get current API key and model
             api_key = None
             model = 'gemini-1.5-flash'  # default
             
@@ -1347,7 +1345,7 @@ class MangaTranslationTab:
             elif hasattr(self.main_gui, 'config') and self.main_gui.config.get('api_key'):
                 api_key = self.main_gui.config.get('api_key')
             
-            # Try to get model
+            # Try to get model - ALWAYS get the current selection from GUI
             if hasattr(self.main_gui, 'model_var'):
                 model = self.main_gui.model_var.get()
             elif hasattr(self.main_gui, 'config') and self.main_gui.config.get('model'):
@@ -1357,71 +1355,87 @@ class MangaTranslationTab:
                 messagebox.showerror("Error", "API key not found.\nPlease configure your API key in the main settings.")
                 return
             
-            # Create the unified client
-            try:
-                from unified_api_client import UnifiedClient
-                self.main_gui.client = UnifiedClient(model=model, api_key=api_key)
-                self._log(f"Created API client with model: {model}", "info")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to create API client:\n{str(e)}")
-                return
-        
-        # Initialize translator if needed
-        if not self.translator:
-            try:
-                self.translator = MangaTranslator(
-                    google_creds,
-                    self.main_gui.client,
-                    self.main_gui,
-                    log_callback=self._log
-                )
+            # Check if we need to create or update the client
+            needs_new_client = False
+            
+            if not hasattr(self.main_gui, 'client') or not self.main_gui.client:
+                needs_new_client = True
+                self._log(f"Creating new API client with model: {model}", "info")
+            elif hasattr(self.main_gui.client, 'model') and self.main_gui.client.model != model:
+                needs_new_client = True
+                self._log(f"Model changed from {self.main_gui.client.model} to {model}, creating new client", "info")
+            
+            if needs_new_client:
+                # Create the unified client with the current model
+                try:
+                    from unified_api_client import UnifiedClient
+                    self.main_gui.client = UnifiedClient(model=model, api_key=api_key)
+                    self._log(f"Created API client with model: {model}", "info")
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to create API client:\n{str(e)}")
+                    return
+            
+            # Initialize translator if needed
+            if not self.translator:
+                try:
+                    self.translator = MangaTranslator(
+                        google_creds,
+                        self.main_gui.client,
+                        self.main_gui,
+                        log_callback=self._log
+                    )
+                    
+                    # Apply text rendering settings
+                    self._apply_rendering_settings()
+                    
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to initialize translator:\n{str(e)}")
+                    self._log(f"Initialization error: {str(e)}", "error")
+                    self._log(traceback.format_exc(), "error")
+                    return
+            else:
+                # Update the translator with the new client if model changed
+                if needs_new_client and hasattr(self.translator, 'client'):
+                    self.translator.client = self.main_gui.client
+                    self._log(f"Updated translator with new API client", "info")
                 
-                # Apply text rendering settings
+                # Update rendering settings
                 self._apply_rendering_settings()
-                
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to initialize translator:\n{str(e)}")
-                self._log(f"Initialization error: {str(e)}", "error")
-                self._log(traceback.format_exc(), "error")
-                return
-        else:
-            # Update rendering settings
-            self._apply_rendering_settings()
-        
-        # Clear log
-        self.log_text.delete('1.0', tk.END)
-        
-        # Reset progress
-        self.total_files = len(self.selected_files)
-        self.completed_files = 0
-        self.failed_files = 0
-        self.current_file_index = 0
-        
-        # Update UI state
-        self.is_running = True
-        self.stop_flag.clear()
-        self.start_button.config(state=tk.DISABLED)
-        self.stop_button.config(state=tk.NORMAL)
-        
-        # Disable file modification during translation
-        for widget in [self.file_listbox]:
-            widget.config(state=tk.DISABLED)
-        
-        # Log start message
-        self._log(f"Starting translation of {self.total_files} files...", "info")
-        self._log(f"Using Google Vision credentials: {os.path.basename(google_creds)}", "info")
-        self._log(f"Using API model: {self.main_gui.client.model if hasattr(self.main_gui.client, 'model') else 'unknown'}", "info")
-        self._log(f"Contextual: {'Enabled' if self.main_gui.contextual_var.get() else 'Disabled'}", "info")
-        self._log(f"History limit: {self.main_gui.trans_history.get()} exchanges", "info")
-        self._log(f"Rolling history: {'Enabled' if self.main_gui.translation_history_rolling_var.get() else 'Disabled'}", "info")
-        self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_var.get() else 'Disabled'}", "info")
-        
-        # Start translation thread
-        self.translation_thread = threading.Thread(
-            target=self._translation_worker,
-            daemon=True
-        )
-        self.translation_thread.start()
+            
+            # Clear log
+            self.log_text.delete('1.0', tk.END)
+            
+            # Reset progress
+            self.total_files = len(self.selected_files)
+            self.completed_files = 0
+            self.failed_files = 0
+            self.current_file_index = 0
+            
+            # Update UI state
+            self.is_running = True
+            self.stop_flag.clear()
+            self.start_button.config(state=tk.DISABLED)
+            self.stop_button.config(state=tk.NORMAL)
+            
+            # Disable file modification during translation
+            for widget in [self.file_listbox]:
+                widget.config(state=tk.DISABLED)
+            
+            # Log start message
+            self._log(f"Starting translation of {self.total_files} files...", "info")
+            self._log(f"Using Google Vision credentials: {os.path.basename(google_creds)}", "info")
+            self._log(f"Using API model: {self.main_gui.client.model if hasattr(self.main_gui.client, 'model') else 'unknown'}", "info")
+            self._log(f"Contextual: {'Enabled' if self.main_gui.contextual_var.get() else 'Disabled'}", "info")
+            self._log(f"History limit: {self.main_gui.trans_history.get()} exchanges", "info")
+            self._log(f"Rolling history: {'Enabled' if self.main_gui.translation_history_rolling_var.get() else 'Disabled'}", "info")
+            self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_var.get() else 'Disabled'}", "info")
+            
+            # Start translation thread
+            self.translation_thread = threading.Thread(
+                target=self._translation_worker,
+                daemon=True
+            )
+            self.translation_thread.start()
     
     def _apply_rendering_settings(self):
         """Apply current rendering settings to translator"""
