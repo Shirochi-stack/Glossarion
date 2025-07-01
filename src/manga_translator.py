@@ -149,9 +149,9 @@ class MangaTranslator:
         self.shadow_blur = config.get('manga_shadow_blur', 0)  # 0 = sharp shadow, higher = more blur
         self.skip_inpainting = config.get('manga_skip_inpainting', True)
 
-        # Font size multiplier mode
-        self.font_size_mode = 'fixed'  # 'fixed' or 'multiplier'
-        self.font_size_multiplier = 1.0  # Default multiplier        
+        # Font size multiplier mode - Load from config
+        self.font_size_mode = config.get('manga_font_size_mode', 'fixed')  # 'fixed' or 'multiplier'
+        self.font_size_multiplier = config.get('manga_font_size_multiplier', 1.0)  # Default multiplierr        
         
         # Stop flag for interruption
         self.stop_flag = None
@@ -1439,51 +1439,58 @@ class MangaTranslator:
         return ImageFont.load_default()
     
     def _fit_text_to_region(self, text: str, max_width: int, max_height: int, draw: ImageDraw) -> Tuple[int, List[str]]:
-        """Find optimal font size and text wrapping"""
-        # Use 80% of the region for text (leave margins)
-        usable_width = int(max_width * 0.8)
-        usable_height = int(max_height * 0.8)
-        
-        # Apply multiplier to font size range if in multiplier mode
-        min_font_size = self.min_font_size
-        max_font_size = self.max_font_size
-        
-        if self.font_size_mode == 'multiplier':
-            # Calculate base font size based on region dimensions
-            # Base size is proportional to the smaller dimension
-            base_size = min(max_width, max_height) // 8  # Adjust divisor as needed
+            """Find optimal font size and text wrapping"""
+            # Use 80% of the region for text (leave margins)
+            usable_width = int(max_width * 0.8)
+            usable_height = int(max_height * 0.8)
             
-            # Apply multiplier
-            target_size = int(base_size * self.font_size_multiplier)
+            # Apply multiplier to font size range if in multiplier mode
+            min_font_size = self.min_font_size
+            max_font_size = self.max_font_size
             
-            # Clamp to reasonable bounds
-            min_font_size = max(self.min_font_size, int(target_size * 0.7))
-            max_font_size = min(self.max_font_size * 2, int(target_size * 1.3))  # Allow larger max in multiplier mode
-        
-        # Try different font sizes
-        for font_size in range(max_font_size, min_font_size, -1):
-            font = self._get_font(font_size)
+            if self.font_size_mode == 'multiplier':
+                # Calculate base font size based on region dimensions
+                # Base size is proportional to the smaller dimension
+                base_size = min(max_width, max_height) // 8  # Adjust divisor as needed
+                
+                # Apply multiplier
+                target_size = int(base_size * self.font_size_multiplier)
+                
+                # Clamp to reasonable bounds
+                min_font_size = max(self.min_font_size, int(target_size * 0.7))
+                max_font_size = min(self.max_font_size * 2, int(target_size * 1.3))  # Allow larger max in multiplier mode
             
-            # Wrap text
-            lines = self._wrap_text(text, font, usable_width, draw)
+            # Try different font sizes
+            best_font_size = min_font_size
+            best_lines = []
             
-            # Check if it fits vertically
-            line_height = font_size * 1.2
-            total_height = len(lines) * line_height
+            for font_size in range(max_font_size, min_font_size, -1):
+                font = self._get_font(font_size)
+                
+                # Wrap text
+                lines = self._wrap_text(text, font, usable_width, draw)
+                
+                # Check if it fits vertically
+                line_height = font_size * 1.2
+                total_height = len(lines) * line_height
+                
+                if total_height <= usable_height:
+                    best_font_size = font_size
+                    best_lines = lines
+                    break
             
-            if total_height <= usable_height:
-                return font_size, lines
-        
-        # If nothing fits, use minimum size
-        font = self._get_font(min_font_size)
-        lines = self._wrap_text(text, font, usable_width, draw)
-        
-        # Truncate if needed
-        max_lines = int(usable_height // (min_font_size * 1.2))
-        if len(lines) > max_lines:
-            lines = lines[:max_lines-1] + [lines[max_lines-1][:10] + '...']
-        
-        return min_font_size, lines
+            # If nothing fits, use minimum size
+            if not best_lines:
+                font = self._get_font(min_font_size)
+                best_lines = self._wrap_text(text, font, usable_width, draw)
+                best_font_size = min_font_size
+                
+                # Truncate if needed
+                max_lines = int(usable_height // (min_font_size * 1.2))
+                if len(best_lines) > max_lines:
+                    best_lines = best_lines[:max_lines-1] + [best_lines[max_lines-1][:10] + '...']
+            
+            return best_font_size, best_lines
     
     def _wrap_text(self, text: str, font: ImageFont, max_width: int, draw: ImageDraw) -> List[str]:
         """Wrap text to fit within max_width"""
