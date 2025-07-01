@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion v3.1.1 - PyInstaller Specification File
+Glossarion v3.2.0 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, AI Hunter, and Manga Translation
 """
 
@@ -12,7 +12,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'Glossarion v3.1.1'
+APP_NAME = 'Glossarion v3.1.3'  # CHANGED: Updated version
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -80,6 +80,9 @@ app_files = [
     ('manga_translator.py', '.'),
     ('manga_integration.py', '.'),
     
+    # Update Manager - ADDED
+    ('update_manager.py', '.'),
+    
     # Resources
     ('Halgakos.ico', '.'),
 ]
@@ -109,6 +112,7 @@ app_modules = [
     'ai_hunter_enhanced',  # AI Hunter Enhanced module
     'manga_translator',    # Manga translator module
     'manga_integration',   # Manga GUI integration
+    'update_manager',      # ADDED: Update manager module
 ]
 
 # GUI Framework
@@ -633,6 +637,11 @@ utility_modules = [
     'dotenv.main',
     'dotenv.parser',
     'dataclasses',  # For manga TextRegion dataclass
+    # ADDED: Version parsing for update manager
+    'packaging',
+    'packaging.version',
+    'packaging.specifiers',
+    'packaging.requirements',
 ]
 
 # Encoding support
@@ -861,6 +870,7 @@ This build includes:
 - Manga text detection with Google Cloud Vision OCR support
 - Manga text translation with API key
 - OpenCV for advanced image processing
+- Auto-update functionality with GitHub release checking
 
 The executable will be ~160MB due to included ML libraries and OpenCV.
 
@@ -874,4 +884,9 @@ For manga translation:
 - Google Cloud Vision API credentials required (JSON file)
 - OpenCV (cv2) included for image processing
 - Supports manga panel text detection and translation
+
+For auto-update:
+- Checks GitHub releases for new versions
+- Downloads updates directly from GitHub
+- Configurable auto-check on startup
 """
