@@ -2014,13 +2014,18 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         qa_settings = {
             'foreign_char_threshold': 10,
             'excluded_characters': '',
-            'check_encoding_issues': True,
+            'check_encoding_issues': False,
             'check_repetition': True,
             'check_translation_artifacts': True,
             'min_file_length': 100,
             'report_format': 'detailed',
             'auto_save_report': True
         }
+    log(f"\n📋 QA Settings Status:")
+    log(f"   ✓ Encoding issues check: {'ENABLED' if qa_settings.get('check_encoding_issues', True) else 'DISABLED'}")
+    log(f"   ✓ Repetition check: {'ENABLED' if qa_settings.get('check_repetition', True) else 'DISABLED'}")
+    log(f"   ✓ Translation artifacts check: {'ENABLED' if qa_settings.get('check_translation_artifacts', True) else 'DISABLED'}")
+    log(f"   ✓ Foreign char threshold: {qa_settings.get('foreign_char_threshold', 10)}")
     
     # Initialize configuration
     custom_settings = None
@@ -2136,6 +2141,13 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         artifacts = []
         if not is_quick_scan and qa_settings.get('check_translation_artifacts', True):
             artifacts = detect_translation_artifacts(raw_text)
+            
+        # Filter out encoding_issues if check_encoding_issues is disabled
+        if not qa_settings.get('check_encoding_issues', True):
+            original_count = len(artifacts)
+            artifacts = [a for a in artifacts if a['type'] != 'encoding_issues']
+            if original_count != len(artifacts):
+                log(f"      → Filtered out encoding artifacts (check disabled)")
         
         results.append({
             "file_index": idx,
@@ -2225,6 +2237,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         if qa_settings.get('check_encoding_issues', True):
             if has_no_spacing_or_linebreaks(raw_text):
                 issues.append("no_spacing_or_linebreaks")
+                # Debug log when issue is found
+                if idx < 5:  # Only log for first 5 files to avoid spam
+                    log(f"      → Found spacing/linebreak issue in {result['filename']}")
         
         # Repetitive content - only if repetition check is enabled
         if qa_settings.get('check_repetition', True):
@@ -2237,9 +2252,15 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 if artifact['type'] == 'machine_translation':
                     issues.append(f"machine_translation_markers_{artifact['count']}_found")
                 elif artifact['type'] == 'encoding_issues':
-                    issues.append(f"encoding_issues_{artifact['count']}_found")
+                    # Only add encoding issues if the check is enabled
+                    if qa_settings.get('check_encoding_issues', True):
+                        issues.append(f"encoding_issues_{artifact['count']}_found")
+                        # Debug log
+                        if idx < 5:  # Only log for first 5 files
+                            log(f"      → Found encoding artifacts in {result['filename']}: {artifact['count']} instances")
                 elif artifact['type'] == 'repeated_watermarks':
                     issues.append(f"repeated_watermarks_found")
+
         
         result['issues'] = issues
         result['score'] = len(issues)
