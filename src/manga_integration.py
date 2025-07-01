@@ -2,6 +2,7 @@
 """
 Enhanced GUI Integration module for Manga Translation with text visibility controls
 Integrates with TranslatorGUI using WindowManager and existing infrastructure
+Now includes full page context mode with customizable prompt
 """
 
 import os
@@ -59,10 +60,26 @@ class MangaTranslationTab:
         # Flag to prevent saving during initialization
         self._initializing = True
         
-        # Load saved text rendering settings from config
+        # IMPORTANT: Load settings BEFORE building interface
+        # This ensures all variables are initialized before they're used in the GUI
         self._load_rendering_settings()
         
-        # Build interface
+        # Initialize the full page context prompt
+        self.full_page_context_prompt = self.main_gui.config.get(
+            'manga_full_page_context_prompt',
+            "You will receive multiple text segments from a manga page. "
+            "Translate each segment considering the context of all segments together. "
+            "Maintain consistency in character names, tone, and style across all translations.\n\n"
+            "IMPORTANT: Return your response as a JSON object where each key is the EXACT original text "
+            "(without the [0], [1] index prefixes) and each value is the translation. Example:\n"
+            '{\n'
+            '  "こんにちは": "Hello",\n'
+            '  "ありがとう": "Thank you"\n'
+            '}\n\n'
+            'Do NOT include the [0], [1], etc. prefixes in the JSON keys.'
+        )
+        
+        # Build interface AFTER loading settings
         self._build_interface()
         
         # Now that everything is initialized, allow saving
@@ -230,6 +247,133 @@ class MangaTranslationTab:
             bootstyle="primary"
         ).pack(side=tk.LEFT)
         
+        # Separator for context settings
+        ttk.Separator(settings_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
+        
+        # Context and Full Page Mode Settings
+        context_frame = tk.LabelFrame(
+            settings_frame,
+            text="🔄 Context & Translation Mode",
+            font=('Arial', 11, 'bold'),
+            padx=10,
+            pady=10
+        )
+        context_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Show current contextual settings from main GUI
+        context_info = tk.Frame(context_frame)
+        context_info.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(
+            context_info,
+            text="Main GUI Context Settings:",
+            font=('Arial', 10, 'bold')
+        ).pack(anchor=tk.W)
+        
+        # Display current settings
+        settings_frame_display = tk.Frame(context_info)
+        settings_frame_display.pack(fill=tk.X, padx=(20, 0))
+        
+        # Contextual enabled status
+        contextual_status = "Enabled" if self.main_gui.contextual_var.get() else "Disabled"
+        self.contextual_status_label = tk.Label(
+            settings_frame_display,
+            text=f"• Contextual Translation: {contextual_status}",
+            font=('Arial', 10)
+        )
+        self.contextual_status_label.pack(anchor=tk.W)
+        
+        # History limit
+        history_limit = self.main_gui.trans_history.get() if hasattr(self.main_gui, 'trans_history') else "3"
+        self.history_limit_label = tk.Label(
+            settings_frame_display,
+            text=f"• Translation History Limit: {history_limit} exchanges",
+            font=('Arial', 10)
+        )
+        self.history_limit_label.pack(anchor=tk.W)
+        
+        # Rolling history status
+        rolling_status = "Enabled (Rolling Window)" if self.main_gui.translation_history_rolling_var.get() else "Disabled (Reset on Limit)"
+        self.rolling_status_label = tk.Label(
+            settings_frame_display,
+            text=f"• Rolling History: {rolling_status}",
+            font=('Arial', 10)
+        )
+        self.rolling_status_label.pack(anchor=tk.W)
+        
+        # Separator
+        ttk.Separator(context_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
+        
+        # Full Page Context Translation Settings
+        full_page_frame = tk.Frame(context_frame)
+        full_page_frame.pack(fill=tk.X)
+        
+        tk.Label(
+            full_page_frame,
+            text="Full Page Context Mode (Manga-specific):",
+            font=('Arial', 10, 'bold')
+        ).pack(anchor=tk.W, pady=(0, 5))
+        
+        # Enable/disable toggle
+        self.full_page_context_var = tk.BooleanVar(
+            value=self.main_gui.config.get('manga_full_page_context', True)
+        )
+        
+        toggle_frame = tk.Frame(full_page_frame)
+        toggle_frame.pack(fill=tk.X, padx=(20, 0))
+        
+        self.context_checkbox = tb.Checkbutton(
+            toggle_frame,
+            text="Enable Full Page Context Translation (Recommended)",
+            variable=self.full_page_context_var,
+            command=self._on_context_toggle,
+            bootstyle="round-toggle"
+        )
+        self.context_checkbox.pack(side=tk.LEFT)
+        
+        # Edit prompt button
+        tb.Button(
+            toggle_frame,
+            text="Edit Prompt",
+            command=self._edit_context_prompt,
+            bootstyle="secondary"
+        ).pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Help text
+        help_text = tk.Label(
+            full_page_frame,
+            text="Full page context sends all text regions from the page together in a single request.\n"
+                 "This allows the AI to see all text at once for more contextually accurate translations,\n"
+                 "especially useful for maintaining character name consistency and understanding\n"
+                 "conversation flow across multiple speech bubbles.",
+            font=('Arial', 10),
+            fg='gray',
+            justify=tk.LEFT
+        )
+        help_text.pack(anchor=tk.W, padx=(20, 0), pady=(5, 0))
+        
+        # Pros and cons
+        pros_cons_frame = tk.Frame(full_page_frame)
+        pros_cons_frame.pack(fill=tk.X, padx=(20, 0), pady=(5, 0))
+        
+        pros_label = tk.Label(
+            pros_cons_frame,
+            text="✅ Better context awareness, consistent translations\n"
+                 "❌ Single API call failure affects all text, may use more tokens",
+            font=('Arial', 8),
+            fg='gray',
+            justify=tk.LEFT
+        )
+        pros_label.pack(anchor=tk.W)
+        
+        # Refresh button to update from main GUI
+        tb.Button(
+            context_frame,
+            text="↻ Refresh from Main GUI",
+            command=self._refresh_context_settings,
+            bootstyle="secondary"
+        ).pack(pady=(10, 0))
+        
         # Text Rendering Settings Frame
         render_frame = tk.LabelFrame(
             self.parent_frame,
@@ -316,17 +460,82 @@ class MangaTranslationTab:
         # Font settings
         font_frame = tk.Frame(render_frame)
         font_frame.pack(fill=tk.X, pady=5)
-        
-        tk.Label(font_frame, text="Font Size:", width=20, anchor='w').pack(side=tk.LEFT)
-        
+
+        # Font size mode selection
+        mode_frame = tk.Frame(font_frame)
+        mode_frame.pack(fill=tk.X)
+
+        tk.Label(mode_frame, text="Font Size Mode:", width=20, anchor='w').pack(side=tk.LEFT)
+
+        # Radio buttons for mode selection
+        mode_selection_frame = tk.Frame(mode_frame)
+        mode_selection_frame.pack(side=tk.LEFT, padx=10)
+
+        tb.Radiobutton(
+            mode_selection_frame,
+            text="Fixed Size",
+            variable=self.font_size_mode_var,
+            value="fixed",
+            command=self._toggle_font_size_mode,
+            bootstyle="primary"
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        tb.Radiobutton(
+            mode_selection_frame,
+            text="Dynamic Multiplier",
+            variable=self.font_size_mode_var,
+            value="multiplier",
+            command=self._toggle_font_size_mode,
+            bootstyle="primary"
+        ).pack(side=tk.LEFT)
+
+        # Fixed font size frame
+        self.fixed_size_frame = tk.Frame(font_frame)
+        self.fixed_size_frame.pack(fill=tk.X, pady=(5, 0))
+
+        tk.Label(self.fixed_size_frame, text="Font Size:", width=20, anchor='w').pack(side=tk.LEFT)
+
         font_size_spinbox = tb.Spinbox(
-            font_frame,
+            self.fixed_size_frame,
             from_=0,
             to=72,
             textvariable=self.font_size_var,
             width=10,
             command=self._save_rendering_settings
         )
+        font_size_spinbox.pack(side=tk.LEFT, padx=10)
+        # Also bind to save on manual entry
+        font_size_spinbox.bind('<Return>', lambda e: self._save_rendering_settings())
+        font_size_spinbox.bind('<FocusOut>', lambda e: self._save_rendering_settings())
+
+        tk.Label(self.fixed_size_frame, text="(0 = Auto)", font=('Arial', 9), fg='gray').pack(side=tk.LEFT)
+
+        # Dynamic multiplier frame
+        self.multiplier_frame = tk.Frame(font_frame)
+        self.multiplier_frame.pack(fill=tk.X, pady=(5, 0))
+
+        tk.Label(self.multiplier_frame, text="Size Multiplier:", width=20, anchor='w').pack(side=tk.LEFT)
+
+        multiplier_scale = tk.Scale(
+            self.multiplier_frame,
+            from_=0.5,
+            to=2.0,
+            resolution=0.1,
+            orient=tk.HORIZONTAL,
+            variable=self.font_size_multiplier_var,
+            command=self._update_multiplier_label,
+            length=200
+        )
+        multiplier_scale.pack(side=tk.LEFT, padx=10)
+
+        self.multiplier_label = tk.Label(self.multiplier_frame, text="1.0x", width=5)
+        self.multiplier_label.pack(side=tk.LEFT)
+
+        tk.Label(self.multiplier_frame, text="(Scales with panel size)", font=('Arial', 9), fg='gray').pack(side=tk.LEFT, padx=(10, 0))
+
+        # Initialize visibility
+        self._toggle_font_size_mode()
+
         font_size_spinbox.pack(side=tk.LEFT, padx=10)
         # Also bind to save on manual entry
         font_size_spinbox.bind('<Return>', lambda e: self._save_rendering_settings())
@@ -595,6 +804,25 @@ class MangaTranslationTab:
         self.log_text.tag_config('success', foreground='green')
         self.log_text.tag_config('warning', foreground='orange')
         self.log_text.tag_config('error', foreground='red')
+ 
+    def _toggle_font_size_mode(self):
+        """Toggle between fixed size and multiplier mode"""
+        mode = self.font_size_mode_var.get()
+        if mode == "fixed":
+            self.fixed_size_frame.pack(fill=tk.X, pady=(5, 0))
+            self.multiplier_frame.pack_forget()
+        else:
+            self.fixed_size_frame.pack_forget()
+            self.multiplier_frame.pack(fill=tk.X, pady=(5, 0))
+        # Auto-save on change
+        if not getattr(self, '_initializing', False):
+            self._save_rendering_settings()
+
+    def _update_multiplier_label(self, value):
+        """Update multiplier label"""
+        self.multiplier_label.config(text=f"{float(value):.1f}x")
+        # Auto-save on change
+        self._save_rendering_settings()
     
     def _update_color_preview(self, event):
         """Update the font color preview"""
@@ -659,6 +887,8 @@ class MangaTranslationTab:
         self.font_size_var = tk.IntVar(value=config.get('manga_font_size', 0))
         self.selected_font_path = config.get('manga_font_path', None)
         self.skip_inpainting_var = tk.BooleanVar(value=config.get('manga_skip_inpainting', True))
+        self.font_size_mode_var = tk.StringVar(value=config.get('manga_font_size_mode', 'fixed'))
+        self.font_size_multiplier_var = tk.DoubleVar(value=config.get('manga_font_size_multiplier', 1.0))
         
         # Font color settings
         manga_text_color = config.get('manga_text_color', [102, 0, 0])
@@ -710,6 +940,8 @@ class MangaTranslationTab:
         self.main_gui.config['manga_font_size'] = self.font_size_var.get()
         self.main_gui.config['manga_font_path'] = self.selected_font_path
         self.main_gui.config['manga_skip_inpainting'] = self.skip_inpainting_var.get()
+        self.main_gui.config['manga_font_size_mode'] = self.font_size_mode_var.get()
+        self.main_gui.config['manga_font_size_multiplier'] = self.font_size_multiplier_var.get()
 
         
         # Save font color as list
@@ -730,13 +962,161 @@ class MangaTranslationTab:
         self.main_gui.config['manga_shadow_offset_y'] = self.shadow_offset_y_var.get()
         self.main_gui.config['manga_shadow_blur'] = self.shadow_blur_var.get()
         
-        # Save existing create_subfolder setting if it exists
+        # Save output settings
         if hasattr(self, 'create_subfolder_var'):
             self.main_gui.config['manga_create_subfolder'] = self.create_subfolder_var.get()
+        
+        # Save full page context settings
+        self.main_gui.config['manga_full_page_context'] = self.full_page_context_var.get()
+        self.main_gui.config['manga_full_page_context_prompt'] = self.full_page_context_prompt
         
         # Call main GUI's save_configuration to persist to file
         if hasattr(self.main_gui, 'save_configuration'):
             self.main_gui.save_configuration()
+    
+    def _on_context_toggle(self):
+        """Handle full page context toggle"""
+        enabled = self.full_page_context_var.get()
+        self._save_rendering_settings()
+    
+    def _edit_context_prompt(self):
+        """Open dialog to edit full page context prompt"""
+        # Store parent canvas for scroll restoration
+        parent_canvas = self.canvas
+        
+        # Use WindowManager to create scrollable dialog
+        dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
+            self.dialog,  # parent window
+            "Edit Full Page Context Prompt",
+            width=700,
+            height=500,
+            max_width_ratio=0.7,
+            max_height_ratio=0.8
+        )
+        
+        # Instructions
+        instructions = tk.Label(
+            scrollable_frame,
+            text="Edit the prompt used for full page context translation.\n"
+                 "This will be appended to the main translation system prompt.",
+            font=('Arial', 10),
+            justify=tk.LEFT
+        )
+        instructions.pack(padx=20, pady=(20, 10))
+        
+        # Text editor with UIHelper for undo/redo support
+        text_editor = self.main_gui.ui.setup_scrollable_text(
+            scrollable_frame,
+            wrap=tk.WORD,
+            height=15
+        )
+        text_editor.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 10))
+        
+        # Insert current prompt
+        text_editor.insert(1.0, self.full_page_context_prompt)
+        
+        # Button frame
+        button_frame = tk.Frame(scrollable_frame)
+        button_frame.pack(fill=tk.X, padx=20, pady=(0, 20))
+        
+        def close_dialog():
+            """Properly close dialog and restore parent scrolling"""
+            try:
+                # Clean up this dialog's scrolling
+                if hasattr(dialog, '_cleanup_scrolling') and callable(dialog._cleanup_scrolling):
+                    dialog._cleanup_scrolling()
+            except:
+                pass
+            
+            # Destroy the dialog
+            dialog.destroy()
+            
+            # Re-bind scroll to parent canvas after a short delay
+            if parent_canvas and parent_canvas.winfo_exists():
+                def rebind_scroll():
+                    try:
+                        # Re-create scroll bindings for parent
+                        def on_mousewheel(event):
+                            if parent_canvas.winfo_exists():
+                                parent_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                        
+                        def on_mousewheel_linux(event, direction):
+                            if parent_canvas.winfo_exists():
+                                parent_canvas.yview_scroll(direction * 3, "units")
+                        
+                        # Bind to the parent dialog
+                        self.dialog.bind_all("<MouseWheel>", on_mousewheel)
+                        self.dialog.bind_all("<Button-4>", lambda e: on_mousewheel_linux(e, -1))
+                        self.dialog.bind_all("<Button-5>", lambda e: on_mousewheel_linux(e, 1))
+                    except:
+                        pass
+                
+                # Use after_idle to ensure dialog is fully destroyed first
+                self.dialog.after_idle(rebind_scroll)
+        
+        def save_prompt():
+            self.full_page_context_prompt = text_editor.get(1.0, tk.END).strip()
+            self._save_rendering_settings()
+            self._log("✅ Updated full page context prompt", "success")
+            close_dialog()
+        
+        def reset_prompt():
+            default_prompt = (
+                "You will receive multiple text segments from a manga page. "
+                "Translate each segment considering the context of all segments together. "
+                "Maintain consistency in character names, tone, and style across all translations.\n\n"
+                "IMPORTANT: Return your response as a JSON object where each key is the EXACT original text "
+                "(without the [0], [1] index prefixes) and each value is the translation. Example:\n"
+                '{\n'
+                '  "こんにちは": "Hello",\n'
+                '  "ありがとう": "Thank you"\n'
+                '}\n\n'
+                'Do NOT include the [0], [1], etc. prefixes in the JSON keys.'
+            )
+            text_editor.delete(1.0, tk.END)
+            text_editor.insert(1.0, default_prompt)
+        
+        # Buttons
+        tb.Button(
+            button_frame,
+            text="Save",
+            command=save_prompt,
+            bootstyle="primary"
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        
+        tb.Button(
+            button_frame,
+            text="Reset to Default",
+            command=reset_prompt,
+            bootstyle="secondary"
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        
+        tb.Button(
+            button_frame,
+            text="Cancel",
+            command=close_dialog,
+            bootstyle="secondary"
+        ).pack(side=tk.LEFT)
+        
+        # Auto-resize dialog to fit content
+        self.main_gui.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.7, max_height_ratio=0.6)
+        
+        # Handle window close
+        dialog.protocol("WM_DELETE_WINDOW", close_dialog)
+    
+    def _refresh_context_settings(self):
+        """Refresh context settings from main GUI"""
+        # Update labels
+        contextual_status = "Enabled" if self.main_gui.contextual_var.get() else "Disabled"
+        self.contextual_status_label.config(text=f"• Contextual Translation: {contextual_status}")
+        
+        history_limit = self.main_gui.trans_history.get() if hasattr(self.main_gui, 'trans_history') else "3"
+        self.history_limit_label.config(text=f"• Translation History Limit: {history_limit} exchanges")
+        
+        rolling_status = "Enabled (Rolling Window)" if self.main_gui.translation_history_rolling_var.get() else "Disabled (Reset on Limit)"
+        self.rolling_status_label.config(text=f"• Rolling History: {rolling_status}")
+        
+        self._log("✅ Refreshed context settings from main GUI", "success")
     
     def _browse_google_credentials_permanent(self):
         """Browse and set Google Cloud Vision credentials from the permanent button"""
@@ -1028,6 +1408,10 @@ class MangaTranslationTab:
         self._log(f"Starting translation of {self.total_files} files...", "info")
         self._log(f"Using Google Vision credentials: {os.path.basename(google_creds)}", "info")
         self._log(f"Using API model: {self.main_gui.client.model if hasattr(self.main_gui.client, 'model') else 'unknown'}", "info")
+        self._log(f"Contextual: {'Enabled' if self.main_gui.contextual_var.get() else 'Disabled'}", "info")
+        self._log(f"History limit: {self.main_gui.trans_history.get()} exchanges", "info")
+        self._log(f"Rolling history: {'Enabled' if self.main_gui.translation_history_rolling_var.get() else 'Disabled'}", "info")
+        self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_var.get() else 'Disabled'}", "info")
         
         # Start translation thread
         self.translation_thread = threading.Thread(
@@ -1066,14 +1450,22 @@ class MangaTranslationTab:
                 shadow_offset_y=self.shadow_offset_y_var.get(),
                 shadow_blur=self.shadow_blur_var.get()
             )
+            
             if hasattr(self, 'skip_inpainting_var'):
                 self.translator.skip_inpainting = self.skip_inpainting_var.get()
+            
+            # Set full page context mode
+            self.translator.set_full_page_context(
+                enabled=self.full_page_context_var.get(),
+                custom_prompt=self.full_page_context_prompt
+            )
             
             self._log(f"Applied rendering settings:", "info")
             self._log(f"  Background: {self.bg_style_var.get()} @ {int(self.bg_opacity_var.get()/255*100)}% opacity", "info")
             self._log(f"  Font: {os.path.basename(self.selected_font_path) if self.selected_font_path else 'Default'}", "info")
             self._log(f"  Text Color: RGB({text_color[0]}, {text_color[1]}, {text_color[2]})", "info")
             self._log(f"  Shadow: {'Enabled' if self.shadow_enabled_var.get() else 'Disabled'}", "info")
+            self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_var.get() else 'Disabled'}", "info")
 
     def _translation_worker(self):
         """Worker thread for translation"""
