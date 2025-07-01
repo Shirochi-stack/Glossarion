@@ -44,6 +44,8 @@
   * AI sees the full manga page image for accurate context
   * Full page context mode for multi-bubble consistency
   * Character expressions inform translation tone
+  **Best results with advanced models like o3**
+
 * **Advanced Text Rendering**
   * Customizable fonts, colors, and backgrounds
   * Text shadows and outlines for readability
