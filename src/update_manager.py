@@ -1,14 +1,15 @@
-# update_manager.py - New module for update functionality
+# update_manager.py - Auto-update functionality for Glossarion
 import os
 import json
 import requests
 import threading
-import hashlib
+import time
 from typing import Optional, Dict, Tuple
 from packaging import version
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 import ttkbootstrap as tb
+from datetime import datetime
 
 class UpdateManager:
     """Handles automatic update checking and installation for Glossarion"""
@@ -153,7 +154,7 @@ class UpdateManager:
                  bootstyle="link").pack(side='left', padx=5)
         
         # Auto-resize and show
-        self.main_gui.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.4, max_height_ratio=0.58)
+        self.main_gui.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.4, max_height_ratio=0.62)
         
         # Handle window close
         dialog.protocol("WM_DELETE_WINDOW", lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
