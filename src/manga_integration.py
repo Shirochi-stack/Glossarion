@@ -536,6 +536,9 @@ class MangaTranslationTab:
         # Initialize visibility
         self._toggle_font_size_mode()
 
+        # Update multiplier label with loaded value
+        self._update_multiplier_label(self.font_size_multiplier_var.get())
+        
         font_size_spinbox.pack(side=tk.LEFT, padx=10)
         # Also bind to save on manual entry
         font_size_spinbox.bind('<Return>', lambda e: self._save_rendering_settings())
