@@ -331,7 +331,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - **Issues**: [GitHub Issues](https://github.com/Shirochi-stack/Glossarion/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/Shirochi-stack/Glossarion/discussions)
-- **Wiki**: [Documentation Wiki](https://github.com/Shirochi-stack/Glossarion/wiki)
 
 ---
 
