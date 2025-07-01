@@ -2,9 +2,9 @@
   <img src="assets/Halgakos.png" width="200" alt="Glossarion Logo" />
 </p>
 
-# 📚 Glossarion
+# 📚 Glossarion v3.1.0
 
-**Glossarion** is an AI translator and AI glossary generator for Korean, Japanese, and Chinese light novels, built to transform EPUB files **and raw .txt files** into high-quality, context-aware English translations. It supports OpenAI, Gemini, DeepSeek, and Sonnet APIs, with a GUI that gives you total control over every step of the process—from prompt customization to final EPUB export.
+**Glossarion** is a comprehensive AI-powered translation suite for Korean, Japanese, and Chinese light novels, web novels, and manga. Built to transform EPUB files, raw .txt files, and manga images into high-quality, context-aware English translations. It supports multiple AI providers including OpenAI, Google Gemini, Anthropic Claude, DeepSeek, Mistral, and more, with a modern GUI that gives you total control over every step of the translation process.
 
 ---
 
@@ -16,191 +16,362 @@
 ![Python application](https://github.com/Shirochi-stack/Glossarion/workflows/Python%20application/badge.svg)
 [![GitHub release](https://img.shields.io/github/release/Shirochi-stack/Glossarion.svg)](https://GitHub.com/Shirochi-stack/Glossarion/releases/)
 
-## ✨ Features
+## ✨ Key Features
 
-### 📖 Core Translation Engine
+### 🎌 Manga Translation (NEW!)
+* **Hybrid OCR + Translation Pipeline**
+  * Google Cloud Vision API for text detection
+  * AI-powered translation with visual context awareness
+  * Full page context mode for accurate multi-bubble translations
+* **Advanced Text Rendering**
+  * Customizable fonts, colors, and backgrounds
+  * Text shadows and outlines for readability
+  * Smart inpainting to remove original text
+  * Preserve original art option
+* **Batch Processing**
+  * Process entire manga chapters automatically
+  * Stop/resume functionality
+  * Progress tracking and error recovery
 
-* Translate EPUB chapters using OpenAI or Gemini chat models.
-* Customizable system prompts that allow you to adjust your preferences.
-* Fully retains HTML structure and embedded images.
-* Manual glossary override supported.
-* Configurable context-memory window per chapter.
-* Rate-limit handling with delay configuration and retry logic for timeouts & duplicates
-  
-    ### 🖼️ OCR Translation
-  
-  * Extract & translate embedded images’ text  
-  * Auto-split tall images (>2000 px) for reliable OCR
-  * Configurable chunk sizing
-  * OpenAI & Gemini API support
+### 📖 Novel Translation Engine
+* **Multi-Provider AI Support**
+  * OpenAI (GPT-4, o1-preview, o1-mini)
+  * Google Gemini (Flash, Pro, experimental models)
+  * Anthropic Claude (Opus, Sonnet, Haiku)
+  * DeepSeek, Mistral, Cohere, and more
+* **Advanced Context Management**
+  * Rolling history window for consistent translations
+  * Chunk-based processing for long chapters
+  * Contextual memory with configurable depth
+  * Full history export/import
+* **Smart Retry System**
+  * AI Hunter duplicate detection
+  * Automatic retry for timeouts and errors
+  * Intelligent truncation detection and recovery
+  * Rate limit handling with exponential backoff
 
+### 🧠 AI Hunter
+* **Advanced Duplicate Detection**
+  * Machine learning-based content similarity analysis
+  * Semantic fingerprinting using TF-IDF
+  * Structural pattern recognition
+  * Configurable sensitivity thresholds
+* **Smart Filtering**
+  * Length ratio checks
+  * Key phrase verification
+  * Character name consistency
+  * Statistical outlier detection
 
+### 📓 Glossary System v2.0
+* **Flexible Extraction**
+  * Custom field support
+  * Configurable prompts
+  * Multi-language support (KR/JP/CN)
+  * Duplicate merging strategies
+* **Advanced Management**
+  * Field-specific trimming controls
+  * Import/export with validation
+  * Automatic backup system
+  * JSON and Markdown formats
 
-### 📓 Glossary Extraction
+### 🛡️ Quality Assurance Suite
+* **Comprehensive Scanning**
+  * Duplicate content detection
+  * Non-English fragment identification
+  * Spacing and formatting issues
+  * Repetitive sentence patterns
+* **Multiple Report Formats**
+  * Interactive HTML reports
+  * Detailed JSON analysis
+  * CSV exports for spreadsheets
+  * Summary statistics
 
-* AI-powered extraction of:
+### 🖼️ Image Translation
+* **Smart Processing**
+  * Auto-detection of text in images
+  * Tall image splitting for reliable OCR
+  * Batch processing with progress tracking
+  * Context preservation across chunks
 
-  * Character names (original + romanized)
-  * Titles and group affiliations
-  * Traits and reference styles (how characters refer to others)
-  * Locations (with original script in brackets)
-* Output in `.json` and Markdown `.md` formats.
-* Intelligent merging of duplicate entries.
+### 📚 File Format Support
+* **EPUB Processing**
+  * Structure-preserving translation
+  * Metadata and cover retention
+  * Image gallery support
+  * Clean HTML generation
+* **Text File Support**
+  * Chapter detection algorithms
+  * Custom delimiters
+  * Encoding auto-detection
+  * Format preservation
 
-
-### ✂️ Glossary Management
-
-* GUI glossary trimmer with field-specific controls:
-
-  * Drop traits, affiliations, name-mappings, etc.
-  * Aggregate all locations into a summary entry.
-* Import and override glossary files manually.
-
-
-### 🖥️ Full GUI Support
-
-* Built with `ttkbootstrap` and `tkinter` for a modern interface.
-* Language prompt profiles with import/export options.
-* Configurable API model, temperature, history depth, and more.
-* Real-time logging, subprocess output streaming, and fallback behavior.
-
-
-### 🛡️ QA Scanning
-
-* Scan translated HTML files for duplicates, non-English fragments, spacing issues, and repetitive sentences.
-* Generate JSON, CSV, and HTML reports for QA review.
-* Trigger via GUI **QA Scan** button or CLI `scan_html_folder.py`.
-
-
-### 📚 EPUB Export
-
-* Rebuild an EPUB from translated HTML and images, preserving cover art and metadata.
-* Image gallery support.
-* Accessible via GUI **EPUB Converter** or CLI `epub_converter.py`.
-* Preserves cover art, images & metadata  
-* Smart chapter extraction & robust XHTML parsing
-
-  
-### 🔍 Quality Assurance Tools
-* Automated HTML scans for duplicates, non-English fragments & spacing issues  
-* Reports in JSON, CSV & HTML
-
-   
-### 🔧 Helper Tools
-
-* Unified API client (`unified_api_client.py`): supports OpenAI, Gemini, DeepSeek Chat, and Anthropic/Sonetta models with automatic retries and detailed payload logging.
+### 🖥️ Modern GUI Interface
+* **User-Friendly Design**
+  * Dark/light theme support via ttkbootstrap
+  * Real-time translation progress
+  * Scrollable dialogs for all screens
+  * Comprehensive logging system
+* **Advanced Configuration**
+  * Per-language prompt profiles
+  * Temperature and token controls
+  * API endpoint customization
+  * Batch size optimization
 
 ---
 
 ## 📦 Installation
 
-1. Clone or download this repo:
+### Prerequisites
+- Python 3.10 or higher
+- Windows 10/11 (for full feature support)
 
+### Quick Start
+
+1. Clone the repository:
    ```bash
    git clone https://github.com/Shirochi-stack/Glossarion.git
+   cd Glossarion
    ```
-2. Install dependencies:
 
+2. Install dependencies:
    ```bash
    pip install -r requirements.txt
    ```
 
-**requirements.txt**:
-
-```text
-# Third-party dependencies
-
-tiktoken
-ebooklib
-beautifulsoup4
-ttkbootstrap
-Pillow
-requests
-openai
-google-generative-ai
-langdetect
-tqdm
-```
-
 3. Launch the GUI:
-
    ```bash
    python translator_gui.py
    ```
 
----
-
-## 🔑 API Keys
-
-To use translation features, provide an API key in the GUI:
-
-* **OpenAI**: Models like `gpt-4.1-*`, `o4-*`
-* **Gemini**: Any `gemini-flash-*`, `gemini-pro-*` model supported by Google
-* **DeepSeek Chat**: Your DeepSeek Chat API key
-* **Sonetta (Anthropic)**: Your Sonetta/Anthropic API key
+### Building Executable (Optional)
+```bash
+pip install pyinstaller
+pyinstaller translator.spec
+```
 
 ---
 
+## 📋 Requirements
 
-## 🧠 System Prompt Customization
+```text
+# Core Translation
+tiktoken>=0.5.0
+openai>=1.0.0
+google-generativeai>=0.3.0
+anthropic>=0.7.0
+mistralai>=0.0.7
+cohere>=4.0.0
 
-Customize your translation style:
+# File Processing
+ebooklib>=0.18
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+html5lib>=1.1
 
-* Per-language prompt profiles (e.g., Korean, Japanese, Chinese)
-* Onomatopoeia in Romaji
-* Speech tone retention
-* Slang/dialect preservation
+# GUI Framework
+ttkbootstrap>=1.10.0
+tkinter (included with Python)
 
-All settings are saved in `config.json`.
+# Image Processing
+Pillow>=10.0.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+
+# Manga Translation
+google-cloud-vision>=3.4.0
+
+# Text Analysis
+langdetect>=1.0.9
+chardet>=5.2.0
+datasketch>=1.6.0
+scipy>=1.11.0
+
+# Utilities
+requests>=2.31.0
+tqdm>=4.66.0
+regex>=2023.0.0
+```
 
 ---
 
+## 🔑 API Configuration
 
-## 🧪 Example Workflow
+### Supported AI Providers
 
-1. Select your `.epub` file.
-2. Enter your API key and prompt settings.
-3. Click **Run Translation**.
-4. After translation, click **EPUB Converter** to recompile.
-5. Optionally, use **Extract Glossary** to generate character info.
+| Provider | Model Format | Example Models | Notes |
+|----------|--------------|----------------|-------|
+| **OpenAI** | `gpt-*`, `o1-*`, `o3-*`, `o4-*` | GPT-4, GPT-4-turbo, o1-preview, o3, o4-mini | Industry standard |
+| **Google Gemini** | `gemini-*` | gemini-1.5-flash, gemini-1.5-pro, gemini-2.0-flash-exp | Free tier available |
+| **Anthropic** | `claude-*` | claude-3-opus, claude-3-sonnet, claude-3-haiku | High quality output |
+| **DeepSeek** | `deepseek-*` | deepseek-chat, deepseek-coder | Cost-effective option |
+| **Mistral** | `mistral-*`, `open-mistral-*` | mistral-large, mistral-medium, open-mistral-7b | European provider |
+| **ElectronHub** | `eh/*`, `electronhub/*` | Access to GPT-4, Claude, Yi, Qwen, and many others | API aggregator service |
+| **Cohere** | `command-*` | command-r, command-r-plus | Specialized for tasks |
+
+### Additional Supported Providers
+Yi, Qwen, Baichuan, Zhipu AI, Moonshot, Groq, Baidu, Tencent, iFLYTEK, ByteDance, MiniMax, Together AI, Perplexity, and many more. See the full list in `unified_api_client.py`.
+
+### API Key Setup
+1. **Direct Providers**: Use API keys from OpenAI, Google, Anthropic, etc.
+2. **ElectronHub**: Single API key for access to models from multiple providers
+3. **Custom Endpoints**: Configure base URL for self-hosted or alternative endpoints
+
+### Model Selection
+- Enter the model name exactly as shown in the provider's documentation
+- The tool automatically detects the provider based on the model prefix
+- For ElectronHub, prefix any supported model with `eh/`, `electronhub/`, or `electron/`
+  - Example: `eh/gpt-4`, `electronhub/claude-3-opus`, `electron/yi-34b-chat`
+
+### Manga Translation Setup
+1. Create a Google Cloud Project
+2. Enable Cloud Vision API
+3. Create service account credentials
+4. Download JSON key file
+5. Set path in Manga Translator interface
+
+---
+
+## 🚀 Usage Examples
+
+### Basic Novel Translation
+1. Select your EPUB/TXT file
+2. Choose source language profile
+3. Enter your API key
+4. Configure translation settings
+5. Click "Run Translation"
+
+### Manga Translation
+1. Open Manga Translator from Tools menu
+2. Set Google Cloud Vision credentials
+3. Select manga images
+4. Configure text rendering options
+5. Start batch translation
+
+### Glossary Extraction
+1. After translation completes
+2. Click "Extract Glossary"
+3. Review and edit entries
+4. Export to JSON/Markdown
+
+### Quality Assurance
+1. Complete translation
+2. Click "QA Scan"
+3. Review HTML report
+4. Fix identified issues
 
 ---
 
 ## 🧱 Project Structure
 
 ```
-.
+Glossarion/
 ├── src/
-│   ├── translator_gui.py
-│   ├── TransateKRtoEN.py
-│   ├── extract_glossary_from_epub.py
-│   ├── epub_converter.py
-│   ├── unified_api_client.py
-│   ├── launch_Glossarion.bat
-│   └── launch_Glossarion.vbs
-│   └── scan_html_folder.py
-│   └── image_translator.py
-├── docs/
-│   └── UserGuide.md
-├── Glossary/
-├── output/
-├── Payloads/
+│   ├── translator_gui.py          # Main GUI application
+│   ├── TransateKRtoEN.py         # Core translation engine
+│   ├── unified_api_client.py     # Multi-provider AI client
+│   ├── manga_translator.py       # Manga OCR and translation
+│   ├── manga_integration.py      # Manga GUI interface
+│   ├── ai_hunter_enhanced.py     # Advanced duplicate detection
+│   ├── history_manager.py        # Context management
+│   ├── extract_glossary_from_*.py # Glossary extractors
+│   ├── epub_converter.py         # EPUB processing
+│   ├── scan_html_folder.py       # QA scanner
+│   └── [other modules]
 ├── assets/
-│   └── Halgakos.png
-├── README.md
-├── LICENSE
+│   └── Halgakos.png             # Application icon
+├── docs/
+│   └── [documentation]
+├── translator.spec              # PyInstaller config
 ├── requirements.txt
-└── install_requirements.bat
+├── README.md
+└── LICENSE
 ```
 
 ---
 
-## 💬 Acknowledgments
+## 🎯 Advanced Features
 
-Built with ❤️ using OpenAI, Gemini & Claude APIs. Designed with ChatGPT & Claude.
+### Translation Profiles
+- **Japanese (Manga_JP)**: Optimized for manga with visual context
+- **Korean (Manga_KR)**: Manhwa-specific translations
+- **Chinese (Manga_CN)**: Manhua translations
+- **Novel profiles**: Separate profiles for text-only content
+
+### Context Window Management
+- **Rolling Window**: Maintains recent context only
+- **Reset on Limit**: Clears history at threshold
+- **Dynamic Adjustment**: Based on token limits
+- **Export/Import**: Save translation sessions
+
+### Batch Processing Options
+- **Concurrent Chunks**: Process multiple sections simultaneously
+- **Auto-retry Failed**: Automatic error recovery
+- **Progress Persistence**: Resume interrupted translations
+- **Resource Management**: CPU/memory optimization
+
+---
+
+## 🤝 Contributing
+
+We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.
+
+### Development Setup
+```bash
+# Clone with submodules
+git clone --recursive https://github.com/Shirochi-stack/Glossarion.git
+
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dev dependencies
+pip install -r requirements-dev.txt
+```
+
+---
+
+## 📝 Changelog
+
+### v3.1.0 (Latest)
+- ✨ Added comprehensive manga translation support
+- 🚀 Implemented AI Hunter duplicate detection
+- 🔄 Added rolling history window for better context
+- 🎨 New customizable text rendering system
+- 🛠️ Improved error handling and recovery
+- 📊 Enhanced progress tracking and reporting
+
+### v3.0.0
+- 🤖 Multi-provider AI support
+- 📚 Glossary system v2.0
+- 🔍 Advanced QA scanning
+- 💾 Session management
+
+[See full changelog](CHANGELOG.md)
+
+---
+
+## 🙏 Acknowledgments
+
+Built with ❤️ using:
+- OpenAI, Google, and Anthropic APIs
+- Designed with assistance from ChatGPT & Claude
+- Community feedback and contributions
+- Open source libraries and tools
 
 ---
 
 ## 📜 License
 
-MIT License
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+---
+
+## 📞 Support
+
+- **Issues**: [GitHub Issues](https://github.com/Shirochi-stack/Glossarion/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/Shirochi-stack/Glossarion/discussions)
+- **Wiki**: [Documentation Wiki](https://github.com/Shirochi-stack/Glossarion/wiki)
+
+---
+
+<p align="center">Made with 🌸 for the translation community</p>
