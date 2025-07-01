@@ -628,7 +628,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        master.title("Glossarion v3.0.6")
+        master.title("Glossarion v3.1.0")
         
         self.wm.responsive_size(master, BASE_WIDTH, BASE_HEIGHT)
         master.minsize(1600, 1000)
@@ -868,7 +868,8 @@ class TranslatorGUI:
         
     def create_glossary_backup(self, operation_name="manual"):
         """Create a backup of the current glossary if auto-backup is enabled"""
-        if not self.config.get('glossary_auto_backup', False):
+        # For manual backups, always proceed. For automatic backups, check the setting.
+        if operation_name != "manual" and not self.config.get('glossary_auto_backup', True):
             return True
         
         if not self.current_glossary_data or not self.editor_file_var.get():
@@ -880,19 +881,15 @@ class TranslatorGUI:
             original_dir = os.path.dirname(original_path)
             original_name = os.path.basename(original_path)
             
-            # Create backup directory - use a different approach
+            # Create backup directory
             backup_dir = os.path.join(original_dir, "Backups")
             
-            # Try to create directory only if it doesn't exist
-            if not os.path.isdir(backup_dir):
-                try:
-                    os.mkdir(backup_dir)  # Use mkdir instead of makedirs
-                except FileExistsError:
-                    pass  # Directory was created between check and creation
-                except Exception as e:
-                    # Log the actual error for debugging
-                    self.append_log(f"⚠️ Directory creation issue: {str(e)}")
-                    # Continue anyway since we might still be able to write
+            # Create directory if it doesn't exist
+            try:
+                os.makedirs(backup_dir, exist_ok=True)
+            except Exception as e:
+                self.append_log(f"⚠️ Failed to create backup directory: {str(e)}")
+                return False
             
             # Generate timestamp-based backup filename
             timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -913,15 +910,11 @@ class TranslatorGUI:
             return True
             
         except Exception as e:
-            # Only show error if backup actually failed
-            if not os.path.exists(backup_path):
-                self.append_log(f"⚠️ Backup failed: {str(e)}")
-                return messagebox.askyesno("Backup Failed", 
-                                          f"Failed to create backup: {str(e)}\n\nContinue anyway?")
-            else:
-                # Backup was created despite the error
-                self.append_log(f"💾 Backup created despite warning: {backup_name}")
-                return True
+            # Log the actual error
+            self.append_log(f"⚠️ Backup failed: {str(e)}")
+            # Ask user if they want to continue anyway
+            return messagebox.askyesno("Backup Failed", 
+                                      f"Failed to create backup: {str(e)}\n\nContinue anyway?")
 
     def _clean_old_backups(self, backup_dir, original_name, max_backups):
         """Remove old backups exceeding the limit"""
@@ -1154,7 +1147,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.0.6 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.1.0 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -3243,7 +3236,7 @@ Recent translations to summarize:
                 width=500,
                 height=None,
                 max_width_ratio=0.45,
-                max_height_ratio=0.5
+                max_height_ratio=0.51
             )
             
             # Main frame
@@ -3310,8 +3303,8 @@ Recent translations to summarize:
             
             if self.editor_file_var.get():
                 glossary_dir = os.path.dirname(self.editor_file_var.get())
-                backup_path = os.path.join("Glossary", "Backups")
-                full_path = os.path.join(glossary_dir, backup_path)
+                backup_path = "Backups"  # <-- Fixed this line
+                full_path = os.path.join(glossary_dir, "Backups")
                 
                 path_label = ttk.Label(location_frame, 
                                       text=f"{backup_path}/",
@@ -3328,7 +3321,7 @@ Recent translations to summarize:
                              foreground='gray').pack(anchor=tk.W, padx=(10, 0))
             else:
                 ttk.Label(location_frame, 
-                         text="Glossary/Backups",
+                         text="Backups",  # <-- Also fix this line
                          font=('TkDefaultFont', 9),
                          foreground='gray').pack(anchor=tk.W, padx=(10, 0))
             
@@ -3384,7 +3377,7 @@ Recent translations to summarize:
                       bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
             
             # Auto-resize and show
-            self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.45, max_height_ratio=0.4)
+            self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.45, max_height_ratio=0.41)
     
         def smart_trim_dialog():
             if not self.current_glossary_data:
@@ -7385,7 +7378,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.0.6...")
+    print("🚀 Starting Glossarion v3.1.0...")
     
     # Initialize splash screen
     splash_manager = None
