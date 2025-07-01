@@ -2,7 +2,7 @@
   <img src="assets/Halgakos.png" width="200" alt="Glossarion Logo" />
 </p>
 
-# 📚 Glossarion v3.1.0
+# 📚 Glossarion
 
 **Glossarion** is a comprehensive AI-powered translation suite for Korean, Japanese, and Chinese light novels, web novels, and manga. Built to transform EPUB files, raw .txt files, and manga images into high-quality, context-aware English translations. It supports multiple AI providers including OpenAI, Google Gemini, Anthropic Claude, DeepSeek, Mistral, and more, with a modern GUI that gives you total control over every step of the translation process.
 
