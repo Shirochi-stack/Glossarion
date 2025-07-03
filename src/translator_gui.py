@@ -96,21 +96,24 @@ class UIHelper:
             except tk.TclError: 
                 pass
         
-        # Bind events
-        wheel_handler = lambda e: on_mousewheel(e)
-        wheel_up = lambda e: on_mousewheel_linux(e, -1)
-        wheel_down = lambda e: on_mousewheel_linux(e, 1)
+        # Bind events TO THE CANVAS AND DIALOG, NOT GLOBALLY
+        dialog_window.bind("<MouseWheel>", on_mousewheel)
+        dialog_window.bind("<Button-4>", lambda e: on_mousewheel_linux(e, -1))
+        dialog_window.bind("<Button-5>", lambda e: on_mousewheel_linux(e, 1))
         
-        dialog_window.bind_all("<MouseWheel>", wheel_handler)
-        dialog_window.bind_all("<Button-4>", wheel_up)
-        dialog_window.bind_all("<Button-5>", wheel_down)
+        canvas.bind("<MouseWheel>", on_mousewheel)
+        canvas.bind("<Button-4>", lambda e: on_mousewheel_linux(e, -1))
+        canvas.bind("<Button-5>", lambda e: on_mousewheel_linux(e, 1))
         
         # Return cleanup function
         def cleanup_bindings():
             try:
-                dialog_window.unbind_all("<MouseWheel>")
-                dialog_window.unbind_all("<Button-4>")
-                dialog_window.unbind_all("<Button-5>")
+                dialog_window.unbind("<MouseWheel>")
+                dialog_window.unbind("<Button-4>")
+                dialog_window.unbind("<Button-5>")
+                canvas.unbind("<MouseWheel>")
+                canvas.unbind("<Button-4>")
+                canvas.unbind("<Button-5>")
             except: 
                 pass
         
@@ -627,7 +630,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.1.3"
+        __version__ = "3.1.5"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1195,7 +1198,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.1.3 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.1.5 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -7452,7 +7455,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.1.3...")
+    print("🚀 Starting Glossarion v3.1.5...")
     
     # Initialize splash screen
     splash_manager = None
