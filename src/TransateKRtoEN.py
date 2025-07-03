@@ -579,7 +579,7 @@ class ProgressManager:
                 "actual_num": actual_num,
                 "output_file": output_file
             }
-    
+        
     def check_chapter_status(self, chapter_idx, actual_num, content_hash, output_dir):
         """Check if a chapter needs translation with fallback"""
         chapter_key = content_hash
@@ -666,6 +666,10 @@ class ProgressManager:
                             return True, None, None
                     else:
                         return True, None, None
+        
+        # FIXED: Add the missing return statement for when none of the above conditions are met
+        # This means the chapter needs translation
+        return True, None, None
     
     def cleanup_missing_files(self, output_dir):
         """Scan progress tracking and clean up any references to missing files"""
