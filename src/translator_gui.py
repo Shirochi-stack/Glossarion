@@ -5775,22 +5775,29 @@ Recent translations to summarize:
         
         def save_settings():
             """Save QA scanner settings"""
-            qa_settings['foreign_char_threshold'] = threshold_var.get()
-            qa_settings['excluded_characters'] = excluded_text.get(1.0, tk.END).strip()
-            qa_settings['check_encoding_issues'] = check_encoding_var.get()
-            qa_settings['check_repetition'] = check_repetition_var.get()
-            qa_settings['check_translation_artifacts'] = check_artifacts_var.get()
-            qa_settings['min_file_length'] = min_length_var.get()
-            qa_settings['report_format'] = format_var.get()
-            qa_settings['auto_save_report'] = auto_save_var.get()
-            
-            # Save to main config
-            self.config['qa_scanner_settings'] = qa_settings
-            self.save_config()
-            
-            self.append_log("✅ QA Scanner settings saved")
-            dialog._cleanup_scrolling()  # Clean up scrolling bindings
-            dialog.destroy()
+            try:
+                qa_settings['foreign_char_threshold'] = threshold_var.get()
+                qa_settings['excluded_characters'] = excluded_text.get(1.0, tk.END).strip()
+                qa_settings['check_encoding_issues'] = check_encoding_var.get()
+                qa_settings['check_repetition'] = check_repetition_var.get()
+                qa_settings['check_translation_artifacts'] = check_artifacts_var.get()
+                qa_settings['min_file_length'] = min_length_var.get()
+                qa_settings['report_format'] = format_var.get()
+                qa_settings['auto_save_report'] = auto_save_var.get()
+                
+                # Save to main config
+                self.config['qa_scanner_settings'] = qa_settings
+                
+                # Call save_config with show_message=False to avoid the error
+                self.save_config(show_message=False)
+                
+                self.append_log("✅ QA Scanner settings saved")
+                dialog._cleanup_scrolling()  # Clean up scrolling bindings
+                dialog.destroy()
+                
+            except Exception as e:
+                self.append_log(f"❌ Error saving QA settings: {str(e)}")
+                messagebox.showerror("Error", f"Failed to save settings: {str(e)}")
         
         def reset_defaults():
             """Reset to default settings"""
@@ -7178,10 +7185,10 @@ Recent translations to summarize:
                     "ENABLE_DECIMAL_CHAPTERS": "1" if self.enable_decimal_chapters_var.get() else "0",
                     'ENABLE_WATERMARK_REMOVAL': "1" if self.enable_watermark_removal_var.get() else "0",
                     'SAVE_CLEANED_IMAGES': "1" if self.save_cleaned_images_var.get() else "0",
-                    'TRANSLATION_CHUNK_PROMPT': self.translation_chunk_prompt,
-                    'IMAGE_CHUNK_PROMPT': self.image_chunk_prompt,
+                    'TRANSLATION_CHUNK_PROMPT': str(getattr(self, 'translation_chunk_prompt', '')),  # FIXED: Convert to string
+                    'IMAGE_CHUNK_PROMPT': str(getattr(self, 'image_chunk_prompt', '')),  # FIXED: Convert to string
                     "DISABLE_GEMINI_SAFETY": str(self.config.get('disable_gemini_safety', False)).lower(),
-                    'auto_update_check': self.auto_update_check_var.get() 
+                    'auto_update_check': str(self.auto_update_check_var.get())  # FIXED: Convert to string
                 }
                 os.environ.update(env_updates)
                 
