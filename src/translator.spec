@@ -48,6 +48,7 @@ for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'charde
 # ============================================================================
 
 # Main application files
+
 app_files = [
     # Core GUI
     ('translator_gui.py', '.'),
@@ -79,15 +80,14 @@ app_files = [
     # Manga Translation modules
     ('manga_translator.py', '.'),
     ('manga_integration.py', '.'),
-    ('manga_settings_dialog.py', '.'),  # ADDED: Manga settings dialog
+    ('manga_settings_dialog.py', '.'), 
     
-    # Update Manager
+    # Update Manager - ADDED
     ('update_manager.py', '.'),
     
     # Resources
     ('Halgakos.ico', '.'),
 ]
-
 # Add application files to datas
 datas.extend(app_files)
 
@@ -113,8 +113,8 @@ app_modules = [
     'ai_hunter_enhanced',  # AI Hunter Enhanced module
     'manga_translator',    # Manga translator module
     'manga_integration',   # Manga GUI integration
-    'manga_settings_dialog',  # ADDED: Manga settings dialog module
-    'update_manager',      # Update manager module
+    'manga_settings_dialog', 
+    'update_manager',      # ADDED: Update manager module
 ]
 
 # GUI Framework
@@ -581,9 +581,12 @@ datetime_modules = [
 utility_modules = [
     'tqdm',
     'tqdm.auto',
+	'dataclasses',
     'tqdm.std',
     'tqdm.gui',
+	'dataclasses',
     'tqdm.notebook',
+	'concurrent.futures',
     'tqdm.utils',
     'tqdm.cli',
     'logging',
