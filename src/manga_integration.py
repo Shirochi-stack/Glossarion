@@ -17,6 +17,8 @@ import ttkbootstrap as tb
 from typing import List, Dict, Optional, Any
 from queue import Queue
 from manga_translator import MangaTranslator, GOOGLE_CLOUD_VISION_AVAILABLE
+from manga_settings_dialog import MangaSettingsDialog
+
 
 # Try to import UnifiedClient for API initialization
 try:
@@ -48,6 +50,8 @@ class MangaTranslationTab:
         self.translation_thread = None
         self.selected_files = []
         self.current_file_index = 0
+        self.font_mapping = {}  # Initialize font mapping dictionary
+
         
         # Progress tracking
         self.total_files = 0
@@ -209,6 +213,7 @@ class MangaTranslationTab:
             padx=15,
             pady=10
         )
+      
         settings_frame.pack(fill=tk.X, padx=20, pady=10)
         
         # API Settings - Hybrid approach
@@ -387,6 +392,24 @@ class MangaTranslationTab:
             pady=10
         )
         render_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        # Advanced Settings button at the top of render_frame
+        advanced_button_frame = tk.Frame(render_frame)
+        advanced_button_frame.pack(fill=tk.X, pady=(0, 10))
+
+        tb.Button(
+            advanced_button_frame,
+            text="⚙️ Advanced Settings",
+            command=self._open_advanced_settings,
+            bootstyle="info"
+        ).pack(side=tk.RIGHT)
+
+        tk.Label(
+            advanced_button_frame,
+            text="Configure OCR, preprocessing, and performance options",
+            font=('Arial', 9),
+            fg='gray'
+        ).pack(side=tk.LEFT)
         
         # Background opacity slider
         opacity_frame = tk.Frame(render_frame)
@@ -811,7 +834,34 @@ class MangaTranslationTab:
         self.log_text.tag_config('success', foreground='green')
         self.log_text.tag_config('warning', foreground='orange')
         self.log_text.tag_config('error', foreground='red')
- 
+        
+    def _open_advanced_settings(self):
+        """Open the manga advanced settings dialog"""
+        try:
+            def on_settings_saved(settings):
+                """Callback when settings are saved"""
+                # Update config with new settings
+                self.main_gui.config['manga_settings'] = settings
+                
+                # Reload settings in translator if it exists
+                if self.translator:
+                    self._log("📋 Reloading settings in translator...", "info")
+                    # The translator will pick up new settings on next operation
+                
+                self._log("✅ Advanced settings saved and applied", "success")
+            
+            # Open the settings dialog
+            MangaSettingsDialog(
+                parent=self.dialog,
+                main_gui=self.main_gui,
+                config=self.main_gui.config,
+                callback=on_settings_saved
+            )
+            
+        except Exception as e:
+            self._log(f"❌ Error opening settings dialog: {str(e)}", "error")
+            messagebox.showerror("Error", f"Failed to open settings dialog:\n{str(e)}")
+        
     def _toggle_font_size_mode(self):
         """Toggle between fixed size and multiplier mode"""
         mode = self.font_size_mode_var.get()
@@ -912,6 +962,8 @@ class MangaTranslationTab:
         self.shadow_offset_x_var = tk.IntVar(value=config.get('manga_shadow_offset_x', 2))
         self.shadow_offset_y_var = tk.IntVar(value=config.get('manga_shadow_offset_y', 2))
         self.shadow_blur_var = tk.IntVar(value=config.get('manga_shadow_blur', 0))
+        self.font_style_var = tk.StringVar(value=config.get('manga_font_style', 'Default'))
+
         
         # Also set font style var if we have a saved font
         if self.selected_font_path:
@@ -949,6 +1001,7 @@ class MangaTranslationTab:
         self.main_gui.config['manga_skip_inpainting'] = self.skip_inpainting_var.get()
         self.main_gui.config['manga_font_size_mode'] = self.font_size_mode_var.get()
         self.main_gui.config['manga_font_size_multiplier'] = self.font_size_multiplier_var.get()
+        self.main_gui.config['manga_font_style'] = self.font_style_var.get()
 
         
         # Save font color as list
@@ -987,129 +1040,106 @@ class MangaTranslationTab:
         self._save_rendering_settings()
     
     def _edit_context_prompt(self):
-        """Open dialog to edit full page context prompt"""
-        # Store parent canvas for scroll restoration
-        parent_canvas = self.canvas
-        
-        # Use WindowManager to create scrollable dialog
-        dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
-            self.dialog,  # parent window
-            "Edit Full Page Context Prompt",
-            width=700,
-            height=500,
-            max_width_ratio=0.7,
-            max_height_ratio=0.8
-        )
-        
-        # Instructions
-        instructions = tk.Label(
-            scrollable_frame,
-            text="Edit the prompt used for full page context translation.\n"
-                 "This will be appended to the main translation system prompt.",
-            font=('Arial', 10),
-            justify=tk.LEFT
-        )
-        instructions.pack(padx=20, pady=(20, 10))
-        
-        # Text editor with UIHelper for undo/redo support
-        text_editor = self.main_gui.ui.setup_scrollable_text(
-            scrollable_frame,
-            wrap=tk.WORD,
-            height=15
-        )
-        text_editor.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 10))
-        
-        # Insert current prompt
-        text_editor.insert(1.0, self.full_page_context_prompt)
-        
-        # Button frame
-        button_frame = tk.Frame(scrollable_frame)
-        button_frame.pack(fill=tk.X, padx=20, pady=(0, 20))
-        
-        def close_dialog():
-            """Properly close dialog and restore parent scrolling"""
-            try:
-                # Clean up this dialog's scrolling
-                if hasattr(dialog, '_cleanup_scrolling') and callable(dialog._cleanup_scrolling):
-                    dialog._cleanup_scrolling()
-            except:
-                pass
+            """Open dialog to edit full page context prompt"""
+            # Store parent canvas for scroll restoration
+            parent_canvas = self.canvas
             
-            # Destroy the dialog
-            dialog.destroy()
-            
-            # Re-bind scroll to parent canvas after a short delay
-            if parent_canvas and parent_canvas.winfo_exists():
-                def rebind_scroll():
-                    try:
-                        # Re-create scroll bindings for parent
-                        def on_mousewheel(event):
-                            if parent_canvas.winfo_exists():
-                                parent_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-                        
-                        def on_mousewheel_linux(event, direction):
-                            if parent_canvas.winfo_exists():
-                                parent_canvas.yview_scroll(direction * 3, "units")
-                        
-                        # Bind to the parent dialog
-                        self.dialog.bind_all("<MouseWheel>", on_mousewheel)
-                        self.dialog.bind_all("<Button-4>", lambda e: on_mousewheel_linux(e, -1))
-                        self.dialog.bind_all("<Button-5>", lambda e: on_mousewheel_linux(e, 1))
-                    except:
-                        pass
-                
-                # Use after_idle to ensure dialog is fully destroyed first
-                self.dialog.after_idle(rebind_scroll)
-        
-        def save_prompt():
-            self.full_page_context_prompt = text_editor.get(1.0, tk.END).strip()
-            self._save_rendering_settings()
-            self._log("✅ Updated full page context prompt", "success")
-            close_dialog()
-        
-        def reset_prompt():
-            default_prompt = (
-                "You will receive multiple text segments from a manga page. "
-                "Translate each segment considering the context of all segments together. "
-                "Maintain consistency in character names, tone, and style across all translations.\n\n"
-                "IMPORTANT: Return your response as a JSON object where each key is the EXACT original text "
-                "(without the [0], [1] index prefixes) and each value is the translation. Example:\n"
-                '{\n'
-                '  "こんにちは": "Hello",\n'
-                '  "ありがとう": "Thank you"\n'
-                '}\n\n'
-                'Do NOT include the [0], [1], etc. prefixes in the JSON keys.'
+            # Use WindowManager to create scrollable dialog
+            dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
+                self.dialog,  # parent window
+                "Edit Full Page Context Prompt",
+                width=700,
+                height=500,
+                max_width_ratio=0.7,
+                max_height_ratio=0.8
             )
-            text_editor.delete(1.0, tk.END)
-            text_editor.insert(1.0, default_prompt)
-        
-        # Buttons
-        tb.Button(
-            button_frame,
-            text="Save",
-            command=save_prompt,
-            bootstyle="primary"
-        ).pack(side=tk.LEFT, padx=(0, 10))
-        
-        tb.Button(
-            button_frame,
-            text="Reset to Default",
-            command=reset_prompt,
-            bootstyle="secondary"
-        ).pack(side=tk.LEFT, padx=(0, 10))
-        
-        tb.Button(
-            button_frame,
-            text="Cancel",
-            command=close_dialog,
-            bootstyle="secondary"
-        ).pack(side=tk.LEFT)
-        
-        # Auto-resize dialog to fit content
-        self.main_gui.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.7, max_height_ratio=0.6)
-        
-        # Handle window close
-        dialog.protocol("WM_DELETE_WINDOW", close_dialog)
+            
+            # Instructions
+            instructions = tk.Label(
+                scrollable_frame,
+                text="Edit the prompt used for full page context translation.\n"
+                     "This will be appended to the main translation system prompt.",
+                font=('Arial', 10),
+                justify=tk.LEFT
+            )
+            instructions.pack(padx=20, pady=(20, 10))
+            
+            # Text editor with UIHelper for undo/redo support
+            text_editor = self.main_gui.ui.setup_scrollable_text(
+                scrollable_frame,
+                wrap=tk.WORD,
+                height=15
+            )
+            text_editor.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 10))
+            
+            # Insert current prompt
+            text_editor.insert(1.0, self.full_page_context_prompt)
+            
+            # Button frame
+            button_frame = tk.Frame(scrollable_frame)
+            button_frame.pack(fill=tk.X, padx=20, pady=(0, 20))
+            
+            def close_dialog():
+                """Properly close dialog and restore parent scrolling"""
+                try:
+                    # Clean up this dialog's scrolling
+                    if hasattr(dialog, '_cleanup_scrolling') and callable(dialog._cleanup_scrolling):
+                        dialog._cleanup_scrolling()
+                except:
+                    pass
+                
+                # Destroy the dialog
+                dialog.destroy()
+            
+            def save_prompt():
+                self.full_page_context_prompt = text_editor.get(1.0, tk.END).strip()
+                self._save_rendering_settings()
+                self._log("✅ Updated full page context prompt", "success")
+                close_dialog()
+            
+            def reset_prompt():
+                default_prompt = (
+                    "You will receive multiple text segments from a manga page. "
+                    "Translate each segment considering the context of all segments together. "
+                    "Maintain consistency in character names, tone, and style across all translations.\n\n"
+                    "IMPORTANT: Return your response as a JSON object where each key is the EXACT original text "
+                    "(without the [0], [1] index prefixes) and each value is the translation. Example:\n"
+                    '{\n'
+                    '  こんにちは: Hello,\n'
+                    '  ありがとう": Thank you\n'
+                    '}\n\n'
+                    'Do NOT include the [0], [1], etc. prefixes in the JSON keys.'
+                )
+                text_editor.delete(1.0, tk.END)
+                text_editor.insert(1.0, default_prompt)
+            
+            # Buttons
+            tb.Button(
+                button_frame,
+                text="Save",
+                command=save_prompt,
+                bootstyle="primary"
+            ).pack(side=tk.LEFT, padx=(0, 10))
+            
+            tb.Button(
+                button_frame,
+                text="Reset to Default",
+                command=reset_prompt,
+                bootstyle="secondary"
+            ).pack(side=tk.LEFT, padx=(0, 10))
+            
+            tb.Button(
+                button_frame,
+                text="Cancel",
+                command=close_dialog,
+                bootstyle="secondary"
+            ).pack(side=tk.LEFT)
+            
+            # Auto-resize dialog to fit content
+            self.main_gui.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.7, max_height_ratio=0.6)
+            
+            # Handle window close
+            dialog.protocol("WM_DELETE_WINDOW", close_dialog)
     
     def _refresh_context_settings(self):
         """Refresh context settings from main GUI"""
@@ -1164,33 +1194,77 @@ class MangaTranslationTab:
             self.start_button.config(state=tk.NORMAL)
     
     def _get_available_fonts(self):
-        """Get list of available fonts"""
+        """Get list of available fonts with full path mapping"""
         fonts = ["Default"]
+        self.font_mapping = {}  # Reset mapping
         
         # Windows fonts including CJK support
         windows_fonts = [
             ("Arial", "C:/Windows/Fonts/arial.ttf"),
             ("Calibri", "C:/Windows/Fonts/calibri.ttf"),
             ("Comic Sans MS", "C:/Windows/Fonts/comic.ttf"),
-            ("MS Gothic", "C:/Windows/Fonts/msgothic.ttc"),      # Japanese
-            ("MS Mincho", "C:/Windows/Fonts/msmincho.ttc"),      # Japanese
-            ("Meiryo", "C:/Windows/Fonts/meiryo.ttc"),           # Japanese
-            ("Yu Gothic", "C:/Windows/Fonts/yugothic.ttc"),      # Japanese
-            ("Malgun Gothic", "C:/Windows/Fonts/malgun.ttf"),    # Korean
-            ("SimSun", "C:/Windows/Fonts/simsun.ttc"),           # Chinese
-            ("Microsoft YaHei", "C:/Windows/Fonts/msyh.ttc"),    # Chinese
-            ("Tahoma", "C:/Windows/Fonts/tahoma.ttf"),
+            ("Impact", "C:/Windows/Fonts/impact.ttf"),
             ("Times New Roman", "C:/Windows/Fonts/times.ttf"),
             ("Verdana", "C:/Windows/Fonts/verdana.ttf"),
-            ("Georgia", "C:/Windows/Fonts/georgia.ttf"),
-            ("Impact", "C:/Windows/Fonts/impact.ttf"),
+            ("Tahoma", "C:/Windows/Fonts/tahoma.ttf"),
             ("Trebuchet MS", "C:/Windows/Fonts/trebuc.ttf"),
-            ("Courier New", "C:/Windows/Fonts/cour.ttf")
+            ("Georgia", "C:/Windows/Fonts/georgia.ttf"),
+            ("Courier New", "C:/Windows/Fonts/cour.ttf"),
+            
+            # Japanese fonts
+            ("MS Gothic", "C:/Windows/Fonts/msgothic.ttc"),
+            ("MS Mincho", "C:/Windows/Fonts/msmincho.ttc"),
+            ("Meiryo", "C:/Windows/Fonts/meiryo.ttc"),
+            ("Yu Gothic", "C:/Windows/Fonts/yugothic.ttc"),
+            ("Yu Mincho", "C:/Windows/Fonts/yumin.ttc"),
+            
+            # Korean fonts
+            ("Malgun Gothic", "C:/Windows/Fonts/malgun.ttf"),
+            ("Gulim", "C:/Windows/Fonts/gulim.ttc"),
+            ("Dotum", "C:/Windows/Fonts/dotum.ttc"),
+            ("Batang", "C:/Windows/Fonts/batang.ttc"),
+            
+            # Chinese fonts
+            ("SimSun", "C:/Windows/Fonts/simsun.ttc"),
+            ("SimHei", "C:/Windows/Fonts/simhei.ttf"),
+            ("Microsoft YaHei", "C:/Windows/Fonts/msyh.ttc"),
+            ("Microsoft JhengHei", "C:/Windows/Fonts/msjh.ttc"),
+            ("KaiTi", "C:/Windows/Fonts/simkai.ttf"),
+            ("FangSong", "C:/Windows/Fonts/simfang.ttf"),
         ]
         
-        for name, path in windows_fonts:
-            if os.path.exists(path):
-                fonts.append(name)
+        # Check which fonts exist and add to mapping
+        for font_name, font_path in windows_fonts:
+            if os.path.exists(font_path):
+                fonts.append(font_name)
+                self.font_mapping[font_name] = font_path
+        
+        # Check for custom fonts directory
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        fonts_dir = os.path.join(script_dir, "fonts")
+        
+        if os.path.exists(fonts_dir):
+            for root, dirs, files in os.walk(fonts_dir):
+                for font_file in files:
+                    if font_file.endswith(('.ttf', '.ttc', '.otf')):
+                        font_path = os.path.join(root, font_file)
+                        font_name = os.path.splitext(font_file)[0]
+                        # Add category from folder
+                        category = os.path.basename(root)
+                        if category != "fonts":
+                            font_name = f"{font_name} ({category})"
+                        fonts.append(font_name)
+                        self.font_mapping[font_name] = font_path
+        
+        # Load previously saved custom fonts
+        if 'custom_fonts' in self.main_gui.config:
+            for custom_font in self.main_gui.config['custom_fonts']:
+                if os.path.exists(custom_font['path']):
+                    fonts.append(custom_font['name'])
+                    self.font_mapping[custom_font['name']] = custom_font['path']
+        
+        # Add custom fonts option at the end
+        fonts.append("Browse Custom Font...")
         
         return fonts
     
@@ -1200,29 +1274,90 @@ class MangaTranslationTab:
         
         if selected == "Default":
             self.selected_font_path = None
-        else:
-            # Map font names to paths
-            font_map = {
-                "Arial": "C:/Windows/Fonts/arial.ttf",
-                "Calibri": "C:/Windows/Fonts/calibri.ttf",
-                "Comic Sans MS": "C:/Windows/Fonts/comic.ttf",
-                "MS Gothic": "C:/Windows/Fonts/msgothic.ttc",
-                "MS Mincho": "C:/Windows/Fonts/msmincho.ttc",
-                "Meiryo": "C:/Windows/Fonts/meiryo.ttc",
-                "Yu Gothic": "C:/Windows/Fonts/yugothic.ttc",
-                "Malgun Gothic": "C:/Windows/Fonts/malgun.ttf",
-                "SimSun": "C:/Windows/Fonts/simsun.ttc",
-                "Microsoft YaHei": "C:/Windows/Fonts/msyh.ttc",
-                "Tahoma": "C:/Windows/Fonts/tahoma.ttf",
-                "Times New Roman": "C:/Windows/Fonts/times.ttf",
-                "Verdana": "C:/Windows/Fonts/verdana.ttf",
-                "Georgia": "C:/Windows/Fonts/georgia.ttf",
-                "Impact": "C:/Windows/Fonts/impact.ttf",
-                "Trebuchet MS": "C:/Windows/Fonts/trebuc.ttf",
-                "Courier New": "C:/Windows/Fonts/cour.ttf"
-            }
+        elif selected == "Browse Custom Font...":
+            # Open file dialog to select custom font
+            font_path = filedialog.askopenfilename(
+                title="Select Font File",
+                filetypes=[
+                    ("Font files", "*.ttf *.ttc *.otf"),
+                    ("TrueType fonts", "*.ttf"),
+                    ("TrueType collections", "*.ttc"),
+                    ("OpenType fonts", "*.otf"),
+                    ("All files", "*.*")
+                ]
+            )
             
-            self.selected_font_path = font_map.get(selected, None)
+            if font_path:
+                # Add to combo box
+                font_name = os.path.basename(font_path)
+                current_values = list(self.font_combo['values'])
+                
+                # Insert before "Browse Custom Font..." option
+                if (font_name, font_path) not in [(n, p) for n, p in self.font_mapping.items()]:
+                    current_values.insert(-1, font_name)
+                    self.font_combo['values'] = current_values
+                    self.font_combo.set(font_name)
+                    
+                    # Update font mapping
+                    self.font_mapping[font_name] = font_path
+                    self.selected_font_path = font_path
+                    
+                    # Save custom font to config
+                    if 'custom_fonts' not in self.main_gui.config:
+                        self.main_gui.config['custom_fonts'] = []
+                    
+                    custom_font_entry = {'name': font_name, 'path': font_path}
+                    if custom_font_entry not in self.main_gui.config['custom_fonts']:
+                        self.main_gui.config['custom_fonts'].append(custom_font_entry)
+                else:
+                    # Font already exists, just select it
+                    self.font_combo.set(font_name)
+                    self.selected_font_path = font_path
+            else:
+                # User cancelled, revert to previous selection
+                if hasattr(self, 'previous_font_selection'):
+                    self.font_combo.set(self.previous_font_selection)
+                else:
+                    self.font_combo.set("Default")
+                return
+        else:
+            # Check if it's in the font mapping
+            if selected in self.font_mapping:
+                self.selected_font_path = self.font_mapping[selected]
+            else:
+                # Fallback to the old hardcoded map for compatibility
+                font_map = {
+                    "Arial": "C:/Windows/Fonts/arial.ttf",
+                    "Calibri": "C:/Windows/Fonts/calibri.ttf",
+                    "Comic Sans MS": "C:/Windows/Fonts/comic.ttf",
+                    "MS Gothic": "C:/Windows/Fonts/msgothic.ttc",
+                    "MS Mincho": "C:/Windows/Fonts/msmincho.ttc",
+                    "Meiryo": "C:/Windows/Fonts/meiryo.ttc",
+                    "Yu Gothic": "C:/Windows/Fonts/yugothic.ttc",
+                    "Yu Mincho": "C:/Windows/Fonts/yumin.ttc",
+                    "Malgun Gothic": "C:/Windows/Fonts/malgun.ttf",
+                    "Gulim": "C:/Windows/Fonts/gulim.ttc",
+                    "Dotum": "C:/Windows/Fonts/dotum.ttc",
+                    "Batang": "C:/Windows/Fonts/batang.ttc",
+                    "SimSun": "C:/Windows/Fonts/simsun.ttc",
+                    "SimHei": "C:/Windows/Fonts/simhei.ttf",
+                    "Microsoft YaHei": "C:/Windows/Fonts/msyh.ttc",
+                    "Microsoft JhengHei": "C:/Windows/Fonts/msjh.ttc",
+                    "KaiTi": "C:/Windows/Fonts/simkai.ttf",
+                    "FangSong": "C:/Windows/Fonts/simfang.ttf",
+                    "Tahoma": "C:/Windows/Fonts/tahoma.ttf",
+                    "Times New Roman": "C:/Windows/Fonts/times.ttf",
+                    "Verdana": "C:/Windows/Fonts/verdana.ttf",
+                    "Georgia": "C:/Windows/Fonts/georgia.ttf",
+                    "Impact": "C:/Windows/Fonts/impact.ttf",
+                    "Trebuchet MS": "C:/Windows/Fonts/trebuc.ttf",
+                    "Courier New": "C:/Windows/Fonts/cour.ttf"
+                }
+                
+                self.selected_font_path = font_map.get(selected, None)
+        
+        # Store current selection for next time
+        self.previous_font_selection = selected
         
         # Auto-save on change
         self._save_rendering_settings()
