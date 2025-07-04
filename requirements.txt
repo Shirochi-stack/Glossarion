@@ -1,3 +1,4 @@
+# Core packages
 pyinstaller
 ttkbootstrap
 pillow
@@ -8,22 +9,44 @@ ebooklib
 requests
 tqdm
 langdetect
+
+# AI/API Clients
 google-generativeai
 openai
 anthropic
+mistralai
+cohere
 tiktoken
+
+# Data processing
 datasketch
-certifi
-chardet
-charset-normalizer
-olefile
-numpy<2.0.0
+numpy
 scipy
+
+# HTTP/Networking
 httpx
 httpcore
 anyio
 sniffio
+
+# Text processing
 regex
 python-dotenv
+certifi
+chardet
+charset-normalizer
+olefile
+
+# Image processing (Manga)
 opencv-python
+
+# Google Cloud Vision (Manga OCR)
 google-cloud-vision
+google-auth
+google-auth-httplib2
+google-api-core
+googleapis-common-protos
+grpcio
+grpcio-status
+proto-plus
+protobuf
