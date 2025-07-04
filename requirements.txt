@@ -50,3 +50,6 @@ grpcio
 grpcio-status
 proto-plus
 protobuf
+
+# lama inpainting
+#simple-lama-inpainting
