@@ -66,6 +66,235 @@ class MangaSettingsDialog:
         
         # Show dialog
         self.show_dialog()
+    def _create_font_size_controls(self, parent_frame):
+        """Create improved font size controls with presets"""
+        
+        # Font size frame
+        font_frame = tk.Frame(parent_frame)
+        font_frame.pack(fill=tk.X, pady=5)
+        
+        tk.Label(font_frame, text="Font Size:", width=20, anchor='w').pack(side=tk.LEFT)
+        
+        # Font size mode selection
+        mode_frame = tk.Frame(font_frame)
+        mode_frame.pack(side=tk.LEFT, padx=10)
+        
+        # Radio buttons for mode
+        self.font_size_mode_var = tk.StringVar(value='auto')
+        
+        modes = [
+            ("Auto", "auto", "Automatically fit text to bubble size"),
+            ("Fixed", "fixed", "Use a specific font size"),
+            ("Scale", "scale", "Scale auto size by percentage")
+        ]
+        
+        for text, value, tooltip in modes:
+            rb = ttk.Radiobutton(
+                mode_frame,
+                text=text,
+                variable=self.font_size_mode_var,
+                value=value,
+                command=self._on_font_mode_change
+            )
+            rb.pack(side=tk.LEFT, padx=5)
+            
+            # Add tooltip
+            self._create_tooltip(rb, tooltip)
+        
+        # Controls frame (changes based on mode)
+        self.font_controls_frame = tk.Frame(parent_frame)
+        self.font_controls_frame.pack(fill=tk.X, pady=5, padx=(20, 0))
+        
+        # Fixed size controls
+        self.fixed_size_frame = tk.Frame(self.font_controls_frame)
+        tk.Label(self.fixed_size_frame, text="Size:").pack(side=tk.LEFT)
+        
+        self.fixed_font_size_var = tk.IntVar(value=16)
+        fixed_spin = ttk.Spinbox(
+            self.fixed_size_frame,
+            from_=8,
+            to=72,
+            textvariable=self.fixed_font_size_var,
+            width=10,
+            command=self._save_rendering_settings
+        )
+        fixed_spin.pack(side=tk.LEFT, padx=5)
+        
+        # Quick presets for fixed size
+        tk.Label(self.fixed_size_frame, text="Presets:").pack(side=tk.LEFT, padx=(10, 5))
+        
+        presets = [
+            ("Small", 12),
+            ("Medium", 16),
+            ("Large", 20),
+            ("XL", 24)
+        ]
+        
+        for text, size in presets:
+            ttk.Button(
+                self.fixed_size_frame,
+                text=text,
+                command=lambda s=size: self._set_fixed_size(s),
+                width=6
+            ).pack(side=tk.LEFT, padx=2)
+        
+        # Scale controls
+        self.scale_frame = tk.Frame(self.font_controls_frame)
+        tk.Label(self.scale_frame, text="Scale:").pack(side=tk.LEFT)
+        
+        self.font_scale_var = tk.DoubleVar(value=1.0)
+        scale_slider = tk.Scale(
+            self.scale_frame,
+            from_=0.5,
+            to=2.0,
+            resolution=0.1,
+            orient=tk.HORIZONTAL,
+            variable=self.font_scale_var,
+            length=200,
+            command=lambda v: self._update_scale_label()
+        )
+        scale_slider.pack(side=tk.LEFT, padx=5)
+        
+        self.scale_label = tk.Label(self.scale_frame, text="100%", width=5)
+        self.scale_label.pack(side=tk.LEFT)
+        
+        # Quick scale presets
+        tk.Label(self.scale_frame, text="Quick:").pack(side=tk.LEFT, padx=(10, 5))
+        
+        scale_presets = [
+            ("75%", 0.75),
+            ("100%", 1.0),
+            ("125%", 1.25),
+            ("150%", 1.5)
+        ]
+        
+        for text, scale in scale_presets:
+            ttk.Button(
+                self.scale_frame,
+                text=text,
+                command=lambda s=scale: self._set_scale(s),
+                width=5
+            ).pack(side=tk.LEFT, padx=2)
+        
+        # Auto size settings
+        self.auto_frame = tk.Frame(self.font_controls_frame)
+        
+        # Min/Max size constraints for auto mode
+        constraints_frame = tk.Frame(self.auto_frame)
+        constraints_frame.pack(fill=tk.X)
+        
+        tk.Label(constraints_frame, text="Size Range:").pack(side=tk.LEFT)
+        
+        tk.Label(constraints_frame, text="Min:").pack(side=tk.LEFT, padx=(10, 2))
+        self.min_font_size_var = tk.IntVar(value=10)
+        ttk.Spinbox(
+            constraints_frame,
+            from_=6,
+            to=20,
+            textvariable=self.min_font_size_var,
+            width=8,
+            command=self._save_rendering_settings
+        ).pack(side=tk.LEFT)
+        
+        tk.Label(constraints_frame, text="Max:").pack(side=tk.LEFT, padx=(10, 2))
+        self.max_font_size_var = tk.IntVar(value=28)
+        ttk.Spinbox(
+            constraints_frame,
+            from_=16,
+            to=48,
+            textvariable=self.max_font_size_var,
+            width=8,
+            command=self._save_rendering_settings
+        ).pack(side=tk.LEFT)
+        
+        # Auto fit quality
+        quality_frame = tk.Frame(self.auto_frame)
+        quality_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        tk.Label(quality_frame, text="Fit Style:").pack(side=tk.LEFT)
+        
+        self.auto_fit_style_var = tk.StringVar(value='balanced')
+        
+        fit_styles = [
+            ("Compact", "compact", "Fit more text, smaller size"),
+            ("Balanced", "balanced", "Balance readability and fit"),
+            ("Readable", "readable", "Prefer larger, more readable text")
+        ]
+        
+        for text, value, tooltip in fit_styles:
+            rb = ttk.Radiobutton(
+                quality_frame,
+                text=text,
+                variable=self.auto_fit_style_var,
+                value=value,
+                command=self._save_rendering_settings
+            )
+            rb.pack(side=tk.LEFT, padx=5)
+            self._create_tooltip(rb, tooltip)
+        
+        # Initialize the correct frame
+        self._on_font_mode_change()
+
+    def _on_font_mode_change(self):
+        """Show/hide appropriate font controls based on mode"""
+        # Hide all frames
+        for frame in [self.fixed_size_frame, self.scale_frame, self.auto_frame]:
+            frame.pack_forget()
+        
+        # Show the appropriate frame
+        mode = self.font_size_mode_var.get()
+        if mode == 'fixed':
+            self.fixed_size_frame.pack(fill=tk.X)
+        elif mode == 'scale':
+            self.scale_frame.pack(fill=tk.X)
+        else:  # auto
+            self.auto_frame.pack(fill=tk.X)
+        
+        self._save_rendering_settings()
+
+    def _set_fixed_size(self, size):
+        """Set fixed font size from preset"""
+        self.fixed_font_size_var.set(size)
+        self._save_rendering_settings()
+
+    def _set_scale(self, scale):
+        """Set font scale from preset"""
+        self.font_scale_var.set(scale)
+        self._update_scale_label()
+        self._save_rendering_settings()
+
+    def _update_scale_label(self):
+        """Update the scale percentage label"""
+        scale = self.font_scale_var.get()
+        self.scale_label.config(text=f"{int(scale * 100)}%")
+        self._save_rendering_settings()
+
+    def _create_tooltip(self, widget, text):
+        """Create a tooltip for a widget"""
+        def on_enter(event):
+            tooltip = tk.Toplevel()
+            tooltip.wm_overrideredirect(True)
+            tooltip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
+            
+            label = tk.Label(
+                tooltip,
+                text=text,
+                background="#ffffe0",
+                relief=tk.SOLID,
+                borderwidth=1,
+                font=('Arial', 9)
+            )
+            label.pack()
+            
+            widget.tooltip = tooltip
+        
+        def on_leave(event):
+            if hasattr(widget, 'tooltip'):
+                widget.tooltip.destroy()
+                del widget.tooltip
+        
+        widget.bind('<Enter>', on_enter)
+        widget.bind('<Leave>', on_leave)
     
     def _merge_settings(self, existing: Dict) -> Dict:
         """Merge existing settings with defaults"""
