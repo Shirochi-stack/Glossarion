@@ -1730,7 +1730,11 @@ class MangaTranslationTab:
                 except Exception as e:
                     messagebox.showerror("Error", f"Failed to create API client:\n{str(e)}")
                     return
-            
+                    
+            # Reset the translator's history manager for new batch
+            if hasattr(self, 'translator') and self.translator and hasattr(self.translator, 'reset_history_manager'):
+                self.translator.reset_history_manager()
+    
             # Initialize translator if needed
             if not self.translator:
                 try:
