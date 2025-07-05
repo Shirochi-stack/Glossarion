@@ -670,6 +670,78 @@ class MangaTranslationTab:
         # Initialize visibility AFTER all frames are created
         self._toggle_font_size_mode()
 
+        # Minimum font size setting (for auto mode)
+        min_size_frame = tk.Frame(render_frame)
+        min_size_frame.pack(fill=tk.X, pady=5)
+
+        tk.Label(min_size_frame, text="Minimum Font Size:", width=20, anchor='w').pack(side=tk.LEFT)
+
+        self.min_readable_size_var = tk.IntVar(value=self.main_gui.config.get('manga_min_readable_size', 16))
+
+        min_size_spinbox = ttk.Spinbox(
+            min_size_frame,
+            from_=10,
+            to=24,
+            textvariable=self.min_readable_size_var,
+            width=10,
+            command=self._save_rendering_settings
+        )
+        min_size_spinbox.pack(side=tk.LEFT, padx=10)
+
+        tk.Label(
+            min_size_frame, 
+            text="(Auto mode won't go below this)", 
+            font=('Arial', 9), 
+            fg='gray'
+        ).pack(side=tk.LEFT, padx=5)
+    
+        # Maximum font size setting
+        max_size_frame = tk.Frame(render_frame)
+        max_size_frame.pack(fill=tk.X, pady=5)
+
+        tk.Label(max_size_frame, text="Maximum Font Size:", width=20, anchor='w').pack(side=tk.LEFT)
+
+        self.max_font_size_var = tk.IntVar(value=self.main_gui.config.get('manga_max_font_size', 24))
+
+        max_size_spinbox = ttk.Spinbox(
+            max_size_frame,
+            from_=20,
+            to=100,
+            textvariable=self.max_font_size_var,
+            width=10,
+            command=self._save_rendering_settings
+        )
+        max_size_spinbox.pack(side=tk.LEFT, padx=10)
+
+        tk.Label(
+            max_size_frame, 
+            text="(Limits maximum text size)", 
+            font=('Arial', 9), 
+            fg='gray'
+        ).pack(side=tk.LEFT, padx=5)
+
+        # Text wrapping mode
+        wrap_frame = tk.Frame(render_frame)
+        wrap_frame.pack(fill=tk.X, pady=5)
+
+        self.strict_text_wrapping_var = tk.BooleanVar(value=self.main_gui.config.get('manga_strict_text_wrapping', False))
+
+        self.strict_wrap_checkbox = tb.Checkbutton(
+            wrap_frame,
+            text="Strict text wrapping (force text to fit within bubbles)",
+            variable=self.strict_text_wrapping_var,
+            command=self._save_rendering_settings,
+            bootstyle="primary"
+        )
+        self.strict_wrap_checkbox.pack(side=tk.LEFT)
+
+        tk.Label(
+            wrap_frame, 
+            text="(Break words with hyphens if needed)", 
+            font=('Arial', 9), 
+            fg='gray'
+        ).pack(side=tk.LEFT, padx=5)
+    
         # Update multiplier label with loaded value
         self._update_multiplier_label(self.font_size_multiplier_var.get())
         
@@ -697,41 +769,52 @@ class MangaTranslationTab:
         self.font_combo.pack(side=tk.LEFT, padx=10)
         self.font_combo.bind('<<ComboboxSelected>>', self._on_font_selected)
         
-        # Font color selection
+# Font color selection
         color_frame = tk.Frame(render_frame)
         color_frame.pack(fill=tk.X, pady=5)
         
         tk.Label(color_frame, text="Font Color:", width=20, anchor='w').pack(side=tk.LEFT)
         
-        # RGB sliders in a sub-frame
-        rgb_frame = tk.Frame(color_frame)
-        rgb_frame.pack(side=tk.LEFT, padx=10)
-        
-        # Red
-        r_frame = tk.Frame(rgb_frame)
-        r_frame.pack(side=tk.LEFT, padx=5)
-        tk.Label(r_frame, text="R:", width=2).pack(side=tk.LEFT)
-        tk.Scale(r_frame, from_=0, to=255, orient=tk.HORIZONTAL, variable=self.text_color_r,
-                length=80, command=self._update_color_preview).pack(side=tk.LEFT)
-        
-        # Green
-        g_frame = tk.Frame(rgb_frame)
-        g_frame.pack(side=tk.LEFT, padx=5)
-        tk.Label(g_frame, text="G:", width=2).pack(side=tk.LEFT)
-        tk.Scale(g_frame, from_=0, to=255, orient=tk.HORIZONTAL, variable=self.text_color_g,
-                length=80, command=self._update_color_preview).pack(side=tk.LEFT)
-        
-        # Blue
-        b_frame = tk.Frame(rgb_frame)
-        b_frame.pack(side=tk.LEFT, padx=5)
-        tk.Label(b_frame, text="B:", width=2).pack(side=tk.LEFT)
-        tk.Scale(b_frame, from_=0, to=255, orient=tk.HORIZONTAL, variable=self.text_color_b,
-                length=80, command=self._update_color_preview).pack(side=tk.LEFT)
+        # Color button and preview
+        color_button_frame = tk.Frame(color_frame)
+        color_button_frame.pack(side=tk.LEFT, padx=10)
         
         # Color preview
-        self.color_preview = tk.Canvas(color_frame, width=40, height=30, 
+        self.color_preview = tk.Canvas(color_button_frame, width=40, height=30, 
                                      highlightthickness=1, highlightbackground="gray")
-        self.color_preview.pack(side=tk.LEFT, padx=10)
+        self.color_preview.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # RGB display label
+        r, g, b = self.text_color_r.get(), self.text_color_g.get(), self.text_color_b.get()
+        self.rgb_label = tk.Label(color_button_frame, text=f"RGB({r},{g},{b})", width=12)
+        self.rgb_label.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # Color picker button
+        def pick_font_color():
+            from tkinter import colorchooser
+            # Get current color
+            current_color = (self.text_color_r.get(), self.text_color_g.get(), self.text_color_b.get())
+            color_hex = f'#{current_color[0]:02x}{current_color[1]:02x}{current_color[2]:02x}'
+            
+            # Open color dialog
+            color = colorchooser.askcolor(initialcolor=color_hex, parent=self.dialog, 
+                                         title="Choose Font Color")
+            if color[0]:  # If a color was chosen (not cancelled)
+                # Update RGB values
+                self.text_color_r.set(int(color[0][0]))
+                self.text_color_g.set(int(color[0][1]))
+                self.text_color_b.set(int(color[0][2]))
+                # Update display
+                self.rgb_label.config(text=f"RGB({int(color[0][0])},{int(color[0][1])},{int(color[0][2])})")
+                self._update_color_preview(None)
+        
+        tb.Button(
+            color_button_frame,
+            text="Choose Color",
+            command=pick_font_color,
+            bootstyle="info"
+        ).pack(side=tk.LEFT)
+        
         self._update_color_preview(None)  # Initialize with loaded colors
         
         # Shadow settings frame
@@ -757,35 +840,47 @@ class MangaTranslationTab:
         
         tk.Label(shadow_color_frame, text="Shadow Color:", width=15, anchor='w').pack(side=tk.LEFT)
         
-        # Shadow RGB sliders
-        shadow_rgb_frame = tk.Frame(shadow_color_frame)
-        shadow_rgb_frame.pack(side=tk.LEFT, padx=10)
-        
-        # Shadow Red
-        sr_frame = tk.Frame(shadow_rgb_frame)
-        sr_frame.pack(side=tk.LEFT, padx=5)
-        tk.Label(sr_frame, text="R:", width=2).pack(side=tk.LEFT)
-        tk.Scale(sr_frame, from_=0, to=255, orient=tk.HORIZONTAL, variable=self.shadow_color_r,
-                length=60, command=self._update_shadow_preview).pack(side=tk.LEFT)
-        
-        # Shadow Green
-        sg_frame = tk.Frame(shadow_rgb_frame)
-        sg_frame.pack(side=tk.LEFT, padx=5)
-        tk.Label(sg_frame, text="G:", width=2).pack(side=tk.LEFT)
-        tk.Scale(sg_frame, from_=0, to=255, orient=tk.HORIZONTAL, variable=self.shadow_color_g,
-                length=60, command=self._update_shadow_preview).pack(side=tk.LEFT)
-        
-        # Shadow Blue
-        sb_frame = tk.Frame(shadow_rgb_frame)
-        sb_frame.pack(side=tk.LEFT, padx=5)
-        tk.Label(sb_frame, text="B:", width=2).pack(side=tk.LEFT)
-        tk.Scale(sb_frame, from_=0, to=255, orient=tk.HORIZONTAL, variable=self.shadow_color_b,
-                length=60, command=self._update_shadow_preview).pack(side=tk.LEFT)
+        # Shadow color button and preview
+        shadow_button_frame = tk.Frame(shadow_color_frame)
+        shadow_button_frame.pack(side=tk.LEFT, padx=10)
         
         # Shadow color preview
-        self.shadow_preview = tk.Canvas(shadow_color_frame, width=30, height=25, 
+        self.shadow_preview = tk.Canvas(shadow_button_frame, width=30, height=25, 
                                       highlightthickness=1, highlightbackground="gray")
-        self.shadow_preview.pack(side=tk.LEFT, padx=10)
+        self.shadow_preview.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # Shadow RGB display label
+        sr, sg, sb = self.shadow_color_r.get(), self.shadow_color_g.get(), self.shadow_color_b.get()
+        self.shadow_rgb_label = tk.Label(shadow_button_frame, text=f"RGB({sr},{sg},{sb})", width=15)
+        self.shadow_rgb_label.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # Shadow color picker button
+        def pick_shadow_color():
+            from tkinter import colorchooser
+            # Get current color
+            current_color = (self.shadow_color_r.get(), self.shadow_color_g.get(), self.shadow_color_b.get())
+            color_hex = f'#{current_color[0]:02x}{current_color[1]:02x}{current_color[2]:02x}'
+            
+            # Open color dialog
+            color = colorchooser.askcolor(initialcolor=color_hex, parent=self.dialog, 
+                                         title="Choose Shadow Color")
+            if color[0]:  # If a color was chosen (not cancelled)
+                # Update RGB values
+                self.shadow_color_r.set(int(color[0][0]))
+                self.shadow_color_g.set(int(color[0][1]))
+                self.shadow_color_b.set(int(color[0][2]))
+                # Update display
+                self.shadow_rgb_label.config(text=f"RGB({int(color[0][0])},{int(color[0][1])},{int(color[0][2])})")
+                self._update_shadow_preview(None)
+        
+        tb.Button(
+            shadow_button_frame,
+            text="Choose Color",
+            command=pick_shadow_color,
+            bootstyle="info",
+            width=12
+        ).pack(side=tk.LEFT)
+        
         self._update_shadow_preview(None)  # Initialize with loaded colors
         
         # Shadow offset
@@ -1067,6 +1162,8 @@ class MangaTranslationTab:
         self.font_size_mode_var = tk.StringVar(value=config.get('manga_font_size_mode', 'fixed'))
         self.font_size_multiplier_var = tk.DoubleVar(value=config.get('manga_font_size_multiplier', 1.0))
         self.constrain_to_bubble_var = tk.BooleanVar(value=config.get('manga_constrain_to_bubble', True))
+        self.max_font_size_var = tk.IntVar(value=config.get('manga_max_font_size', 24))
+        self.strict_text_wrapping_var = tk.BooleanVar(value=config.get('manga_strict_text_wrapping', False))
         
         # Font color settings
         manga_text_color = config.get('manga_text_color', [102, 0, 0])
@@ -1098,7 +1195,12 @@ class MangaTranslationTab:
         
         # Output settings
         self.create_subfolder_var = tk.BooleanVar(value=config.get('manga_create_subfolder', True))
-            
+ 
+    def _set_min_size(self, size):
+        """Set minimum font size from preset"""
+        self.min_readable_size_var.set(size)
+        self._save_rendering_settings()
+    
     def _save_rendering_settings(self):
         """Save text rendering settings to config"""
         # Don't save during initialization
@@ -1119,6 +1221,9 @@ class MangaTranslationTab:
         self.main_gui.config['manga_font_size_multiplier'] = self.font_size_multiplier_var.get()
         self.main_gui.config['manga_font_style'] = self.font_style_var.get()
         self.main_gui.config['manga_constrain_to_bubble'] = self.constrain_to_bubble_var.get()
+        self.main_gui.config['manga_min_readable_size'] = self.min_readable_size_var.get()
+        self.main_gui.config['manga_max_font_size'] = self.max_font_size_var.get()
+        self.main_gui.config['manga_strict_text_wrapping'] = self.strict_text_wrapping_var.get()
         
         # Save font color as list
         self.main_gui.config['manga_text_color'] = [
@@ -1921,6 +2026,10 @@ class MangaTranslationTab:
             # Update font mode and multiplier explicitly
             self.translator.font_size_mode = self.font_size_mode_var.get()
             self.translator.font_size_multiplier = self.font_size_multiplier_var.get()
+            self.translator.min_readable_size = self.min_readable_size_var.get()
+            self.translator.min_readable_size = self.min_readable_size_var.get()
+            self.translator.max_font_size_limit = self.max_font_size_var.get()
+            self.translator.strict_text_wrapping = self.strict_text_wrapping_var.get()
             
             # Update constrain to bubble setting
             if hasattr(self, 'constrain_to_bubble_var'):
@@ -1939,6 +2048,9 @@ class MangaTranslationTab:
             self._log(f"Applied rendering settings:", "info")
             self._log(f"  Background: {self.bg_style_var.get()} @ {int(self.bg_opacity_var.get()/255*100)}% opacity", "info")
             self._log(f"  Font: {os.path.basename(self.selected_font_path) if self.selected_font_path else 'Default'}", "info")
+            self._log(f"  Minimum Font Size: {self.min_readable_size_var.get()}pt", "info")
+            self._log(f"  Maximum Font Size: {self.max_font_size_var.get()}pt", "info")
+            self._log(f"  Strict Text Wrapping: {'Enabled (force fit)' if self.strict_text_wrapping_var.get() else 'Disabled (allow overflow)'}", "info")
             
             # Log font size mode
             if self.font_size_mode_var.get() == 'multiplier':
