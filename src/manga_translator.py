@@ -170,7 +170,10 @@ class MangaTranslator:
 
         # Font size multiplier mode - Load from config
         self.font_size_mode = config.get('manga_font_size_mode', 'fixed')  # 'fixed' or 'multiplier'
-        self.font_size_multiplier = config.get('manga_font_size_multiplier', 1.0)  # Default multiplierr        
+        self.font_size_multiplier = config.get('manga_font_size_multiplier', 1.0)  # Default multiplierr
+        
+        #inpainting quality
+        self.inpaint_quality = config.get('manga_inpaint_quality', 'high')  # 'high' or 'fast'        
         
         # Stop flag for interruption
         self.stop_flag = None
@@ -195,7 +198,8 @@ class MangaTranslator:
         self.save_intermediate = self.manga_settings.get('advanced', {}).get('save_intermediate', False)
         self.parallel_processing = self.manga_settings.get('advanced', {}).get('parallel_processing', False)
         self.max_workers = self.manga_settings.get('advanced', {}).get('max_workers', 4)
- 
+        
+            
     def set_stop_flag(self, stop_flag):
         """Set the stop flag for checking interruptions"""
         self.stop_flag = stop_flag
@@ -555,6 +559,13 @@ class MangaTranslator:
             cv2.imwrite(debug_path, overlay)
             self._log(f"   📸 Saved debug image: {debug_path}")
             
+            mask = self.create_text_mask(img, regions)
+            mask_debug_path = debug_path.replace('_debug', '_mask')
+            cv2.imwrite(mask_debug_path, mask)
+            mask_percentage = ((mask > 0).sum() / mask.size) * 100
+            self._log(f"   🎭 Saved mask image: {mask_debug_path}", "info")
+            self._log(f"   📊 Mask coverage: {mask_percentage:.1f}% of image", "info")
+                        
             # If save_intermediate is enabled, save additional debug images
             if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
                 # Save confidence heatmap
@@ -1479,7 +1490,7 @@ class MangaTranslator:
                 return {}
             
     def create_text_mask(self, image: np.ndarray, regions: List[TextRegion]) -> np.ndarray:
-        """Create a binary mask for text regions using exact vertices from Cloud Vision"""
+        """Create a binary mask with aggressive dilation for better inpainting"""
         mask = np.zeros(image.shape[:2], dtype=np.uint8)
         
         for region in regions:
@@ -1490,31 +1501,215 @@ class MangaTranslator:
             # Fill the polygon
             import cv2
             cv2.fillPoly(mask, [pts], 255)
+        
+        # Get dilation settings from config
+        config = self.main_gui.config if hasattr(self.main_gui, 'config') else {}
+        dilation_size = config.get('manga_inpaint_dilation', 15)
+        
+        # Much more aggressive dilation based on quality setting
+        if self.inpaint_quality == 'high':
+            # Very aggressive for manga - use elliptical kernel for smoother edges
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilation_size, dilation_size))
+            mask = cv2.dilate(mask, kernel, iterations=2)
             
-            # Dilate slightly to ensure complete text coverage
-            kernel = np.ones((5, 5), np.uint8)
+            # Optional: Add slight blur to smooth mask edges
+            mask = cv2.GaussianBlur(mask, (5, 5), 0)
+            _, mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
+        else:
+            # Standard dilation
+            kernel = np.ones((10, 10), np.uint8)
             mask = cv2.dilate(mask, kernel, iterations=1)
+        
+        self._log(f"   Created mask with dilation size: {dilation_size if self.inpaint_quality == 'high' else 10}", "info")
         
         return mask
     
     def inpaint_regions(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        """Enhanced inpainting with transparency support"""
-        import cv2
-        
-        # If we want fully transparent backgrounds, we need to handle this differently
-        if self.text_bg_opacity == 0:
-            # For fully transparent, we'll use more sophisticated inpainting
-            # that attempts to reconstruct the background
-            result = cv2.inpaint(image, mask, 3, cv2.INPAINT_TELEA)
-            self._log("   Using TELEA inpainting for transparent background", "info")
+        """Inpaint using cloud API or return original"""
+        if self.skip_inpainting:
+            self._log("   ⏭️ Skipping inpainting (preserving original art)", "info")
+            return image.copy()
+            
+        if hasattr(self, 'use_cloud_inpainting') and self.use_cloud_inpainting:
+            return self._cloud_inpaint(image, mask)
         else:
-            # For non-transparent, fill with white as before
-            result = image.copy()
-            result[mask > 0] = 255  # Set to white
-            self._log("   Using white fill for non-transparent background", "info")
-        
-        return result
-    
+            self._log("   ⚠️ Inpainting not configured, returning original image", "warning")
+            return image.copy()
+            
+    def _cloud_inpaint(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+            """Use Replicate API for inpainting"""
+            try:
+                import requests
+                import base64
+                from io import BytesIO
+                from PIL import Image as PILImage
+                import cv2
+                
+                self._log("   ☁️ Cloud inpainting via Replicate API", "info")
+                
+                # Convert to PIL
+                image_pil = PILImage.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+                mask_pil = PILImage.fromarray(mask).convert('L')
+                
+                # Convert to base64
+                img_buffer = BytesIO()
+                image_pil.save(img_buffer, format='PNG')
+                img_base64 = base64.b64encode(img_buffer.getvalue()).decode()
+                
+                mask_buffer = BytesIO()
+                mask_pil.save(mask_buffer, format='PNG')
+                mask_base64 = base64.b64encode(mask_buffer.getvalue()).decode()
+                
+                # Get cloud settings
+                cloud_settings = self.main_gui.config.get('manga_settings', {})
+                model_type = cloud_settings.get('cloud_inpaint_model', 'ideogram-v2')
+                timeout = cloud_settings.get('cloud_timeout', 60)
+                
+                # Determine model identifier based on model type
+                if model_type == 'ideogram-v2':
+                    model = 'ideogram-ai/ideogram-v2'
+                    self._log(f"   Using Ideogram V2 inpainting model", "info")
+                elif model_type == 'sd-inpainting':
+                    model = 'stability-ai/stable-diffusion-inpainting'
+                    self._log(f"   Using Stable Diffusion inpainting model", "info")
+                elif model_type == 'flux-inpainting':
+                    model = 'zsxkib/flux-dev-inpainting'
+                    self._log(f"   Using FLUX inpainting model", "info")
+                elif model_type == 'custom':
+                    model = cloud_settings.get('cloud_custom_version', '')
+                    if not model:
+                        raise Exception("No custom model identifier specified")
+                    self._log(f"   Using custom model: {model}", "info")
+                else:
+                    # Default to Ideogram V2
+                    model = 'ideogram-ai/ideogram-v2'
+                    self._log(f"   Using default Ideogram V2 model", "info")
+                
+                # Build input data based on model type
+                input_data = {
+                    'image': f'data:image/png;base64,{img_base64}',
+                    'mask': f'data:image/png;base64,{mask_base64}'
+                }
+                
+                # Add prompt settings for models that support them
+                if model_type in ['ideogram-v2', 'sd-inpainting', 'flux-inpainting', 'custom']:
+                    prompt = cloud_settings.get('cloud_inpaint_prompt', 'clean background, smooth surface')
+                    input_data['prompt'] = prompt
+                    self._log(f"   Prompt: {prompt}", "info")
+                    
+                    # SD-specific parameters
+                    if model_type == 'sd-inpainting':
+                        negative_prompt = cloud_settings.get('cloud_negative_prompt', 'text, writing, letters')
+                        input_data['negative_prompt'] = negative_prompt
+                        input_data['num_inference_steps'] = cloud_settings.get('cloud_inference_steps', 20)
+                        self._log(f"   Negative prompt: {negative_prompt}", "info")
+                
+                # Get the latest version of the model
+                headers = {
+                    'Authorization': f'Token {self.replicate_api_key}',
+                    'Content-Type': 'application/json'
+                }
+                
+                # First, get the latest version of the model
+                model_response = requests.get(
+                    f'https://api.replicate.com/v1/models/{model}',
+                    headers=headers
+                )
+                
+                if model_response.status_code != 200:
+                    # If model lookup fails, try direct prediction with model identifier
+                    self._log(f"   Model lookup returned {model_response.status_code}, trying direct prediction", "warning")
+                    version = None
+                else:
+                    model_info = model_response.json()
+                    version = model_info.get('latest_version', {}).get('id')
+                    if not version:
+                        raise Exception(f"Could not get version for model {model}")
+                
+                # Create prediction
+                prediction_data = {
+                    'input': input_data
+                }
+                
+                if version:
+                    prediction_data['version'] = version
+                else:
+                    # For custom models, try extracting version from model string
+                    if ':' in model:
+                        # Format: owner/model:version
+                        model_name, version_id = model.split(':', 1)
+                        prediction_data['version'] = version_id
+                    else:
+                        raise Exception(f"Could not determine version for model {model}. Try using format: owner/model:version")
+                
+                response = requests.post(
+                    'https://api.replicate.com/v1/predictions',
+                    headers=headers,
+                    json=prediction_data
+                )
+                
+                if response.status_code != 201:
+                    raise Exception(f"API error: {response.text}")
+                    
+                # Get prediction URL
+                prediction = response.json()
+                prediction_url = prediction.get('urls', {}).get('get') or prediction.get('id')
+                
+                if not prediction_url:
+                    raise Exception("No prediction URL returned")
+                
+                # If we only got an ID, construct the URL
+                if not prediction_url.startswith('http'):
+                    prediction_url = f'https://api.replicate.com/v1/predictions/{prediction_url}'
+                
+                # Poll for result with configured timeout
+                import time
+                for i in range(timeout):
+                    response = requests.get(prediction_url, headers=headers)
+                    result = response.json()
+                    
+                    # Log progress every 5 seconds
+                    if i % 5 == 0 and i > 0:
+                        self._log(f"   ⏳ Still processing... ({i}s elapsed)", "info")
+                    
+                    if result['status'] == 'succeeded':
+                        # Download result image (handle both single URL and list)
+                        output = result.get('output')
+                        if not output:
+                            raise Exception("No output returned from model")
+                        
+                        if isinstance(output, list):
+                            output_url = output[0] if output else None
+                        else:
+                            output_url = output
+                        
+                        if not output_url:
+                            raise Exception("No output URL in result")
+                            
+                        img_response = requests.get(output_url)
+                        
+                        # Convert back to numpy
+                        result_pil = PILImage.open(BytesIO(img_response.content))
+                        result_bgr = cv2.cvtColor(np.array(result_pil), cv2.COLOR_RGB2BGR)
+                        
+                        self._log("   ✅ Cloud inpainting completed", "success")
+                        return result_bgr
+                        
+                    elif result['status'] == 'failed':
+                        error_msg = result.get('error', 'Unknown error')
+                        # Check for common errors
+                        if 'version' in error_msg.lower():
+                            error_msg += f" (Try using the model identifier '{model}' in the custom field)"
+                        raise Exception(f"Inpainting failed: {error_msg}")
+                        
+                    time.sleep(1)
+                    
+                raise Exception(f"Timeout waiting for inpainting (>{timeout}s)")
+                
+            except Exception as e:
+                self._log(f"   ❌ Cloud inpainting failed: {str(e)}", "error")
+                return image.copy()         
+            
     def _regions_overlap(self, region1: TextRegion, region2: TextRegion) -> bool:
         """Check if two regions overlap"""
         x1, y1, w1, h1 = region1.bounding_box
@@ -2323,12 +2518,33 @@ class MangaTranslator:
             
             # Check if we should skip inpainting
             if self.skip_inpainting:
+                # User wants to preserve original art
                 self._log(f"🎨 Skipping inpainting (preserving original art)", "info")
                 self._log(f"   Background opacity: {int(self.text_bg_opacity/255*100)}%", "info")
                 inpainted = image.copy()
             else:
                 self._log(f"🎭 Creating text mask...")
                 mask = self.create_text_mask(image, regions)
+                
+                # Debug save mask
+                try:
+                    mask_path = image_path.replace('.', '_mask.')
+                    cv2.imwrite(mask_path, mask)
+                    mask_percentage = ((mask > 0).sum() / mask.size) * 100
+                    self._log(f"   🎭 DEBUG: Saved mask to {mask_path}", "info")
+                    self._log(f"   📊 Mask coverage: {mask_percentage:.1f}% of image", "info")
+                    
+                    # Save mask overlay visualization
+                    mask_viz = image.copy()
+                    mask_viz[mask > 0] = [0, 0, 255]  # Simple red overlay
+                    viz_path = image_path.replace('.', '_mask_overlay.')
+                    cv2.imwrite(viz_path, mask_viz)
+                    self._log(f"   🎭 DEBUG: Saved mask overlay to {viz_path}", "info")
+                    
+                    if mask_percentage > 50:
+                        self._log(f"   ⚠️ WARNING: Mask covers {mask_percentage:.1f}% - this might be too much!", "warning")
+                except Exception as e:
+                    self._log(f"   ❌ Failed to save mask debug: {str(e)}", "error")
                 
                 if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
                     self._save_intermediate_image(image_path, mask, "mask")
@@ -2370,7 +2586,7 @@ class MangaTranslator:
                 result['errors'].append(error_msg)
                 result['success'] = False
                 return result
-
+            
             # Update result
             result['regions'] = [r.to_dict() for r in regions]
             if not result.get('interrupted', False):
@@ -2378,7 +2594,7 @@ class MangaTranslator:
                 self._log(f"\n✅ TRANSLATION PIPELINE COMPLETE", "success")
             else:
                 self._log(f"\n⚠️ TRANSLATION INTERRUPTED - Partial output saved", "warning")
-
+            
             self._log(f"{'='*60}\n")
             
         except Exception as e:
