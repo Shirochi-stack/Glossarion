@@ -81,8 +81,8 @@ class MangaTranslationTab:
             "- Use \\\\ for backslashes\n\n"
             "Example:\n"
             '{\n'
-            '  "こんにちは": "Hello",\n'
-            '  "ありがとう": "Thank you"\n'
+            '  こんにちは: Hello,\n'
+            '  ありがとう: Thank you\n'
             '}\n\n'
             'Do NOT include the [0], [1], etc. prefixes in the JSON keys.'
         )
