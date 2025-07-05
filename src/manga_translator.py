@@ -96,22 +96,10 @@ class MangaTranslator:
         self.translation_history_limit = int(main_gui.trans_history.get() if hasattr(main_gui, 'trans_history') else 3)
         self.rolling_history_enabled = main_gui.translation_history_rolling_var.get() if hasattr(main_gui, 'translation_history_rolling_var') else False
         
-        # Initialize HistoryManager for proper context tracking
+        # Initialize HistoryManager placeholder
         self.history_manager = None
-        if HistoryManager:
-            # Create a manga-specific directory for history relative to the script location
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            manga_history_dir = os.path.join(script_dir, "manga_translation_history")
-            
-            # Ensure the directory exists with additional error handling
-            try:
-                os.makedirs(manga_history_dir, exist_ok=True)
-                self.history_manager = HistoryManager(manga_history_dir)
-                self._log(f"📚 Initialized HistoryManager with directory: {manga_history_dir}")
-            except Exception as e:
-                self._log(f"⚠️ Failed to create history directory: {str(e)}", "warning")
-                self._log(f"   Attempted path: {manga_history_dir}", "warning")
-                self.history_manager = None
+        self.history_manager_initialized = False
+        self.history_output_dir = None
         
         # Full page context translation settings
         self.full_page_context_enabled = True
@@ -1039,455 +1027,469 @@ class MangaTranslator:
             return text
 
     def translate_full_page_context(self, regions: List[TextRegion], image_path: str) -> Dict[str, str]:
-            """Translate all text regions with full page context in a single request"""
-            try:
-                import time
-                import traceback
-                
-                self._log(f"\n📄 Full page context translation of {len(regions)} text regions")
-                
-                # Get system prompt from GUI profile
-                profile_name = self.main_gui.profile_var.get()
-                
-                # Try to get the prompt from prompt_profiles dictionary (for all profiles including custom ones)
-                system_prompt = ''
-                if hasattr(self.main_gui, 'prompt_profiles') and profile_name in self.main_gui.prompt_profiles:
-                    system_prompt = self.main_gui.prompt_profiles[profile_name]
-                    self._log(f"📋 Using profile: {profile_name}")
-                else:
-                    # Fallback to check if it's stored as a direct attribute (legacy support)
-                    system_prompt = getattr(self.main_gui, profile_name.replace(' ', '_'), '')
-                    if system_prompt:
-                        self._log(f"📋 Using profile (legacy): {profile_name}")
-                    else:
-                        self._log(f"⚠️ Profile '{profile_name}' not found, using empty prompt", "warning")
-                
-                # Combine with full page context instructions
+        """Translate all text regions with full page context in a single request"""
+        try:
+            import time
+            import traceback
+            
+            self._log(f"\n📄 Full page context translation of {len(regions)} text regions")
+            
+            # Get system prompt from GUI profile
+            profile_name = self.main_gui.profile_var.get()
+            
+            # Try to get the prompt from prompt_profiles dictionary (for all profiles including custom ones)
+            system_prompt = ''
+            if hasattr(self.main_gui, 'prompt_profiles') and profile_name in self.main_gui.prompt_profiles:
+                system_prompt = self.main_gui.prompt_profiles[profile_name]
+                self._log(f"📋 Using profile: {profile_name}")
+            else:
+                # Fallback to check if it's stored as a direct attribute (legacy support)
+                system_prompt = getattr(self.main_gui, profile_name.replace(' ', '_'), '')
                 if system_prompt:
-                    system_prompt = f"{system_prompt}\n\n{self.full_page_context_prompt}"
+                    self._log(f"📋 Using profile (legacy): {profile_name}")
                 else:
-                    system_prompt = self.full_page_context_prompt
+                    self._log(f"⚠️ Profile '{profile_name}' not found, using empty prompt", "warning")
+            
+            # Combine with full page context instructions
+            if system_prompt:
+                system_prompt = f"{system_prompt}\n\n{self.full_page_context_prompt}"
+            else:
+                system_prompt = self.full_page_context_prompt
+            
+            messages = [{"role": "system", "content": system_prompt}]
+            
+            # CHECK 2: Before adding context
+            if self._check_stop():
+                self._log("⏹️ Translation stopped during context preparation", "warning")
+                return {}
+            
+            # Add contextual translations if enabled
+            if self.contextual_enabled and self.history_manager:
+                history_context = self._get_translation_history_context()
+                if history_context:
+                    context_count = len(history_context) // 2
+                    self._log(f"🔗 Adding {context_count} previous exchanges from history")
+                    messages.extend(history_context)
+            
+            # Prepare text segments with indices
+            all_texts = {}
+            text_list = []
+            for i, region in enumerate(regions):
+                # Use index-based key to handle duplicate texts
+                key = f"[{i}] {region.text}"
+                all_texts[key] = region.text
+                text_list.append(f"{key}")
                 
-                messages = [{"role": "system", "content": system_prompt}]
+            # CHECK 3: Before image processing
+            if self._check_stop():
+                self._log("⏹️ Translation stopped before image processing", "warning")
+                return {}
+                    
+            # Create the request with image
+            try:
+                import base64
+                from PIL import Image as PILImage
                 
-                # CHECK 2: Before adding context
-                if self._check_stop():
-                    self._log("⏹️ Translation stopped during context preparation", "warning")
-                    return {}
+                self._log(f"📷 Adding full page visual context for translation")
                 
-                # Add contextual translations if enabled
-                if self.contextual_enabled and self.history_manager:
-                    history_context = self._get_translation_history_context()
-                    if history_context:
-                        context_count = len(history_context) // 2
-                        self._log(f"🔗 Adding {context_count} previous exchanges from history")
-                        messages.extend(history_context)
+                # Read and encode the image
+                with open(image_path, 'rb') as img_file:
+                    img_data = img_file.read()
                 
-                # Prepare text segments with indices
-                all_texts = {}
-                text_list = []
-                for i, region in enumerate(regions):
-                    # Use index-based key to handle duplicate texts
-                    key = f"[{i}] {region.text}"
-                    all_texts[key] = region.text
-                    text_list.append(f"{key}")
-                    
-                # CHECK 3: Before image processing
-                if self._check_stop():
-                    self._log("⏹️ Translation stopped before image processing", "warning")
-                    return {}
-                        
-                # Create the request with image
-                try:
-                    import base64
-                    from PIL import Image as PILImage
-                    
-                    self._log(f"📷 Adding full page visual context for translation")
-                    
-                    # Read and encode the image
-                    with open(image_path, 'rb') as img_file:
-                        img_data = img_file.read()
-                    
-                    # Check image size
-                    img_size_mb = len(img_data) / (1024 * 1024)
-                    self._log(f"📊 Image size: {img_size_mb:.2f} MB")
-                    
-                    # Get image dimensions
-                    pil_image = PILImage.open(image_path)
-                    self._log(f"   Image dimensions: {pil_image.width}x{pil_image.height}")
+                # Check image size
+                img_size_mb = len(img_data) / (1024 * 1024)
+                self._log(f"📊 Image size: {img_size_mb:.2f} MB")
+                
+                # Get image dimensions
+                pil_image = PILImage.open(image_path)
+                self._log(f"   Image dimensions: {pil_image.width}x{pil_image.height}")
      
-                    # CHECK 4: Before resizing (which can take time)
-                    if self._check_stop():
-                        self._log("⏹️ Translation stopped during image preparation", "warning")
-                        return {}
-                    
-                    # Resize if needed
-                    if img_size_mb > 10:
-                        self._log(f"📉 Resizing large image for API limits...")
-                        max_size = 2048
-                        ratio = min(max_size / pil_image.width, max_size / pil_image.height)
-                        if ratio < 1:
-                            new_size = (int(pil_image.width * ratio), int(pil_image.height * ratio))
-                            pil_image = pil_image.resize(new_size, PILImage.Resampling.LANCZOS)
-                            from io import BytesIO
-                            buffered = BytesIO()
-                            pil_image.save(buffered, format="PNG", optimize=True)
-                            img_data = buffered.getvalue()
-                            self._log(f"✅ Resized to {new_size[0]}x{new_size[1]}px ({len(img_data)/(1024*1024):.2f} MB)")
-                    
-                    # Convert to base64
-                    img_b64 = base64.b64encode(img_data).decode('utf-8')
-                    
-                    # Create the full context message
-                    context_text = "\n".join(text_list)
-                    
-                    # Log text content info
-                    total_chars = sum(len(region.text) for region in regions)
-                    self._log(f"📝 Text content: {len(regions)} regions, {total_chars} total characters")
-                    
-                    messages.append({
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": context_text},
-                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
-                        ]
-                    })
-                    
-                    self._log(f"✅ Added full page image as visual context")
-                    
-                except Exception as e:
-                    self._log(f"⚠️ Failed to add image context: {str(e)}", "warning")
-                    self._log(f"   Error type: {type(e).__name__}", "warning")
-                    import traceback
-                    self._log(traceback.format_exc(), "warning")
-                    # Fall back to text-only translation
-                    messages.append({"role": "user", "content": context_text})
-
-                # CHECK 5: Before API call
+                # CHECK 4: Before resizing (which can take time)
                 if self._check_stop():
-                    self._log("⏹️ Translation stopped before API call", "warning")
+                    self._log("⏹️ Translation stopped during image preparation", "warning")
                     return {}
                 
-                # Check input token limit
-                # For Gemini, images cost approximately 258 tokens per image (for Gemini 1.5)
-                # Text tokens are roughly 1 token per 4 characters
-                text_tokens = 0
-                image_tokens = 0
-
-                for msg in messages:
-                    if isinstance(msg.get("content"), str):
-                        # Simple text message
-                        text_tokens += len(msg["content"]) // 4
-                    elif isinstance(msg.get("content"), list):
-                        # Message with mixed content (text + image)
-                        for content_part in msg["content"]:
-                            if content_part.get("type") == "text":
-                                text_tokens += len(content_part.get("text", "")) // 4
-                            elif content_part.get("type") == "image_url":
-                                # Gemini charges a flat rate per image regardless of size
-                                # For Gemini 1.5 Flash: 258 tokens per image
-                                # For Gemini 1.5 Pro: 258 tokens per image
-                                image_tokens += 258
-
-                estimated_tokens = text_tokens + image_tokens
-
-                # Check token limit only if it's enabled
-                if self.input_token_limit is None:
-                    self._log(f"📊 Token estimate - Text: {text_tokens}, Images: {image_tokens} (Total: {estimated_tokens} / unlimited)")
-                else:
-                    self._log(f"📊 Token estimate - Text: {text_tokens}, Images: {image_tokens} (Total: {estimated_tokens} / {self.input_token_limit})")
-                    
-                    if estimated_tokens > self.input_token_limit:
-                        self._log(f"⚠️ Token limit exceeded, trimming context", "warning")
-                        # Keep system prompt, image, and current text only
-                        messages = [messages[0], messages[-1]]  
-                        # Recalculate tokens
-                        text_tokens = len(messages[0]["content"]) // 4 + len(context_text) // 4
-                        estimated_tokens = text_tokens + image_tokens
-                        self._log(f"📊 Trimmed token estimate: {estimated_tokens}")
+                # Resize if needed
+                if img_size_mb > 10:
+                    self._log(f"📉 Resizing large image for API limits...")
+                    max_size = 2048
+                    ratio = min(max_size / pil_image.width, max_size / pil_image.height)
+                    if ratio < 1:
+                        new_size = (int(pil_image.width * ratio), int(pil_image.height * ratio))
+                        pil_image = pil_image.resize(new_size, PILImage.Resampling.LANCZOS)
+                        from io import BytesIO
+                        buffered = BytesIO()
+                        pil_image.save(buffered, format="PNG", optimize=True)
+                        img_data = buffered.getvalue()
+                        self._log(f"✅ Resized to {new_size[0]}x{new_size[1]}px ({len(img_data)/(1024*1024):.2f} MB)")
                 
-                # Make API call using the client's send method (matching translate_text)
-                self._log(f"🌐 Sending full page context to API...")
-                self._log(f"   API Model: {self.client.model if hasattr(self.client, 'model') else 'unknown'}")
-                self._log(f"   Temperature: {self.temperature}")
-                self._log(f"   Max Output Tokens: {self.max_tokens}")
+                # Convert to base64
+                img_b64 = base64.b64encode(img_data).decode('utf-8')
                 
-                start_time = time.time()
-                api_time = 0  # Initialize to avoid NameError
+                # Create the full context message
+                context_text = "\n".join(text_list)
                 
-                try:
-                    response = self.client.send(
-                        messages=messages,
-                        temperature=self.temperature,
-                        max_tokens=self.max_tokens  # Use the configured max tokens without multiplication
-                    )
-                    api_time = time.time() - start_time
-                    
-                    # CHECK 6: Immediately after API response
-                    if self._check_stop():
-                        self._log(f"⏹️ Translation stopped after API call ({api_time:.2f}s)", "warning")
-                        return {}
-                    
-                    self._log(f"✅ API responded in {api_time:.2f} seconds")
-                    
-                except Exception as api_error:
-                    api_time = time.time() - start_time
-                    
-                    # CHECK 7: After API error
-                    if self._check_stop():
-                        self._log(f"⏹️ Translation stopped during API error handling", "warning")
-                        return {}
-                    
-                    error_str = str(api_error).lower()
-                    error_type = type(api_error).__name__
-                    
-                    # Check for specific error types
-                    if "429" in error_str or "rate limit" in error_str:
-                        self._log(f"⚠️ RATE LIMIT ERROR (429) after {api_time:.2f}s", "error")
-                        self._log(f"   The API rate limit has been exceeded", "error")
-                        self._log(f"   Please wait before retrying or reduce request frequency", "error")
-                        self._log(f"   Error details: {str(api_error)}", "error")
-                        raise Exception(f"Rate limit exceeded (429): {str(api_error)}")
-                        
-                    elif "401" in error_str or "unauthorized" in error_str:
-                        self._log(f"❌ AUTHENTICATION ERROR (401) after {api_time:.2f}s", "error")
-                        self._log(f"   Invalid API key or authentication failed", "error")
-                        self._log(f"   Please check your API key in settings", "error")
-                        self._log(f"   Error details: {str(api_error)}", "error")
-                        raise Exception(f"Authentication failed (401): {str(api_error)}")
-                        
-                    elif "403" in error_str or "forbidden" in error_str:
-                        self._log(f"❌ FORBIDDEN ERROR (403) after {api_time:.2f}s", "error")
-                        self._log(f"   Access denied - check API permissions", "error")
-                        self._log(f"   Error details: {str(api_error)}", "error")
-                        raise Exception(f"Access forbidden (403): {str(api_error)}")
-                        
-                    elif "400" in error_str or "bad request" in error_str:
-                        self._log(f"❌ BAD REQUEST ERROR (400) after {api_time:.2f}s", "error")
-                        self._log(f"   Invalid request format or parameters", "error")
-                        self._log(f"   Error details: {str(api_error)}", "error")
-                        raise Exception(f"Bad request (400): {str(api_error)}")
-                        
-                    elif "timeout" in error_str:
-                        self._log(f"⏱️ TIMEOUT ERROR after {api_time:.2f}s", "error")
-                        self._log(f"   API request timed out", "error")
-                        self._log(f"   Consider increasing timeout or retry", "error")
-                        self._log(f"   Error details: {str(api_error)}", "error")
-                        raise Exception(f"Request timeout: {str(api_error)}")
-                        
-                    else:
-                        # Generic API error
-                        self._log(f"❌ API ERROR ({error_type}) after {api_time:.2f}s", "error")
-                        self._log(f"   Error details: {str(api_error)}", "error")
-                        self._log(f"   Full traceback:", "error")
-                        self._log(traceback.format_exc(), "error")
-                        raise
+                # Log text content info
+                total_chars = sum(len(region.text) for region in regions)
+                self._log(f"📝 Text content: {len(regions)} regions, {total_chars} total characters")
                 
-                # Extract content from response (matching translate_text method)
-                if hasattr(response, 'content'):
-                    response_text = response.content.strip()
-                else:
-                    response_text = str(response).strip()
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": context_text},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
+                    ]
+                })
                 
-                self._log(f"📥 Received response ({len(response_text)} chars)")
-                
-                # CHECK 8: Before parsing response
-                if self._check_stop():
-                    self._log("⏹️ Translation stopped before parsing response", "warning")
-                    return {}
-                
-                self._log(f"🔍 Raw response type: {type(response)}")
-                self._log(f"🔍 Raw response preview: '{response_text[:100]}...'")
-                
-                # Check if the response looks like a Python literal (tuple/string representation)
-                if response_text.startswith("('") or response_text.startswith('("') or response_text.startswith("('''"):
-                    self._log(f"⚠️ Detected Python literal in response, attempting to extract actual text", "warning")
-                    original_response = response_text
-                    try:
-                        # Try to evaluate it as a Python literal
-                        import ast
-                        evaluated = ast.literal_eval(response_text)
-                        self._log(f"📦 Evaluated type: {type(evaluated)}")
-                        
-                        if isinstance(evaluated, tuple):
-                            # Take the first element of the tuple
-                            response_text = str(evaluated[0])
-                            self._log(f"📦 Extracted from tuple: '{response_text[:50]}...'")
-                        elif isinstance(evaluated, str):
-                            response_text = evaluated
-                            self._log(f"📦 Extracted string: '{response_text[:50]}...'")
-                        else:
-                            self._log(f"⚠️ Unexpected type after eval: {type(evaluated)}", "warning")
-                            
-                    except Exception as e:
-                        self._log(f"⚠️ Failed to parse Python literal: {e}", "warning")
-                        self._log(f"⚠️ Original content: {original_response[:200]}", "warning")
-                        
-                        # Try regex as fallback
-                        import re
-                        match = re.search(r"^\(['\"](.+)['\"]\)$", response_text, re.DOTALL)
-                        if match:
-                            response_text = match.group(1)
-                            self._log(f"📦 Regex extracted: '{response_text[:50]}...'")
-                
-                # Additional check for escaped content
-                if '\\\\' in response_text or '\\n' in response_text:
-                    self._log(f"⚠️ Detected escaped content, unescaping...", "warning")
-                    try:
-                        # Unescape the string
-                        before = response_text
-                        response_text = response_text.encode().decode('unicode_escape')
-                        self._log(f"📦 Unescaped content")
-                    except Exception as e:
-                        self._log(f"⚠️ Failed to unescape: {e}", "warning")
-                
-                # Try to parse as JSON
-                translations = {}
-                try:
-                    # Clean up response if needed
-                    if "```json" in response_text:
-                        import re
-                        match = re.search(r'```json\s*(.*?)```', response_text, re.DOTALL)
-                        if match:
-                            response_text = match.group(1)
-                    elif "```" in response_text:
-                        import re
-                        match = re.search(r'```\s*(.*?)```', response_text, re.DOTALL)
-                        if match:
-                            response_text = match.group(1)
-                    
-                    # Parse JSON
-                    import json
-                    translations = json.loads(response_text)
-                    self._log(f"✅ Successfully parsed {len(translations)} translations")
-                    
-                except json.JSONDecodeError as e:
-                    self._log(f"⚠️ Failed to parse JSON response: {str(e)}", "warning")
-                    self._log(f"Response preview: {response_text[:200]}...", "warning")
-                    
-                    # Fallback: try to fix common JSON issues
-                    try:
-                        self._log("🔧 Attempting to fix JSON by escaping control characters...", "info")
-                        
-                        # Method 1: Use json.dumps to properly escape the string, then parse it
-                        import re
-                        
-                        # First, try to extract key-value pairs manually
-                        translations = {}
-                        
-                        # Pattern to match "key": "value" pairs, handling quotes and newlines
-                        pattern = r'"([^"]+)"\s*:\s*"([^"]*(?:\\.[^"]*)*)"'
-                        matches = re.findall(pattern, response_text)
-                        
-                        for key, value in matches:
-                            # Unescape the value
-                            try:
-                                # Replace literal \n with actual newlines
-                                value = value.replace('\\n', '\n')
-                                value = value.replace('\\"', '"')
-                                value = value.replace('\\\\', '\\')
-                                translations[key] = value
-                                self._log(f"  ✅ Extracted: '{key[:30]}...' → '{value[:30]}...'", "info")
-                            except Exception as ex:
-                                self._log(f"  ⚠️ Failed to process pair: {ex}", "warning")
-                        
-                        if translations:
-                            self._log(f"✅ Recovered {len(translations)} translations using regex", "success")
-                        else:
-                            # Method 2: Try to clean and re-parse
-                            cleaned = response_text
-                            # Remove any actual newlines within string values
-                            cleaned = re.sub(r'(?<="[^"]*)\n(?=[^"]*")', '\\n', cleaned)
-                            cleaned = re.sub(r'(?<="[^"]*)\r(?=[^"]*")', '\\r', cleaned)
-                            cleaned = re.sub(r'(?<="[^"]*)\t(?=[^"]*")', '\\t', cleaned)
-                            
-                            translations = json.loads(cleaned)
-                            self._log(f"✅ Successfully parsed after cleaning: {len(translations)} translations", "success")
-                            
-                    except Exception as e2:
-                        self._log(f"❌ Failed to recover JSON: {str(e2)}", "error")
-                        self._log(f"   Returning empty translations", "error")
-                        return {}
-                
-                # Map translations back to regions
-                result = {}
-                history_saved_count = 0
-                
-                for i, region in enumerate(regions):
-                    
-                    # CHECK 9: During mapping (in case there are many regions)
-                    if i % 10 == 0 and self._check_stop():  # Check every 10 regions
-                        self._log(f"⏹️ Translation stopped during mapping (processed {i}/{len(regions)} regions)", "warning")
-                        return result  #
-                    
-                    key = f"[{i}] {region.text}"
-                    
-                    # First try with the indexed key
-                    if key in translations:
-                        translated = translations[key]
-                        self._log(f"  ✅ Found translation with indexed key for region {i}")
-                    # Then try with just the text (without index)
-                    elif region.text in translations:
-                        translated = translations[region.text]
-                        self._log(f"  ✅ Found translation with text-only key for region {i}")
-                    else:
-                        self._log(f"⚠️ No translation found for region {i}", "warning")
-                        self._log(f"   Tried keys: '{key}' and '{region.text}'", "warning")
-                        self._log(f"   Available keys sample: {list(translations.keys())[:2]}...", "warning")
-                        translated = region.text  # Use original as fallback
-                    
-                    # Apply glossary
-                    if translated != region.text and hasattr(self.main_gui, 'manual_glossary') and self.main_gui.manual_glossary:
-                        for entry in self.main_gui.manual_glossary:
-                            if 'source' in entry and 'target' in entry:
-                                if entry['source'] in translated:
-                                    translated = translated.replace(entry['source'], entry['target'])
-                    
-                    result[region.text] = translated
-                    
-                    if translated != region.text:
-                        self._log(f"  ✅ Mapped translation: '{region.text[:30]}...' → '{translated[:30]}...'")
-                    
-                    # Store in history - INDIVIDUAL ENTRIES FOR EACH REGION
-                    if self.history_manager and self.contextual_enabled and translated != region.text:
-                        try:
-                            self.history_manager.append_to_history(
-                                user_content=region.text,
-                                assistant_content=translated,
-                                hist_limit=self.translation_history_limit,
-                                reset_on_limit=not self.rolling_history_enabled,
-                                rolling_window=self.rolling_history_enabled
-                            )
-                            history_saved_count += 1
-                        except Exception as e:
-                            self._log(f"⚠️ Failed to save to history: {str(e)}", "warning")
-                
-                # Log history save summary
-                if self.history_manager and self.contextual_enabled and history_saved_count > 0:
-                    self._log(f"📚 Saved {history_saved_count} translations to history", "success")
-                    
-                    # Check if we're approaching the history limit
-                    try:
-                        current_history = self.history_manager.load_history()
-                        current_exchanges = len(current_history) // 2
-                        if current_exchanges >= self.translation_history_limit - 1:
-                            mode = "roll over" if self.rolling_history_enabled else "reset"
-                            self._log(f"📚 History will {mode} on next translation (at limit: {self.translation_history_limit})", "info")
-                    except:
-                        pass
-                
-                return result
+                self._log(f"✅ Added full page image as visual context")
                 
             except Exception as e:
-                
-                # CHECK 10: In exception handler
-                if self._check_stop():
-                    self._log("⏹️ Translation stopped due to user request", "warning")
-                    return {}  
-                    
-                self._log(f"❌ Full page context translation error: {str(e)}", "error")
-                self._log(traceback.format_exc(), "error")
+                self._log(f"⚠️ Failed to add image context: {str(e)}", "warning")
+                self._log(f"   Error type: {type(e).__name__}", "warning")
+                import traceback
+                self._log(traceback.format_exc(), "warning")
+                # Fall back to text-only translation
+                messages.append({"role": "user", "content": context_text})
+
+            # CHECK 5: Before API call
+            if self._check_stop():
+                self._log("⏹️ Translation stopped before API call", "warning")
                 return {}
+            
+            # Check input token limit
+            # For Gemini, images cost approximately 258 tokens per image (for Gemini 1.5)
+            # Text tokens are roughly 1 token per 4 characters
+            text_tokens = 0
+            image_tokens = 0
+
+            for msg in messages:
+                if isinstance(msg.get("content"), str):
+                    # Simple text message
+                    text_tokens += len(msg["content"]) // 4
+                elif isinstance(msg.get("content"), list):
+                    # Message with mixed content (text + image)
+                    for content_part in msg["content"]:
+                        if content_part.get("type") == "text":
+                            text_tokens += len(content_part.get("text", "")) // 4
+                        elif content_part.get("type") == "image_url":
+                            # Gemini charges a flat rate per image regardless of size
+                            # For Gemini 1.5 Flash: 258 tokens per image
+                            # For Gemini 1.5 Pro: 258 tokens per image
+                            image_tokens += 258
+
+            estimated_tokens = text_tokens + image_tokens
+
+            # Check token limit only if it's enabled
+            if self.input_token_limit is None:
+                self._log(f"📊 Token estimate - Text: {text_tokens}, Images: {image_tokens} (Total: {estimated_tokens} / unlimited)")
+            else:
+                self._log(f"📊 Token estimate - Text: {text_tokens}, Images: {image_tokens} (Total: {estimated_tokens} / {self.input_token_limit})")
+                
+                if estimated_tokens > self.input_token_limit:
+                    self._log(f"⚠️ Token limit exceeded, trimming context", "warning")
+                    # Keep system prompt, image, and current text only
+                    messages = [messages[0], messages[-1]]  
+                    # Recalculate tokens
+                    text_tokens = len(messages[0]["content"]) // 4 + len(context_text) // 4
+                    estimated_tokens = text_tokens + image_tokens
+                    self._log(f"📊 Trimmed token estimate: {estimated_tokens}")
+            
+            # Make API call using the client's send method (matching translate_text)
+            self._log(f"🌐 Sending full page context to API...")
+            self._log(f"   API Model: {self.client.model if hasattr(self.client, 'model') else 'unknown'}")
+            self._log(f"   Temperature: {self.temperature}")
+            self._log(f"   Max Output Tokens: {self.max_tokens}")
+            
+            start_time = time.time()
+            api_time = 0  # Initialize to avoid NameError
+            
+            try:
+                response = self.client.send(
+                    messages=messages,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens  # Use the configured max tokens without multiplication
+                )
+                api_time = time.time() - start_time
+                
+                # CHECK 6: Immediately after API response
+                if self._check_stop():
+                    self._log(f"⏹️ Translation stopped after API call ({api_time:.2f}s)", "warning")
+                    return {}
+                
+                self._log(f"✅ API responded in {api_time:.2f} seconds")
+                
+            except Exception as api_error:
+                api_time = time.time() - start_time
+                
+                # CHECK 7: After API error
+                if self._check_stop():
+                    self._log(f"⏹️ Translation stopped during API error handling", "warning")
+                    return {}
+                
+                error_str = str(api_error).lower()
+                error_type = type(api_error).__name__
+                
+                # Check for specific error types
+                if "429" in error_str or "rate limit" in error_str:
+                    self._log(f"⚠️ RATE LIMIT ERROR (429) after {api_time:.2f}s", "error")
+                    self._log(f"   The API rate limit has been exceeded", "error")
+                    self._log(f"   Please wait before retrying or reduce request frequency", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Rate limit exceeded (429): {str(api_error)}")
+                    
+                elif "401" in error_str or "unauthorized" in error_str:
+                    self._log(f"❌ AUTHENTICATION ERROR (401) after {api_time:.2f}s", "error")
+                    self._log(f"   Invalid API key or authentication failed", "error")
+                    self._log(f"   Please check your API key in settings", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Authentication failed (401): {str(api_error)}")
+                    
+                elif "403" in error_str or "forbidden" in error_str:
+                    self._log(f"❌ FORBIDDEN ERROR (403) after {api_time:.2f}s", "error")
+                    self._log(f"   Access denied - check API permissions", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Access forbidden (403): {str(api_error)}")
+                    
+                elif "400" in error_str or "bad request" in error_str:
+                    self._log(f"❌ BAD REQUEST ERROR (400) after {api_time:.2f}s", "error")
+                    self._log(f"   Invalid request format or parameters", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Bad request (400): {str(api_error)}")
+                    
+                elif "timeout" in error_str:
+                    self._log(f"⏱️ TIMEOUT ERROR after {api_time:.2f}s", "error")
+                    self._log(f"   API request timed out", "error")
+                    self._log(f"   Consider increasing timeout or retry", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    raise Exception(f"Request timeout: {str(api_error)}")
+                    
+                else:
+                    # Generic API error
+                    self._log(f"❌ API ERROR ({error_type}) after {api_time:.2f}s", "error")
+                    self._log(f"   Error details: {str(api_error)}", "error")
+                    self._log(f"   Full traceback:", "error")
+                    self._log(traceback.format_exc(), "error")
+                    raise
+            
+            # Extract content from response (matching translate_text method)
+            if hasattr(response, 'content'):
+                response_text = response.content.strip()
+            else:
+                response_text = str(response).strip()
+            
+            self._log(f"📥 Received response ({len(response_text)} chars)")
+            
+            # CHECK 8: Before parsing response
+            if self._check_stop():
+                self._log("⏹️ Translation stopped before parsing response", "warning")
+                return {}
+            
+            self._log(f"🔍 Raw response type: {type(response)}")
+            self._log(f"🔍 Raw response preview: '{response_text[:100]}...'")
+            
+            # Check if the response looks like a Python literal (tuple/string representation)
+            if response_text.startswith("('") or response_text.startswith('("') or response_text.startswith("('''"):
+                self._log(f"⚠️ Detected Python literal in response, attempting to extract actual text", "warning")
+                original_response = response_text
+                try:
+                    # Try to evaluate it as a Python literal
+                    import ast
+                    evaluated = ast.literal_eval(response_text)
+                    self._log(f"📦 Evaluated type: {type(evaluated)}")
+                    
+                    if isinstance(evaluated, tuple):
+                        # Take the first element of the tuple
+                        response_text = str(evaluated[0])
+                        self._log(f"📦 Extracted from tuple: '{response_text[:50]}...'")
+                    elif isinstance(evaluated, str):
+                        response_text = evaluated
+                        self._log(f"📦 Extracted string: '{response_text[:50]}...'")
+                    else:
+                        self._log(f"⚠️ Unexpected type after eval: {type(evaluated)}", "warning")
+                        
+                except Exception as e:
+                    self._log(f"⚠️ Failed to parse Python literal: {e}", "warning")
+                    self._log(f"⚠️ Original content: {original_response[:200]}", "warning")
+                    
+                    # Try regex as fallback
+                    import re
+                    match = re.search(r"^\(['\"](.+)['\"]\)$", response_text, re.DOTALL)
+                    if match:
+                        response_text = match.group(1)
+                        self._log(f"📦 Regex extracted: '{response_text[:50]}...'")
+            
+            # Additional check for escaped content
+            if '\\\\' in response_text or '\\n' in response_text:
+                self._log(f"⚠️ Detected escaped content, unescaping...", "warning")
+                try:
+                    # Unescape the string
+                    before = response_text
+                    response_text = response_text.encode().decode('unicode_escape')
+                    self._log(f"📦 Unescaped content")
+                except Exception as e:
+                    self._log(f"⚠️ Failed to unescape: {e}", "warning")
+            
+            # Try to parse as JSON
+            translations = {}
+            try:
+                # Clean up response if needed
+                if "```json" in response_text:
+                    import re
+                    match = re.search(r'```json\s*(.*?)```', response_text, re.DOTALL)
+                    if match:
+                        response_text = match.group(1)
+                elif "```" in response_text:
+                    import re
+                    match = re.search(r'```\s*(.*?)```', response_text, re.DOTALL)
+                    if match:
+                        response_text = match.group(1)
+                
+                # Parse JSON
+                import json
+                translations = json.loads(response_text)
+                self._log(f"✅ Successfully parsed {len(translations)} translations")
+                
+            except json.JSONDecodeError as e:
+                self._log(f"⚠️ Failed to parse JSON response: {str(e)}", "warning")
+                self._log(f"Response preview: {response_text[:200]}...", "warning")
+                
+                # Fallback: try to fix common JSON issues
+                try:
+                    self._log("🔧 Attempting to fix JSON by escaping control characters...", "info")
+                    
+                    # Method 1: Use json.dumps to properly escape the string, then parse it
+                    import re
+                    
+                    # First, try to extract key-value pairs manually
+                    translations = {}
+                    
+                    # Pattern to match "key": "value" pairs, handling quotes and newlines
+                    pattern = r'"([^"]+)"\s*:\s*"([^"]*(?:\\.[^"]*)*)"'
+                    matches = re.findall(pattern, response_text)
+                    
+                    for key, value in matches:
+                        # Unescape the value
+                        try:
+                            # Replace literal \n with actual newlines
+                            value = value.replace('\\n', '\n')
+                            value = value.replace('\\"', '"')
+                            value = value.replace('\\\\', '\\')
+                            translations[key] = value
+                            self._log(f"  ✅ Extracted: '{key[:30]}...' → '{value[:30]}...'", "info")
+                        except Exception as ex:
+                            self._log(f"  ⚠️ Failed to process pair: {ex}", "warning")
+                    
+                    if translations:
+                        self._log(f"✅ Recovered {len(translations)} translations using regex", "success")
+                    else:
+                        # Method 2: Try to clean and re-parse
+                        cleaned = response_text
+                        # Remove any actual newlines within string values
+                        cleaned = re.sub(r'(?<="[^"]*)\n(?=[^"]*")', '\\n', cleaned)
+                        cleaned = re.sub(r'(?<="[^"]*)\r(?=[^"]*")', '\\r', cleaned)
+                        cleaned = re.sub(r'(?<="[^"]*)\t(?=[^"]*")', '\\t', cleaned)
+                        
+                        translations = json.loads(cleaned)
+                        self._log(f"✅ Successfully parsed after cleaning: {len(translations)} translations", "success")
+                        
+                except Exception as e2:
+                    self._log(f"❌ Failed to recover JSON: {str(e2)}", "error")
+                    self._log(f"   Returning empty translations", "error")
+                    return {}
+            
+            # Map translations back to regions
+            result = {}
+            translations_to_save = []
+            
+            for i, region in enumerate(regions):
+                
+                # CHECK 9: During mapping (in case there are many regions)
+                if i % 10 == 0 and self._check_stop():  # Check every 10 regions
+                    self._log(f"⏹️ Translation stopped during mapping (processed {i}/{len(regions)} regions)", "warning")
+                    return result  #
+                
+                key = f"[{i}] {region.text}"
+                
+                # First try with the indexed key
+                if key in translations:
+                    translated = translations[key]
+                    self._log(f"  ✅ Found translation with indexed key for region {i}")
+                # Then try with just the text (without index)
+                elif region.text in translations:
+                    translated = translations[region.text]
+                    self._log(f"  ✅ Found translation with text-only key for region {i}")
+                else:
+                    self._log(f"⚠️ No translation found for region {i}", "warning")
+                    self._log(f"   Tried keys: '{key}' and '{region.text}'", "warning")
+                    self._log(f"   Available keys sample: {list(translations.keys())[:2]}...", "warning")
+                    translated = region.text  # Use original as fallback
+                
+                # Apply glossary
+                if translated != region.text and hasattr(self.main_gui, 'manual_glossary') and self.main_gui.manual_glossary:
+                    for entry in self.main_gui.manual_glossary:
+                        if 'source' in entry and 'target' in entry:
+                            if entry['source'] in translated:
+                                translated = translated.replace(entry['source'], entry['target'])
+                
+                result[region.text] = translated
+                
+                if translated != region.text:
+                    self._log(f"  ✅ Mapped translation: '{region.text[:30]}...' → '{translated[:30]}...'")
+                    # Collect translations to save in batch
+                    translations_to_save.append((region.text, translated))
+            
+            # Save ALL translations as a batch without triggering limits between each one
+            if self.history_manager and self.contextual_enabled and translations_to_save:
+                try:
+                    # Save all translations from this page without checking limits between each
+                    for original, translated in translations_to_save:
+                        self.history_manager.append_to_history(
+                            user_content=original,
+                            assistant_content=translated,
+                            hist_limit=999999,  # Temporarily disable limit checking
+                            reset_on_limit=False,
+                            rolling_window=False
+                        )
+                    
+                    # Now apply the actual limit AFTER all saves
+                    current_history = self.history_manager.load_history()
+                    current_exchanges = len(current_history) // 2
+                    
+                    if current_exchanges > self.translation_history_limit:
+                        if self.rolling_history_enabled:
+                            # Keep only the most recent exchanges
+                            messages_to_keep = self.translation_history_limit * 2
+                            trimmed_history = current_history[-messages_to_keep:]
+                            self.history_manager.save_history(trimmed_history)
+                            self._log(f"📚 Trimmed history to last {self.translation_history_limit} exchanges")
+                        else:
+                            # Reset mode - clear older entries
+                            messages_to_keep = self.translation_history_limit * 2
+                            trimmed_history = current_history[-messages_to_keep:]
+                            self.history_manager.save_history(trimmed_history)
+                            self._log(f"📚 Reset history to last {self.translation_history_limit} exchanges")
+                    
+                    self._log(f"📚 Saved {len(translations_to_save)} translations to history", "success")
+                    
+                    # Show current history status
+                    final_exchanges = len(self.history_manager.load_history()) // 2
+                    self._log(f"📚 History now contains {final_exchanges} exchanges", "info")
+                    
+                except Exception as e:
+                    self._log(f"⚠️ Failed to save translations to history: {str(e)}", "warning")
+            
+            return result
+            
+        except Exception as e:
+            
+            # CHECK 10: In exception handler
+            if self._check_stop():
+                self._log("⏹️ Translation stopped due to user request", "warning")
+                return {}  
+                
+            self._log(f"❌ Full page context translation error: {str(e)}", "error")
+            self._log(traceback.format_exc(), "error")
+            return {}
             
     def create_text_mask(self, image: np.ndarray, regions: List[TextRegion]) -> np.ndarray:
         """Create a binary mask with aggressive dilation for better inpainting"""
@@ -2348,6 +2350,7 @@ class MangaTranslator:
             self._log(f"[{thread_name}] Error: {str(e)}", "error")
             return None
 
+
     def process_image(self, image_path: str, output_path: Optional[str] = None) -> Dict[str, Any]:
         """Process a single manga image through the full pipeline"""
         
@@ -2368,6 +2371,29 @@ class MangaTranslator:
         }
         
         try:
+            # Determine the output directory from output_path
+            if output_path:
+                output_dir = os.path.dirname(output_path)
+            else:
+                # If no output path specified, use default
+                output_dir = os.path.join(os.path.dirname(image_path), "translated_images")
+            
+            # Ensure output directory exists
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # Initialize HistoryManager with the output directory
+            if self.contextual_enabled and not self.history_manager_initialized:
+                # Only initialize if we're in a new output directory
+                if output_dir != getattr(self, 'history_output_dir', None):
+                    try:
+                        self.history_manager = HistoryManager(output_dir)
+                        self.history_manager_initialized = True
+                        self.history_output_dir = output_dir
+                        self._log(f"📚 Initialized HistoryManager in output directory: {output_dir}")
+                    except Exception as e:
+                        self._log(f"⚠️ Failed to initialize history manager: {str(e)}", "warning")
+                        self.history_manager = None
+            
             # Check for stop signal
             if self._check_stop():
                 result['interrupted'] = True
@@ -2607,7 +2633,12 @@ class MangaTranslator:
         
         return result
 
-
+    def reset_history_manager(self):
+        """Reset history manager for new translation batch"""
+        self.history_manager = None
+        self.history_manager_initialized = False
+        self.history_output_dir = None
+    
     def _process_webtoon_chunks(self, image_path: str, output_path: str, result: Dict) -> Dict:
         """Process webtoon in chunks for better OCR"""
         # Implementation for processing tall images in chunks
