@@ -1418,12 +1418,16 @@ class MangaTranslationTab:
         self._toggle_inpaint_controls_visibility()
 
     def _toggle_inpaint_controls_visibility(self):
-        """Toggle visibility of inpaint controls (mask expansion and passes) based on skip inpainting setting"""
-        if self.skip_inpainting_var.get():
-            self.inpaint_controls_frame.pack_forget()
-        else:
-            # Pack it back in the right position
-            self.inpaint_controls_frame.pack(fill=tk.X, pady=5, after=self.inpaint_quality_frame)
+            """Toggle visibility of inpaint controls (mask expansion and passes) based on skip inpainting setting"""
+            # Just return if the frame doesn't exist - prevents AttributeError
+            if not hasattr(self, 'inpaint_controls_frame'):
+                return
+                
+            if self.skip_inpainting_var.get():
+                self.inpaint_controls_frame.pack_forget()
+            else:
+                # Pack it back in the right position
+                self.inpaint_controls_frame.pack(fill=tk.X, pady=5, after=self.inpaint_quality_frame)
 
     def _configure_inpaint_api(self):
         """Configure cloud inpainting API"""
