@@ -571,11 +571,11 @@ class MangaTranslationTab:
         # Initialize the label with the loaded value
         self._update_reduction_label(self.bg_reduction_var.get())
         
-        # Font settings
+        # Font size selection with mode toggle
         font_frame = tk.Frame(render_frame)
         font_frame.pack(fill=tk.X, pady=5)
-
-        # Font size mode selection
+        
+        # Mode selection frame
         mode_frame = tk.Frame(font_frame)
         mode_frame.pack(fill=tk.X)
 
@@ -605,7 +605,7 @@ class MangaTranslationTab:
 
         # Fixed font size frame
         self.fixed_size_frame = tk.Frame(font_frame)
-        self.fixed_size_frame.pack(fill=tk.X, pady=(5, 0))
+        # Don't pack yet - let _toggle_font_size_mode handle it
 
         tk.Label(self.fixed_size_frame, text="Font Size:", width=20, anchor='w').pack(side=tk.LEFT)
 
@@ -626,7 +626,7 @@ class MangaTranslationTab:
 
         # Dynamic multiplier frame
         self.multiplier_frame = tk.Frame(font_frame)
-        self.multiplier_frame.pack(fill=tk.X, pady=(5, 0))
+        # Don't pack yet - let _toggle_font_size_mode handle it
 
         tk.Label(self.multiplier_frame, text="Size Multiplier:", width=20, anchor='w').pack(side=tk.LEFT)
 
@@ -645,9 +645,29 @@ class MangaTranslationTab:
         self.multiplier_label = tk.Label(self.multiplier_frame, text="1.0x", width=5)
         self.multiplier_label.pack(side=tk.LEFT)
 
-        tk.Label(self.multiplier_frame, text="(Scales with panel size)", font=('Arial', 9), fg='gray').pack(side=tk.LEFT, padx=(10, 0))
+        tk.Label(self.multiplier_frame, text="(Scales with panel size)", font=('Arial', 9), fg='gray').pack(side=tk.LEFT, padx=5)
 
-        # Initialize visibility
+        # Constraint checkbox frame (only visible in multiplier mode)
+        self.constraint_frame = tk.Frame(font_frame)
+        # Don't pack yet - let _toggle_font_size_mode handle it
+        
+        self.constrain_checkbox = tb.Checkbutton(
+            self.constraint_frame,
+            text="Constrain text to bubble boundaries",
+            variable=self.constrain_to_bubble_var,
+            command=self._save_rendering_settings,
+            bootstyle="primary"
+        )
+        self.constrain_checkbox.pack(side=tk.LEFT, padx=(20, 0))
+
+        tk.Label(
+            self.constraint_frame, 
+            text="(Unchecked allows text to exceed bubbles)", 
+            font=('Arial', 9), 
+            fg='gray'
+        ).pack(side=tk.LEFT, padx=5)
+
+        # Initialize visibility AFTER all frames are created
         self._toggle_font_size_mode()
 
         # Update multiplier label with loaded value
@@ -950,16 +970,26 @@ class MangaTranslationTab:
             messagebox.showerror("Error", f"Failed to open settings dialog:\n{str(e)}")
         
     def _toggle_font_size_mode(self):
-        """Toggle between fixed size and multiplier mode"""
+        """Toggle between fixed size and multiplier modes"""
         mode = self.font_size_mode_var.get()
-        if mode == "fixed":
-            self.fixed_size_frame.pack(fill=tk.X, pady=(5, 0))
-            self.multiplier_frame.pack_forget()
-        else:
-            self.fixed_size_frame.pack_forget()
-            self.multiplier_frame.pack(fill=tk.X, pady=(5, 0))
-        # Auto-save on change
-        if not getattr(self, '_initializing', False):
+        
+        # Check if frames exist before trying to pack/unpack them
+        if hasattr(self, 'fixed_size_frame') and hasattr(self, 'multiplier_frame'):
+            if mode == "fixed":
+                self.fixed_size_frame.pack(fill=tk.X, pady=(5, 0))
+                self.multiplier_frame.pack_forget()
+                # Hide constraint frame if it exists
+                if hasattr(self, 'constraint_frame'):
+                    self.constraint_frame.pack_forget()
+            else:
+                self.fixed_size_frame.pack_forget()
+                self.multiplier_frame.pack(fill=tk.X, pady=(5, 0))
+                # Show constraint frame if it exists
+                if hasattr(self, 'constraint_frame'):
+                    self.constraint_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        # Only save if we're not initializing
+        if not hasattr(self, '_initializing') or not self._initializing:
             self._save_rendering_settings()
 
     def _update_multiplier_label(self, value):
@@ -1036,6 +1066,7 @@ class MangaTranslationTab:
         self.inpaint_passes_var = tk.IntVar(value=config.get('manga_inpaint_passes', 2))
         self.font_size_mode_var = tk.StringVar(value=config.get('manga_font_size_mode', 'fixed'))
         self.font_size_multiplier_var = tk.DoubleVar(value=config.get('manga_font_size_multiplier', 1.0))
+        self.constrain_to_bubble_var = tk.BooleanVar(value=config.get('manga_constrain_to_bubble', True))
         
         # Font color settings
         manga_text_color = config.get('manga_text_color', [102, 0, 0])
@@ -1087,6 +1118,7 @@ class MangaTranslationTab:
         self.main_gui.config['manga_font_size_mode'] = self.font_size_mode_var.get()
         self.main_gui.config['manga_font_size_multiplier'] = self.font_size_multiplier_var.get()
         self.main_gui.config['manga_font_style'] = self.font_style_var.get()
+        self.main_gui.config['manga_constrain_to_bubble'] = self.constrain_to_bubble_var.get()
         
         # Save font color as list
         self.main_gui.config['manga_text_color'] = [
@@ -1864,12 +1896,20 @@ class MangaTranslationTab:
                 self.shadow_color_b.get()
             )
             
+            # Determine font size value based on mode
+            if self.font_size_mode_var.get() == 'multiplier':
+                # Pass negative value to indicate multiplier mode
+                font_size = -self.font_size_multiplier_var.get()
+            else:
+                # Fixed mode - use the font size value directly
+                font_size = self.font_size_var.get() if self.font_size_var.get() > 0 else None
+            
             self.translator.update_text_rendering_settings(
                 bg_opacity=self.bg_opacity_var.get(),
                 bg_style=self.bg_style_var.get(),
                 bg_reduction=self.bg_reduction_var.get(),
                 font_style=self.selected_font_path,
-                font_size=self.font_size_var.get() if self.font_size_var.get() > 0 else None,
+                font_size=font_size,
                 text_color=text_color,
                 shadow_enabled=self.shadow_enabled_var.get(),
                 shadow_color=shadow_color,
@@ -1877,6 +1917,14 @@ class MangaTranslationTab:
                 shadow_offset_y=self.shadow_offset_y_var.get(),
                 shadow_blur=self.shadow_blur_var.get()
             )
+            
+            # Update font mode and multiplier explicitly
+            self.translator.font_size_mode = self.font_size_mode_var.get()
+            self.translator.font_size_multiplier = self.font_size_multiplier_var.get()
+            
+            # Update constrain to bubble setting
+            if hasattr(self, 'constrain_to_bubble_var'):
+                self.translator.constrain_to_bubble = self.constrain_to_bubble_var.get()
             
             if hasattr(self, 'skip_inpainting_var'):
                 self.translator.skip_inpainting = self.skip_inpainting_var.get()
@@ -1887,9 +1935,21 @@ class MangaTranslationTab:
                 custom_prompt=self.full_page_context_prompt
             )
             
+            # Update logging to include new settings
             self._log(f"Applied rendering settings:", "info")
             self._log(f"  Background: {self.bg_style_var.get()} @ {int(self.bg_opacity_var.get()/255*100)}% opacity", "info")
             self._log(f"  Font: {os.path.basename(self.selected_font_path) if self.selected_font_path else 'Default'}", "info")
+            
+            # Log font size mode
+            if self.font_size_mode_var.get() == 'multiplier':
+                self._log(f"  Font Size: Dynamic multiplier ({self.font_size_multiplier_var.get():.1f}x)", "info")
+                if hasattr(self, 'constrain_to_bubble_var'):
+                    constraint_status = "constrained" if self.constrain_to_bubble_var.get() else "unconstrained"
+                    self._log(f"  Text Constraint: {constraint_status}", "info")
+            else:
+                size_text = f"{self.font_size_var.get()}pt" if self.font_size_var.get() > 0 else "Auto"
+                self._log(f"  Font Size: Fixed ({size_text})", "info")
+            
             self._log(f"  Text Color: RGB({text_color[0]}, {text_color[1]}, {text_color[2]})", "info")
             self._log(f"  Shadow: {'Enabled' if self.shadow_enabled_var.get() else 'Disabled'}", "info")
             self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_var.get() else 'Disabled'}", "info")
