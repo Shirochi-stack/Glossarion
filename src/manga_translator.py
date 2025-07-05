@@ -130,6 +130,9 @@ class MangaTranslator:
         self.font_path = self._find_font()
         self.min_font_size = 10
         self.max_font_size = 60
+        self.min_readable_size = main_gui.config.get('manga_min_readable_size', 16)
+        self.max_font_size_limit = main_gui.config.get('manga_max_font_size', 24)
+        self.strict_text_wrapping = main_gui.config.get('manga_strict_text_wrapping', False)
         
         # Enhanced text rendering settings - Load from config if available
         config = main_gui.config if hasattr(main_gui, 'config') else {}
@@ -514,6 +517,11 @@ class MangaTranslator:
             
             # Draw rectangles around detected text regions
             overlay = img.copy()
+            
+            # Calculate statistics
+            total_chars = sum(len(r.text) for r in regions)
+            avg_confidence = np.mean([r.confidence for r in regions]) if regions else 0
+            
             for i, region in enumerate(regions):
                 x, y, w, h = region.bounding_box
                 
@@ -533,11 +541,31 @@ class MangaTranslator:
                 cv2.putText(overlay, info_text, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 
                            0.5, color, 1, cv2.LINE_AA)
                 
+                # Add character count
+                char_count = len(region.text.strip())
+                cv2.putText(overlay, f"{char_count} chars", (x, y + h + 15), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+                
                 # Add detected text preview if in verbose debug mode
                 if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
                     text_preview = region.text[:20] + "..." if len(region.text) > 20 else region.text
-                    cv2.putText(overlay, text_preview, (x, y + h + 15), cv2.FONT_HERSHEY_SIMPLEX, 
+                    cv2.putText(overlay, text_preview, (x, y + h + 30), cv2.FONT_HERSHEY_SIMPLEX, 
                                0.4, color, 1, cv2.LINE_AA)
+            
+            # Add overall statistics to the image
+            stats_bg = overlay.copy()
+            cv2.rectangle(stats_bg, (10, 10), (300, 90), (0, 0, 0), -1)
+            cv2.addWeighted(stats_bg, 0.7, overlay, 0.3, 0, overlay)
+            
+            stats_text = [
+                f"Regions: {len(regions)}",
+                f"Total chars: {total_chars}",
+                f"Avg confidence: {avg_confidence:.2f}"
+            ]
+            
+            for i, text in enumerate(stats_text):
+                cv2.putText(overlay, text, (20, 35 + i*20), cv2.FONT_HERSHEY_SIMPLEX,
+                           0.5, (255, 255, 255), 1, cv2.LINE_AA)
             
             # Save main debug image
             if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
@@ -548,6 +576,7 @@ class MangaTranslator:
             cv2.imwrite(debug_path, overlay)
             self._log(f"   📸 Saved debug image: {debug_path}")
             
+            # Save text mask
             mask = self.create_text_mask(img, regions)
             mask_debug_path = debug_path.replace('_debug', '_mask')
             cv2.imwrite(mask_debug_path, mask)
@@ -563,13 +592,37 @@ class MangaTranslator:
                 cv2.imwrite(heatmap_path, heatmap)
                 self._log(f"   🌡️ Saved confidence heatmap: {heatmap_path}")
                 
-                # Save text density map
-                density_map = self._create_text_density_map(img, regions)
-                density_path = os.path.join(debug_dir, f"{base_name}_text_density.png")
-                cv2.imwrite(density_path, density_map)
-                self._log(f"   📊 Saved text density map: {density_path}")
+                # Save polygon visualization with safe text areas
+                if any(hasattr(r, 'vertices') and r.vertices for r in regions):
+                    polygon_img = img.copy()
+                    for region in regions:
+                        if hasattr(region, 'vertices') and region.vertices:
+                            # Draw polygon
+                            pts = np.array(region.vertices, np.int32)
+                            pts = pts.reshape((-1, 1, 2))
+                            
+                            # Fill with transparency
+                            overlay_poly = polygon_img.copy()
+                            cv2.fillPoly(overlay_poly, [pts], (0, 255, 255))
+                            cv2.addWeighted(overlay_poly, 0.2, polygon_img, 0.8, 0, polygon_img)
+                            
+                            # Draw outline
+                            cv2.polylines(polygon_img, [pts], True, (255, 0, 0), 2)
+                            
+                            # Draw safe text area
+                            try:
+                                safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(region)
+                                cv2.rectangle(polygon_img, (safe_x, safe_y), 
+                                            (safe_x + safe_w, safe_y + safe_h), 
+                                            (0, 255, 0), 1)
+                            except:
+                                pass  # Skip if get_safe_text_area fails
+                    
+                    polygon_path = os.path.join(debug_dir, f"{base_name}_polygons.png")
+                    cv2.imwrite(polygon_path, polygon_img)
+                    self._log(f"   🔷 Saved polygon visualization: {polygon_path}")
                 
-                # Save individual region crops
+                # Save individual region crops with more info
                 regions_dir = os.path.join(debug_dir, 'regions')
                 os.makedirs(regions_dir, exist_ok=True)
                 
@@ -582,8 +635,20 @@ class MangaTranslator:
                     x2 = min(img.shape[1], x + w + pad)
                     y2 = min(img.shape[0], y + h + pad)
                     
-                    region_crop = img[y1:y2, x1:x2]
-                    region_path = os.path.join(regions_dir, f"region_{i:03d}.png")
+                    region_crop = img[y1:y2, x1:x2].copy()
+                    
+                    # Draw bounding box on crop
+                    cv2.rectangle(region_crop, (pad, pad), 
+                                (pad + w, pad + h), (0, 255, 0), 2)
+                    
+                    # Add text info on the crop
+                    info = f"Conf: {region.confidence:.2f} | Chars: {len(region.text)}"
+                    cv2.putText(region_crop, info, (5, 15), cv2.FONT_HERSHEY_SIMPLEX,
+                               0.4, (255, 255, 255), 1, cv2.LINE_AA)
+                    
+                    # Save with meaningful filename
+                    safe_text = region.text[:20].replace('/', '_').replace('\\', '_').strip()
+                    region_path = os.path.join(regions_dir, f"region_{i:03d}_{safe_text}.png")
                     cv2.imwrite(region_path, region_crop)
                 
                 self._log(f"   📁 Saved individual region crops to: {regions_dir}")
@@ -610,34 +675,6 @@ class MangaTranslator:
         
         # Blend with original image
         result = cv2.addWeighted(img, 0.7, heatmap_colored, 0.3, 0)
-        return result
-
-    def _create_text_density_map(self, img, regions):
-        """Create a map showing text density across the image"""
-        # Create grid
-        grid_size = 50
-        height, width = img.shape[:2]
-        density_map = np.zeros((height // grid_size + 1, width // grid_size + 1))
-        
-        # Calculate density
-        for region in regions:
-            x, y, w, h = region.bounding_box
-            grid_x = x // grid_size
-            grid_y = y // grid_size
-            grid_w = (w // grid_size) + 1
-            grid_h = (h // grid_size) + 1
-            
-            for gy in range(grid_y, min(grid_y + grid_h, density_map.shape[0])):
-                for gx in range(grid_x, min(grid_x + grid_w, density_map.shape[1])):
-                    density_map[gy, gx] += 1
-        
-        # Upscale and visualize
-        density_resized = cv2.resize(density_map, (width, height), interpolation=cv2.INTER_NEAREST)
-        density_normalized = (density_resized / density_resized.max() * 255).astype(np.uint8)
-        density_colored = cv2.applyColorMap(density_normalized, cv2.COLORMAP_HOT)
-        
-        # Blend with original
-        result = cv2.addWeighted(img, 0.5, density_colored, 0.5, 0)
         return result
 
     def _get_translation_history_context(self) -> List[Dict[str, str]]:
@@ -1709,198 +1746,330 @@ class MangaTranslator:
                 self._log(f"   ❌ Cloud inpainting failed: {str(e)}", "error")
                 return image.copy()         
             
+
     def _regions_overlap(self, region1: TextRegion, region2: TextRegion) -> bool:
         """Check if two regions overlap"""
         x1, y1, w1, h1 = region1.bounding_box
         x2, y2, w2, h2 = region2.bounding_box
         
         # Check if rectangles overlap
-        return not (x1 + w1 < x2 or x2 + w2 < x1 or y1 + h1 < y2 or y2 + h2 < y1)
+        if (x1 + w1 < x2 or x2 + w2 < x1 or 
+            y1 + h1 < y2 or y2 + h2 < y1):
+            return False
+        
+        return True
+
+    def _calculate_overlap_area(self, region1: TextRegion, region2: TextRegion) -> float:
+        """Calculate the area of overlap between two regions"""
+        x1, y1, w1, h1 = region1.bounding_box
+        x2, y2, w2, h2 = region2.bounding_box
+        
+        # Calculate intersection
+        x_left = max(x1, x2)
+        y_top = max(y1, y2)
+        x_right = min(x1 + w1, x2 + w2)
+        y_bottom = min(y1 + h1, y2 + h2)
+        
+        if x_right < x_left or y_bottom < y_top:
+            return 0.0
+        
+        return (x_right - x_left) * (y_bottom - y_top)
+
+    def _adjust_overlapping_regions(self, regions: List[TextRegion], image_width: int, image_height: int) -> List[TextRegion]:
+        """Adjust positions of overlapping regions to prevent overlap"""
+        if len(regions) <= 1:
+            return regions
+        
+        # Create a copy of regions to modify
+        adjusted_regions = []
+        for region in regions:
+            # Create a new TextRegion with copied values
+            adjusted_region = TextRegion(
+                text=region.text,
+                vertices=list(region.vertices),
+                bounding_box=list(region.bounding_box),  # Make it mutable
+                confidence=region.confidence,
+                region_type=region.region_type
+            )
+            if hasattr(region, 'translated_text'):
+                adjusted_region.translated_text = region.translated_text
+            adjusted_regions.append(adjusted_region)
+        
+        # Sort by y-coordinate (top to bottom) then x-coordinate (left to right)
+        adjusted_regions.sort(key=lambda r: (r.bounding_box[1], r.bounding_box[0]))
+        
+        # Adjust overlapping regions
+        for i in range(len(adjusted_regions)):
+            for j in range(i + 1, len(adjusted_regions)):
+                region1 = adjusted_regions[i]
+                region2 = adjusted_regions[j]
+                
+                if self._regions_overlap(region1, region2):
+                    # Calculate overlap
+                    overlap_area = self._calculate_overlap_area(region1, region2)
+                    x1, y1, w1, h1 = region1.bounding_box
+                    x2, y2, w2, h2 = region2.bounding_box
+                    
+                    # Determine adjustment direction based on relative positions
+                    center1_x = x1 + w1 / 2
+                    center1_y = y1 + h1 / 2
+                    center2_x = x2 + w2 / 2
+                    center2_y = y2 + h2 / 2
+                    
+                    # Calculate minimum separation needed
+                    min_gap = 10  # Minimum pixels between regions
+                    
+                    # Prefer vertical adjustment for manga (usually vertical text flow)
+                    vertical_overlap = min(y1 + h1, y2 + h2) - max(y1, y2)
+                    horizontal_overlap = min(x1 + w1, x2 + w2) - max(x1, x2)
+                    
+                    if vertical_overlap < horizontal_overlap:
+                        # Adjust vertically
+                        if center2_y > center1_y:
+                            # Move region2 down
+                            new_y2 = y1 + h1 + min_gap
+                            if new_y2 + h2 <= image_height:
+                                region2.bounding_box = (x2, new_y2, w2, h2)
+                                self._log(f"  📍 Moved region down to prevent overlap", "info")
+                            else:
+                                # Move region1 up if region2 can't go down
+                                new_y1 = y2 - h1 - min_gap
+                                if new_y1 >= 0:
+                                    region1.bounding_box = (x1, new_y1, w1, h1)
+                                    self._log(f"  📍 Moved region up to prevent overlap", "info")
+                        else:
+                            # Move region2 up
+                            new_y2 = y1 - h2 - min_gap
+                            if new_y2 >= 0:
+                                region2.bounding_box = (x2, new_y2, w2, h2)
+                                self._log(f"  📍 Moved region up to prevent overlap", "info")
+                            else:
+                                # Move region1 down if region2 can't go up
+                                new_y1 = y2 + h2 + min_gap
+                                if new_y1 + h1 <= image_height:
+                                    region1.bounding_box = (x1, new_y1, w1, h1)
+                                    self._log(f"  📍 Moved region down to prevent overlap", "info")
+                    else:
+                        # Adjust horizontally
+                        if center2_x > center1_x:
+                            # Move region2 right
+                            new_x2 = x1 + w1 + min_gap
+                            if new_x2 + w2 <= image_width:
+                                region2.bounding_box = (new_x2, y2, w2, h2)
+                                self._log(f"  📍 Moved region right to prevent overlap", "info")
+                            else:
+                                # Move region1 left if region2 can't go right
+                                new_x1 = x2 - w1 - min_gap
+                                if new_x1 >= 0:
+                                    region1.bounding_box = (new_x1, y1, w1, h1)
+                                    self._log(f"  📍 Moved region left to prevent overlap", "info")
+                        else:
+                            # Move region2 left
+                            new_x2 = x1 - w2 - min_gap
+                            if new_x2 >= 0:
+                                region2.bounding_box = (new_x2, y2, w2, h2)
+                                self._log(f"  📍 Moved region left to prevent overlap", "info")
+                            else:
+                                # Move region1 right if region2 can't go left
+                                new_x1 = x2 + w2 + min_gap
+                                if new_x1 + w1 <= image_width:
+                                    region1.bounding_box = (new_x1, y1, w1, h1)
+                                    self._log(f"  📍 Moved region right to prevent overlap", "info")
+        
+        return adjusted_regions
+
     
     def render_translated_text(self, image: np.ndarray, regions: List[TextRegion]) -> np.ndarray:
-            """Enhanced text rendering with customizable backgrounds and styles"""
-            self._log(f"\n🎨 Starting ENHANCED text rendering with custom settings:", "info")
-            self._log(f"  ✅ Using ENHANCED renderer (not the simple version)", "info")
-            self._log(f"  Background: {self.text_bg_style} @ {int(self.text_bg_opacity/255*100)}% opacity", "info")
-            self._log(f"  Text color: RGB{self.text_color}", "info")
-            self._log(f"  Shadow: {'Enabled' if self.shadow_enabled else 'Disabled'}", "info")
-            self._log(f"  Font: {os.path.basename(self.selected_font_style) if self.selected_font_style else 'Default'}", "info")
-            
-            # Convert to PIL for text rendering
-            import cv2
-            pil_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-            
-            # Check if any regions overlap
-            has_overlaps = False
-            for i, region1 in enumerate(regions):
-                for region2 in regions[i+1:]:
-                    if self._regions_overlap(region1, region2):
-                        has_overlaps = True
-                        break
-                if has_overlaps:
+        """Enhanced text rendering with customizable backgrounds and styles"""
+        self._log(f"\n🎨 Starting ENHANCED text rendering with custom settings:", "info")
+        self._log(f"  ✅ Using ENHANCED renderer (not the simple version)", "info")
+        self._log(f"  Background: {self.text_bg_style} @ {int(self.text_bg_opacity/255*100)}% opacity", "info")
+        self._log(f"  Text color: RGB{self.text_color}", "info")
+        self._log(f"  Shadow: {'Enabled' if self.shadow_enabled else 'Disabled'}", "info")
+        self._log(f"  Font: {os.path.basename(self.selected_font_style) if self.selected_font_style else 'Default'}", "info")
+        
+        # Convert to PIL for text rendering
+        import cv2
+        pil_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        
+        # Get image dimensions for boundary checking
+        image_height, image_width = image.shape[:2]
+        
+        # Adjust overlapping regions before rendering
+        adjusted_regions = self._adjust_overlapping_regions(regions, image_width, image_height)
+        
+        # Check if any regions still overlap after adjustment (shouldn't happen, but let's verify)
+        has_overlaps = False
+        for i, region1 in enumerate(adjusted_regions):
+            for region2 in adjusted_regions[i+1:]:
+                if self._regions_overlap(region1, region2):
+                    has_overlaps = True
+                    self._log("  ⚠️ Regions still overlap after adjustment", "warning")
                     break
+            if has_overlaps:
+                break
+        
+        # Handle transparency settings based on overlaps
+        if has_overlaps and self.text_bg_opacity < 255 and self.text_bg_opacity > 0:
+            self._log("  ⚠️ Overlapping regions detected with partial transparency", "warning")
+            self._log("  ℹ️ Rendering with requested transparency level", "info")
+        
+        region_count = 0
+        
+        # Decide rendering path based on transparency needs
+        # For full transparency (opacity = 0) or no overlaps, use RGBA rendering
+        # For overlaps with partial transparency, we still use RGBA to honor user settings
+        use_rgba_rendering = True  # Always use RGBA for consistent transparency support
+        
+        if use_rgba_rendering:
+            # Transparency-enabled rendering path
+            pil_image = pil_image.convert('RGBA')
             
-            # Handle transparency settings based on overlaps
-            if has_overlaps and self.text_bg_opacity < 255 and self.text_bg_opacity > 0:
-                self._log("  ⚠️ Overlapping regions detected with partial transparency", "warning")
-                self._log("  ℹ️ Rendering with requested transparency level", "info")
-            
-            region_count = 0
-            
-            # Decide rendering path based on transparency needs
-            # For full transparency (opacity = 0) or no overlaps, use RGBA rendering
-            # For overlaps with partial transparency, we still use RGBA to honor user settings
-            use_rgba_rendering = True  # Always use RGBA for consistent transparency support
-            
-            if use_rgba_rendering:
-                # Transparency-enabled rendering path
-                pil_image = pil_image.convert('RGBA')
+            for region in adjusted_regions:
+                if not region.translated_text:
+                    continue
                 
-                for region in regions:
-                    if not region.translated_text:
-                        continue
-                    
-                    region_count += 1
-                    self._log(f"  Rendering region {region_count}: {region.translated_text[:30]}...", "info")
-                    
-                    # Create a separate layer for this region only
-                    region_overlay = Image.new('RGBA', pil_image.size, (0, 0, 0, 0))
-                    region_draw = ImageDraw.Draw(region_overlay)
-                    
-                    x, y, w, h = region.bounding_box
-                    
-                    # Find optimal font size
-                    if self.custom_font_size:
-                        # Fixed size specified
-                        font_size = self.custom_font_size
-                        # Pass the region to use vertices
-                        if hasattr(region, 'vertices') and region.vertices:
-                            _, _, safe_w, safe_h = self.get_safe_text_area(region)
-                            lines = self._wrap_text(region.translated_text, 
-                                                  self._get_font(font_size), 
-                                                  safe_w, region_draw)
-                        else:
-                            lines = self._wrap_text(region.translated_text, 
-                                                  self._get_font(font_size), 
-                                                  int(w * 0.8), region_draw)
-                    elif self.font_size_mode == 'multiplier':
-                        # Use dynamic sizing with multiplier - pass region for vertices
-                        font_size, lines = self._fit_text_to_region(
-                            region.translated_text, w, h, region_draw, region
-                        )
-                    else:
-                        # Auto mode - use standard fitting - pass region for vertices
-                        font_size, lines = self._fit_text_to_region(
-                            region.translated_text, w, h, region_draw, region
-                        )
-                    
-                    # Load font
-                    font = self._get_font(font_size)
-                    
-                    # Calculate text layout
-                    line_height = font_size * 1.2
-                    total_height = len(lines) * line_height
-                    start_y = y + (h - total_height) // 2
-                    
-                    # Draw background if opacity > 0
-                    if self.text_bg_opacity > 0:
-                        self._draw_text_background(region_draw, x, y, w, h, lines, font, 
-                                                 font_size, start_y)
-                    
-                    # Draw text on the same region overlay
-                    for i, line in enumerate(lines):
-                        text_bbox = region_draw.textbbox((0, 0), line, font=font)
-                        text_width = text_bbox[2] - text_bbox[0]
-                        
-                        text_x = x + (w - text_width) // 2
-                        text_y = start_y + i * line_height
-                        
-                        if self.shadow_enabled:
-                            self._draw_text_shadow(region_draw, text_x, text_y, line, font)
-                        
-                        outline_width = max(1, font_size // self.outline_width_factor)
-                        
-                        # Draw outline
-                        for dx in range(-outline_width, outline_width + 1):
-                            for dy in range(-outline_width, outline_width + 1):
-                                if dx != 0 or dy != 0:
-                                    region_draw.text((text_x + dx, text_y + dy), line, 
-                                            font=font, fill=self.outline_color + (255,))
-                        
-                        # Draw main text
-                        region_draw.text((text_x, text_y), line, font=font, fill=self.text_color + (255,))
-                    
-                    # Composite this region onto the main image
-                    pil_image = Image.alpha_composite(pil_image, region_overlay)
+                region_count += 1
+                self._log(f"  Rendering region {region_count}: {region.translated_text[:30]}...", "info")
                 
-                # Convert back to RGB
-                pil_image = pil_image.convert('RGB')
-            
-            else:
-                # This path is now deprecated but kept for backwards compatibility
-                # Direct rendering without transparency layers
-                draw = ImageDraw.Draw(pil_image)
+                # Create a separate layer for this region only
+                region_overlay = Image.new('RGBA', pil_image.size, (0, 0, 0, 0))
+                region_draw = ImageDraw.Draw(region_overlay)
                 
-                for region in regions:
-                    if not region.translated_text:
-                        continue
-                    
-                    region_count += 1
-                    self._log(f"  Rendering region {region_count}: {region.translated_text[:30]}...", "info")
-                    
-                    x, y, w, h = region.bounding_box
-                    
-                    # Find optimal font size
-                    if self.custom_font_size:
-                        font_size = self.custom_font_size
+                x, y, w, h = region.bounding_box
+                
+                # Find optimal font size
+                if self.custom_font_size:
+                    # Fixed size specified
+                    font_size = self.custom_font_size
+                    # Pass the region to use vertices
+                    if hasattr(region, 'vertices') and region.vertices:
+                        _, _, safe_w, safe_h = self.get_safe_text_area(region)
                         lines = self._wrap_text(region.translated_text, 
                                               self._get_font(font_size), 
-                                              int(w * 0.8), draw)
+                                              safe_w, region_draw)
                     else:
-                        font_size, lines = self._fit_text_to_region(
-                            region.translated_text, w, h, draw
-                        )
+                        lines = self._wrap_text(region.translated_text, 
+                                              self._get_font(font_size), 
+                                              int(w * 0.8), region_draw)
+                elif self.font_size_mode == 'multiplier':
+                    # Use dynamic sizing with multiplier - pass region for vertices
+                    font_size, lines = self._fit_text_to_region(
+                        region.translated_text, w, h, region_draw, region
+                    )
+                else:
+                    # Auto mode - use standard fitting - pass region for vertices
+                    font_size, lines = self._fit_text_to_region(
+                        region.translated_text, w, h, region_draw, region
+                    )
+                
+                # Load font
+                font = self._get_font(font_size)
+                
+                # Calculate text layout
+                line_height = font_size * 1.2
+                total_height = len(lines) * line_height
+                start_y = y + (h - total_height) // 2
+                
+                # Draw background if opacity > 0
+                if self.text_bg_opacity > 0:
+                    self._draw_text_background(region_draw, x, y, w, h, lines, font, 
+                                             font_size, start_y)
+                
+                # Draw text on the same region overlay
+                for i, line in enumerate(lines):
+                    text_bbox = region_draw.textbbox((0, 0), line, font=font)
+                    text_width = text_bbox[2] - text_bbox[0]
                     
-                    # Load font
-                    font = self._get_font(font_size)
+                    text_x = x + (w - text_width) // 2
+                    text_y = start_y + i * line_height
                     
-                    # Calculate text layout
-                    line_height = font_size * 1.2
-                    total_height = len(lines) * line_height
-                    start_y = y + (h - total_height) // 2
+                    if self.shadow_enabled:
+                        self._draw_text_shadow(region_draw, text_x, text_y, line, font)
                     
-                    # Draw opaque background
-                    if self.text_bg_opacity > 0:
-                        self._draw_text_background(draw, x, y, w, h, lines, font, 
-                                                 font_size, start_y)
+                    outline_width = max(1, font_size // self.outline_width_factor)
                     
-                    # Draw text
-                    for i, line in enumerate(lines):
-                        text_bbox = draw.textbbox((0, 0), line, font=font)
-                        text_width = text_bbox[2] - text_bbox[0]
-                        
-                        text_x = x + (w - text_width) // 2
-                        text_y = start_y + i * line_height
-                        
-                        if self.shadow_enabled:
-                            self._draw_text_shadow(draw, text_x, text_y, line, font)
-                        
-                        outline_width = max(1, font_size // self.outline_width_factor)
-                        
-                        # Draw outline
-                        for dx in range(-outline_width, outline_width + 1):
-                            for dy in range(-outline_width, outline_width + 1):
-                                if dx != 0 or dy != 0:
-                                    draw.text((text_x + dx, text_y + dy), line, 
-                                            font=font, fill=self.outline_color)
-                        
-                        # Draw main text
-                        draw.text((text_x, text_y), line, font=font, fill=self.text_color)
+                    # Draw outline
+                    for dx in range(-outline_width, outline_width + 1):
+                        for dy in range(-outline_width, outline_width + 1):
+                            if dx != 0 or dy != 0:
+                                region_draw.text((text_x + dx, text_y + dy), line, 
+                                        font=font, fill=self.outline_color + (255,))
+                    
+                    # Draw main text
+                    region_draw.text((text_x, text_y), line, font=font, fill=self.text_color + (255,))
+                
+                # Composite this region onto the main image
+                pil_image = Image.alpha_composite(pil_image, region_overlay)
             
-            # Convert back to numpy array
-            result = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-            self._log(f"✅ ENHANCED text rendering complete - rendered {region_count} regions", "info")
-            return result
+            # Convert back to RGB
+            pil_image = pil_image.convert('RGB')
+        
+        else:
+            # This path is now deprecated but kept for backwards compatibility
+            # Direct rendering without transparency layers
+            draw = ImageDraw.Draw(pil_image)
+            
+            for region in adjusted_regions:
+                if not region.translated_text:
+                    continue
+                
+                region_count += 1
+                self._log(f"  Rendering region {region_count}: {region.translated_text[:30]}...", "info")
+                
+                x, y, w, h = region.bounding_box
+                
+                # Find optimal font size
+                if self.custom_font_size:
+                    font_size = self.custom_font_size
+                    lines = self._wrap_text(region.translated_text, 
+                                          self._get_font(font_size), 
+                                          int(w * 0.8), draw)
+                else:
+                    font_size, lines = self._fit_text_to_region(
+                        region.translated_text, w, h, draw
+                    )
+                
+                # Load font
+                font = self._get_font(font_size)
+                
+                # Calculate text layout
+                line_height = font_size * 1.2
+                total_height = len(lines) * line_height
+                start_y = y + (h - total_height) // 2
+                
+                # Draw opaque background
+                if self.text_bg_opacity > 0:
+                    self._draw_text_background(draw, x, y, w, h, lines, font, 
+                                             font_size, start_y)
+                
+                # Draw text
+                for i, line in enumerate(lines):
+                    text_bbox = draw.textbbox((0, 0), line, font=font)
+                    text_width = text_bbox[2] - text_bbox[0]
+                    
+                    text_x = x + (w - text_width) // 2
+                    text_y = start_y + i * line_height
+                    
+                    if self.shadow_enabled:
+                        self._draw_text_shadow(draw, text_x, text_y, line, font)
+                    
+                    outline_width = max(1, font_size // self.outline_width_factor)
+                    
+                    # Draw outline
+                    for dx in range(-outline_width, outline_width + 1):
+                        for dy in range(-outline_width, outline_width + 1):
+                            if dx != 0 or dy != 0:
+                                draw.text((text_x + dx, text_y + dy), line, 
+                                        font=font, fill=self.outline_color)
+                    
+                    # Draw main text
+                    draw.text((text_x, text_y), line, font=font, fill=self.text_color)
+        
+        # Convert back to numpy array
+        result = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+        self._log(f"✅ ENHANCED text rendering complete - rendered {region_count} regions", "info")
+        return result
     
     def _draw_text_background(self, draw: ImageDraw, x: int, y: int, w: int, h: int,
                             lines: List[str], font: ImageFont, font_size: int, 
@@ -2015,45 +2184,42 @@ class MangaTranslator:
                 pass
         
         return ImageFont.load_default()
- 
+     
     def get_safe_text_area(self, region: TextRegion) -> Tuple[int, int, int, int]:
-        """Get safe text area based on the actual bubble shape from vertices"""
-        import cv2
-        import numpy as np
+        """Get safe text area with less conservative margins for readability"""
+        if not hasattr(region, 'vertices') or not region.vertices:
+            x, y, w, h = region.bounding_box
+            margin_factor = 0.85  # Less conservative default
+            safe_width = int(w * margin_factor)
+            safe_height = int(h * margin_factor)
+            safe_x = x + (w - safe_width) // 2
+            safe_y = y + (h - safe_height) // 2
+            return safe_x, safe_y, safe_width, safe_height
         
-        # Use the exact vertices from Google Vision
-        vertices = np.array(region.vertices, dtype=np.int32)
+        try:
+            vertices = np.array(region.vertices)
+            hull = cv2.convexHull(vertices)
+            hull_area = cv2.contourArea(hull)
+            poly_area = cv2.contourArea(vertices)
+            
+            if poly_area > 0:
+                convexity = hull_area / poly_area
+            else:
+                convexity = 1.0
+            
+            # LESS CONSERVATIVE margins for better readability
+            if convexity < 0.85:  # Speech bubble with tail
+                margin_factor = 0.75  # Was 0.6
+                self._log(f"  Speech bubble detected, using 75% of area", "info")
+            elif convexity > 0.98:  # Rectangular
+                margin_factor = 0.9   # Was 0.75
+                self._log(f"  Rectangular bubble, using 90% of area", "info")
+            else:  # Regular bubble
+                margin_factor = 0.8   # Was 0.65
+                self._log(f"  Regular bubble, using 80% of area", "info")
+        except:
+            margin_factor = 0.8  # Safe default
         
-        # Get convex hull
-        hull = cv2.convexHull(vertices)
-        
-        # Find convexity defects (how much the shape deviates from convex)
-        hull_indices = cv2.convexHull(vertices, returnPoints=False)
-        if len(hull_indices) > 3:
-            try:
-                defects = cv2.convexityDefects(vertices, hull_indices)
-                if defects is not None:
-                    # Calculate maximum defect depth
-                    max_defect = np.max(defects[:, :, 3]) / 256.0  # Convert to pixels
-                    
-                    # Use this to determine margin based on bubble shape
-                    if max_defect > 20:  # Significant concavity (speech bubble with tail)
-                        margin_factor = 0.5
-                        self._log(f"  Detected speech bubble with tail, using 50% margin", "info")
-                    elif max_defect > 10:  # Some concavity
-                        margin_factor = 0.6
-                        self._log(f"  Detected curved bubble, using 60% margin", "info")
-                    else:  # Nearly convex
-                        margin_factor = 0.7
-                        self._log(f"  Detected regular bubble, using 70% margin", "info")
-                else:
-                    margin_factor = 0.7
-            except:
-                margin_factor = 0.6  # Safe default
-        else:
-            margin_factor = 0.8
-        
-        # Get bounding box and apply margin
         x, y, w, h = cv2.boundingRect(vertices)
         
         safe_width = int(w * margin_factor)
@@ -2064,119 +2230,292 @@ class MangaTranslator:
         return safe_x, safe_y, safe_width, safe_height
     
     def _fit_text_to_region(self, text: str, max_width: int, max_height: int, draw: ImageDraw, region: TextRegion = None) -> Tuple[int, List[str]]:
-        """Find optimal font size and text wrapping using exact bubble shape"""
+        """Find optimal font size with smart strategy selection based on context"""
         
-        # If we have the region with vertices, use them to calculate safe area
+        # MINIMUM READABLE SIZE (Option 3)
+        MIN_READABLE_SIZE = self.min_readable_size
+        
+        # Check if this region might overlap with others (Option 1 trigger)
+        has_potential_overlap = self._check_potential_overlap(region) if region else False
+        
+        # Get usable area
         if region and hasattr(region, 'vertices') and region.vertices:
             safe_x, safe_y, safe_width, safe_height = self.get_safe_text_area(region)
             usable_width = safe_width
             usable_height = safe_height
             self._log(f"  Using vertex-based safe area: {safe_width}x{safe_height}", "info")
         else:
-            # Fallback to the old method
-            usable_width = int(max_width * 0.8)
-            usable_height = int(max_height * 0.8)
-            self._log(f"  Using standard margins (no vertices)", "info")
+            # LESS CONSERVATIVE for better readability (Option 2)
+            margin = 0.75 if has_potential_overlap else 0.85  # Use more space when no overlap
+            usable_width = int(max_width * margin)
+            usable_height = int(max_height * margin)
+            self._log(f"  Using {int(margin*100)}% margins (overlap: {has_potential_overlap})", "info")
         
-        # Standard font size range
-        min_font_size = self.min_font_size
-        max_font_size = self.max_font_size
+        # Font size range with maximum limit applied
+        min_font_size = max(self.min_font_size, MIN_READABLE_SIZE)  # Enforce minimum
+        max_font_size = min(self.max_font_size, self.max_font_size_limit)  # Apply user-configured maximum
         
-        # If in multiplier mode and not constraining to bubble
+        # Calculate text metrics
+        text_length = len(text.strip())
+        area = usable_width * usable_height
+        
+        # OPTION 1: Simple top-down approach for overlapping regions
+        if has_potential_overlap:
+            self._log("  Using conservative sizing due to potential overlap", "info")
+            return self._fit_text_simple_topdown(text, usable_width, usable_height, draw, min_font_size, max_font_size)
+        
+        # OPTION 2: Less conservative approach for non-overlapping regions
+        # Start with HIGHER estimates
+        if text_length > 0:
+            pixels_per_char = area / text_length
+            
+            # MORE AGGRESSIVE sizing
+            if pixels_per_char > 800:
+                initial_estimate = int(max_font_size * 0.9)  # Was 0.7
+            elif pixels_per_char > 400:
+                initial_estimate = int(max_font_size * 0.7)  # Was 0.5
+            elif pixels_per_char > 200:
+                initial_estimate = int(max_font_size * 0.5)  # Was 0.35
+            elif pixels_per_char > 100:
+                initial_estimate = int(max_font_size * 0.4)  # Was 0.25
+            else:
+                initial_estimate = int(max_font_size * 0.3)  # Was 0.2
+        else:
+            initial_estimate = int(max_font_size * 0.6)  # Was 0.4
+        
+        # Ensure we start high enough
+        initial_estimate = max(initial_estimate, min_font_size + 10)
+        initial_estimate = min(initial_estimate, max_font_size)
+        
+        self._log(f"  Text length: {text_length}, Initial estimate: {initial_estimate}", "info")
+        
+        # Handle multiplier modes
         if self.font_size_mode == 'multiplier' and not self.constrain_to_bubble:
-            # Calculate a base size based on bubble dimensions
-            base_size = min(max_font_size, int(usable_height / 3))
-            
-            # Apply the multiplier directly
+            # Unconstrained multiplier
+            base_size = initial_estimate
             target_size = int(base_size * self.font_size_multiplier)
-            
-            # Allow larger sizes when unconstrained
-            max_allowed = self.max_font_size * 5 if not self.constrain_to_bubble else self.max_font_size * 3
-            target_size = max(self.min_font_size, min(target_size, max_allowed))
-            
-            self._log(f"  Unconstrained multiplier: base={base_size}, target={target_size}", "info")
+            target_size = max(min_font_size, min(target_size, self.max_font_size_limit * 3))  # Apply limit even in unconstrained mode
             
             font = self._get_font(target_size)
             lines = self._wrap_text(text, font, usable_width, draw)
             
             return target_size, lines
         
-        # Standard behavior - find best fitting size
-        elif self.font_size_mode == 'multiplier':
-            # Constrained multiplier mode - try target size first
-            starting_font_size = int(max_font_size * 0.8)
-            target_size = int(starting_font_size * self.font_size_multiplier)
-            
-            font = self._get_font(target_size)
+        # Binary search with preference for LARGER sizes
+        low = min_font_size
+        high = initial_estimate
+        best_size = min_font_size
+        best_lines = []
+        
+        # First, try to find the largest size that fits
+        while low <= high:
+            mid = (low + high) // 2
+            font = self._get_font(mid)
             lines = self._wrap_text(text, font, usable_width, draw)
             
-            line_height = target_size * 1.2
+            # Less strict height check - use more vertical space
+            line_height = mid * 1.25  # Reduced from 1.3 for tighter spacing
+            total_height = len(lines) * line_height
+            
+            if total_height <= usable_height:  # No padding, use full height
+                best_size = mid
+                best_lines = lines
+                low = mid + 1  # Try even larger
+            else:
+                high = mid - 1
+        
+        # Apply multiplier if needed
+        if self.font_size_mode == 'multiplier' and self.constrain_to_bubble:
+            multiplied_size = int(best_size * self.font_size_multiplier)
+            multiplied_size = max(min_font_size, min(multiplied_size, self.max_font_size_limit))  # Apply maximum limit
+            
+            font = self._get_font(multiplied_size)
+            lines = self._wrap_text(text, font, usable_width, draw)
+            line_height = multiplied_size * 1.25
             total_height = len(lines) * line_height
             
             if total_height <= usable_height:
-                return target_size, lines
+                best_size = multiplied_size
+                best_lines = lines
+        
+        # OPTION 3: Enforce minimum readable size
+        if best_size < MIN_READABLE_SIZE:
+            self._log(f"  Size {best_size} below minimum, using {MIN_READABLE_SIZE}", "warning")
+            best_size = MIN_READABLE_SIZE
+            font = self._get_font(best_size)
+            best_lines = self._wrap_text(text, font, usable_width, draw)
             
-            # If doesn't fit, fall through to standard fitting
+            # If it doesn't fit at minimum size, we still use it (readability > fit)
+            line_height = best_size * 1.25
+            max_lines = int(usable_height / line_height)
+            if len(best_lines) > max_lines > 0:
+                # Only truncate if really necessary
+                best_lines = best_lines[:max_lines]
+                if len(best_lines) < len(self._wrap_text(text, font, usable_width, draw)):
+                    best_lines[-1] = best_lines[-1][:-3] + "..."
         
-        # Standard fitting algorithm
-        best_base_size = min_font_size
-        best_lines = []
+        self._log(f"  Final size: {best_size}, Lines: {len(best_lines)}", "info")
         
-        for font_size in range(max_font_size, min_font_size - 1, -1):
+        return best_size, best_lines
+
+    def _fit_text_simple_topdown(self, text: str, usable_width: int, usable_height: int, 
+                                 draw: ImageDraw, min_size: int, max_size: int) -> Tuple[int, List[str]]:
+        """Simple top-down approach - start large and shrink only if needed"""
+        # Start from a reasonable large size
+        start_size = int(max_size * 0.8)
+        
+        for font_size in range(start_size, min_size - 1, -2):  # Step by 2 for speed
             font = self._get_font(font_size)
             lines = self._wrap_text(text, font, usable_width, draw)
             
-            line_height = font_size * 1.2
+            line_height = font_size * 1.2  # Tighter for overlaps
             total_height = len(lines) * line_height
             
             if total_height <= usable_height:
-                best_base_size = font_size
-                best_lines = lines
-                break
+                return font_size, lines
         
-        # Apply multiplier to the best fitting size if in multiplier mode
-        if self.font_size_mode == 'multiplier':
-            final_size = int(best_base_size * self.font_size_multiplier)
-            final_size = max(self.min_font_size, min(final_size, self.max_font_size * 3))
-            
-            font = self._get_font(final_size)
-            best_lines = self._wrap_text(text, font, usable_width, draw)
-            
-            # Truncate if needed when constrained
-            if self.constrain_to_bubble:
-                line_height = final_size * 1.2
-                max_lines = int(usable_height // line_height)
-                if len(best_lines) > max_lines and max_lines > 0:
-                    best_lines = best_lines[:max_lines-1] + [best_lines[max_lines-1][:10] + '...']
-            
-            return final_size, best_lines
+        # If nothing fits, use minimum
+        font = self._get_font(min_size)
+        lines = self._wrap_text(text, font, usable_width, draw)
+        return min_size, lines
+
+    def _check_potential_overlap(self, region: TextRegion) -> bool:
+        """Check if this region might overlap with others based on position"""
+        if not region or not hasattr(region, 'bounding_box'):
+            return False
         
-        return best_base_size, best_lines
+        x, y, w, h = region.bounding_box
+        
+        # Simple heuristic: small regions or regions at edges might overlap
+        # You can make this smarter based on your needs
+        if w < 100 or h < 50:  # Small bubbles often overlap
+            return True
+        
+        # Add more overlap detection logic here if needed
+        # For now, default to no overlap for larger bubbles
+        return False
     
     def _wrap_text(self, text: str, font: ImageFont, max_width: int, draw: ImageDraw) -> List[str]:
-        """Wrap text to fit within max_width"""
+        """Wrap text to fit within max_width with optional strict wrapping"""
+        # Handle empty text
+        if not text.strip():
+            return []
+        
         words = text.split()
         lines = []
         current_line = []
         
         for word in words:
-            test_line = ' '.join(current_line + [word])
-            text_bbox = draw.textbbox((0, 0), test_line, font=font)
-            text_width = text_bbox[2] - text_bbox[0]
+            # Check if word alone is too long
+            word_bbox = draw.textbbox((0, 0), word, font=font)
+            word_width = word_bbox[2] - word_bbox[0]
             
-            if text_width <= max_width:
-                current_line.append(word)
-            else:
+            if word_width > max_width and len(word) > 1:
+                # Word is too long for the bubble
                 if current_line:
+                    # Save current line first
                     lines.append(' '.join(current_line))
-                    current_line = [word]
-                else:
-                    # Word is too long, split it
-                    lines.append(word)
                     current_line = []
+                
+                if self.strict_text_wrapping:
+                    # STRICT MODE: Force break the word to fit within bubble
+                    # This is the original behavior that ensures text stays within bounds
+                    broken_parts = self._force_break_word(word, font, max_width, draw)
+                    lines.extend(broken_parts)
+                else:
+                    # RELAXED MODE: Keep word whole (may exceed bubble)
+                    lines.append(word)
+                    # self._log(f"  ⚠️ Word '{word}' exceeds bubble width, keeping whole", "warning")
+            else:
+                # Normal word processing
+                if current_line:
+                    test_line = ' '.join(current_line + [word])
+                else:
+                    test_line = word
+                
+                text_bbox = draw.textbbox((0, 0), test_line, font=font)
+                text_width = text_bbox[2] - text_bbox[0]
+                
+                if text_width <= max_width:
+                    current_line.append(word)
+                else:
+                    if current_line:
+                        lines.append(' '.join(current_line))
+                        current_line = [word]
+                    else:
+                        # Single word that fits
+                        lines.append(word)
         
         if current_line:
             lines.append(' '.join(current_line))
+        
+        return lines
+
+    # Keep the existing _force_break_word method as is (the complete version from earlier):
+    def _force_break_word(self, word: str, font: ImageFont, max_width: int, draw: ImageDraw) -> List[str]:
+        """Force break a word that's too long to fit"""
+        lines = []
+        
+        # Binary search to find how many characters fit
+        low = 1
+        high = len(word)
+        chars_that_fit = 1
+        
+        while low <= high:
+            mid = (low + high) // 2
+            test_text = word[:mid]
+            bbox = draw.textbbox((0, 0), test_text, font=font)
+            width = bbox[2] - bbox[0]
+            
+            if width <= max_width:
+                chars_that_fit = mid
+                low = mid + 1
+            else:
+                high = mid - 1
+        
+        # Break the word into pieces
+        remaining = word
+        while remaining:
+            if len(remaining) <= chars_that_fit:
+                # Last piece
+                lines.append(remaining)
+                break
+            else:
+                # Find the best break point
+                break_at = chars_that_fit
+                
+                # Try to break at a more natural point if possible
+                # Look for vowel-consonant boundaries for better hyphenation
+                for i in range(min(chars_that_fit, len(remaining) - 1), max(1, chars_that_fit - 5), -1):
+                    if i < len(remaining) - 1:
+                        current_char = remaining[i].lower()
+                        next_char = remaining[i + 1].lower()
+                        
+                        # Good hyphenation points:
+                        # - Between consonant and vowel
+                        # - After prefix (un-, re-, pre-, etc.)
+                        # - Before suffix (-ing, -ed, -er, etc.)
+                        if (current_char in 'bcdfghjklmnpqrstvwxyz' and next_char in 'aeiou') or \
+                           (current_char in 'aeiou' and next_char in 'bcdfghjklmnpqrstvwxyz'):
+                            break_at = i + 1
+                            break
+                
+                # Add hyphen if we're breaking in the middle of a word
+                if break_at < len(remaining):
+                    # Check if adding hyphen still fits
+                    test_with_hyphen = remaining[:break_at] + '-'
+                    bbox = draw.textbbox((0, 0), test_with_hyphen, font=font)
+                    width = bbox[2] - bbox[0]
+                    
+                    if width <= max_width:
+                        lines.append(remaining[:break_at] + '-')
+                    else:
+                        # Hyphen doesn't fit, break without it
+                        lines.append(remaining[:break_at])
+                else:
+                    lines.append(remaining[:break_at])
+                
+                remaining = remaining[break_at:]
         
         return lines
     
