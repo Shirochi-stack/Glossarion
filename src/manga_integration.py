@@ -433,6 +433,52 @@ class MangaTranslationTab:
         
         # Initialize the label with the loaded value
         self._update_opacity_label(self.bg_opacity_var.get())
+
+        # Background style selection
+        style_frame = tk.Frame(render_frame)
+        style_frame.pack(fill=tk.X, pady=5)
+
+        tk.Label(style_frame, text="Background Style:", width=20, anchor='w').pack(side=tk.LEFT)
+
+        # Radio buttons for background style
+        style_selection_frame = tk.Frame(style_frame)
+        style_selection_frame.pack(side=tk.LEFT, padx=10)
+
+        tb.Radiobutton(
+            style_selection_frame,
+            text="Box",
+            variable=self.bg_style_var,
+            value="box",
+            command=self._save_rendering_settings,
+            bootstyle="primary"
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        tb.Radiobutton(
+            style_selection_frame,
+            text="Circle",
+            variable=self.bg_style_var,
+            value="circle",
+            command=self._save_rendering_settings,
+            bootstyle="primary"
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        tb.Radiobutton(
+            style_selection_frame,
+            text="Wrap",
+            variable=self.bg_style_var,
+            value="wrap",
+            command=self._save_rendering_settings,
+            bootstyle="primary"
+        ).pack(side=tk.LEFT)
+
+        # Add tooltips or descriptions
+        style_help = tk.Label(
+            style_frame,
+            text="(Box: rounded rectangle, Circle: ellipse, Wrap: per-line)",
+            font=('Arial', 9),
+            fg='gray'
+        )
+        style_help.pack(side=tk.LEFT, padx=(10, 0))
  
         # Skip inpainting toggle - store as instance variable
         self.skip_inpainting_checkbox = tb.Checkbutton(
