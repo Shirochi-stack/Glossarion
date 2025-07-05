@@ -128,8 +128,8 @@ class MangaTranslator:
         
         # Font settings for text rendering
         self.font_path = self._find_font()
-        self.min_font_size = 8
-        self.max_font_size = 36
+        self.min_font_size = 10
+        self.max_font_size = 60
         
         # Enhanced text rendering settings - Load from config if available
         config = main_gui.config if hasattr(main_gui, 'config') else {}
@@ -137,6 +137,7 @@ class MangaTranslator:
         self.text_bg_opacity = config.get('manga_bg_opacity', 255)  # 0-255, default fully opaque
         self.text_bg_style = config.get('manga_bg_style', 'box')  # 'box', 'circle', 'wrap'
         self.text_bg_reduction = config.get('manga_bg_reduction', 1.0)  # Size reduction factor (0.5-1.0)
+        self.constrain_to_bubble = config.get('manga_constrain_to_bubble', True) 
         
         # Text color from config
         manga_text_color = config.get('manga_text_color', [0, 0, 0])
@@ -1772,18 +1773,25 @@ class MangaTranslator:
                     if self.custom_font_size:
                         # Fixed size specified
                         font_size = self.custom_font_size
-                        lines = self._wrap_text(region.translated_text, 
-                                              self._get_font(font_size), 
-                                              int(w * 0.8), region_draw)
+                        # Pass the region to use vertices
+                        if hasattr(region, 'vertices') and region.vertices:
+                            _, _, safe_w, safe_h = self.get_safe_text_area(region)
+                            lines = self._wrap_text(region.translated_text, 
+                                                  self._get_font(font_size), 
+                                                  safe_w, region_draw)
+                        else:
+                            lines = self._wrap_text(region.translated_text, 
+                                                  self._get_font(font_size), 
+                                                  int(w * 0.8), region_draw)
                     elif self.font_size_mode == 'multiplier':
-                        # Use dynamic sizing with multiplier
+                        # Use dynamic sizing with multiplier - pass region for vertices
                         font_size, lines = self._fit_text_to_region(
-                            region.translated_text, w, h, region_draw
+                            region.translated_text, w, h, region_draw, region
                         )
                     else:
-                        # Auto mode - use standard fitting
+                        # Auto mode - use standard fitting - pass region for vertices
                         font_size, lines = self._fit_text_to_region(
-                            region.translated_text, w, h, region_draw
+                            region.translated_text, w, h, region_draw, region
                         )
                     
                     # Load font
@@ -2007,55 +2015,143 @@ class MangaTranslator:
                 pass
         
         return ImageFont.load_default()
+ 
+    def get_safe_text_area(self, region: TextRegion) -> Tuple[int, int, int, int]:
+        """Get safe text area based on the actual bubble shape from vertices"""
+        import cv2
+        import numpy as np
+        
+        # Use the exact vertices from Google Vision
+        vertices = np.array(region.vertices, dtype=np.int32)
+        
+        # Get convex hull
+        hull = cv2.convexHull(vertices)
+        
+        # Find convexity defects (how much the shape deviates from convex)
+        hull_indices = cv2.convexHull(vertices, returnPoints=False)
+        if len(hull_indices) > 3:
+            try:
+                defects = cv2.convexityDefects(vertices, hull_indices)
+                if defects is not None:
+                    # Calculate maximum defect depth
+                    max_defect = np.max(defects[:, :, 3]) / 256.0  # Convert to pixels
+                    
+                    # Use this to determine margin based on bubble shape
+                    if max_defect > 20:  # Significant concavity (speech bubble with tail)
+                        margin_factor = 0.5
+                        self._log(f"  Detected speech bubble with tail, using 50% margin", "info")
+                    elif max_defect > 10:  # Some concavity
+                        margin_factor = 0.6
+                        self._log(f"  Detected curved bubble, using 60% margin", "info")
+                    else:  # Nearly convex
+                        margin_factor = 0.7
+                        self._log(f"  Detected regular bubble, using 70% margin", "info")
+                else:
+                    margin_factor = 0.7
+            except:
+                margin_factor = 0.6  # Safe default
+        else:
+            margin_factor = 0.8
+        
+        # Get bounding box and apply margin
+        x, y, w, h = cv2.boundingRect(vertices)
+        
+        safe_width = int(w * margin_factor)
+        safe_height = int(h * margin_factor)
+        safe_x = x + (w - safe_width) // 2
+        safe_y = y + (h - safe_height) // 2
+        
+        return safe_x, safe_y, safe_width, safe_height
     
-    def _fit_text_to_region(self, text: str, max_width: int, max_height: int, draw: ImageDraw) -> Tuple[int, List[str]]:
-            """Find optimal font size and text wrapping"""
-            # Use 80% of the region for text (leave margins)
+    def _fit_text_to_region(self, text: str, max_width: int, max_height: int, draw: ImageDraw, region: TextRegion = None) -> Tuple[int, List[str]]:
+        """Find optimal font size and text wrapping using exact bubble shape"""
+        
+        # If we have the region with vertices, use them to calculate safe area
+        if region and hasattr(region, 'vertices') and region.vertices:
+            safe_x, safe_y, safe_width, safe_height = self.get_safe_text_area(region)
+            usable_width = safe_width
+            usable_height = safe_height
+            self._log(f"  Using vertex-based safe area: {safe_width}x{safe_height}", "info")
+        else:
+            # Fallback to the old method
             usable_width = int(max_width * 0.8)
             usable_height = int(max_height * 0.8)
+            self._log(f"  Using standard margins (no vertices)", "info")
+        
+        # Standard font size range
+        min_font_size = self.min_font_size
+        max_font_size = self.max_font_size
+        
+        # If in multiplier mode and not constraining to bubble
+        if self.font_size_mode == 'multiplier' and not self.constrain_to_bubble:
+            # Calculate a base size based on bubble dimensions
+            base_size = min(max_font_size, int(usable_height / 3))
             
-            # Standard font size range
-            min_font_size = self.min_font_size
-            max_font_size = self.max_font_size
+            # Apply the multiplier directly
+            target_size = int(base_size * self.font_size_multiplier)
             
-            # First, find the best base font size (without multiplier)
-            best_base_size = min_font_size
-            best_lines = []
+            # Allow larger sizes when unconstrained
+            max_allowed = self.max_font_size * 5 if not self.constrain_to_bubble else self.max_font_size * 3
+            target_size = max(self.min_font_size, min(target_size, max_allowed))
             
-            for font_size in range(max_font_size, min_font_size - 1, -1):
-                font = self._get_font(font_size)
-                
-                # Wrap text
-                lines = self._wrap_text(text, font, usable_width, draw)
-                
-                # Check if it fits vertically
-                line_height = font_size * 1.2
-                total_height = len(lines) * line_height
-                
-                if total_height <= usable_height:
-                    best_base_size = font_size
-                    best_lines = lines
-                    break
+            self._log(f"  Unconstrained multiplier: base={base_size}, target={target_size}", "info")
             
-            # Now apply multiplier if in multiplier mode
-            if self.font_size_mode == 'multiplier':
-                final_size = int(best_base_size * self.font_size_multiplier)
-                # Clamp to reasonable bounds
-                final_size = max(self.min_font_size, min(final_size, self.max_font_size * 3))
-                
-                # Re-calculate lines with the multiplied size
-                font = self._get_font(final_size)
-                best_lines = self._wrap_text(text, font, usable_width, draw)
-                
-                # Check if we need to truncate with new size
+            font = self._get_font(target_size)
+            lines = self._wrap_text(text, font, usable_width, draw)
+            
+            return target_size, lines
+        
+        # Standard behavior - find best fitting size
+        elif self.font_size_mode == 'multiplier':
+            # Constrained multiplier mode - try target size first
+            starting_font_size = int(max_font_size * 0.8)
+            target_size = int(starting_font_size * self.font_size_multiplier)
+            
+            font = self._get_font(target_size)
+            lines = self._wrap_text(text, font, usable_width, draw)
+            
+            line_height = target_size * 1.2
+            total_height = len(lines) * line_height
+            
+            if total_height <= usable_height:
+                return target_size, lines
+            
+            # If doesn't fit, fall through to standard fitting
+        
+        # Standard fitting algorithm
+        best_base_size = min_font_size
+        best_lines = []
+        
+        for font_size in range(max_font_size, min_font_size - 1, -1):
+            font = self._get_font(font_size)
+            lines = self._wrap_text(text, font, usable_width, draw)
+            
+            line_height = font_size * 1.2
+            total_height = len(lines) * line_height
+            
+            if total_height <= usable_height:
+                best_base_size = font_size
+                best_lines = lines
+                break
+        
+        # Apply multiplier to the best fitting size if in multiplier mode
+        if self.font_size_mode == 'multiplier':
+            final_size = int(best_base_size * self.font_size_multiplier)
+            final_size = max(self.min_font_size, min(final_size, self.max_font_size * 3))
+            
+            font = self._get_font(final_size)
+            best_lines = self._wrap_text(text, font, usable_width, draw)
+            
+            # Truncate if needed when constrained
+            if self.constrain_to_bubble:
                 line_height = final_size * 1.2
                 max_lines = int(usable_height // line_height)
                 if len(best_lines) > max_lines and max_lines > 0:
                     best_lines = best_lines[:max_lines-1] + [best_lines[max_lines-1][:10] + '...']
-            else:
-                final_size = best_base_size
-                
+            
             return final_size, best_lines
+        
+        return best_base_size, best_lines
     
     def _wrap_text(self, text: str, font: ImageFont, max_width: int, draw: ImageDraw) -> List[str]:
         """Wrap text to fit within max_width"""
