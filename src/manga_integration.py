@@ -434,31 +434,72 @@ class MangaTranslationTab:
         # Initialize the label with the loaded value
         self._update_opacity_label(self.bg_opacity_var.get())
  
-        # Skip inpainting toggle
-        tb.Checkbutton(render_frame, text="Skip Inpainting (Preserve Original Art)", 
-                      variable=self.skip_inpainting_var,
-                      bootstyle="round-toggle",
-                      command=self._save_rendering_settings).pack(anchor='w', pady=5)
-        
-        tk.Label(render_frame, text="Keep original manga art under translated text",
-                font=('TkDefaultFont', 9), fg='gray').pack(anchor='w', padx=20, pady=(0, 10))
-                
-        # Background style selection
-        style_frame = tk.Frame(render_frame)
-        style_frame.pack(fill=tk.X, pady=5)
-        
-        tk.Label(style_frame, text="Background Style:", width=20, anchor='w').pack(side=tk.LEFT)
-        
-        styles = [('box', 'Box'), ('circle', 'Circle'), ('wrap', 'Wrap Text')]
-        for value, text in styles:
+        # Skip inpainting toggle - store as instance variable
+        self.skip_inpainting_checkbox = tb.Checkbutton(
+            render_frame, 
+            text="Skip Inpainter (Recommended)", 
+            variable=self.skip_inpainting_var,
+            bootstyle="round-toggle",
+            command=self._toggle_inpaint_visibility
+        )
+        self.skip_inpainting_checkbox.pack(anchor='w', pady=5)
+
+        # Inpaint quality selection (only visible when inpainting is enabled)
+        self.inpaint_quality_frame = tk.Frame(render_frame)
+        self.inpaint_quality_frame.pack(fill=tk.X, pady=5)
+
+        tk.Label(self.inpaint_quality_frame, text="Inpaint Quality:", width=20, anchor='w').pack(side=tk.LEFT)
+
+        quality_options = [('high', 'High Quality'), ('fast', 'Fast')]
+        for value, text in quality_options:
             tb.Radiobutton(
-                style_frame,
+                self.inpaint_quality_frame,
                 text=text,
-                variable=self.bg_style_var,
+                variable=self.inpaint_quality_var,
                 value=value,
                 bootstyle="primary",
                 command=self._save_rendering_settings
             ).pack(side=tk.LEFT, padx=10)
+
+        # Cloud inpainting API configuration
+        api_loader_frame = tk.Frame(self.inpaint_quality_frame)
+        api_loader_frame.pack(fill=tk.X, pady=(10, 0))
+
+        # Check if API key exists
+        saved_api_key = self.main_gui.config.get('replicate_api_key', '')
+        if saved_api_key:
+            status_text = "✅ Cloud inpainting configured"
+            status_color = 'green'
+        else:
+            status_text = "❌ Inpainting API not configured"
+            status_color = 'red'
+
+        self.inpaint_api_status_label = tk.Label(
+            api_loader_frame, 
+            text=status_text,
+            font=('Arial', 9),
+            fg=status_color
+        )
+        self.inpaint_api_status_label.pack(side=tk.LEFT)
+
+        tb.Button(
+            api_loader_frame,
+            text="Configure API Key",
+            command=self._configure_inpaint_api,
+            bootstyle="info"
+        ).pack(side=tk.LEFT, padx=(10, 0))
+
+        # Add a clear button if API is configured
+        if saved_api_key:
+            tb.Button(
+                api_loader_frame,
+                text="Clear",
+                command=self._clear_inpaint_api,
+                bootstyle="secondary"
+            ).pack(side=tk.LEFT, padx=(5, 0))
+
+        # Set initial visibility based on current setting
+        self._toggle_inpaint_quality_visibility()
         
         # Background size reduction
         reduction_frame = tk.Frame(render_frame)
@@ -944,6 +985,9 @@ class MangaTranslationTab:
         self.font_size_var = tk.IntVar(value=config.get('manga_font_size', 0))
         self.selected_font_path = config.get('manga_font_path', None)
         self.skip_inpainting_var = tk.BooleanVar(value=config.get('manga_skip_inpainting', True))
+        self.inpaint_quality_var = tk.StringVar(value=config.get('manga_inpaint_quality', 'high'))
+        self.inpaint_dilation_var = tk.IntVar(value=config.get('manga_inpaint_dilation', 15))
+        self.inpaint_passes_var = tk.IntVar(value=config.get('manga_inpaint_passes', 2))
         self.font_size_mode_var = tk.StringVar(value=config.get('manga_font_size_mode', 'fixed'))
         self.font_size_multiplier_var = tk.DoubleVar(value=config.get('manga_font_size_multiplier', 1.0))
         
@@ -962,30 +1006,22 @@ class MangaTranslationTab:
         self.shadow_offset_x_var = tk.IntVar(value=config.get('manga_shadow_offset_x', 2))
         self.shadow_offset_y_var = tk.IntVar(value=config.get('manga_shadow_offset_y', 2))
         self.shadow_blur_var = tk.IntVar(value=config.get('manga_shadow_blur', 0))
-        self.font_style_var = tk.StringVar(value=config.get('manga_font_style', 'Default'))
-
         
-        # Also set font style var if we have a saved font
-        if self.selected_font_path:
-            # Reverse lookup the font name from path
-            font_map = {
-                "C:/Windows/Fonts/arial.ttf": "Arial",
-                "C:/Windows/Fonts/calibri.ttf": "Calibri",
-                "C:/Windows/Fonts/comic.ttf": "Comic Sans MS",
-                "C:/Windows/Fonts/tahoma.ttf": "Tahoma",
-                "C:/Windows/Fonts/times.ttf": "Times New Roman",
-                "C:/Windows/Fonts/verdana.ttf": "Verdana",
-                "C:/Windows/Fonts/georgia.ttf": "Georgia",
-                "C:/Windows/Fonts/impact.ttf": "Impact",
-                "C:/Windows/Fonts/trebuc.ttf": "Trebuchet MS",
-                "C:/Windows/Fonts/cour.ttf": "Courier New"
-            }
-            font_name = next((name for path, name in font_map.items() if path == self.selected_font_path), "Default")
-        else:
-            font_name = "Default"
+        # Initialize font_style_var with saved value or default
+        saved_font_style = config.get('manga_font_style', 'Default')
+        self.font_style_var = tk.StringVar(value=saved_font_style)
         
-        self.font_style_var = tk.StringVar(value=font_name)
-    
+        # Full page context settings
+        self.full_page_context_var = tk.BooleanVar(value=config.get('manga_full_page_context', False))
+        self.full_page_context_prompt = config.get('manga_full_page_context_prompt', 
+            "You will receive multiple text segments from a manga page. "
+            "Translate each segment considering the context of all segments together. "
+            "Maintain consistency in character names, tone, and style across all segments."
+        )
+        
+        # Output settings
+        self.create_subfolder_var = tk.BooleanVar(value=config.get('manga_create_subfolder', True))
+            
     def _save_rendering_settings(self):
         """Save text rendering settings to config"""
         # Don't save during initialization
@@ -999,10 +1035,12 @@ class MangaTranslationTab:
         self.main_gui.config['manga_font_size'] = self.font_size_var.get()
         self.main_gui.config['manga_font_path'] = self.selected_font_path
         self.main_gui.config['manga_skip_inpainting'] = self.skip_inpainting_var.get()
+        self.main_gui.config['manga_inpaint_quality'] = self.inpaint_quality_var.get()
+        self.main_gui.config['manga_inpaint_dilation'] = self.inpaint_dilation_var.get()
+        self.main_gui.config['manga_inpaint_passes'] = self.inpaint_passes_var.get()
         self.main_gui.config['manga_font_size_mode'] = self.font_size_mode_var.get()
         self.main_gui.config['manga_font_size_multiplier'] = self.font_size_multiplier_var.get()
         self.main_gui.config['manga_font_style'] = self.font_style_var.get()
-
         
         # Save font color as list
         self.main_gui.config['manga_text_color'] = [
@@ -1030,9 +1068,9 @@ class MangaTranslationTab:
         self.main_gui.config['manga_full_page_context'] = self.full_page_context_var.get()
         self.main_gui.config['manga_full_page_context_prompt'] = self.full_page_context_prompt
         
-        # Call main GUI's save_configuration to persist to file
-        if hasattr(self.main_gui, 'save_configuration'):
-            self.main_gui.save_configuration()
+        # Call main GUI's save_config to persist to file
+        if hasattr(self.main_gui, 'save_config'):
+            self.main_gui.save_config(show_message=False)
     
     def _on_context_toggle(self):
         """Handle full page context toggle"""
@@ -1168,8 +1206,9 @@ class MangaTranslationTab:
             self.main_gui.config['google_cloud_credentials'] = file_path
             
             # Save configuration
-            if hasattr(self.main_gui, 'save_configuration'):
-                self.main_gui.save_configuration()
+            if hasattr(self.main_gui, 'save_config'):
+                self.main_gui.save_config(show_message=False)
+
             
             # Update button state immediately
             self.start_button.config(state=tk.NORMAL)
@@ -1194,21 +1233,24 @@ class MangaTranslationTab:
             self.start_button.config(state=tk.NORMAL)
     
     def _get_available_fonts(self):
-        """Get list of available fonts with full path mapping"""
-        fonts = ["Default"]
-        self.font_mapping = {}  # Reset mapping
+        """Get list of available fonts from system and custom directories"""
+        fonts = ["Default"]  # Default option
         
-        # Windows fonts including CJK support
+        # Reset font mapping
+        self.font_mapping = {}
+        
+        # Windows system fonts with paths
         windows_fonts = [
+            # Basic fonts
             ("Arial", "C:/Windows/Fonts/arial.ttf"),
             ("Calibri", "C:/Windows/Fonts/calibri.ttf"),
             ("Comic Sans MS", "C:/Windows/Fonts/comic.ttf"),
-            ("Impact", "C:/Windows/Fonts/impact.ttf"),
+            ("Tahoma", "C:/Windows/Fonts/tahoma.ttf"),
             ("Times New Roman", "C:/Windows/Fonts/times.ttf"),
             ("Verdana", "C:/Windows/Fonts/verdana.ttf"),
-            ("Tahoma", "C:/Windows/Fonts/tahoma.ttf"),
-            ("Trebuchet MS", "C:/Windows/Fonts/trebuc.ttf"),
             ("Georgia", "C:/Windows/Fonts/georgia.ttf"),
+            ("Impact", "C:/Windows/Fonts/impact.ttf"),
+            ("Trebuchet MS", "C:/Windows/Fonts/trebuc.ttf"),
             ("Courier New", "C:/Windows/Fonts/cour.ttf"),
             
             # Japanese fonts
@@ -1260,8 +1302,10 @@ class MangaTranslationTab:
         if 'custom_fonts' in self.main_gui.config:
             for custom_font in self.main_gui.config['custom_fonts']:
                 if os.path.exists(custom_font['path']):
-                    fonts.append(custom_font['name'])
-                    self.font_mapping[custom_font['name']] = custom_font['path']
+                    # Check if this font is already in the list
+                    if custom_font['name'] not in fonts:
+                        fonts.append(custom_font['name'])
+                        self.font_mapping[custom_font['name']] = custom_font['path']
         
         # Add custom fonts option at the end
         fonts.append("Browse Custom Font...")
@@ -1293,7 +1337,7 @@ class MangaTranslationTab:
                 current_values = list(self.font_combo['values'])
                 
                 # Insert before "Browse Custom Font..." option
-                if (font_name, font_path) not in [(n, p) for n, p in self.font_mapping.items()]:
+                if font_name not in [n for n in self.font_mapping.keys()]:
                     current_values.insert(-1, font_name)
                     self.font_combo['values'] = current_values
                     self.font_combo.set(font_name)
@@ -1307,12 +1351,22 @@ class MangaTranslationTab:
                         self.main_gui.config['custom_fonts'] = []
                     
                     custom_font_entry = {'name': font_name, 'path': font_path}
-                    if custom_font_entry not in self.main_gui.config['custom_fonts']:
+                    # Check if this exact entry already exists
+                    font_exists = False
+                    for existing_font in self.main_gui.config['custom_fonts']:
+                        if existing_font['path'] == font_path:
+                            font_exists = True
+                            break
+                    
+                    if not font_exists:
                         self.main_gui.config['custom_fonts'].append(custom_font_entry)
+                        # Save config immediately to persist custom fonts
+                        if hasattr(self.main_gui, 'save_config'):
+                            self.main_gui.save_config(show_message=False)
                 else:
                     # Font already exists, just select it
                     self.font_combo.set(font_name)
-                    self.selected_font_path = font_path
+                    self.selected_font_path = self.font_mapping[font_name]
             else:
                 # User cancelled, revert to previous selection
                 if hasattr(self, 'previous_font_selection'):
@@ -1325,36 +1379,8 @@ class MangaTranslationTab:
             if selected in self.font_mapping:
                 self.selected_font_path = self.font_mapping[selected]
             else:
-                # Fallback to the old hardcoded map for compatibility
-                font_map = {
-                    "Arial": "C:/Windows/Fonts/arial.ttf",
-                    "Calibri": "C:/Windows/Fonts/calibri.ttf",
-                    "Comic Sans MS": "C:/Windows/Fonts/comic.ttf",
-                    "MS Gothic": "C:/Windows/Fonts/msgothic.ttc",
-                    "MS Mincho": "C:/Windows/Fonts/msmincho.ttc",
-                    "Meiryo": "C:/Windows/Fonts/meiryo.ttc",
-                    "Yu Gothic": "C:/Windows/Fonts/yugothic.ttc",
-                    "Yu Mincho": "C:/Windows/Fonts/yumin.ttc",
-                    "Malgun Gothic": "C:/Windows/Fonts/malgun.ttf",
-                    "Gulim": "C:/Windows/Fonts/gulim.ttc",
-                    "Dotum": "C:/Windows/Fonts/dotum.ttc",
-                    "Batang": "C:/Windows/Fonts/batang.ttc",
-                    "SimSun": "C:/Windows/Fonts/simsun.ttc",
-                    "SimHei": "C:/Windows/Fonts/simhei.ttf",
-                    "Microsoft YaHei": "C:/Windows/Fonts/msyh.ttc",
-                    "Microsoft JhengHei": "C:/Windows/Fonts/msjh.ttc",
-                    "KaiTi": "C:/Windows/Fonts/simkai.ttf",
-                    "FangSong": "C:/Windows/Fonts/simfang.ttf",
-                    "Tahoma": "C:/Windows/Fonts/tahoma.ttf",
-                    "Times New Roman": "C:/Windows/Fonts/times.ttf",
-                    "Verdana": "C:/Windows/Fonts/verdana.ttf",
-                    "Georgia": "C:/Windows/Fonts/georgia.ttf",
-                    "Impact": "C:/Windows/Fonts/impact.ttf",
-                    "Trebuchet MS": "C:/Windows/Fonts/trebuc.ttf",
-                    "Courier New": "C:/Windows/Fonts/cour.ttf"
-                }
-                
-                self.selected_font_path = font_map.get(selected, None)
+                # This shouldn't happen, but just in case
+                self.selected_font_path = None
         
         # Store current selection for next time
         self.previous_font_selection = selected
@@ -1375,7 +1401,194 @@ class MangaTranslationTab:
         self.reduction_label.config(text=f"{percentage}%")
         # Auto-save on change
         self._save_rendering_settings()
-    
+        
+    def _toggle_inpaint_quality_visibility(self):
+        """Show/hide inpaint quality options based on skip_inpainting setting"""
+        if hasattr(self, 'inpaint_quality_frame'):
+            if self.skip_inpainting_var.get():
+                # Hide quality options when inpainting is skipped
+                self.inpaint_quality_frame.pack_forget()
+            else:
+                # Show quality options when inpainting is enabled
+                self.inpaint_quality_frame.pack(fill=tk.X, pady=5, after=self.skip_inpainting_checkbox)
+
+    def _toggle_inpaint_visibility(self):
+        """Toggle visibility of all inpaint-related options"""
+        self._toggle_inpaint_quality_visibility()
+        self._toggle_inpaint_controls_visibility()
+
+    def _toggle_inpaint_controls_visibility(self):
+        """Toggle visibility of inpaint controls (mask expansion and passes) based on skip inpainting setting"""
+        if self.skip_inpainting_var.get():
+            self.inpaint_controls_frame.pack_forget()
+        else:
+            # Pack it back in the right position
+            self.inpaint_controls_frame.pack(fill=tk.X, pady=5, after=self.inpaint_quality_frame)
+
+    def _configure_inpaint_api(self):
+        """Configure cloud inpainting API"""
+        # Show instructions
+        result = messagebox.askyesno(
+            "Configure Cloud Inpainting",
+            "Cloud inpainting uses Replicate API for questionable results.\n\n"
+            "1. Go to replicate.com and sign up (free tier available?)\n"
+            "2. Get your API token from Account Settings\n"
+            "3. Enter it here\n\n"
+            "Pricing: ~$0.0023 per image?\n"
+            "Free tier: ~100 images per month?\n\n"
+            "Would you like to proceed?"
+        )
+        
+        if not result:
+            return
+        
+        # Open Replicate page
+        import webbrowser
+        webbrowser.open("https://replicate.com/account/api-tokens")
+        
+        # Get API key from user using WindowManager
+        dialog = self.main_gui.wm.create_simple_dialog(
+            self.main_gui.master,
+            "Replicate API Key",
+            width=400,
+            height=165,
+            hide_initially=True  # Hide initially so we can position it
+        )
+        
+        # Force the height by overriding after creation
+        dialog.update_idletasks()  # Process pending geometry
+        dialog.minsize(400, 165)   # Set minimum size
+        dialog.maxsize(720, 165)   # Set maximum size to lock it
+        
+        # Get cursor position
+        cursor_x = self.main_gui.master.winfo_pointerx()
+        cursor_y = self.main_gui.master.winfo_pointery()
+        
+        # Offset the dialog slightly so it doesn't appear directly under cursor
+        # This prevents the cursor from immediately being over a button
+        offset_x = 10
+        offset_y = 10
+        
+        # Ensure dialog doesn't go off-screen
+        screen_width = dialog.winfo_screenwidth()
+        screen_height = dialog.winfo_screenheight()
+        
+        # Adjust position if it would go off-screen
+        if cursor_x + 400 + offset_x > screen_width:
+            cursor_x = screen_width - 400 - offset_x
+        if cursor_y + 150 + offset_y > screen_height:
+            cursor_y = screen_height - 150 - offset_y
+        
+        # Set position and show
+        dialog.geometry(f"400x150+{cursor_x + offset_x}+{cursor_y + offset_y}")
+        dialog.deiconify()  # Show the dialog
+        
+        # Variables
+        api_key_var = tk.StringVar()
+        result = {'key': None}
+        
+        # Content
+        frame = tk.Frame(dialog, padx=20, pady=20)
+        frame.pack(fill='both', expand=True)
+        
+        tk.Label(frame, text="Enter your Replicate API key:").pack(anchor='w', pady=(0, 10))
+        
+        # Entry with show/hide
+        entry_frame = tk.Frame(frame)
+        entry_frame.pack(fill='x')
+        
+        entry = tk.Entry(entry_frame, textvariable=api_key_var, show='*', width=35)
+        entry.pack(side='left', fill='x', expand=True)
+        
+        # Toggle show/hide
+        def toggle_show():
+            current = entry.cget('show')
+            entry.config(show='' if current else '*')
+            show_btn.config(text='Hide' if current else 'Show')
+        
+        show_btn = tb.Button(entry_frame, text="Show", command=toggle_show, width=8)
+        show_btn.pack(side='left', padx=(10, 0))
+        
+        # Buttons
+        btn_frame = tk.Frame(frame)
+        btn_frame.pack(fill='x', pady=(20, 0))
+        
+        def on_ok():
+            result['key'] = api_key_var.get().strip()
+            dialog.destroy()
+        
+        tb.Button(btn_frame, text="OK", command=on_ok, bootstyle="success").pack(side='right', padx=(5, 0))
+        tb.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side='right')
+        
+        # Focus and bindings
+        entry.focus_set()
+        dialog.bind('<Return>', lambda e: on_ok())
+        dialog.bind('<Escape>', lambda e: dialog.destroy())
+        
+        # Wait for dialog
+        dialog.wait_window()
+        
+        api_key = result['key']
+        
+        if api_key:
+            try:
+                # Save the API key
+                self.main_gui.config['replicate_api_key'] = api_key
+                self.main_gui.save_config(show_message=False)
+                
+                # Update UI
+                self.inpaint_api_status_label.config(
+                    text="✅ Cloud inpainting configured",
+                    fg='green'
+                )
+                
+                # Add clear button if it doesn't exist
+                clear_button_exists = False
+                for widget in self.inpaint_api_status_label.master.winfo_children():
+                    if isinstance(widget, tb.Button) and widget.cget('text') == 'Clear':
+                        clear_button_exists = True
+                        break
+                
+                if not clear_button_exists:
+                    tb.Button(
+                        self.inpaint_api_status_label.master,
+                        text="Clear",
+                        command=self._clear_inpaint_api,
+                        bootstyle="secondary"
+                    ).pack(side=tk.LEFT, padx=(5, 0))
+                
+                # Set flag on translator
+                if self.translator:
+                    self.translator.use_cloud_inpainting = True
+                    self.translator.replicate_api_key = api_key
+                    
+                self._log("✅ Cloud inpainting API configured", "success")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save API key:\n{str(e)}")
+
+    def _clear_inpaint_api(self):
+        """Clear the inpainting API configuration"""
+        self.main_gui.config['replicate_api_key'] = ''
+        self.main_gui.save_config(show_message=False)
+        
+        self.inpaint_api_status_label.config(
+            text="❌ Inpainting API not configured", 
+            fg='red'
+        )
+        
+        if hasattr(self, 'translator') and self.translator:
+            self.translator.use_cloud_inpainting = False
+            self.translator.replicate_api_key = None
+            
+        self._log("🗑️ Cleared inpainting API configuration", "info")
+        
+        # Find and destroy the clear button
+        for widget in self.inpaint_api_status_label.master.winfo_children():
+            if isinstance(widget, tb.Button) and widget.cget('text') == 'Clear':
+                widget.destroy()
+                break 
+            
     def _add_files(self):
         """Add image files to the list"""
         files = filedialog.askopenfilenames(
@@ -1523,7 +1736,11 @@ class MangaTranslationTab:
                         self.main_gui,
                         log_callback=self._log
                     )
-                    
+                    # Set cloud inpainting if configured
+                    saved_api_key = self.main_gui.config.get('replicate_api_key', '')
+                    if saved_api_key:
+                        self.translator.use_cloud_inpainting = True
+                        self.translator.replicate_api_key = saved_api_key                    
                     # Apply text rendering settings
                     self._apply_rendering_settings()
                     
@@ -1622,7 +1839,17 @@ class MangaTranslationTab:
             self._log(f"  Text Color: RGB({text_color[0]}, {text_color[1]}, {text_color[2]})", "info")
             self._log(f"  Shadow: {'Enabled' if self.shadow_enabled_var.get() else 'Disabled'}", "info")
             self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_var.get() else 'Disabled'}", "info")
-
+            
+            # Apply cloud inpainting settings
+            saved_api_key = self.main_gui.config.get('replicate_api_key', '')
+            if saved_api_key:
+                self.translator.use_cloud_inpainting = True
+                self.translator.replicate_api_key = saved_api_key
+                self._log(f"  Cloud Inpainting: Enabled", "info")
+            else:
+                self.translator.use_cloud_inpainting = False
+                self.translator.replicate_api_key = None
+    
     def _translation_worker(self):
         """Worker thread for translation"""
         try:
