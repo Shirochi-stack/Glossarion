@@ -1399,7 +1399,8 @@ class MangaTranslator:
             
             # Map translations back to regions
             result = {}
-            translations_to_save = []
+            all_originals = []
+            all_translations = []
             
             for i, region in enumerate(regions):
                 
@@ -1435,48 +1436,42 @@ class MangaTranslator:
                 
                 if translated != region.text:
                     self._log(f"  ✅ Mapped translation: '{region.text[:30]}...' → '{translated[:30]}...'")
-                    # Collect translations to save in batch
-                    translations_to_save.append((region.text, translated))
+                    # Collect all text for combined history entry
+                    all_originals.append(f"[{i+1}] {region.text}")
+                    all_translations.append(f"[{i+1}] {translated}")
             
-            # Save ALL translations as a batch without triggering limits between each one
-            if self.history_manager and self.contextual_enabled and translations_to_save:
+            # Save as ONE combined history entry for the entire page
+            if self.history_manager and self.contextual_enabled and all_originals:
                 try:
-                    # Save all translations from this page without checking limits between each
-                    for original, translated in translations_to_save:
-                        self.history_manager.append_to_history(
-                            user_content=original,
-                            assistant_content=translated,
-                            hist_limit=999999,  # Temporarily disable limit checking
-                            reset_on_limit=False,
-                            rolling_window=False
-                        )
+                    # Combine all text from this page into a single exchange
+                    combined_original = "\n".join(all_originals)
+                    combined_translation = "\n".join(all_translations)
                     
-                    # Now apply the actual limit AFTER all saves
+                    # Save as a single history entry
+                    self.history_manager.append_to_history(
+                        user_content=combined_original,
+                        assistant_content=combined_translation,
+                        hist_limit=self.translation_history_limit,
+                        reset_on_limit=not self.rolling_history_enabled,
+                        rolling_window=self.rolling_history_enabled
+                    )
+                    
+                    self._log(f"📚 Saved {len(all_originals)} translations as 1 combined history entry", "success")
+                    
+                    # Check current history status
                     current_history = self.history_manager.load_history()
                     current_exchanges = len(current_history) // 2
+                    self._log(f"📚 History now contains {current_exchanges} exchanges (pages)", "info")
                     
-                    if current_exchanges > self.translation_history_limit:
-                        if self.rolling_history_enabled:
-                            # Keep only the most recent exchanges
-                            messages_to_keep = self.translation_history_limit * 2
-                            trimmed_history = current_history[-messages_to_keep:]
-                            self.history_manager.save_history(trimmed_history)
-                            self._log(f"📚 Trimmed history to last {self.translation_history_limit} exchanges")
-                        else:
-                            # Reset mode - clear older entries
-                            messages_to_keep = self.translation_history_limit * 2
-                            trimmed_history = current_history[-messages_to_keep:]
-                            self.history_manager.save_history(trimmed_history)
-                            self._log(f"📚 Reset history to last {self.translation_history_limit} exchanges")
-                    
-                    self._log(f"📚 Saved {len(translations_to_save)} translations to history", "success")
-                    
-                    # Show current history status
-                    final_exchanges = len(self.history_manager.load_history()) // 2
-                    self._log(f"📚 History now contains {final_exchanges} exchanges", "info")
+                    if self.history_manager.will_reset_on_next_append(
+                        self.translation_history_limit, 
+                        self.rolling_history_enabled
+                    ):
+                        mode = "roll over" if self.rolling_history_enabled else "reset"
+                        self._log(f"📚 History will {mode} on next page (at limit: {self.translation_history_limit})", "info")
                     
                 except Exception as e:
-                    self._log(f"⚠️ Failed to save translations to history: {str(e)}", "warning")
+                    self._log(f"⚠️ Failed to save page to history: {str(e)}", "warning")
             
             return result
             
@@ -1490,6 +1485,7 @@ class MangaTranslator:
             self._log(f"❌ Full page context translation error: {str(e)}", "error")
             self._log(traceback.format_exc(), "error")
             return {}
+
             
     def create_text_mask(self, image: np.ndarray, regions: List[TextRegion]) -> np.ndarray:
         """Create a binary mask with aggressive dilation for better inpainting"""
