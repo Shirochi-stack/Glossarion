@@ -180,6 +180,13 @@ class WindowManager:
         self._pending_operations = {}
         self._dpi_scale = None
         self._topmost_protection_active = {}
+        self._force_safe_ratios = False
+        self._primary_monitor_width = None  # Cache the detected width
+
+    def toggle_safe_ratios(self):
+        """Toggle forcing 1080p Windows ratios"""
+        self._force_safe_ratios = not self._force_safe_ratios
+        return self._force_safe_ratios
     
     def get_dpi_scale(self, window):
         """Get and cache DPI scaling factor"""
@@ -190,22 +197,53 @@ class WindowManager:
                 self._dpi_scale = 1.0
         return self._dpi_scale
     
+    def responsive_size(self, window, base_width, base_height, 
+                       scale_factor=None, center=True, use_full_height=True):
+        """Size window responsively based on primary monitor"""
+        
+        # Auto-detect primary monitor
+        primary_width = self.detect_primary_monitor_width(window)
+        screen_height = window.winfo_screenheight()
+        
+        if use_full_height:
+            width = min(int(base_width * 1.2), int(primary_width * 0.98))
+            height = int(screen_height * 0.98)
+        else:
+            width = base_width
+            height = base_height
+            
+            if width > primary_width * 0.9:
+                width = int(primary_width * 0.85)
+            if height > screen_height * 0.9:
+                height = int(screen_height * 0.85)
+        
+        if center:
+            x = (primary_width - width) // 2
+            y = (screen_height - height) // 2
+            geometry_str = f"{width}x{height}+{x}+{y}"
+        else:
+            geometry_str = f"{width}x{height}"
+        
+        window.geometry(geometry_str)
+        window.attributes('-topmost', False)
+        
+        return width, height
+
     def setup_window(self, window, width=None, height=None, 
                     center=True, icon=True, hide_initially=False,
                     max_width_ratio=0.98, max_height_ratio=0.98,
                     min_width=400, min_height=300):
-        """Universal window setup with proper deferral and DPI awareness"""
+        """Universal window setup with auto-detected primary monitor"""
         
         if hide_initially:
             window.withdraw()
         
-        # Always ensure not topmost
         window.attributes('-topmost', False)
         
         if icon:
             window.after_idle(lambda: load_application_icon(window, self.base_dir))
         
-        screen_width = window.winfo_screenwidth()
+        primary_width = self.detect_primary_monitor_width(window)
         screen_height = window.winfo_screenheight()
         dpi_scale = self.get_dpi_scale(window)
         
@@ -219,14 +257,14 @@ class WindowManager:
         else:
             height = int(height / dpi_scale)
         
-        max_width = int(screen_width * max_width_ratio)
+        max_width = int(primary_width * max_width_ratio)  # Use primary width
         max_height = int(screen_height * max_height_ratio)
         
         final_width = max(min_width, min(width, max_width))
         final_height = max(min_height, min(height, max_height))
         
         if center:
-            x = max(0, (screen_width - final_width) // 2)
+            x = max(0, (primary_width - final_width) // 2)  # Center on primary
             y = 5
             geometry_str = f"{final_width}x{final_height}+{x}+{y}"
         else:
@@ -255,42 +293,6 @@ class WindowManager:
         else:
             # Primary monitor
             return {'x': 0, 'width': primary_width, 'height': 1080}
-    
-    def responsive_size(self, window, base_width, base_height, 
-                       scale_factor=None, center=True, use_full_height=True):
-        """Size window responsively based on screen size - FIXED"""
-        
-        screen_width = window.winfo_screenwidth()
-        screen_height = window.winfo_screenheight()
-        
-        if use_full_height:
-            # Maximize to 98% of screen
-            width = min(int(base_width * 1.2), int(screen_width * 0.98))
-            height = int(screen_height * 0.98)
-        else:
-            # Use base dimensions directly
-            width = base_width
-            height = base_height
-            
-            # Only scale down if window doesn't fit on screen
-            if width > screen_width * 0.9:
-                width = int(screen_width * 0.85)
-            if height > screen_height * 0.9:
-                height = int(screen_height * 0.85)
-        
-        if center:
-            x = (screen_width - width) // 2
-            y = (screen_height - height) // 2
-            geometry_str = f"{width}x{height}+{x}+{y}"
-        else:
-            geometry_str = f"{width}x{height}"
-        
-        window.geometry(geometry_str)
-        
-        # Ensure not topmost
-        window.attributes('-topmost', False)
-        
-        return width, height
     
     def _fix_maximize_behavior(self, window):
         """Fix the standard Windows maximize button for multi-monitor"""
@@ -334,6 +336,11 @@ class WindowManager:
     
     def auto_resize_dialog(self, dialog, canvas=None, max_width_ratio=0.9, max_height_ratio=0.95):
         """Auto-resize dialog based on content"""
+        
+        # Override ratios if 1080p mode is on
+        if self._force_safe_ratios:
+            max_height_ratio = min(max_height_ratio, 0.85)  # Force 85% max
+            max_width_ratio = min(max_width_ratio, 0.85)
         
         was_hidden = not dialog.winfo_viewable()
         
@@ -602,22 +609,92 @@ class WindowManager:
             
             window.geometry(f"{screen_width}x{usable_height}+{new_x}+0")
             
+    def detect_primary_monitor_width(self, reference_window):
+        """Auto-detect primary monitor width"""
+        if self._primary_monitor_width is not None:
+            return self._primary_monitor_width
+        
+        try:
+            # Create a hidden test window at origin (0,0) - should be on primary monitor
+            test = tk.Toplevel(reference_window)
+            test.withdraw()
+            test.overrideredirect(True)  # No window decorations
+            
+            # Position at origin
+            test.geometry("100x100+0+0")
+            test.update_idletasks()
+            
+            # Now maximize it to get the monitor's dimensions
+            test.state('zoomed')
+            test.update_idletasks()
+            
+            # Get the maximized width - this is the primary monitor width
+            primary_width = test.winfo_width()
+            primary_height = test.winfo_height()
+            
+            test.destroy()
+            
+            # Sanity check - if we got the full desktop width, try another method
+            total_width = reference_window.winfo_screenwidth()
+            if primary_width >= total_width * 0.9:
+                # Likely got the full desktop, not just primary monitor
+                # Use aspect ratio method as fallback
+                screen_height = reference_window.winfo_screenheight()
+                
+                # Common aspect ratios
+                aspect_ratios = [16/9, 16/10, 21/9, 4/3]
+                for ratio in aspect_ratios:
+                    test_width = int(screen_height * ratio)
+                    if test_width < total_width * 0.7:  # Reasonable for primary monitor
+                        primary_width = test_width
+                        break
+                else:
+                    # Default to half of total if nothing else works
+                    primary_width = total_width // 2
+            
+            self._primary_monitor_width = primary_width
+            print(f"Detected primary monitor width: {primary_width}")
+            return primary_width
+            
+        except Exception as e:
+            print(f"Error detecting monitor: {e}")
+            # Fallback to common resolutions based on height
+            height = reference_window.winfo_screenheight()
+            if height >= 2160:
+                return 3840  # 4K
+            elif height >= 1440:
+                return 2560  # 1440p
+            elif height >= 1080:
+                return 1920  # 1080p
+            else:
+                return 1366  # 720p
+
     def center_window(self, window):
-        """Center a window on screen"""
+        """Center a window on primary screen with auto-detection"""
         def do_center():
             if window.winfo_exists():
                 window.update_idletasks()
                 width = window.winfo_width()
                 height = window.winfo_height()
-                screen_width = window.winfo_screenwidth()
                 screen_height = window.winfo_screenheight()
                 
-                x = (screen_width - width) // 2
+                # Auto-detect primary monitor width
+                primary_width = self.detect_primary_monitor_width(window)
+                
+                # Center on primary monitor
+                x = (primary_width - width) // 2
                 y = (screen_height - height) // 2
+                
+                # Move up by reducing Y (adjust this value as needed)
+                y = max(30, y - 340)  # Move up by 340 pixels, but keep at least 30 from top
+                
+                # Ensure it stays on primary monitor
+                x = max(0, min(x, primary_width - width))
                 
                 window.geometry(f"+{x}+{y}")
         
         window.after_idle(do_center)
+    
 class TranslatorGUI:
     def __init__(self, master):        
         # Initialization
@@ -630,12 +707,12 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.1.5"
+        __version__ = "3.1.7"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
         self.wm.responsive_size(master, BASE_WIDTH, BASE_HEIGHT)
-        master.minsize(1600, 1000)
+        master.minsize(1800, 1000)
         self.wm.center_window(master)
         
         # Setup fullscreen support
@@ -685,6 +762,14 @@ class TranslatorGUI:
             except Exception as e:
                 print(f"Warning: Could not save config.json: {e}")
         
+        if self.config.get('force_safe_ratios', False):
+            self.wm._force_safe_ratios = True
+            # Update button after GUI is created
+            self.master.after(500, lambda: (
+                self.safe_ratios_btn.config(text="📐 1080p: ON", bootstyle="success") 
+                if hasattr(self, 'safe_ratios_btn') else None
+            ))
+    
         # Initialize auto-update check variable
         self.auto_update_check_var = tk.BooleanVar(value=self.config.get('auto_update_check', True))
         
@@ -1198,7 +1283,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.1.5 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.1.7 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -4413,6 +4498,7 @@ Recent translations to summarize:
             ("Load Glossary", self.load_glossary, "secondary"),
             ("Import Profiles", self.import_profiles, "secondary"),
             ("Export Profiles", self.export_profiles, "secondary"),
+            ("📐 1080p: OFF", self.toggle_safe_ratios, "secondary"), 
         ])
         
         for idx, (lbl, cmd, style) in enumerate(toolbar_items):
@@ -4423,9 +4509,32 @@ Recent translations to summarize:
                 self.glossary_button = btn
             elif lbl == "EPUB Converter":
                 self.epub_button = btn
+            elif "1080p" in lbl:
+                self.safe_ratios_btn = btn
         
         self.frame.grid_rowconfigure(12, weight=0)
 
+    def toggle_safe_ratios(self):
+        """Toggle 1080p Windows ratios mode"""
+        is_safe = self.wm.toggle_safe_ratios()
+        
+        if is_safe:
+            self.safe_ratios_btn.config(
+                text="📐 1080p: ON",
+                bootstyle="success"
+            )
+            self.append_log("✅ 1080p Windows ratios enabled - all dialogs will fit on screen")
+        else:
+            self.safe_ratios_btn.config(
+                text="📐 1080p: OFF",
+                bootstyle="secondary"
+            )
+            self.append_log("❌ 1080p Windows ratios disabled - using default sizes")
+        
+        # Save preference
+        self.config['force_safe_ratios'] = is_safe
+        self.save_config()
+    
     # Thread management methods
     def run_translation_thread(self):
         """Start translation in a separate thread"""
@@ -7462,7 +7571,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.1.5...")
+    print("🚀 Starting Glossarion v3.1.7...")
     
     # Initialize splash screen
     splash_manager = None
