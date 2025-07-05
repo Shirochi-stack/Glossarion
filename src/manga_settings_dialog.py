@@ -105,6 +105,12 @@ class MangaSettingsDialog:
         self._create_ocr_tab(notebook)
         self._create_advanced_tab(notebook)
         
+        # Cloud API tab
+        self.cloud_tab = ttk.Frame(notebook)
+        notebook.add(self.cloud_tab, text="Cloud API")
+        self._create_cloud_api_tab(self.cloud_tab)
+        
+        
         # Button frame at bottom (inside scrollable frame for proper scrolling)
         button_frame = tk.Frame(scrollable_frame)
         button_frame.pack(fill='x', padx=10, pady=(10, 20))
@@ -389,7 +395,259 @@ class MangaSettingsDialog:
         self.preprocessing_controls.append(self.chunk_overlap_spinbox)
         
         tk.Label(chunk_overlap_frame, text="pixels").pack(side='left')
+
+    def _create_cloud_api_tab(self, parent):
+            """Create cloud API settings tab"""
+            # NO CANVAS - JUST USE PARENT DIRECTLY
+            frame = parent
+            
+            # API Model Selection
+            model_frame = tk.LabelFrame(frame, text="Inpainting Model", padx=15, pady=10)
+            model_frame.pack(fill='x', padx=20, pady=(20, 0))
+            
+            tk.Label(model_frame, text="Select the Replicate model to use for inpainting:").pack(anchor='w', pady=(0, 10))
+            
+            # Model options
+            self.cloud_model_var = tk.StringVar(value=self.settings.get('cloud_inpaint_model', 'ideogram-v2'))
+            
+            models = [
+                ('ideogram-v2', 'Ideogram V2 (Best quality, with prompts)', 'ideogram-ai/ideogram-v2'),
+                ('sd-inpainting', 'Stable Diffusion Inpainting (Classic, fast)', 'stability-ai/stable-diffusion-inpainting'),
+                ('flux-inpainting', 'FLUX Dev Inpainting (High quality)', 'zsxkib/flux-dev-inpainting'),
+                ('custom', 'Custom Model (Enter model identifier)', '')
+            ]
+            
+            for value, text, model_id in models:
+                row_frame = tk.Frame(model_frame)
+                row_frame.pack(fill='x', pady=2)
+                
+                rb = tb.Radiobutton(
+                    row_frame,
+                    text=text,
+                    variable=self.cloud_model_var,
+                    value=value,
+                    command=self._on_cloud_model_change
+                )
+                rb.pack(side='left')
+                
+                if model_id:
+                    tk.Label(row_frame, text=f"({model_id})", font=('Arial', 8), fg='gray').pack(side='left', padx=(10, 0))
+            
+            # Custom version ID (now model identifier)
+            self.custom_version_frame = tk.Frame(model_frame)
+            self.custom_version_frame.pack(fill='x', pady=(10, 0))
+            
+            tk.Label(self.custom_version_frame, text="Model ID:", width=15, anchor='w').pack(side='left')
+            self.custom_version_var = tk.StringVar(value=self.settings.get('cloud_custom_version', ''))
+            self.custom_version_entry = tk.Entry(self.custom_version_frame, textvariable=self.custom_version_var, width=50)
+            self.custom_version_entry.pack(side='left', padx=10)
+            
+            # Add helper text for custom model
+            helper_text = tk.Label(
+                self.custom_version_frame, 
+                text="Format: owner/model-name (e.g. stability-ai/stable-diffusion-inpainting)",
+                font=('Arial', 8), 
+                fg='gray'
+            )
+            helper_text.pack(anchor='w', padx=(70, 0), pady=(2, 0))
+            
+            # Initially hide custom version entry
+            if self.cloud_model_var.get() != 'custom':
+                self.custom_version_frame.pack_forget()
+            
+            # Performance Settings
+            perf_frame = tk.LabelFrame(frame, text="Performance Settings", padx=15, pady=10)
+            perf_frame.pack(fill='x', padx=20, pady=(20, 0))
+
+            # Mask Settings
+            mask_frame = tk.LabelFrame(frame, text="Mask Settings", padx=15, pady=10)
+            mask_frame.pack(fill='x', padx=20, pady=(20, 0))
+            
+            # Mask dilation size
+            dilation_frame = tk.Frame(mask_frame)
+            dilation_frame.pack(fill='x', pady=5)
+            
+            tk.Label(dilation_frame, text="Mask Dilation:", width=15, anchor='w').pack(side='left')
+            self.mask_dilation_var = tk.IntVar(value=self.settings.get('mask_dilation', 15))
+            dilation_spinbox = tb.Spinbox(
+                dilation_frame,
+                from_=0,
+                to=50,
+                textvariable=self.mask_dilation_var,
+                increment=5,
+                width=10
+            )
+            dilation_spinbox.pack(side='left', padx=10)
+            tk.Label(dilation_frame, text="pixels (0 = exact text bounds)").pack(side='left')
+            
+            # Dilation iterations
+            iterations_frame = tk.Frame(mask_frame)
+            iterations_frame.pack(fill='x', pady=5)
+            
+            tk.Label(iterations_frame, text="Iterations:", width=15, anchor='w').pack(side='left')
+            self.dilation_iterations_var = tk.IntVar(value=self.settings.get('dilation_iterations', 2))
+            iterations_spinbox = tb.Spinbox(
+                iterations_frame,
+                from_=1,
+                to=5,
+                textvariable=self.dilation_iterations_var,
+                width=10
+            )
+            iterations_spinbox.pack(side='left', padx=10)
+            tk.Label(iterations_frame, text="times").pack(side='left')
+            
+            # Quick presets
+            preset_frame = tk.Frame(mask_frame)
+            preset_frame.pack(fill='x', pady=(10, 5))
+            
+            tk.Label(preset_frame, text="Quick Presets:").pack(side='left', padx=(0, 10))
+            
+            tb.Button(
+                preset_frame,
+                text="Tight",
+                command=lambda: self._set_mask_preset(5, 1),
+                bootstyle="secondary",
+                width=9
+            ).pack(side='left', padx=2)
+            
+            tb.Button(
+                preset_frame,
+                text="Standard",
+                command=lambda: self._set_mask_preset(15, 2),
+                bootstyle="secondary",
+                width=9
+            ).pack(side='left', padx=2)
+            
+            tb.Button(
+                preset_frame,
+                text="Aggressive",
+                command=lambda: self._set_mask_preset(25, 3),
+                bootstyle="secondary",
+                width=9
+            ).pack(side='left', padx=2)
+            
+            # Help text
+            tk.Label(
+                mask_frame,
+                text="💡 Lower values = tighter masks, may miss text edges\n"
+                     "💡 Higher values = looser masks, may affect surrounding art",
+                font=('Arial', 9),
+                fg='gray',
+                justify='left'
+            ).pack(anchor='w', pady=(10, 0))
     
+            # Timeout
+            timeout_frame = tk.Frame(perf_frame)
+            timeout_frame.pack(fill='x', pady=5)
+            
+            tk.Label(timeout_frame, text="API Timeout:", width=15, anchor='w').pack(side='left')
+            self.cloud_timeout_var = tk.IntVar(value=self.settings.get('cloud_timeout', 60))
+            timeout_spinbox = tb.Spinbox(
+                timeout_frame,
+                from_=30,
+                to=300,
+                textvariable=self.cloud_timeout_var,
+                width=10
+            )
+            timeout_spinbox.pack(side='left', padx=10)
+            tk.Label(timeout_frame, text="seconds", font=('Arial', 9)).pack(side='left')
+            
+            # Help text
+            help_frame = tk.Frame(frame)
+            help_frame.pack(fill='x', padx=20, pady=20)
+            
+            help_text = tk.Label(
+                help_frame,
+                text="💡 Tips:\n"
+                     "• Ideogram V2 is currently the best quality option\n"
+                     "• SD inpainting is fast and supports prompts\n"
+                     "• FLUX inpainting offers high quality results\n"
+                     "• Find more models at replicate.com/collections/inpainting",
+                font=('Arial', 9),
+                fg='gray',
+                justify='left'
+            )
+            help_text.pack(anchor='w')
+            
+            # Prompt Settings (for all models except custom)
+            self.prompt_frame = tk.LabelFrame(frame, text="Prompt Settings", padx=15, pady=10)
+            self.prompt_frame.pack(fill='x', padx=20, pady=(0, 20))
+            
+            # Positive prompt
+            tk.Label(self.prompt_frame, text="Inpainting Prompt:").pack(anchor='w', pady=(0, 5))
+            self.cloud_prompt_var = tk.StringVar(value=self.settings.get('cloud_inpaint_prompt', 'clean background, smooth surface'))
+            prompt_entry = tk.Entry(self.prompt_frame, textvariable=self.cloud_prompt_var, width=60)
+            prompt_entry.pack(fill='x', padx=(20, 20))
+            
+            # Add note about prompts
+            tk.Label(
+                self.prompt_frame, 
+                text="Tip: Describe what you want in the inpainted area (e.g., 'white wall', 'wooden floor')",
+                font=('Arial', 8), 
+                fg='gray'
+            ).pack(anchor='w', padx=(20, 0), pady=(2, 10))
+            
+            # Negative prompt (mainly for SD)
+            self.negative_prompt_label = tk.Label(self.prompt_frame, text="Negative Prompt (SD only):")
+            self.negative_prompt_label.pack(anchor='w', pady=(0, 5))
+            self.cloud_negative_prompt_var = tk.StringVar(value=self.settings.get('cloud_negative_prompt', 'text, writing, letters'))
+            self.negative_entry = tk.Entry(self.prompt_frame, textvariable=self.cloud_negative_prompt_var, width=60)
+            self.negative_entry.pack(fill='x', padx=(20, 20))
+            
+            # Inference steps (for SD)
+            self.steps_frame = tk.Frame(self.prompt_frame)
+            self.steps_frame.pack(fill='x', pady=(10, 5))
+            
+            self.steps_label = tk.Label(self.steps_frame, text="Inference Steps (SD only):", width=20, anchor='w')
+            self.steps_label.pack(side='left', padx=(20, 0))
+            self.cloud_steps_var = tk.IntVar(value=self.settings.get('cloud_inference_steps', 20))
+            self.steps_spinbox = tb.Spinbox(
+                self.steps_frame,
+                from_=10,
+                to=50,
+                textvariable=self.cloud_steps_var,
+                width=10
+            )
+            self.steps_spinbox.pack(side='left', padx=10)
+            tk.Label(self.steps_frame, text="(Higher = better quality, slower)", font=('Arial', 9), fg='gray').pack(side='left')
+            
+            # Initially hide prompt frame if not using appropriate model
+            if self.cloud_model_var.get() == 'custom':
+                self.prompt_frame.pack_forget()
+            
+            # Show/hide SD-specific options based on model
+            self._on_cloud_model_change()
+
+    def _set_mask_preset(self, dilation, iterations):
+        """Set mask dilation preset values"""
+        self.mask_dilation_var.set(dilation)
+        self.dilation_iterations_var.set(iterations)
+    
+    def _on_cloud_model_change(self):
+        """Handle cloud model selection change"""
+        model = self.cloud_model_var.get()
+        
+        # Show/hide custom version entry
+        if model == 'custom':
+            self.custom_version_frame.pack(fill='x', pady=(10, 0))
+            # DON'T HIDE THE PROMPT FRAME FOR CUSTOM MODELS
+            self.prompt_frame.pack(fill='x', padx=20, pady=(20, 0))
+        else:
+            self.custom_version_frame.pack_forget()
+            self.prompt_frame.pack(fill='x', padx=20, pady=(20, 0))
+        
+        # Show/hide SD-specific options
+        if model == 'sd-inpainting':
+            # Show negative prompt and steps
+            self.negative_prompt_label.pack(anchor='w', pady=(10, 5))
+            self.negative_entry.pack(fill='x', padx=(20, 0))
+            self.steps_frame.pack(fill='x', pady=(10, 0))
+        else:
+            # Hide SD-specific options
+            self.negative_prompt_label.pack_forget()
+            self.negative_entry.pack_forget()
+            self.steps_frame.pack_forget()
+        
     def _toggle_preprocessing(self):
         """Enable/disable preprocessing controls based on main toggle"""
         enabled = self.preprocess_enabled.get()
@@ -656,6 +914,17 @@ class MangaSettingsDialog:
         self.settings['advanced']['save_intermediate'] = self.save_intermediate.get()
         self.settings['advanced']['parallel_processing'] = self.parallel_processing.get()
         self.settings['advanced']['max_workers'] = self.max_workers.get()
+        
+        # Cloud API settings (only save if the tab was created)
+        if hasattr(self, 'cloud_model_var'):
+            self.settings['cloud_inpaint_model'] = self.cloud_model_var.get()
+            self.settings['cloud_custom_version'] = self.custom_version_var.get()
+            self.settings['cloud_inpaint_prompt'] = self.cloud_prompt_var.get()
+            self.settings['cloud_negative_prompt'] = self.cloud_negative_prompt_var.get()
+            self.settings['cloud_inference_steps'] = self.cloud_steps_var.get()
+            self.settings['cloud_timeout'] = self.cloud_timeout_var.get()
+            self.settings['mask_dilation'] = self.mask_dilation_var.get()
+            self.settings['dilation_iterations'] = self.dilation_iterations_var.get()
         
         # Save to config
         self.config['manga_settings'] = self.settings
