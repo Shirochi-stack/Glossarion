@@ -1219,12 +1219,13 @@ def detect_duplicates(results, log, should_stop, config):
                 progress = int((comparisons_done / total_comparisons) * 100)
                 if progress >= last_progress + 5:
                     elapsed = time.time() - ai_start_time
-                    if comparisons_done > 0:
+                    if elapsed > 0 and comparisons_done > 0:
                         rate = comparisons_done / elapsed
                         remaining = (total_comparisons - comparisons_done) / rate
                         log(f"   📊 AI Hunter progress: {comparisons_done}/{total_comparisons} ({progress}%) - ~{int(remaining)}s remaining")
                     else:
                         log(f"   📊 AI Hunter progress: {comparisons_done}/{total_comparisons} ({progress}%)")
+                    last_progress = progress
                     last_progress = progress
                 # Skip if already in same group
                 if (results[i]['filename'] in duplicate_groups and 
