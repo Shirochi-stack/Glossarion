@@ -2519,36 +2519,389 @@ class MangaTranslator:
         
         return lines
     
+    def _estimate_font_size_for_region(self, region: TextRegion) -> int:
+        """Estimate the likely font size for a text region based on its dimensions and text content"""
+        x, y, w, h = region.bounding_box
+        text_length = len(region.text.strip())
+        
+        if text_length == 0:
+            return self.max_font_size // 2  # Default middle size
+        
+        # Calculate area per character
+        area = w * h
+        area_per_char = area / text_length
+        
+        # Estimate font size based on area per character
+        # These ratios are approximate and based on typical manga text
+        if area_per_char > 800:
+            estimated_size = int(self.max_font_size * 0.8)
+        elif area_per_char > 400:
+            estimated_size = int(self.max_font_size * 0.6)
+        elif area_per_char > 200:
+            estimated_size = int(self.max_font_size * 0.4)
+        elif area_per_char > 100:
+            estimated_size = int(self.max_font_size * 0.3)
+        else:
+            estimated_size = int(self.max_font_size * 0.2)
+        
+        # Clamp to reasonable bounds
+        return max(self.min_font_size, min(estimated_size, self.max_font_size))
+
+
+    def _likely_different_bubbles(self, region1: TextRegion, region2: TextRegion) -> bool:
+        """Detect if regions are likely in different speech bubbles based on spatial patterns"""
+        x1, y1, w1, h1 = region1.bounding_box
+        x2, y2, w2, h2 = region2.bounding_box
+        
+        # Calculate gaps and positions
+        horizontal_gap = 0
+        if x1 + w1 < x2:
+            horizontal_gap = x2 - (x1 + w1)
+        elif x2 + w2 < x1:
+            horizontal_gap = x1 - (x2 + w2)
+        
+        vertical_gap = 0
+        if y1 + h1 < y2:
+            vertical_gap = y2 - (y1 + h1)
+        elif y2 + h2 < y1:
+            vertical_gap = y1 - (y2 + h2)
+        
+        # Calculate relative positions
+        center_x1 = x1 + w1 / 2
+        center_x2 = x2 + w2 / 2
+        center_y1 = y1 + h1 / 2
+        center_y2 = y2 + h2 / 2
+        
+        horizontal_center_diff = abs(center_x1 - center_x2)
+        avg_width = (w1 + w2) / 2
+        
+        # FIRST CHECK: Very small gaps always indicate same bubble
+        if horizontal_gap < 15 and vertical_gap < 15:
+            return False  # Definitely same bubble
+        
+        # STRICTER CHECK: For regions that are horizontally far apart
+        # Even if they pass the gap threshold, check if they're likely different bubbles
+        if horizontal_gap > 40:  # Significant horizontal gap
+            # Unless they're VERY well aligned vertically, they're different bubbles
+            vertical_overlap = min(y1 + h1, y2 + h2) - max(y1, y2)
+            min_height = min(h1, h2)
+            
+            if vertical_overlap < min_height * 0.8:  # Need 80% overlap to be same bubble
+                return True
+        
+        # SPECIFIC FIX: Check for multi-line text pattern
+        # If regions are well-aligned horizontally, they're likely in the same bubble
+        if horizontal_center_diff < avg_width * 0.35:  # Relaxed from 0.2 to 0.35
+            # Additional checks for multi-line text:
+            # 1. Similar widths (common in speech bubbles)
+            width_ratio = max(w1, w2) / min(w1, w2) if min(w1, w2) > 0 else 999
+            
+            # 2. Reasonable vertical spacing (not too far apart)
+            avg_height = (h1 + h2) / 2
+            
+            if width_ratio < 2.0 and vertical_gap < avg_height * 1.5:
+                # This is very likely multi-line text in the same bubble
+                return False
+        
+        # Pattern 1: Side-by-side bubbles (common in manga)
+        # Characteristics: Significant horizontal gap, similar vertical position
+        if horizontal_gap > 50:  # Increased from 25 to avoid false positives
+            vertical_overlap = min(y1 + h1, y2 + h2) - max(y1, y2)
+            min_height = min(h1, h2)
+            
+            # If they have good vertical overlap, they're likely side-by-side bubbles
+            if vertical_overlap > min_height * 0.5:
+                return True
+        
+        # Pattern 2: Stacked bubbles
+        # Characteristics: Significant vertical gap, similar horizontal position
+        if vertical_gap > 25:  # Back to original threshold
+            horizontal_overlap = min(x1 + w1, x2 + w2) - max(x1, x2)
+            min_width = min(w1, w2)
+            
+            # If they have good horizontal overlap, they're likely stacked bubbles
+            if horizontal_overlap > min_width * 0.5:
+                return True
+        
+        # Pattern 3: Diagonal arrangement (different speakers)
+        # If regions are separated both horizontally and vertically
+        if horizontal_gap > 20 and vertical_gap > 20:
+            return True
+        
+        # Pattern 4: Large gap relative to region size
+        avg_height = (h1 + h2) / 2
+        
+        if horizontal_gap > avg_width * 0.6 or vertical_gap > avg_height * 0.6:
+            return True
+        
+        return False
+
+    def _regions_should_merge(self, region1: TextRegion, region2: TextRegion, threshold: int = 50) -> bool:
+        """Determine if two regions should be merged - with bubble detection"""
+        # First check if they're close enough spatially
+        if not self._regions_are_nearby(region1, region2, threshold):
+            return False
+        
+        x1, y1, w1, h1 = region1.bounding_box
+        x2, y2, w2, h2 = region2.bounding_box
+        
+        # Calculate actual gaps between regions
+        horizontal_gap = 0
+        if x1 + w1 < x2:
+            horizontal_gap = x2 - (x1 + w1)
+        elif x2 + w2 < x1:
+            horizontal_gap = x1 - (x2 + w2)
+        
+        vertical_gap = 0
+        if y1 + h1 < y2:
+            vertical_gap = y2 - (y1 + h1)
+        elif y2 + h2 < y1:
+            vertical_gap = y1 - (y2 + h2)
+        
+        # Calculate centers for alignment checks
+        center_x1 = x1 + w1 / 2
+        center_x2 = x2 + w2 / 2
+        center_y1 = y1 + h1 / 2
+        center_y2 = y2 + h2 / 2
+        
+        horizontal_center_diff = abs(center_x1 - center_x2)
+        vertical_center_diff = abs(center_y1 - center_y2)
+        
+        avg_width = (w1 + w2) / 2
+        avg_height = (h1 + h2) / 2
+        
+        # Determine text orientation and layout
+        is_horizontal_text = horizontal_gap > vertical_gap or (horizontal_center_diff < avg_width * 0.5)
+        is_vertical_text = vertical_gap > horizontal_gap or (vertical_center_diff < avg_height * 0.5)
+        
+        # PRELIMINARY CHECK: If regions overlap or are extremely close, merge them
+        # This handles text that's clearly in the same bubble
+        
+        # Check for overlap
+        overlap_x = max(0, min(x1 + w1, x2 + w2) - max(x1, x2))
+        overlap_y = max(0, min(y1 + h1, y2 + h2) - max(y1, y2))
+        has_overlap = overlap_x > 0 and overlap_y > 0
+        
+        if has_overlap:
+            self._log(f"   Regions overlap - definitely same bubble, merging", "info")
+            return True
+        
+        # If gaps are tiny (< 10 pixels), merge regardless of other factors
+        if horizontal_gap < 10 and vertical_gap < 10:
+            self._log(f"   Very small gaps ({horizontal_gap}, {vertical_gap}) - merging", "info")
+            return True
+        
+        # BUBBLE BOUNDARY CHECK: Use spatial patterns to detect different bubbles
+        # But be less aggressive if gaps are small
+        if horizontal_gap < 20 and vertical_gap < 20:
+            # Very close regions are almost certainly in the same bubble
+            self._log(f"   Regions very close, skipping bubble boundary check", "info")
+        elif self._likely_different_bubbles(region1, region2):
+            self._log(f"   Regions likely in different speech bubbles", "info")
+            return False
+        
+        # CHECK 1: For well-aligned text with small gaps, merge immediately
+        # This catches multi-line text in the same bubble
+        if is_horizontal_text and vertical_center_diff < avg_height * 0.4:
+            # Horizontal text that's well-aligned vertically
+            if horizontal_gap <= threshold and vertical_gap <= threshold * 0.5:
+                self._log(f"   Well-aligned horizontal text with acceptable gaps, merging", "info")
+                return True
+        
+        if is_vertical_text and horizontal_center_diff < avg_width * 0.4:
+            # Vertical text that's well-aligned horizontally
+            if vertical_gap <= threshold and horizontal_gap <= threshold * 0.5:
+                self._log(f"   Well-aligned vertical text with acceptable gaps, merging", "info")
+                return True
+        
+        # ADDITIONAL CHECK: Multi-line text in speech bubbles
+        # Even if not perfectly aligned, check for typical multi-line patterns
+        if horizontal_center_diff < avg_width * 0.5 and vertical_gap <= threshold:
+            # Lines that are reasonably centered and within threshold should merge
+            self._log(f"   Multi-line text pattern detected, merging", "info")
+            return True
+        
+        # CHECK 2: Check alignment quality
+        # Poor alignment often indicates different bubbles
+        if is_horizontal_text:
+            # For horizontal text, check vertical alignment
+            if vertical_center_diff > avg_height * 0.6:
+                self._log(f"   Poor vertical alignment for horizontal text", "info")
+                return False
+        elif is_vertical_text:
+            # For vertical text, check horizontal alignment
+            if horizontal_center_diff > avg_width * 0.6:
+                self._log(f"   Poor horizontal alignment for vertical text", "info")
+                return False
+        
+        # CHECK 3: Font size check (but be reasonable)
+        font_size1 = self._estimate_font_size_for_region(region1)
+        font_size2 = self._estimate_font_size_for_region(region2)
+        size_ratio = max(font_size1, font_size2) / max(min(font_size1, font_size2), 1)
+        
+        # Allow some variation for emphasis or stylistic choices
+        if size_ratio > 2.0:
+            self._log(f"   Font sizes too different ({font_size1} vs {font_size2})", "info")
+            return False
+        
+        # CHECK 4: Final sanity check on merged area
+        merged_width = max(x1 + w1, x2 + w2) - min(x1, x2)
+        merged_height = max(y1 + h1, y2 + h2) - min(y1, y2)
+        merged_area = merged_width * merged_height
+        combined_area = (w1 * h1) + (w2 * h2)
+        
+        # If merged area is way larger than combined areas, they're probably far apart
+        if merged_area > combined_area * 2.5:
+            self._log(f"   Merged area indicates regions are too far apart", "info")
+            return False
+        
+        # If we get here, apply standard threshold checks
+        if horizontal_gap <= threshold and vertical_gap <= threshold:
+            self._log(f"   Standard threshold check passed, merging", "info")
+            return True
+        
+        self._log(f"   No merge conditions met", "info")
+        return False
+
     def _merge_nearby_regions(self, regions: List[TextRegion], threshold: int = 50) -> List[TextRegion]:
-        """Merge text regions that are likely part of the same speech bubble"""
+        """Merge text regions that are likely part of the same speech bubble - with debug logging"""
         if len(regions) <= 1:
             return regions
+        
+        self._log(f"\n=== MERGE DEBUG: Starting merge analysis ===", "info")
+        self._log(f"  Total regions: {len(regions)}", "info")
+        self._log(f"  Threshold: {threshold}px", "info")
+        
+        # First, let's log what regions we have
+        for i, region in enumerate(regions):
+            x, y, w, h = region.bounding_box
+            self._log(f"  Region {i}: pos({x},{y}) size({w}x{h}) text='{region.text[:20]}...'", "info")
+        
+        # Sort regions by area (largest first) to handle contained regions properly
+        sorted_indices = sorted(range(len(regions)), 
+                              key=lambda i: regions[i].bounding_box[2] * regions[i].bounding_box[3], 
+                              reverse=True)
         
         merged = []
         used = set()
         
-        for i, region1 in enumerate(regions):
+        # Process each region in order of size (largest first)
+        for idx in sorted_indices:
+            i = idx
             if i in used:
                 continue
             
+            region1 = regions[i]
+            
             # Start with this region
             merged_text = region1.text
-            merged_vertices = list(region1.vertices)
+            merged_vertices = list(region1.vertices) if hasattr(region1, 'vertices') else []
+            regions_merged = [i]  # Track which regions were merged
             
-            # Check for nearby regions
-            for j, region2 in enumerate(regions[i+1:], i+1):
-                if j in used:
+            self._log(f"\n  Checking region {i} for merges:", "info")
+            
+            # Check against all other unused regions
+            for j in range(len(regions)):
+                if j == i or j in used:
                     continue
                 
-                if self._regions_are_nearby(region1, region2, threshold):
-                    # Merge the regions
+                region2 = regions[j]
+                self._log(f"    Testing merge with region {j}:", "info")
+                
+                # Check if region2 is contained within region1
+                x1, y1, w1, h1 = region1.bounding_box
+                x2, y2, w2, h2 = region2.bounding_box
+                
+                # Check if region2 is fully contained within region1
+                if (x2 >= x1 and y2 >= y1 and 
+                    x2 + w2 <= x1 + w1 and y2 + h2 <= y1 + h1):
+                    self._log(f"      ✓ Region {j} is INSIDE region {i} - merging!", "success")
                     merged_text += " " + region2.text
-                    merged_vertices.extend(region2.vertices)
+                    if hasattr(region2, 'vertices'):
+                        merged_vertices.extend(region2.vertices)
                     used.add(j)
+                    regions_merged.append(j)
+                    continue
+                
+                # Check if region1 is contained within region2 (shouldn't happen due to sorting, but be safe)
+                if (x1 >= x2 and y1 >= y2 and 
+                    x1 + w1 <= x2 + w2 and y1 + h1 <= y2 + h2):
+                    self._log(f"      ✓ Region {i} is INSIDE region {j} - merging!", "success")
+                    merged_text += " " + region2.text
+                    if hasattr(region2, 'vertices'):
+                        merged_vertices.extend(region2.vertices)
+                    used.add(j)
+                    regions_merged.append(j)
+                    # Update region1's bounding box to the larger region
+                    region1 = TextRegion(
+                        text=merged_text,
+                        vertices=merged_vertices,
+                        bounding_box=region2.bounding_box,
+                        confidence=region1.confidence,
+                        region_type='temp_merge'
+                    )
+                    continue
+                
+                # Original proximity and merge checks
+                if self._regions_are_nearby(region1, region2, threshold):
+                    self._log(f"      ✓ Regions are nearby", "info")
+                    
+                    # Then check if they should merge
+                    if self._regions_should_merge(region1, region2, threshold):
+                        self._log(f"      ✓ Regions should merge!", "success")
+                        
+                        # Actually perform the merge
+                        merged_text += " " + region2.text
+                        if hasattr(region2, 'vertices'):
+                            merged_vertices.extend(region2.vertices)
+                        used.add(j)
+                        regions_merged.append(j)
+                        
+                        # Update region1's bounding box for subsequent comparisons
+                        # This is important so the next region can merge with the expanded region
+                        all_vertices = merged_vertices if merged_vertices else []
+                        if all_vertices:
+                            xs = [v[0] for v in all_vertices]
+                            ys = [v[1] for v in all_vertices]
+                        else:
+                            # Fallback to bounding box calculation
+                            x1, y1, w1, h1 = region1.bounding_box
+                            x2, y2, w2, h2 = region2.bounding_box
+                            xs = [x1, x1+w1, x2, x2+w2]
+                            ys = [y1, y1+h1, y2, y2+h2]
+                        
+                        new_x, new_y = min(xs), min(ys)
+                        new_w, new_h = max(xs) - new_x, max(ys) - new_y
+                        
+                        # Create updated region for next iteration
+                        region1 = TextRegion(
+                            text=merged_text,
+                            vertices=merged_vertices,
+                            bounding_box=(new_x, new_y, new_w, new_h),
+                            confidence=region1.confidence,
+                            region_type='temp_merge'
+                        )
+                    else:
+                        self._log(f"      ✗ Regions should not merge", "warning")
+                else:
+                    self._log(f"      ✗ Regions not nearby", "warning")
             
-            # Calculate new bounding box
-            xs = [v[0] for v in merged_vertices]
-            ys = [v[1] for v in merged_vertices]
+            # Log if we merged multiple regions
+            if len(regions_merged) > 1:
+                self._log(f"  ✅ MERGED regions {regions_merged} into one bubble", "success")
+            else:
+                self._log(f"  ℹ️ Region {i} not merged with any other", "info")
+            
+            # Create final merged region
+            if merged_vertices:
+                xs = [v[0] for v in merged_vertices]
+                ys = [v[1] for v in merged_vertices]
+            else:
+                # Use the final bounding box from region1
+                x, y, w, h = region1.bounding_box
+                xs = [x, x + w]
+                ys = [y, y + h]
+            
             min_x, max_x = min(xs), max(xs)
             min_y, max_y = min(ys), max(ys)
             merged_bbox = (min_x, min_y, max_x - min_x, max_y - min_y)
@@ -2557,38 +2910,101 @@ class MangaTranslator:
                 text=merged_text,
                 vertices=merged_vertices,
                 bounding_box=merged_bbox,
-                confidence=region1.confidence,
-                region_type='merged_text_block'
+                confidence=regions[i].confidence,
+                region_type='merged_text_block' if len(regions_merged) > 1 else regions[i].region_type
             )
+            
+            # Copy over any additional attributes
+            if hasattr(regions[i], 'translated_text'):
+                merged_region.translated_text = regions[i].translated_text
             
             merged.append(merged_region)
             used.add(i)
         
+        self._log(f"\n=== MERGE DEBUG: Complete ===", "info")
+        self._log(f"  Final region count: {len(merged)} (was {len(regions)})", "info")
+        
+        # Verify the merge worked
+        if len(merged) == len(regions):
+            self._log(f"  ⚠️ WARNING: No regions were actually merged!", "warning")
+        
         return merged
     
     def _regions_are_nearby(self, region1: TextRegion, region2: TextRegion, threshold: int = 50) -> bool:
-        """Check if two regions are close enough to be in the same bubble"""
+        """Check if two regions are close enough to be in the same bubble - WITH DEBUG"""
         x1, y1, w1, h1 = region1.bounding_box
         x2, y2, w2, h2 = region2.bounding_box
         
-        # Check horizontal distance between closest edges
+        self._log(f"\n    === NEARBY CHECK DEBUG ===", "info")
+        self._log(f"    Region 1: pos({x1},{y1}) size({w1}x{h1})", "info")
+        self._log(f"    Region 2: pos({x2},{y2}) size({w2}x{h2})", "info")
+        self._log(f"    Threshold: {threshold}", "info")
+        
+        # Calculate gaps between closest edges
         horizontal_gap = 0
         if x1 + w1 < x2:  # region1 is to the left
             horizontal_gap = x2 - (x1 + w1)
         elif x2 + w2 < x1:  # region2 is to the left
             horizontal_gap = x1 - (x2 + w2)
         
-        # Check vertical distance between closest edges
         vertical_gap = 0
         if y1 + h1 < y2:  # region1 is above
             vertical_gap = y2 - (y1 + h1)
         elif y2 + h2 < y1:  # region2 is above
             vertical_gap = y1 - (y2 + h2)
         
-        # Regions are nearby if they're close horizontally OR vertically
-        # This handles both horizontal text and vertical text layouts
-        return (horizontal_gap < threshold and vertical_gap < threshold * 2) or \
-               (vertical_gap < threshold and horizontal_gap < threshold * 2)
+        self._log(f"    Horizontal gap: {horizontal_gap}", "info")
+        self._log(f"    Vertical gap: {vertical_gap}", "info")
+        
+        # Detect if regions are likely vertical text based on aspect ratio
+        aspect1 = w1 / max(h1, 1)
+        aspect2 = w2 / max(h2, 1)
+        
+        # More permissive vertical text detection
+        # Vertical text typically has aspect ratio < 1.0 (taller than wide)
+        is_vertical_text = (aspect1 < 1.0 and aspect2 < 1.0) or (aspect1 < 0.5 or aspect2 < 0.5)
+        
+        # Also check if text is arranged vertically (one above the other with minimal horizontal offset)
+        center_x1 = x1 + w1 / 2
+        center_x2 = x2 + w2 / 2
+        horizontal_center_diff = abs(center_x1 - center_x2)
+        avg_width = (w1 + w2) / 2
+        
+        # If regions are vertically stacked with aligned centers, treat as vertical text
+        is_vertically_stacked = (horizontal_center_diff < avg_width * 1.5) and (vertical_gap >= 0)
+        
+        self._log(f"    Is vertical text: {is_vertical_text}", "info")
+        self._log(f"    Is vertically stacked: {is_vertically_stacked}", "info")
+        self._log(f"    Horizontal center diff: {horizontal_center_diff:.1f}", "info")
+        
+        # SIMPLE APPROACH: Just check if gaps are within threshold
+        # Don't overthink it
+        if horizontal_gap <= threshold and vertical_gap <= threshold:
+            self._log(f"    ✅ NEARBY: Both gaps within threshold", "success")
+            return True
+        
+        # SPECIAL CASE: Vertically stacked text with good alignment
+        # This is specifically for multi-line text in bubbles
+        if horizontal_center_diff < avg_width * 0.8 and vertical_gap <= threshold * 1.5:
+            self._log(f"    ✅ NEARBY: Vertically aligned text in same bubble", "success")
+            return True
+        
+        # If one gap is small and the other is slightly over, still consider nearby
+        if (horizontal_gap <= threshold * 0.5 and vertical_gap <= threshold * 1.5) or \
+           (vertical_gap <= threshold * 0.5 and horizontal_gap <= threshold * 1.5):
+            self._log(f"    ✅ NEARBY: One small gap, other slightly over", "success")
+            return True
+        
+        # Special case: Wide bubbles with text on sides
+        # If regions are at nearly the same vertical position, they might be in a wide bubble
+        if abs(y1 - y2) < 10:  # Nearly same vertical position
+            # Check if this could be a wide bubble spanning both regions
+            if horizontal_gap <= threshold * 3:  # Allow up to 3x threshold for wide bubbles
+                self._log(f"    ✅ NEARBY: Same vertical level, possibly wide bubble", "success")
+                return True
+        
+        self._log(f"    ❌ NOT NEARBY: Gaps exceed threshold", "warning")
+        return False
     
     def _find_font(self) -> str:
         """Find a suitable font for text rendering"""
