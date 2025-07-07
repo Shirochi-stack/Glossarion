@@ -7,19 +7,19 @@ Key Design Principles:
 - The client must return accurate finish_reason for truncation detection
 - The client must support cancellation for timeout handling
 
-Supported models and their prefixes:
-- OpenAI: gpt*, o1*, o3*, o4*, codex* (e.g., gpt-4, o3, o4-mini)
-- Google: gemini*, palm*, bard* (e.g., gemini-2.0-flash-exp)
-- Anthropic: claude*, sonnet*, opus*, haiku*
-- DeepSeek: deepseek* (e.g., deepseek-chat)
+Supported models and their prefixes (Updated July 2025):
+- OpenAI: gpt*, o1*, o3*, o4*, codex* (e.g., gpt-4, gpt-4o, gpt-4o-mini, gpt-4.5, gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, o3, o3-mini, o3-pro, o4-mini)
+- Google: gemini*, palm*, bard* (e.g., gemini-2.0-flash-exp, gemini-2.5-pro, gemini-2.5-flash)
+- Anthropic: claude*, sonnet*, opus*, haiku* (e.g., claude-3.5-sonnet, claude-3.7-sonnet, claude-4-opus, claude-4-sonnet, claude-opus-4-20250514, claude-sonnet-4-20250514)
+- DeepSeek: deepseek* (e.g., deepseek-chat, deepseek-vl, deepseek-r1)
 - Mistral: mistral*, mixtral*, codestral*
-- Cohere: command*, cohere*
+- Cohere: command*, cohere*, aya* (e.g., aya-vision, command-r7b)
 - AI21: j2*, jurassic*, jamba*
 - Together AI: llama*, together*, alpaca*, vicuna*, wizardlm*, openchat*
-- Perplexity: perplexity*, pplx*
+- Perplexity: perplexity*, pplx*, sonar*
 - Replicate: replicate*
-- Yi (01.AI): yi* (e.g., yi-34b-chat-200k)
-- Qwen (Alibaba): qwen*
+- Yi (01.AI): yi* (e.g., yi-34b-chat-200k, yi-vl)
+- Qwen (Alibaba): qwen* (e.g., qwen2.5-vl)
 - Baichuan: baichuan*
 - Zhipu AI: glm*, chatglm*
 - Moonshot: moonshot*, kimi*
@@ -31,7 +31,7 @@ Supported models and their prefixes:
 - MiniMax: minimax*, abab*
 - SenseNova: sensenova*, nova*
 - InternLM: intern*, internlm*
-- TII: falcon*
+- TII: falcon* (e.g., falcon-2-11b)
 - Microsoft: phi*, orca*
 - Azure: azure* (for Azure OpenAI deployments)
 - Aleph Alpha: luminous*
@@ -39,16 +39,38 @@ Supported models and their prefixes:
 - HuggingFace: starcoder*
 - Salesforce: codegen*
 - BigScience: bloom*
-- Meta: opt*, galactica*, llama2*, codellama*
+- Meta: opt*, galactica*, llama2*, llama3*, llama4*, codellama*
+- xAI: grok* (e.g., grok-3, grok-vision)
+- Poe: poe/* (e.g., poe/claude-4-opus, poe/gpt-4.5, poe/Assistant)
+- OpenRouter: or/*, openrouter/* (e.g., or/anthropic/claude-4-opus, or/openai/gpt-4.5)
+- Fireworks AI: fireworks/* (e.g., fireworks/llama-v3-70b)
 
 ELECTRONHUB SUPPORT:
 ElectronHub is an API aggregator that provides access to multiple models.
 To use ElectronHub, prefix your model name with one of these:
 - eh/ (e.g., eh/yi-34b-chat-200k)
-- electronhub/ (e.g., electronhub/gpt-4)
-- electron/ (e.g., electron/claude-3-opus)
+- electronhub/ (e.g., electronhub/gpt-4.5)
+- electron/ (e.g., electron/claude-4-opus)
 
 ElectronHub allows you to access models from multiple providers using a single API key.
+
+POE SUPPORT:
+Poe by Quora provides access to multiple AI models through their platform.
+To use Poe, prefix your model name with 'poe/':
+- poe/claude-4-opus
+- poe/claude-4-sonnet
+- poe/gpt-4.5
+- poe/gpt-4.1
+- poe/Assistant
+- poe/gemini-2.5-pro
+
+OPENROUTER SUPPORT:
+OpenRouter is a unified interface for 300+ models from various providers.
+To use OpenRouter, prefix your model name with 'or/' or 'openrouter/':
+- or/anthropic/claude-4-opus
+- openrouter/openai/gpt-4.5
+- or/google/gemini-2.5-pro
+- or/meta-llama/llama-4-70b
 
 Environment Variables:
 - SEND_INTERVAL_SECONDS: Delay between API calls (respects GUI settings)
@@ -58,6 +80,28 @@ Environment Variables:
 - AZURE_API_VERSION: Azure API version (default: 2024-02-01)
 - DATABRICKS_API_URL: Databricks workspace URL
 - SALESFORCE_API_URL: Salesforce API endpoint
+- OPENROUTER_REFERER: HTTP referer for OpenRouter (default: https://github.com/your-app)
+- OPENROUTER_APP_NAME: App name for OpenRouter (default: Glossarion Translation)
+- POE_API_KEY: API key for Poe platform
+- GROQ_API_URL: Custom Groq endpoint (default: https://api.groq.com/openai/v1)
+- FIREWORKS_API_URL: Custom Fireworks AI endpoint (default: https://api.fireworks.ai/inference/v1)
+- DISABLE_GEMINI_SAFETY: Set to "true" to disable Gemini safety filters (respects GUI toggle)
+- XAI_API_URL: Custom xAI endpoint (default: https://api.x.ai/v1)
+- DEEPSEEK_API_URL: Custom DeepSeek endpoint (default: https://api.deepseek.com/v1)
+
+SAFETY SETTINGS:
+The client respects the GUI's "Disable Gemini API Safety Filters" toggle via the 
+DISABLE_GEMINI_SAFETY environment variable. When enabled, it applies API-level safety 
+settings where available:
+
+- Gemini: Sets all harm categories to BLOCK_NONE (most permissive)
+- OpenRouter: Disables safe mode via X-Safe-Mode header
+- Poe: Disables safe mode via safe_mode parameter
+- Other OpenAI-compatible providers: Sets moderation=false where supported
+
+Note: Not all providers support API-level safety toggles. OpenAI and Anthropic APIs
+do not have direct safety filter controls. The client only applies settings that are
+officially supported by each provider's API.
 
 Note: Many Chinese model providers (Yi, Qwen, Baichuan, etc.) may require
 API keys from their respective platforms. Some endpoints might need adjustment
@@ -74,8 +118,11 @@ import base64
 from PIL import Image
 import io
 import time
+import csv
 from datetime import datetime
 import traceback
+import hashlib
+import html
 
 # IMPORTANT: This client respects GUI settings via environment variables:
 # - SEND_INTERVAL_SECONDS: Delay between API calls (set by GUI)
@@ -98,7 +145,7 @@ except ImportError:
 # Gemini SDK
 try:
     import google.generativeai as genai
-    from google.generativeai.types import HarmCategory, HarmBlockThreshold  # ADD THIS LINE
+    from google.generativeai.types import HarmCategory, HarmBlockThreshold
 except ImportError:
     genai = None
     HarmCategory = None
@@ -165,8 +212,22 @@ class UnifiedClient:
     For ElectronHub API aggregator, prefix model names with 'eh/', 'electronhub/', or 'electron/'
     Examples:
     - eh/yi-34b-chat-200k (Yi model via ElectronHub)
-    - electronhub/gpt-4 (OpenAI model via ElectronHub)
-    - electron/claude-3-opus (Anthropic model via ElectronHub)
+    - electronhub/gpt-4.5 (OpenAI model via ElectronHub)
+    - electron/claude-4-opus (Anthropic model via ElectronHub)
+    
+    POE USAGE:
+    For Poe platform models, prefix with 'poe/'
+    Examples:
+    - poe/gpt-4.5
+    - poe/claude-4-opus
+    - poe/Assistant (Poe's default assistant)
+    
+    OPENROUTER USAGE:
+    For OpenRouter aggregator, prefix with 'or/' or 'openrouter/'
+    Examples:
+    - or/openai/gpt-4.5
+    - openrouter/anthropic/claude-4-opus
+    - or/meta-llama/llama-4-70b
     
     Timeout Behavior:
     - Respects GUI "Auto-retry Slow Chunks" timeout setting
@@ -176,7 +237,7 @@ class UnifiedClient:
     - Works with send_with_interrupt() wrapper for proper retry handling
     """
     
-    # Supported model prefixes and their providers
+    # Supported model prefixes and their providers (Updated July 2025)
     MODEL_PROVIDERS = {
         'gpt': 'openai',
         'o1': 'openai',
@@ -193,12 +254,14 @@ class UnifiedClient:
         'codestral': 'mistral',
         'command': 'cohere',
         'cohere': 'cohere',
+        'aya': 'cohere',
         'j2': 'ai21',
         'jurassic': 'ai21',
         'llama': 'together',
         'together': 'together',
         'perplexity': 'perplexity',
         'pplx': 'perplexity',
+        'sonar': 'perplexity',
         'replicate': 'replicate',
         'yi': 'yi',
         'qwen': 'qwen',
@@ -240,7 +303,15 @@ class UnifiedClient:
         'opt': 'meta',
         'galactica': 'meta',
         'llama2': 'meta',
+        'llama3': 'meta',
+        'llama4': 'meta',
         'codellama': 'meta',
+        'grok': 'xai',
+        # New aggregators and providers
+        'poe': 'poe',
+        'or': 'openrouter',
+        'openrouter': 'openrouter',
+        'fireworks': 'fireworks',
         # ElectronHub support - prefix for ElectronHub-routed models
         'eh/': 'electronhub',
         'electronhub/': 'electronhub',
@@ -249,13 +320,14 @@ class UnifiedClient:
     
     # Model-specific constraints (for reference and logging only - handled reactively)
     MODEL_CONSTRAINTS = {
-        'temperature_fixed': ['o4-mini', 'o1-mini', 'o1-preview'],  # Models that only support specific temperatures
-        'no_system_message': ['o1', 'o1-preview', 'o3'],    # Models that don't support system messages
+        'temperature_fixed': ['o4-mini', 'o1-mini', 'o1-preview', 'o3-mini', 'o3', 'o3-pro', 'o4-mini'],  # Models that only support specific temperatures
+        'no_system_message': ['o1', 'o1-preview', 'o3', 'o3-pro'],    # Models that don't support system messages
         'max_completion_tokens': ['o4', 'o1', 'o3'],        # Models using max_completion_tokens
         'chinese_optimized': ['qwen', 'yi', 'glm', 'chatglm', 'baichuan', 'ernie', 'hunyuan'],  # Models optimized for Chinese
     }
     
-    def __init__(self, api_key: str, model: str):
+    def __init__(self, api_key: str, model: str, output_dir: str = None):
+        self._current_output_file = None
         self.api_key = api_key
         self.model = model
         self.conversation_message_count = 0
@@ -264,6 +336,8 @@ class UnifiedClient:
         self.context = None
         self.current_session_context = None
         self._cancelled = False
+        self.output_dir = output_dir
+        self._actual_output_filename = None
         
         # Get timeout configuration from GUI
         # IMPORTANT: This respects the "Auto-retry Slow Chunks" timeout setting
@@ -309,9 +383,11 @@ class UnifiedClient:
             if suggestions:
                 error_msg += f"Did you mean to use one of these prefixes? {suggestions}. "
             else:
-                # Check if it might be an ElectronHub model
+                # Check if it might be an aggregator model
                 if any(provider in model_lower for provider in ['yi', 'qwen', 'llama', 'gpt', 'claude']):
                     error_msg += f"If using ElectronHub, prefix with 'eh/' (e.g., eh/{self.model}). "
+                    error_msg += f"If using OpenRouter, prefix with 'or/' (e.g., or/{self.model}). "
+                    error_msg += f"If using Poe, prefix with 'poe/' (e.g., poe/{self.model}). "
             error_msg += f"Supported prefixes: {list(self.MODEL_PROVIDERS.keys())}"
             raise ValueError(error_msg)
         
@@ -520,7 +596,7 @@ class UnifiedClient:
         else:
             payload_name = f"{context or 'general'}_payload_{self.conversation_message_count}.json"
             response_name = f"{context or 'general'}_response_{self.conversation_message_count}.txt"
-        
+        self._last_response_filename = response_name
         return payload_name, response_name
     
     def _save_payload(self, messages, filename):
@@ -552,18 +628,70 @@ class UnifiedClient:
         except Exception as e:
             logger.error(f"Failed to save payload: {e}")
     
-    def _save_response(self, content, filename):
-        """Save response for debugging and duplicate detection
+
+    def _save_response(self, content: str, filename: str):
+        """Save API response to file with proper path handling
         
-        IMPORTANT: Responses must be saved in Payloads/ directory for duplicate detection
+        IMPORTANT: Only save JSON payloads, not HTML responses
+        HTML responses are saved in the book output folder, not Payloads
         """
-        filepath = os.path.join("Payloads", filename)
+        if not content or not os.getenv("SAVE_PAYLOAD", "1") == "1":
+            return
+        
+        # ONLY save JSON files to Payloads folder
+        # Skip HTML files - they belong in the book output folder
+        if not filename.endswith('.json'):
+            logger.debug(f"Skipping HTML response save to Payloads: {filename}")
+            return
+            
         try:
-            with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(content)
-            logger.debug(f"Saved response to: {filepath}")
+            # Ensure Payloads directory exists
+            os.makedirs("Payloads", exist_ok=True)
+            
+            # Use forward slashes for consistency
+            safe_filename = filename.replace("\\", "/")
+            if "/" in safe_filename:
+                safe_filename = safe_filename.split("/")[-1]
+            
+            filepath = os.path.join("Payloads", safe_filename)
+            
+            # For JSON responses, ensure proper formatting
+            try:
+                # Try to parse and pretty-print JSON
+                json_content = json.loads(content)
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    json.dump(json_content, f, indent=2, ensure_ascii=False)
+            except json.JSONDecodeError:
+                # If not valid JSON, save as-is
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    f.write(content)
+            
+            logger.debug(f"Saved JSON payload to: {filepath}")
+            
         except Exception as e:
-            logger.error(f"Failed to save response: {e}")
+            logger.warning(f"Failed to save response to {filename}: {e}")
+            # Don't raise - this is not critical functionality
+
+    def set_output_filename(self, filename: str):
+        """Set the actual output filename for truncation logging
+        
+        This should be called before sending a request to inform the client
+        about the actual chapter output filename (e.g., response_001_Chapter_1.html)
+        
+        Args:
+            filename: The actual output filename that will be created in the book folder
+        """
+        self._actual_output_filename = filename
+        logger.debug(f"Set output filename for truncation logging: {filename}")
+
+    def set_output_directory(self, directory: str):
+        """Set the output directory for truncation logs
+        
+        Args:
+            directory: The output directory path (e.g., the book folder)
+        """
+        self.output_dir = directory
+        logger.debug(f"Set output directory: {directory}")
     
     def cancel_current_operation(self):
         """Mark current operation as cancelled
@@ -575,7 +703,6 @@ class UnifiedClient:
         print("🛑 API operation cancelled")
     
     def send(self, messages, temperature=None, max_tokens=None, max_completion_tokens=None, context=None) -> Tuple[str, Optional[str]]:
-
         """
         Send messages to the API with enhanced error handling
         Returns: (content, finish_reason) tuple for backward compatibility
@@ -601,7 +728,7 @@ class UnifiedClient:
         if context != self.current_session_context:
             self.reset_conversation_for_new_context(context)
         
-        self.context = context or self.context
+        self.context = context or 'translation'
         self.conversation_message_count += 1
         
         try:
@@ -616,7 +743,7 @@ class UnifiedClient:
             messages = self._apply_pure_reinforcement(messages)
             
             # Get file names - IMPORTANT for duplicate detection
-            payload_name, response_name = self._get_file_names(messages, context)
+            payload_name, response_name = self._get_file_names(messages, context=self.context)
             
             # Save payload for debugging
             self._save_payload(messages, payload_name)
@@ -644,6 +771,14 @@ class UnifiedClient:
             if response.is_error or not response.content or response.content.strip() in ["", "[]"]:
                 logger.warning(f"Empty or error response: {response.finish_reason}")
                 self._save_failed_request(messages, "Empty response", context, response.raw_response)
+                # ALWAYS log these failures too
+                self._log_truncation_failure(
+                    messages=messages,
+                    response_content=response.content or "",
+                    finish_reason=response.finish_reason or 'error',
+                    context=context,
+                    error_details=response.error_details
+                )
                 self._track_stats(context, False, "empty_response", time.time() - start_time)
                 
                 # Use fallback
@@ -657,6 +792,15 @@ class UnifiedClient:
             if response.is_truncated:
                 logger.warning(f"Response was truncated: {response.finish_reason}")
                 print(f"⚠️ Response truncated (finish_reason: {response.finish_reason})")
+                
+                # ALWAYS log truncation failures
+                self._log_truncation_failure(
+                    messages=messages,
+                    response_content=response.content,
+                    finish_reason=response.finish_reason,
+                    context=context,
+                    error_details=response.error_details
+                )
                 # The calling code will check finish_reason=='length' for retry
             
             # Return the response with accurate finish_reason
@@ -739,6 +883,10 @@ class UnifiedClient:
             'bigscience': self._send_together,  # Usually through Together/HF
             'meta': self._send_together,  # Meta models usually through Together
             'electronhub': self._send_electronhub,  # ElectronHub API aggregator
+            'poe': self._send_poe,  # Poe platform
+            'openrouter': self._send_openrouter,  # OpenRouter aggregator
+            'fireworks': self._send_fireworks,  # Fireworks AI
+            'xai': self._send_xai,  # xAI Grok models
         }
         
         handler = handlers.get(self.client_type)
@@ -755,19 +903,152 @@ class UnifiedClient:
         else:
             # Other providers don't use max_completion_tokens yet
             return handler(messages, temperature, max_tokens, response_name)
-    
+ 
+    def _detect_silent_truncation(self, content: str, messages: List[Dict], context: str = None) -> bool:
+        """
+        Detect silent truncation where APIs (especially ElectronHub) cut off content
+        without setting proper finish_reason.
+        
+        Common patterns:
+        - Sentences ending abruptly without punctuation
+        - Content significantly shorter than expected
+        - Missing closing tags in structured content
+        - Sudden topic changes or incomplete thoughts
+        """
+        if not content:
+            return False
+        
+        # Pattern 1: Check for incomplete sentence endings
+        # Most complete responses end with proper punctuation
+        content_stripped = content.strip()
+        if content_stripped:
+            last_char = content_stripped[-1]
+            # Define valid ending punctuation marks
+            valid_endings = [
+                '.', '!', '?', '"', "'", '»', '】', '）', ')', 
+                '。', '！', '？', '"', ''', '】', '"', '''
+            ]
+            # Check if ends with incomplete sentence (no proper punctuation)
+            if last_char not in valid_endings:
+                # Additional check: is the last word incomplete?
+                words = content_stripped.split()
+                if words:
+                    last_word = words[-1]
+                    # Check for common incomplete patterns
+                    if len(last_word) > 2 and last_word[-1].isalpha():
+                        logger.warning(f"Possible silent truncation detected: incomplete sentence ending")
+                        return True
+        
+        # Pattern 2: Check for significantly short responses
+        if context == 'translation':
+            # Estimate expected length based on input
+            input_length = sum(len(msg.get('content', '')) for msg in messages if msg.get('role') == 'user')
+            if input_length > 500 and len(content_stripped) < input_length * 0.3:
+                logger.warning(f"Possible silent truncation: output ({len(content_stripped)} chars) much shorter than input ({input_length} chars)")
+                return True
+        
+        # Pattern 3: Check for incomplete HTML/XML structures
+        if '<' in content and '>' in content:
+            # Count opening and closing tags
+            opening_tags = content.count('<') - content.count('</')
+            closing_tags = content.count('</')
+            if opening_tags > closing_tags + 2:  # Allow small mismatch
+                logger.warning(f"Possible silent truncation: unclosed HTML tags detected")
+                return True
+        
+        # Pattern 4: Check for mature content indicators followed by abrupt ending
+        mature_indicators = [
+            'mature content', 'explicit', 'sexual', 'violence', 'adult',
+            'inappropriate', 'sensitive', 'censored', 'restricted'
+        ]
+        content_lower = content_stripped.lower()
+        for indicator in mature_indicators:
+            if indicator in content_lower:
+                # Check if response is suspiciously short after mentioning mature content
+                indicator_pos = content_lower.rfind(indicator)
+                remaining_content = content_stripped[indicator_pos + len(indicator):]
+                if len(remaining_content) < 50:  # Very little content after indicator
+                    logger.warning(f"Possible censorship truncation: content ends shortly after '{indicator}'")
+                    return True
+        
+        # Pattern 5: Check for incomplete code blocks or quotes
+        if '```' in content:
+            code_block_count = content.count('```')
+            if code_block_count % 2 != 0:  # Odd number means unclosed
+                logger.warning(f"Possible silent truncation: unclosed code block")
+                return True
+        
+        # Pattern 6: For glossary context, check for incomplete JSON
+        if context == 'glossary' and content_stripped.startswith('['):
+            if not content_stripped.endswith(']') and not content_stripped.endswith('],'):
+                logger.warning(f"Possible silent truncation: incomplete JSON array")
+                return True
+        
+        return False
+
+    def _enhance_electronhub_response(self, response: UnifiedResponse, messages: List[Dict], 
+                                     context: str = None) -> UnifiedResponse:
+        """
+        Enhance ElectronHub responses with better truncation detection and handling.
+        ElectronHub sometimes silently truncates without proper finish_reason.
+        """
+        # If already marked as truncated, no need to check further
+        if response.is_truncated:
+            return response
+        
+        # Check for silent truncation
+        if self._detect_silent_truncation(response.content, messages, context):
+            logger.warning(f"Silent truncation detected for {self.model} via ElectronHub")
+            
+            # Check if it's likely censorship vs length limit
+            content_lower = response.content.lower()
+            censorship_phrases = [
+                "i cannot", "i can't", "inappropriate", "unable to process",
+                "against my guidelines", "cannot assist", "not able to",
+                "i'm not able", "i am not able", "cannot provide", "can't provide"
+            ]
+            
+            is_censorship = any(phrase in content_lower for phrase in censorship_phrases)
+            
+            if is_censorship:
+                # This is content refusal, not truncation
+                logger.info("Detected content refusal rather than truncation")
+                response.finish_reason = 'content_filter'
+                response.error_details = {
+                    'type': 'content_refused',
+                    'provider': 'electronhub',
+                    'model': self.model,
+                    'detection': 'silent_censorship'
+                }
+            else:
+                # This is actual truncation
+                response.finish_reason = 'length'  # Mark as truncated for retry logic
+                response.error_details = {
+                    'type': 'silent_truncation',
+                    'provider': 'electronhub', 
+                    'model': self.model,
+                    'detection': 'pattern_analysis'
+                }
+            
+            # Add warning to content for translation context
+            if context == 'translation' and not is_censorship:
+                response.content += "\n[WARNING: Response may be truncated]"
+        
+        return response
+ 
     def _send_electronhub(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to ElectronHub API aggregator
+        """Send request to ElectronHub API aggregator with enhanced truncation detection
         
         ElectronHub provides access to multiple AI models through a unified endpoint.
         Model names should be prefixed with 'eh/', 'electronhub/', or 'electron/'.
         
         Examples:
         - eh/yi-34b-chat-200k
-        - electronhub/gpt-4
-        - electron/claude-3-opus
+        - electronhub/gpt-4.5
+        - electron/claude-4-opus
         
         Note: ElectronHub uses OpenAI-compatible API format.
+        This version includes silent truncation detection for mature content.
         """
         # Get ElectronHub endpoint (can be overridden via environment)
         base_url = os.getenv("ELECTRONHUB_API_URL", "https://api.electronhub.ai/v1")
@@ -807,6 +1088,17 @@ class UnifiedClient:
             logger.warning("ElectronHub - No system prompt found in messages")
             print("⚠️ ElectronHub: No system prompt in messages")
         
+        # Check if we should warn about potentially problematic models
+        #problematic_models = ['claude', 'gpt-4', 'gpt-3.5', 'gemini']
+        #if any(model in actual_model.lower() for model in problematic_models):
+            #print(f"⚠️ ElectronHub: Model '{actual_model}' may have strict content filters")
+            
+            # Check for mature content indicators
+            all_content = ' '.join(msg.get('content', '') for msg in messages).lower()
+            mature_indicators = ['mature', 'adult', 'explicit', 'sexual', 'violence', 'intimate']
+            #if any(indicator in all_content for indicator in mature_indicators):
+                #print(f"💡 ElectronHub: Consider using models like yi-34b-chat, deepseek-chat, or llama-2-70b for this content")
+        
         # Temporarily update self.model for the API call
         # This is necessary because _send_openai_compatible uses self.model
         self.model = actual_model
@@ -819,7 +1111,26 @@ class UnifiedClient:
                 response_name=response_name,
                 provider="electronhub"
             )
-            return result
+            
+            # ENHANCEMENT: Check for silent truncation/censorship
+            enhanced_result = self._enhance_electronhub_response(result, messages, self.context)
+            
+            if enhanced_result.finish_reason in ['length', 'content_filter']:
+                self._log_truncation_failure(
+                    messages=messages,
+                    response_content=enhanced_result.content,
+                    finish_reason=enhanced_result.finish_reason,
+                    context=self.context,
+                    error_details=enhanced_result.error_details
+                )
+            
+            # Log if truncation was detected
+            if enhanced_result.finish_reason == 'length' and result.finish_reason != 'length':
+                print(f"🔍 ElectronHub: Silent truncation detected and corrected")
+            elif enhanced_result.finish_reason == 'content_filter' and result.finish_reason != 'content_filter':
+                print(f"🚫 ElectronHub: Silent content refusal detected")
+            
+            return enhanced_result
             
         except UnifiedClientError as e:
             # Enhance error messages for common ElectronHub issues
@@ -830,13 +1141,13 @@ class UnifiedClient:
                 error_msg = (
                     f"ElectronHub rejected model '{actual_model}' (original: '{original_model}').\n"
                     f"\nCommon ElectronHub model names:\n"
-                    f"  • OpenAI: gpt-4, gpt-4-turbo, gpt-3.5-turbo, gpt-4o\n"
-                    f"  • Anthropic: claude-3-opus, claude-3-sonnet, claude-3-haiku\n"
-                    f"  • Meta: llama-2-70b-chat, llama-2-13b-chat, llama-2-7b-chat\n"
+                    f"  • OpenAI: gpt-4, gpt-4-turbo, gpt-3.5-turbo, gpt-4o, gpt-4o-mini, gpt-4.5, gpt-4.1\n"
+                    f"  • Anthropic: claude-3-opus, claude-3-sonnet, claude-3-haiku, claude-4-opus, claude-4-sonnet\n"
+                    f"  • Meta: llama-2-70b-chat, llama-2-13b-chat, llama-2-7b-chat, llama-3-70b, llama-4-70b\n"
                     f"  • Mistral: mistral-large, mistral-medium, mixtral-8x7b\n"
-                    f"  • Google: gemini-pro\n"
+                    f"  • Google: gemini-pro, gemini-1.5-pro, gemini-2.5-pro\n"
                     f"  • Yi: yi-34b-chat, yi-6b-chat\n"
-                    f"  • Others: deepseek-coder-33b, qwen-72b-chat\n"
+                    f"  • Others: deepseek-coder-33b, qwen-72b-chat, grok-3\n"
                     f"\nNote: Do not include version suffixes like ':latest' or ':safe'"
                 )
                 print(f"\n❌ {error_msg}")
@@ -864,10 +1175,187 @@ class UnifiedClient:
             # Always restore the original model name
             # This ensures subsequent calls work correctly
             self.model = original_model
+    
+    def _send_poe(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to Poe API with safety settings"""
+        # Check if safety settings are disabled via GUI toggle
+        disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
         
+        # Strip 'poe/' prefix from model name
+        poe_model = self.model.replace('poe/', '', 1)
+        
+        # Poe API uses a different format, typically through their bot system
+        # This is a simplified implementation - actual Poe API may require different auth
+        headers = {
+            'Authorization': f'Bearer {self.api_key}',
+            'Content-Type': 'application/json'
+        }
+        
+        # Convert messages to text prompt
+        prompt = self._messages_to_prompt(messages)
+        
+        payload = {
+            'query': prompt,
+            'bot': poe_model,
+            'conversation_id': hashlib.md5(str(time.time()).encode()).hexdigest()[:16]
+        }
+        
+        if temperature is not None:
+            payload['temperature'] = temperature
+        if max_tokens:
+            payload['max_tokens'] = max_tokens
+        
+        # Add safety parameter if disabled
+        if disable_safety:
+            payload['safe_mode'] = False
+            logger.info("🔓 Safety toggle enabled for Poe")
+            print("🔓 Poe Safety: Safe mode disabled")
+        
+        # Use Poe API endpoint
+        base_url = os.getenv("POE_API_URL", "https://api.poe.com/bot")
+        
+        # Get response using HTTP request
+        max_retries = 3
+        api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+        
+        for attempt in range(max_retries):
+            try:
+                if self._cancelled:
+                    raise UnifiedClientError("Operation cancelled")
+                
+                resp = requests.post(
+                    f"{base_url}/{poe_model}",
+                    headers=headers,
+                    json=payload,
+                    timeout=self.request_timeout
+                )
+                
+                if resp.status_code == 429:  # Rate limit
+                    if attempt < max_retries - 1:
+                        wait_time = api_delay * 10
+                        logger.warning(f"Poe rate limit hit, waiting {wait_time}s")
+                        time.sleep(wait_time)
+                        continue
+                elif resp.status_code != 200:
+                    error_msg = f"Poe API error: {resp.status_code} - {resp.text}"
+                    if attempt < max_retries - 1:
+                        logger.warning(f"{error_msg} (attempt {attempt + 1})")
+                        time.sleep(api_delay)
+                        continue
+                    raise UnifiedClientError(error_msg, http_status=resp.status_code)
+                
+                json_resp = resp.json()
+                
+                # Extract content based on Poe's response format
+                content = json_resp.get("text", "") or json_resp.get("response", "")
+                finish_reason = json_resp.get("finish_reason", "stop")
+                
+                # Normalize finish reasons
+                if finish_reason in ["max_tokens", "max_length"]:
+                    finish_reason = "length"
+                
+                return UnifiedResponse(
+                    content=content,
+                    finish_reason=finish_reason,
+                    raw_response=json_resp
+                )
+                
+            except requests.RequestException as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Poe API error (attempt {attempt + 1}): {e}")
+                    time.sleep(api_delay)
+                    continue
+                logger.error(f"Poe API error after all retries: {e}")
+                raise UnifiedClientError(f"Poe API error: {e}")
+    
+    def _send_openrouter(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to OpenRouter API with safety settings"""
+        # Check if safety settings are disabled via GUI toggle
+        disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
+        
+        # OpenRouter uses OpenAI-compatible format
+        # Strip 'or/' or 'openrouter/' prefix
+        model_name = self.model
+        for prefix in ['or/', 'openrouter/']:
+            if model_name.startswith(prefix):
+                model_name = model_name[len(prefix):]
+                break
+        
+        # OpenRouter specific headers
+        headers = {
+            'Authorization': f'Bearer {self.api_key}',
+            'Content-Type': 'application/json',
+            'HTTP-Referer': os.getenv('OPENROUTER_REFERER', 'https://github.com/your-app'),
+            'X-Title': os.getenv('OPENROUTER_APP_NAME', 'Glossarion Translation')
+        }
+        
+        # Add safety header if disabled
+        if disable_safety:
+            headers['X-Safe-Mode'] = 'false'
+            logger.info("🔓 Safety toggle enabled for OpenRouter")
+            print("🔓 OpenRouter Safety: Disabled via X-Safe-Mode header")
+        
+        # Store original model and update for API call
+        original_model = self.model
+        self.model = model_name
+        
+        try:
+            return self._send_openai_compatible(
+                messages, temperature, max_tokens,
+                base_url="https://openrouter.ai/api/v1",
+                response_name=response_name,
+                provider="openrouter",
+                headers=headers
+            )
+        finally:
+            self.model = original_model
+    
+    def _send_fireworks(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to Fireworks AI API"""
+        # Fireworks uses accounts/ prefix in model names
+        model_name = self.model.replace('fireworks/', '', 1)
+        if not model_name.startswith('accounts/'):
+            model_name = f'accounts/fireworks/models/{model_name}'
+        
+        # Store original model
+        original_model = self.model
+        self.model = model_name
+        
+        try:
+            return self._send_openai_compatible(
+                messages, temperature, max_tokens,
+                base_url=os.getenv("FIREWORKS_API_URL", "https://api.fireworks.ai/inference/v1"),
+                response_name=response_name,
+                provider="fireworks"
+            )
+        finally:
+            self.model = original_model
+    
+    def _send_xai(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to xAI API (Grok models)"""
+        # xAI uses OpenAI-compatible format
+        return self._send_openai_compatible(
+            messages, temperature, max_tokens,
+            base_url=os.getenv("XAI_API_URL", "https://api.x.ai/v1"),
+            response_name=response_name,
+            provider="xai"
+        )
+    
+    def _messages_to_prompt(self, messages: List[Dict[str, str]]) -> str:
+        """Convert messages array to a single prompt string"""
+        prompt_parts = []
+        for msg in messages:
+            if msg['role'] == 'system':
+                prompt_parts.append(f"System: {msg['content']}")
+            elif msg['role'] == 'user':
+                prompt_parts.append(f"Human: {msg['content']}")
+            elif msg['role'] == 'assistant':
+                prompt_parts.append(f"Assistant: {msg['content']}")
+        
+        return "\n\n".join(prompt_parts)
+    
     def _send_openai(self, messages, temperature, max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
         """Send request to OpenAI API with o-series model support"""
-        """Send request to OpenAI API with retry logic"""
         max_retries = 3
         api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
         
@@ -880,7 +1368,7 @@ class UnifiedClient:
         
         for attempt in range(max_retries):
             try:
-                params = self._build_openai_params(messages, temperature, max_tokens)
+                params = self._build_openai_params(messages, temperature, max_tokens, max_completion_tokens)
                 
                 # Apply any fixes from previous attempts
                 if fixes_attempted['temperature'] and 'temperature_override' in fixes_attempted:
@@ -926,16 +1414,15 @@ class UnifiedClient:
                 
                 if not content and finish_reason == 'length':
                     logger.warning(f"OpenAI vision API returned empty content with finish_reason='length'")
-                    logger.warning(f"This usually means the token limit is too low. Current limit: {api_params.get('max_completion_tokens') or api_params.get('max_tokens', 'not set')}")
+                    logger.warning(f"This usually means the token limit is too low. Current limit: {params.get('max_completion_tokens') or params.get('max_tokens', 'not set')}")
                     # Return with error details
                     return UnifiedResponse(
                         content="",
                         finish_reason='error',
                         error_details={'error': 'Response truncated - increase max_completion_tokens', 
                                      'finish_reason': 'length',
-                                     'token_limit': api_params.get('max_completion_tokens') or api_params.get('max_tokens')}
+                                     'token_limit': params.get('max_completion_tokens') or params.get('max_tokens')}
                     )
-  
                     
                 # Normalize OpenAI finish reasons for retry mechanisms
                 if finish_reason == "max_tokens":
@@ -1049,7 +1536,9 @@ class UnifiedClient:
         if self._is_o_series_model():
             # o-series models use max_completion_tokens
             # The manga translator passes the actual value as max_tokens for now
-            if max_tokens is not None:
+            if max_completion_tokens is not None:
+                params["max_completion_tokens"] = max_completion_tokens
+            elif max_tokens is not None:
                 params["max_completion_tokens"] = max_tokens
                 logger.debug(f"Using max_completion_tokens={max_tokens} for o-series model {self.model}")
         else:
@@ -1130,19 +1619,9 @@ class UnifiedClient:
         try:
             with open(config_path, 'w', encoding='utf-8') as f:
                 json.dump(config_data, f, indent=2)
-            #print(f"📄 Safety config saved: {config_filename}")
         except Exception as e:
             logger.warning(f"Could not save safety config: {e}")
-        
-        # Log to console for immediate verification
-        #if disable_safety and safety_settings:
-         #   print(f"✅ SAFETY DISABLED - Request includes safety_settings with BLOCK_NONE")
-          #  print(f"   Safety config: {json.dumps(safety_settings, indent=2)}")
-        #else:
-        #    print(f"⚠️ SAFETY ENABLED - Using default Gemini safety settings")
                
-
-
         while attempt < attempts:
             try:
                 if self._cancelled:
@@ -1205,6 +1684,13 @@ class UnifiedClient:
 
         if not result:
             logger.error("All Gemini retries failed")
+            self._log_truncation_failure(
+                messages=messages,
+                response_content="",
+                finish_reason='error',
+                context=self.context,
+                error_details={'error': 'all_retries_failed', 'provider': 'gemini', 'attempts': attempt}
+            )
             result = "[]" if self.context == 'glossary' else ""
             finish_reason = 'error'
 
@@ -1578,13 +2064,92 @@ class UnifiedClient:
         )
     
     def _send_perplexity(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to Perplexity API"""
-        return self._send_openai_compatible(
-            messages, temperature, max_tokens,
-            base_url="https://api.perplexity.ai",
-            response_name=response_name,
-            provider="perplexity"
-        )
+        """Send request to Perplexity API with Sonar models"""
+        # Check for safety settings
+        disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
+        
+        headers = {
+            'Authorization': f'Bearer {self.api_key}',
+            'Content-Type': 'application/json'
+        }
+        
+        # Use chat completions endpoint
+        url = "https://api.perplexity.ai/chat/completions"
+        
+        payload = {
+            'model': self.model,
+            'messages': messages
+        }
+        
+        if temperature is not None:
+            payload['temperature'] = temperature
+        if max_tokens:
+            payload['max_tokens'] = max_tokens
+        
+        # Add search options for Sonar models
+        if 'sonar' in self.model.lower():
+            payload['search_domain_filter'] = ['perplexity.ai']
+            payload['return_citations'] = True
+            payload['search_recency_filter'] = 'month'
+        
+        # Get response using HTTP request
+        max_retries = 3
+        api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+        
+        for attempt in range(max_retries):
+            try:
+                if self._cancelled:
+                    raise UnifiedClientError("Operation cancelled")
+                
+                resp = requests.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                    timeout=self.request_timeout
+                )
+                
+                if resp.status_code == 429:  # Rate limit
+                    if attempt < max_retries - 1:
+                        wait_time = api_delay * 10
+                        logger.warning(f"Perplexity rate limit hit, waiting {wait_time}s")
+                        time.sleep(wait_time)
+                        continue
+                elif resp.status_code != 200:
+                    error_msg = f"Perplexity API error: {resp.status_code} - {resp.text}"
+                    if attempt < max_retries - 1:
+                        logger.warning(f"{error_msg} (attempt {attempt + 1})")
+                        time.sleep(api_delay)
+                        continue
+                    raise UnifiedClientError(error_msg, http_status=resp.status_code)
+                
+                json_resp = resp.json()
+                
+                # Extract content
+                choices = json_resp.get("choices", [])
+                if choices:
+                    content = choices[0].get("message", {}).get("content", "")
+                    finish_reason = choices[0].get("finish_reason", "stop")
+                else:
+                    content = ""
+                    finish_reason = "error"
+                
+                # Normalize finish reasons
+                if finish_reason in ["max_tokens", "max_length"]:
+                    finish_reason = "length"
+                
+                return UnifiedResponse(
+                    content=content,
+                    finish_reason=finish_reason,
+                    raw_response=json_resp
+                )
+                
+            except requests.RequestException as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Perplexity API error (attempt {attempt + 1}): {e}")
+                    time.sleep(api_delay)
+                    continue
+                logger.error(f"Perplexity API error after all retries: {e}")
+                raise UnifiedClientError(f"Perplexity API error: {e}")
     
     def _send_replicate(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to Replicate API"""
@@ -1700,16 +2265,19 @@ class UnifiedClient:
         """Send request to DeepSeek API"""
         return self._send_openai_compatible(
             messages, temperature, max_tokens,
-            base_url="https://api.deepseek.com/v1",
+            base_url=os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/v1"),
             response_name=response_name,
             provider="deepseek"
         )
     
     def _send_openai_compatible(self, messages, temperature, max_tokens, base_url, 
-                                response_name, provider="generic") -> UnifiedResponse:
-        """Send request to OpenAI-compatible APIs"""
+                                response_name, provider="generic", headers=None) -> UnifiedResponse:
+        """Send request to OpenAI-compatible APIs with safety settings"""
         max_retries = 3
         api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+        
+        # Check if safety settings are disabled via GUI toggle
+        disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
         
         # Debug logging for ElectronHub
         if provider == "electronhub":
@@ -1720,7 +2288,8 @@ class UnifiedClient:
                     logger.debug(f"  System prompt preview: {msg.get('content', '')[:100]}...")
         
         # Use OpenAI SDK for providers known to work well with it
-        sdk_compatible = ['deepseek', 'together', 'mistral', 'yi', 'qwen', 'moonshot', 'groq', 'electronhub']
+        sdk_compatible = ['deepseek', 'together', 'mistral', 'yi', 'qwen', 'moonshot', 'groq', 
+                         'electronhub', 'openrouter', 'fireworks', 'xai']
         
         if openai and provider in sdk_compatible:
             # Use OpenAI SDK with custom base URL
@@ -1735,16 +2304,52 @@ class UnifiedClient:
                         timeout=float(self.request_timeout)  # Use configured timeout
                     )
                     
-                    resp = client.chat.completions.create(
-                        model=self.model,
-                        messages=messages,
-                        temperature=temperature,
-                        max_tokens=max_tokens
-                    )
+                    # Prepare parameters
+                    params = {
+                        "model": self.model,
+                        "messages": messages,
+                        "temperature": temperature,
+                        "max_tokens": max_tokens
+                    }
+                    
+                    # Add safety parameters for providers that support them
+                    if disable_safety and provider in ["groq", "fireworks", "together"]:
+                        params["moderation"] = False
+                        logger.info(f"🔓 Safety moderation disabled for {provider}")
+                    
+                    resp = client.chat.completions.create(**params)
                     
                     content = resp.choices[0].message.content
                     finish_reason = resp.choices[0].finish_reason
                     
+                    # ADD ELECTRONHUB TRUNCATION DETECTION HERE TOO!
+                    if provider == "electronhub" and content:
+                        # Additional validation for ElectronHub responses
+                        if len(content) < 50 and "cannot" in content.lower():
+                            # Very short response with "cannot" - likely refused
+                            finish_reason = "content_filter"
+                            logger.warning(f"ElectronHub likely refused content: {content[:100]}")
+                            self._log_truncation_failure(
+                                messages=messages,
+                                response_content=content,
+                                finish_reason='content_filter',
+                                context=self.context,
+                                error_details={'type': 'content_refused', 'provider': 'electronhub'}
+                            )
+                        elif finish_reason == "stop":
+                            # Check if content looks truncated despite "stop" status
+                            if self._detect_silent_truncation(content, messages, self.context):
+                                finish_reason = "length"
+                                logger.warning("ElectronHub reported 'stop' but content appears truncated")
+                                print(f"🔍 ElectronHub: Detected silent truncation despite 'stop' status")
+                                self._log_truncation_failure(
+                                    messages=messages,
+                                    response_content=content,
+                                    finish_reason='length',
+                                    context=self.context,
+                                    error_details={'type': 'silent_truncation', 'provider': 'electronhub'}
+                                )
+                                
                     # Normalize finish reasons
                     if finish_reason in ["max_tokens", "max_length"]:
                         finish_reason = "length"
@@ -1781,10 +2386,18 @@ class UnifiedClient:
                     raise UnifiedClientError(f"{provider} SDK error: {e}")
         else:
             # Use HTTP API with retry logic
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
+            if headers is None:
+                headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json"
+                }
+            
+            # Add safety-related headers for providers that support them
+            if disable_safety:
+                # OpenRouter specific safety settings
+                if provider == "openrouter" and "X-Safe-Mode" not in headers:
+                    headers['X-Safe-Mode'] = 'false'
+                    logger.info(f"🔓 {provider} Safety: Disabled via X-Safe-Mode header")
             
             # Some providers need special headers
             if provider == 'zhipu':
@@ -1799,6 +2412,15 @@ class UnifiedClient:
                 "temperature": temperature,
                 "max_tokens": max_tokens
             }
+            
+            # Add safety parameters for compatible providers
+            if disable_safety:
+                if provider in ["openai", "groq", "fireworks", "together"]:
+                    data["moderation"] = False
+                    logger.info(f"🔓 {provider} Safety: Moderation disabled")
+                elif provider == "poe":
+                    data["safe_mode"] = False
+                    logger.info(f"🔓 {provider} Safety: Safe mode disabled")
             
             for attempt in range(max_retries):
                 try:
@@ -1840,6 +2462,20 @@ class UnifiedClient:
                     content = choices[0].get("message", {}).get("content", "")
                     finish_reason = choices[0].get("finish_reason", "stop")
                     
+                    # ElectronHub truncation detection (already in HTTP branch)
+                    if provider == "electronhub" and content:
+                        # Additional validation for ElectronHub responses
+                        if len(content) < 50 and "cannot" in content.lower():
+                            # Very short response with "cannot" - likely refused
+                            finish_reason = "content_filter"
+                            logger.warning(f"ElectronHub likely refused content: {content[:100]}")
+                        elif finish_reason == "stop":
+                            # Check if content looks truncated despite "stop" status
+                            if self._detect_silent_truncation(content, messages, self.context):
+                                finish_reason = "length"
+                                logger.warning("ElectronHub reported 'stop' but content appears truncated")
+                                print(f"🔍 ElectronHub: Detected silent truncation despite 'stop' status")                    
+                    
                     usage = json_resp.get("usage")
                     if usage:
                         usage = {
@@ -1865,6 +2501,301 @@ class UnifiedClient:
                     logger.error(f"{provider} API error after all retries: {e}")
                     raise UnifiedClientError(f"{provider} API error: {e}")
     
+    # Provider-specific implementations using generic handler
+    def _send_yi(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to Yi API"""
+        base_url = os.getenv("YI_API_BASE_URL", "https://api.01.ai/v1")
+        return self._send_openai_compatible(
+            messages, temperature, max_tokens,
+            base_url=base_url,
+            response_name=response_name,
+            provider="yi"
+        )
+    
+    def _send_qwen(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to Qwen API"""
+        return self._send_openai_compatible(
+            messages, temperature, max_tokens,
+            base_url="https://dashscope.aliyuncs.com/api/v1",
+            response_name=response_name,
+            provider="qwen"
+        )
+    
+    def _send_baichuan(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to Baichuan API"""
+        return self._send_openai_compatible(
+            messages, temperature, max_tokens,
+            base_url="https://api.baichuan-ai.com/v1",
+            response_name=response_name,
+            provider="baichuan"
+        )
+    
+    def _send_zhipu(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to Zhipu AI (GLM/ChatGLM)"""
+        return self._send_openai_compatible(
+            messages, temperature, max_tokens,
+            base_url="https://open.bigmodel.cn/api/paas/v4",
+            response_name=response_name,
+            provider="zhipu"
+        )
+    
+    def _send_moonshot(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to Moonshot API"""
+        return self._send_openai_compatible(
+            messages, temperature, max_tokens,
+            base_url="https://api.moonshot.cn/v1",
+            response_name=response_name,
+            provider="moonshot"
+        )
+    
+    def _send_groq(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to Groq API"""
+        return self._send_openai_compatible(
+            messages, temperature, max_tokens,
+            base_url=os.getenv("GROQ_API_URL", "https://api.groq.com/openai/v1"),
+            response_name=response_name,
+            provider="groq"
+        )
+    
+    def _send_baidu(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to Baidu Ernie API"""
+        # Baidu ERNIE has a specific auth flow - this is simplified
+        return self._send_openai_compatible(
+            messages, temperature, max_tokens,
+            base_url="https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop",
+            response_name=response_name,
+            provider="baidu"
+        )
+    
+    def _send_tencent(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to Tencent Hunyuan API"""
+        return self._send_openai_compatible(
+            messages, temperature, max_tokens,
+            base_url="https://hunyuan.cloud.tencent.com/v1",
+            response_name=response_name,
+            provider="tencent"
+        )
+    
+    def _send_iflytek(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to iFLYTEK Spark API"""
+        return self._send_openai_compatible(
+            messages, temperature, max_tokens,
+            base_url="https://spark-api.xf-yun.com/v1",
+            response_name=response_name,
+            provider="iflytek"
+        )
+    
+    def _send_bytedance(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to ByteDance Doubao API"""
+        return self._send_openai_compatible(
+            messages, temperature, max_tokens,
+            base_url="https://maas-api.vercel.app/v1",
+            response_name=response_name,
+            provider="bytedance"
+        )
+    
+    def _send_minimax(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to MiniMax API"""
+        return self._send_openai_compatible(
+            messages, temperature, max_tokens,
+            base_url="https://api.minimax.chat/v1",
+            response_name=response_name,
+            provider="minimax"
+        )
+    
+    def _send_sensenova(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to SenseNova API"""
+        return self._send_openai_compatible(
+            messages, temperature, max_tokens,
+            base_url="https://api.sensenova.cn/v1",
+            response_name=response_name,
+            provider="sensenova"
+        )
+    
+    def _send_internlm(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to InternLM API"""
+        return self._send_openai_compatible(
+            messages, temperature, max_tokens,
+            base_url="https://api.internlm.org/v1",
+            response_name=response_name,
+            provider="internlm"
+        )
+    
+    def _send_tii(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to TII Falcon API"""
+        return self._send_openai_compatible(
+            messages, temperature, max_tokens,
+            base_url="https://api.tii.ae/v1",
+            response_name=response_name,
+            provider="tii"
+        )
+    
+    def _send_microsoft(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to Microsoft API (Phi, Orca)"""
+        # Microsoft models often through Azure
+        return self._send_openai_compatible(
+            messages, temperature, max_tokens,
+            base_url="https://api.microsoft.com/v1",
+            response_name=response_name,
+            provider="microsoft"
+        )
+    
+    def _send_azure(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to Azure OpenAI"""
+        endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", "https://YOUR-RESOURCE.openai.azure.com")
+        api_version = os.getenv("AZURE_API_VERSION", "2024-02-01")
+        
+        headers = {
+            "api-key": self.api_key,
+            "Content-Type": "application/json"
+        }
+        
+        # Azure uses a different URL structure
+        base_url = f"{endpoint}/openai/deployments/{self.model}"
+        url = f"{base_url}/chat/completions?api-version={api_version}"
+        
+        data = {
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens
+        }
+        
+        try:
+            resp = requests.post(
+                url,
+                headers=headers,
+                json=data,
+                timeout=self.request_timeout
+            )
+            
+            if resp.status_code != 200:
+                raise UnifiedClientError(f"Azure OpenAI error: {resp.status_code} - {resp.text}")
+            
+            json_resp = resp.json()
+            content = json_resp['choices'][0]['message']['content']
+            finish_reason = json_resp['choices'][0]['finish_reason']
+            
+            return UnifiedResponse(
+                content=content,
+                finish_reason=finish_reason,
+                raw_response=json_resp
+            )
+            
+        except Exception as e:
+            logger.error(f"Azure OpenAI error: {e}")
+            raise UnifiedClientError(f"Azure OpenAI error: {e}")
+    
+    def _send_google_palm(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to Google PaLM API"""
+        # PaLM is being replaced by Gemini, but included for completeness
+        return self._send_gemini(messages, temperature, max_tokens, response_name)
+    
+    def _send_alephalpha(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to Aleph Alpha API"""
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        # Format messages for Aleph Alpha
+        prompt = self._messages_to_prompt(messages)
+        
+        data = {
+            "model": self.model,
+            "prompt": prompt,
+            "maximum_tokens": max_tokens,
+            "temperature": temperature
+        }
+        
+        try:
+            resp = requests.post(
+                "https://api.aleph-alpha.com/complete",
+                headers=headers,
+                json=data,
+                timeout=self.request_timeout
+            )
+            
+            if resp.status_code != 200:
+                raise UnifiedClientError(f"Aleph Alpha error: {resp.status_code} - {resp.text}")
+            
+            json_resp = resp.json()
+            content = json_resp['completions'][0]['completion']
+            
+            return UnifiedResponse(
+                content=content,
+                finish_reason='stop',
+                raw_response=json_resp
+            )
+            
+        except Exception as e:
+            logger.error(f"Aleph Alpha error: {e}")
+            raise UnifiedClientError(f"Aleph Alpha error: {e}")
+    
+    def _send_databricks(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to Databricks API"""
+        workspace_url = os.getenv("DATABRICKS_API_URL", "https://YOUR-WORKSPACE.databricks.com")
+        
+        return self._send_openai_compatible(
+            messages, temperature, max_tokens,
+            base_url=f"{workspace_url}/serving/endpoints",
+            response_name=response_name,
+            provider="databricks"
+        )
+    
+    def _send_huggingface(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to HuggingFace Inference API"""
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        # Format messages for HuggingFace
+        prompt = self._messages_to_prompt(messages)
+        
+        data = {
+            "inputs": prompt,
+            "parameters": {
+                "max_new_tokens": max_tokens,
+                "temperature": temperature,
+                "return_full_text": False
+            }
+        }
+        
+        try:
+            resp = requests.post(
+                f"https://api-inference.huggingface.co/models/{self.model}",
+                headers=headers,
+                json=data,
+                timeout=self.request_timeout
+            )
+            
+            if resp.status_code != 200:
+                raise UnifiedClientError(f"HuggingFace error: {resp.status_code} - {resp.text}")
+            
+            json_resp = resp.json()
+            content = json_resp[0]['generated_text']
+            
+            return UnifiedResponse(
+                content=content,
+                finish_reason='stop',
+                raw_response=json_resp
+            )
+            
+        except Exception as e:
+            logger.error(f"HuggingFace error: {e}")
+            raise UnifiedClientError(f"HuggingFace error: {e}")
+    
+    def _send_salesforce(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send request to Salesforce CodeGen API"""
+        api_url = os.getenv("SALESFORCE_API_URL", "https://api.salesforce.com/v1")
+        
+        return self._send_openai_compatible(
+            messages, temperature, max_tokens,
+            base_url=api_url,
+            response_name=response_name,
+            provider="salesforce"
+        )
+    
     # Image handling methods
     def send_image(self, messages: List[Dict[str, Any]], image_data: Any,
                   temperature: Optional[float] = None, 
@@ -1876,6 +2807,8 @@ class UnifiedClient:
         
         REFACTORED VERSION with:
         - Proper o-series model support (o1, o3, o4, etc.)
+        - Support for new providers with vision capabilities
+        - Better error handling and fallbacks
         - GUI value respect for temperature and tokens
         - Enhanced error handling
         - Better logging
@@ -1930,11 +2863,51 @@ class UnifiedClient:
             messages = self._apply_pure_reinforcement(messages)
             
             # Use proper naming for duplicate detection
-            payload_name, response_name = self._get_file_names(messages, context)
+            payload_name, response_name = self._get_file_names(messages, context=self.context)
             
             # Log the request details
             logger.info(f"Sending image request to {self.client_type} ({self.model})")
             logger.debug(f"Temperature: {temperature}, Max tokens: {max_tokens or max_completion_tokens}")
+            
+            # Check provider vision support with latest models (2025)
+            vision_providers = {
+                'openai': ['gpt-4-vision', 'gpt-4-turbo', 'gpt-4o', 'gpt-4o-mini', 'gpt-4.5', 'gpt-4.1', 
+                          'gpt-4.1-mini', 'o1-vision', 'o3', 'o3-mini', 'o3-pro', 'o4', 'o4-mini'],
+                'anthropic': ['claude-3', 'claude-3.5', 'claude-3-opus', 'claude-3.5-sonnet', 'claude-3-haiku', 
+                             'claude-3.5-haiku', 'claude-3.7-sonnet', 'claude-4-opus', 'claude-4-sonnet',
+                             'claude-opus-4', 'claude-sonnet-4'],
+                'gemini': ['gemini-pro-vision', 'gemini-1.5', 'gemini-2.0', 'gemini-2.5', 'gemini-flash', 
+                          'gemini-flash-lite', 'gemini-2.5-pro', 'gemini-2.5-flash'],
+                'poe': ['claude-3-opus', 'claude-4-opus', 'claude-4-sonnet', 'gpt-4', 'gpt-4o', 'gpt-4.5', 
+                       'gemini-pro', 'claude-3.5-sonnet', 'gemini-2.5-pro'],
+                'openrouter': ['any'],  # Supports routing to any vision model
+                'groq': ['llava', 'vision'],  # Groq supports some vision models
+                'fireworks': ['firellava', 'vision'],  # Fireworks vision models
+                'together': ['llava', 'fuyu', 'cogvlm'],
+                'replicate': ['blip', 'clip', 'llava', 'minigpt4'],
+                'huggingface': ['vision-transformer', 'vit', 'clip', 'blip'],
+                'deepseek': ['deepseek-vl', 'deepseek-r1-vl'],  # DeepSeek vision language models
+                'qwen': ['qwen-vl', 'qwen2-vl', 'qwen2.5-vl'],  # Qwen vision models
+                'yi': ['yi-vl'],  # Yi vision models
+                'moonshot': ['moonshot-v1-vision'],
+                'electronhub': ['any'],  # Can route to any vision model
+                'perplexity': [],  # Perplexity doesn't support direct image input
+                'cohere': ['aya-vision'],  # Cohere's multimodal Aya Vision
+                'tii': ['falcon-2-11b'],  # Falcon 2 with vision support
+                'xai': ['grok-3', 'grok-vision'],  # Grok models with vision
+                'meta': ['llama-4-vision'],  # Meta's Llama 4 with vision
+            }
+            
+            # Check if provider supports vision
+            if self.client_type not in vision_providers:
+                raise UnifiedClientError(f"Provider {self.client_type} does not support image input")
+            
+            # Check if specific model supports vision
+            supported_models = vision_providers.get(self.client_type, [])
+            if supported_models != ['any']:
+                model_supported = any(model in self.model.lower() for model in supported_models)
+                if not model_supported:
+                    raise UnifiedClientError(f"Model {self.model} does not support image input")
             
             # Route to appropriate handler based on client type
             if self.client_type == 'gemini':
@@ -1943,13 +2916,21 @@ class UnifiedClient:
             elif self.client_type == 'openai':
                 response = self._send_openai_image(messages, image_base64, temperature, 
                                              max_tokens, max_completion_tokens, response_name)
-
             elif self.client_type == 'anthropic':
                 response = self._send_anthropic_image(messages, image_base64, temperature, 
                                                     max_tokens or max_completion_tokens, response_name)
             elif self.client_type == 'electronhub':
                 response = self._send_electronhub_image(messages, image_base64, temperature, 
                                                       max_tokens or max_completion_tokens, response_name)
+            elif self.client_type == 'poe':
+                response = self._send_poe_image(messages, image_base64, temperature,
+                                              max_tokens or max_completion_tokens, response_name)
+            elif self.client_type == 'openrouter':
+                response = self._send_openrouter_image(messages, image_base64, temperature,
+                                                     max_tokens or max_completion_tokens, response_name)
+            elif self.client_type == 'cohere':
+                response = self._send_cohere_image(messages, image_base64, temperature,
+                                                 max_tokens or max_completion_tokens, response_name)
             else:
                 raise UnifiedClientError(f"Image input not supported for {self.client_type}")
             
@@ -1964,6 +2945,16 @@ class UnifiedClient:
             # Handle empty responses
             if not response.content or response.content.strip() == "":
                 logger.warning(f"Empty response from {self.client_type}")
+                
+                # Log empty image responses
+                self._log_truncation_failure(
+                    messages=messages,
+                    response_content="",
+                    finish_reason='error',
+                    context=context or 'image_translation',
+                    error_details={'error': 'empty_image_response'}
+                )
+                
                 fallback = self._handle_empty_result(messages, context, "empty_image_response")
                 return fallback, 'error'
             
@@ -1971,6 +2962,15 @@ class UnifiedClient:
             if response.is_truncated:
                 logger.warning(f"Image response was truncated: {response.finish_reason}")
                 print(f"⚠️ Image response truncated (finish_reason: {response.finish_reason})")
+                
+                # Log image truncation failures
+                self._log_truncation_failure(
+                    messages=messages,
+                    response_content=response.content,
+                    finish_reason=response.finish_reason,
+                    context=context or 'image_translation',
+                    error_details=response.error_details
+                )               
                 
             return response.content, response.finish_reason
                 
@@ -1995,7 +2995,15 @@ class UnifiedClient:
         model_lower = self.model.lower()
         
         # Check for specific patterns
-        if 'o1-preview' in model_lower:
+        if 'o1-preview' in model_lower or 'o1-mini' in model_lower:
+            return True
+        
+        # Check for o3 models
+        if 'o3-mini' in model_lower or 'o3-pro' in model_lower:
+            return True
+        
+        # Check for o4 models
+        if 'o4-mini' in model_lower:
             return True
         
         # Check if it starts with o followed by a digit
@@ -2035,7 +3043,8 @@ class UnifiedClient:
                 self.model,
                 safety_settings=safety_settings if safety_settings else None
             )
-             # SAVE SAFETY CONFIGURATION FOR VERIFICATION
+            
+            # SAVE SAFETY CONFIGURATION FOR VERIFICATION
             if safety_settings:
                 safety_status = "DISABLED - All categories set to BLOCK_NONE"
                 readable_safety = {
@@ -2071,7 +3080,6 @@ class UnifiedClient:
             try:
                 with open(config_path, 'w', encoding='utf-8') as f:
                     json.dump(config_data, f, indent=2)
-               # print(f"📄 Image safety config saved: {config_filename}")
             except Exception as e:
                 logger.warning(f"Could not save image safety config: {e}")    
                 
@@ -2138,115 +3146,109 @@ class UnifiedClient:
                 content="",
                 finish_reason='error',
                 error_details={'error': error_msg}
-        )
-            
-        except Exception as e:
-            logger.error(f"Gemini image API error: {e}")
-            raise UnifiedClientError(f"Gemini image API error: {e}")
-    
+            )
 
     def _send_openai_image(self, messages, image_base64, temperature, 
-                              max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
-            """
-            Refactored OpenAI image handler with o-series model support
-            """
-            try:
-                # Format messages with image
-                vision_messages = []
-                
-                for msg in messages:
-                    if msg['role'] == 'user':
-                        # Add image to user message
-                        vision_messages.append({
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": msg['content']},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/jpeg;base64,{image_base64}"
-                                    }
+                          max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
+        """
+        Refactored OpenAI image handler with o-series model support
+        """
+        try:
+            # Format messages with image
+            vision_messages = []
+            
+            for msg in messages:
+                if msg['role'] == 'user':
+                    # Add image to user message
+                    vision_messages.append({
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": msg['content']},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{image_base64}"
                                 }
-                            ]
-                        })
-                    else:
-                        vision_messages.append(msg)
+                            }
+                        ]
+                    })
+                else:
+                    vision_messages.append(msg)
+            
+            # Build API parameters
+            api_params = {
+                "model": self.model,
+                "messages": vision_messages,
+                "temperature": temperature
+            }
+            
+            # Use the appropriate token parameter based on model type
+            if self._is_o_series_model():
+                # o-series models use max_completion_tokens
+                token_limit = max_completion_tokens or max_tokens or 16384  # Higher default for vision
+                api_params["max_completion_tokens"] = token_limit
+                logger.info(f"Using max_completion_tokens={token_limit} for o-series vision model {self.model}")
+            else:
+                # Regular models use max_tokens
+                if max_tokens:
+                    api_params["max_tokens"] = max_tokens
+                    logger.debug(f"Using max_tokens: {max_tokens} for {self.model}")
+            
+            logger.info(f"Calling OpenAI vision API with model: {self.model}")
+            
+            response = openai.chat.completions.create(**api_params)
+            
+            content = response.choices[0].message.content
+            finish_reason = response.choices[0].finish_reason
+            
+            usage = None
+            if hasattr(response, 'usage'):
+                usage = {
+                    'prompt_tokens': response.usage.prompt_tokens,
+                    'completion_tokens': response.usage.completion_tokens,
+                    'total_tokens': response.usage.total_tokens
+                }
+                logger.debug(f"Token usage: {usage}")
+            
+            return UnifiedResponse(
+                content=content,
+                finish_reason=finish_reason,
+                usage=usage,
+                raw_response=response
+            )
+          
+        except Exception as e:
+            error_msg = str(e)
+            
+            # Check for specific o-series model errors
+            if "max_tokens" in error_msg and "not supported" in error_msg:
+                logger.error(f"Token parameter error for {self.model}: {error_msg}")
+                logger.info("Retrying without token limits...")
                 
-                # Build API parameters
-                api_params = {
+                # Build new params without token limits
+                retry_params = {
                     "model": self.model,
                     "messages": vision_messages,
                     "temperature": temperature
                 }
                 
-                # Use the appropriate token parameter based on model type
-                if self._is_o_series_model():
-                    # o-series models use max_completion_tokens
-                    token_limit = max_completion_tokens or max_tokens or 16384  # Higher default for vision
-                    api_params["max_completion_tokens"] = token_limit
-                    logger.info(f"Using max_completion_tokens={token_limit} for o-series vision model {self.model}")
-                else:
-                    # Regular models use max_tokens
-                    if max_tokens:
-                        api_params["max_tokens"] = max_tokens
-                        logger.debug(f"Using max_tokens: {max_tokens} for {self.model}")
-                
-                logger.info(f"Calling OpenAI vision API with model: {self.model}")
-                
-                response = openai.chat.completions.create(**api_params)
-                
-                content = response.choices[0].message.content
-                finish_reason = response.choices[0].finish_reason
-                
-                usage = None
-                if hasattr(response, 'usage'):
-                    usage = {
-                        'prompt_tokens': response.usage.prompt_tokens,
-                        'completion_tokens': response.usage.completion_tokens,
-                        'total_tokens': response.usage.total_tokens
-                    }
-                    logger.debug(f"Token usage: {usage}")
-                
-                return UnifiedResponse(
-                    content=content,
-                    finish_reason=finish_reason,
-                    usage=usage,
-                    raw_response=response
-                )
-              
-            except Exception as e:
-                error_msg = str(e)
-                
-                # Check for specific o-series model errors
-                if "max_tokens" in error_msg and "not supported" in error_msg:
-                    logger.error(f"Token parameter error for {self.model}: {error_msg}")
-                    logger.info("Retrying without token limits...")
+                try:
+                    response = openai.chat.completions.create(**retry_params)
+                    content = response.choices[0].message.content
+                    finish_reason = response.choices[0].finish_reason
                     
-                    # Build new params without token limits
-                    retry_params = {
-                        "model": self.model,
-                        "messages": vision_messages,
-                        "temperature": temperature
-                    }
-                    
-                    try:
-                        response = openai.chat.completions.create(**retry_params)
-                        content = response.choices[0].message.content
-                        finish_reason = response.choices[0].finish_reason
-                        
-                        return UnifiedResponse(
-                            content=content,
-                            finish_reason=finish_reason,
-                            usage=None,
-                            raw_response=response
-                        )
-                    except Exception as retry_error:
-                        logger.error(f"Retry failed: {retry_error}")
-                        raise UnifiedClientError(f"OpenAI Vision API error: {retry_error}")
-                
-                logger.error(f"OpenAI Vision API error: {e}")
-                raise UnifiedClientError(f"OpenAI Vision API error: {e}")
-        
+                    return UnifiedResponse(
+                        content=content,
+                        finish_reason=finish_reason,
+                        usage=None,
+                        raw_response=response
+                    )
+                except Exception as retry_error:
+                    logger.error(f"Retry failed: {retry_error}")
+                    raise UnifiedClientError(f"OpenAI Vision API error: {retry_error}")
+            
+            logger.error(f"OpenAI Vision API error: {e}")
+            raise UnifiedClientError(f"OpenAI Vision API error: {e}")
     
     def _send_anthropic_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send image request to Anthropic API"""
@@ -2445,563 +3447,636 @@ class UnifiedClient:
                     continue
                 logger.error(f"ElectronHub Vision API error after all retries: {e}")
                 raise UnifiedClientError(f"ElectronHub Vision API error: {e}")
-   
-    def generate_image(self, prompt: str, size: str = "1024x1024", n: int = 1, 
-                      quality: str = "standard", style: str = "vivid", 
-                      model: str = "dall-e-3") -> Dict[str, Any]:
-        """
-        Generate images using DALL-E
-        
-        Args:
-            prompt: Text description of the image to generate
-            size: Image size (1024x1024, 1024x1792, 1792x1024 for DALL-E 3)
-            n: Number of images to generate (1 for DALL-E 3, 1-10 for DALL-E 2)
-            quality: "standard" or "hd" (DALL-E 3 only)
-            style: "vivid" or "natural" (DALL-E 3 only)
-            model: "dall-e-3" or "dall-e-2"
-        
-        Returns:
-            Dict with 'images' list containing URLs or base64 data
-        """
-        if self.client_type != 'openai':
-            raise UnifiedClientError(f"DALL-E is only available for OpenAI clients, not {self.client_type}")
-        
-        if not openai:
-            raise UnifiedClientError("OpenAI library not installed. Install with: pip install openai")
-        
-        try:
-            # Initialize OpenAI client if needed
-            client = openai.OpenAI(api_key=self.api_key, timeout=float(self.request_timeout))
-            
-            # Adjust parameters based on model
-            params = {
-                "model": model,
-                "prompt": prompt,
-                "size": size,
-                "n": n
-            }
-            
-            if model == "dall-e-3":
-                params["quality"] = quality
-                params["style"] = style
-                if n > 1:
-                    logger.warning("DALL-E 3 only supports n=1, adjusting")
-                    params["n"] = 1
-            
-            # Make the API call
-            response = client.images.generate(**params)
-            
-            # Extract image data
-            images = []
-            for img_data in response.data:
-                image_info = {
-                    "url": img_data.url if hasattr(img_data, 'url') else None,
-                    "b64_json": img_data.b64_json if hasattr(img_data, 'b64_json') else None,
-                    "revised_prompt": img_data.revised_prompt if hasattr(img_data, 'revised_prompt') else None
-                }
-                images.append(image_info)
-            
-            # Track stats
-            self.stats['total_requests'] += 1
-            
-            return {
-                "images": images,
-                "model": model,
-                "created": datetime.now().isoformat()
-            }
-            
-        except openai.OpenAIError as e:
-            logger.error(f"DALL-E generation error: {e}")
-            self.stats['errors']['dalle_generate'] = self.stats['errors'].get('dalle_generate', 0) + 1
-            raise UnifiedClientError(f"DALL-E generation error: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected DALL-E error: {e}")
-            raise UnifiedClientError(f"Unexpected DALL-E error: {e}")
     
-    def edit_image(self, image: Any, mask: Any, prompt: str, 
-                   size: str = "1024x1024", n: int = 1, model: str = "dall-e-2") -> Dict[str, Any]:
-        """
-        Edit images using DALL-E (image editing is primarily supported by dall-e-2)
+    def _send_poe_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send image request to Poe API"""
+        # Poe supports vision through certain bots
+        # Strip 'poe/' prefix from model name
+        poe_model = self.model.replace('poe/', '', 1)
         
-        Args:
-            image: PIL Image, file path, or bytes of the image to edit
-            mask: PIL Image, file path, or bytes of the mask (transparent areas will be edited)
-            prompt: Text description of what should be generated in the masked area
-            size: Output size (256x256, 512x512, or 1024x1024)
-            n: Number of images to generate (1-10)
-            model: Model to use (default: dall-e-2, but configurable for future models)
-        
-        Returns:
-            Dict with 'images' list containing URLs or base64 data
-        """
-        if self.client_type != 'openai':
-            raise UnifiedClientError(f"DALL-E is only available for OpenAI clients, not {self.client_type}")
-        
-        if not openai:
-            raise UnifiedClientError("OpenAI library not installed. Install with: pip install openai")
-        
-        try:
-            # Initialize OpenAI client
-            client = openai.OpenAI(api_key=self.api_key, timeout=float(self.request_timeout))
-            
-            # Convert image to bytes if needed
-            logger.info(f"Preparing image for DALL-E edit (type: {type(image)})")
-            image_bytes = self._prepare_image_bytes(image, "image")
-            
-            logger.info(f"Preparing mask for DALL-E edit (type: {type(mask)})")
-            mask_bytes = self._prepare_image_bytes(mask, "mask")
-            
-            # Log details for debugging
-            logger.debug(f"Image bytes size: {len(image_bytes.getvalue())} bytes")
-            logger.debug(f"Mask bytes size: {len(mask_bytes.getvalue())} bytes")
-            logger.debug(f"Using model: {model}, size: {size}")
-            
-            # Make the API call with specified model
-            response = client.images.edit(
-                model=model,  # Use the configurable model
-                image=image_bytes,
-                mask=mask_bytes,
-                prompt=prompt,
-                size=size,
-                n=n
-            )
-            
-            # Extract image data
-            images = []
-            for img_data in response.data:
-                image_info = {
-                    "url": img_data.url if hasattr(img_data, 'url') else None,
-                    "b64_json": img_data.b64_json if hasattr(img_data, 'b64_json') else None
-                }
-                images.append(image_info)
-            
-            # Track stats
-            self.stats['total_requests'] += 1
-            
-            logger.info(f"DALL-E edit successful, received {len(images)} images")
-            
-            return {
-                "images": images,
-                "model": model,
-                "operation": "edit",
-                "created": datetime.now().isoformat()
-            }
-            
-        except openai.OpenAIError as e:
-            logger.error(f"DALL-E edit error with model {model}: {e}")
-            self.stats['errors']['dalle_edit'] = self.stats['errors'].get('dalle_edit', 0) + 1
-            raise UnifiedClientError(f"DALL-E edit error: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected DALL-E edit error with model {model}: {e}")
-            raise UnifiedClientError(f"Unexpected DALL-E edit error: {e}")
-    
-    def create_variation(self, image: Any, size: str = "1024x1024", n: int = 1) -> Dict[str, Any]:
-        """
-        Create variations of an image using DALL-E 2
-        
-        Args:
-            image: PIL Image, file path, or bytes of the image to create variations of
-            size: Output size (256x256, 512x512, or 1024x1024)
-            n: Number of variations to generate (1-10)
-        
-        Returns:
-            Dict with 'images' list containing URLs or base64 data
-        """
-        if self.client_type != 'openai':
-            raise UnifiedClientError(f"DALL-E is only available for OpenAI clients, not {self.client_type}")
-        
-        if not openai:
-            raise UnifiedClientError("OpenAI library not installed. Install with: pip install openai")
-        
-        try:
-            # Initialize OpenAI client
-            client = openai.OpenAI(api_key=self.api_key, timeout=float(self.request_timeout))
-            
-            # Convert image to bytes if needed
-            image_bytes = self._prepare_image_bytes(image, "image")
-            
-            # Make the API call
-            response = client.images.create_variation(
-                model="dall-e-2",
-                image=image_bytes,
-                size=size,
-                n=n
-            )
-            
-            # Extract image data
-            images = []
-            for img_data in response.data:
-                image_info = {
-                    "url": img_data.url if hasattr(img_data, 'url') else None,
-                    "b64_json": img_data.b64_json if hasattr(img_data, 'b64_json') else None
-                }
-                images.append(image_info)
-            
-            # Track stats
-            self.stats['total_requests'] += 1
-            
-            return {
-                "images": images,
-                "model": "dall-e-2",
-                "operation": "variation",
-                "created": datetime.now().isoformat()
-            }
-            
-        except openai.OpenAIError as e:
-            logger.error(f"DALL-E variation error: {e}")
-            self.stats['errors']['dalle_variation'] = self.stats['errors'].get('dalle_variation', 0) + 1
-            raise UnifiedClientError(f"DALL-E variation error: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected DALL-E variation error: {e}")
-            raise UnifiedClientError(f"Unexpected DALL-E variation error: {e}")
-    
-    def _prepare_image_bytes(self, image: Any, image_type: str = "image") -> io.BytesIO:
-        """
-        Convert various image inputs to bytes for DALL-E API
-        
-        Args:
-            image: PIL Image, file path string, or bytes
-            image_type: "image" or "mask" for error messages
-        
-        Returns:
-            BytesIO object ready for API
-        """
-        try:
-            if isinstance(image, str):
-                # File path
-                with Image.open(image) as img:
-                    img_bytes = io.BytesIO()
-                    # Always save as PNG for DALL-E
-                    if img.mode == 'RGBA':
-                        img.save(img_bytes, format='PNG')
-                    else:
-                        # Convert to RGB for non-transparent images
-                        if img.mode != 'RGB':
-                            img = img.convert('RGB')
-                        # Save as PNG (DALL-E prefers PNG)
-                        img.save(img_bytes, format='PNG')
-                    img_bytes.seek(0)
-                    # Set proper name for the BytesIO object
-                    img_bytes.name = f'{image_type}.png'
-                    return img_bytes
-            
-            elif isinstance(image, bytes):
-                # Already bytes - load and ensure it's PNG
-                img = Image.open(io.BytesIO(image))
-                img_bytes = io.BytesIO()
-                if img.mode == 'RGBA':
-                    img.save(img_bytes, format='PNG')
-                else:
-                    if img.mode != 'RGB':
-                        img = img.convert('RGB')
-                    img.save(img_bytes, format='PNG')
-                img_bytes.seek(0)
-                img_bytes.name = f'{image_type}.png'
-                return img_bytes
-            
-            elif hasattr(image, 'save'):
-                # PIL Image or similar
-                img_bytes = io.BytesIO()
-                # Ensure RGBA for masks, RGB for images
-                if image_type == "mask":
-                    if image.mode != 'RGBA' and image.mode != 'L':
-                        # Convert to RGBA for masks
-                        if image.mode == 'L':
-                            # Grayscale mask - keep as is
-                            image.save(img_bytes, format='PNG')
-                        else:
-                            image = image.convert('RGBA')
-                            image.save(img_bytes, format='PNG')
-                    else:
-                        image.save(img_bytes, format='PNG')
-                else:
-                    # Regular image
-                    if image.mode == 'RGBA':
-                        image.save(img_bytes, format='PNG')
-                    else:
-                        if image.mode != 'RGB':
-                            image = image.convert('RGB')
-                        image.save(img_bytes, format='PNG')
-                
-                img_bytes.seek(0)
-                img_bytes.name = f'{image_type}.png'
-                return img_bytes
-            
-            elif isinstance(image, io.BytesIO):
-                # Already BytesIO - ensure it has a name
-                image.seek(0)
-                # Load and re-save as PNG to ensure format
-                img = Image.open(image)
-                img_bytes = io.BytesIO()
-                if img.mode == 'RGBA' or (image_type == "mask" and img.mode == 'L'):
-                    img.save(img_bytes, format='PNG')
-                else:
-                    if img.mode != 'RGB':
-                        img = img.convert('RGB')
-                    img.save(img_bytes, format='PNG')
-                img_bytes.seek(0)
-                img_bytes.name = f'{image_type}.png'
-                return img_bytes
-            
-            else:
-                raise ValueError(f"Unsupported {image_type} type: {type(image)}")
-                
-        except Exception as e:
-            raise UnifiedClientError(f"Failed to prepare {image_type} for DALL-E: {e}")
-    
-    def download_dalle_image(self, url: str, save_path: Optional[str] = None) -> bytes:
-        """
-        Download image from DALL-E URL
-        
-        Args:
-            url: The image URL from DALL-E response
-            save_path: Optional path to save the image
-            
-        Returns:
-            Image bytes
-        """
-        try:
-            response = requests.get(url, timeout=30)
-            response.raise_for_status()
-            
-            image_bytes = response.content
-            
-            if save_path:
-                with open(save_path, 'wb') as f:
-                    f.write(image_bytes)
-                logger.info(f"Saved DALL-E image to: {save_path}")
-            
-            return image_bytes
-            
-        except requests.RequestException as e:
-            raise UnifiedClientError(f"Failed to download DALL-E image: {e}")
-
-            
-    # Additional provider methods for extended model support
-    def _send_yi(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to Yi API (01.AI)
-        
-        Note: If you're using a custom Yi deployment or different endpoint,
-        you may need to modify the base_url. The official Yi API is at:
-        https://api.lingyiwanwu.com/v1
-        
-        Some alternative endpoints:
-        - Local deployment: http://localhost:8000/v1
-        - Custom cloud: https://your-yi-endpoint.com/v1
-        
-        IMPORTANT: Yi API requests will timeout based on your GUI settings:
-        - With "Auto-retry Slow Chunks" enabled: Your configured timeout (e.g., 900s)
-        - Without it: 1 hour default timeout
-        This prevents hanging on slow/unresponsive endpoints.
-        """
-        # Check for custom Yi endpoint in environment
-        custom_yi_url = os.getenv("YI_API_BASE_URL")
-        base_url = custom_yi_url if custom_yi_url else "https://api.lingyiwanwu.com/v1"
-        
-        if custom_yi_url:
-            logger.info(f"Using custom Yi API endpoint: {base_url}")
-        
-        return self._send_openai_compatible(
-            messages, temperature, max_tokens,
-            base_url=base_url,
-            response_name=response_name,
-            provider="yi"
-        )
-    
-    def _send_qwen(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to Qwen API (Alibaba)"""
-        return self._send_openai_compatible(
-            messages, temperature, max_tokens,
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-            response_name=response_name,
-            provider="qwen"
-        )
-    
-    def _send_baichuan(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to Baichuan API"""
-        return self._send_openai_compatible(
-            messages, temperature, max_tokens,
-            base_url="https://api.baichuan-ai.com/v1",
-            response_name=response_name,
-            provider="baichuan"
-        )
-    
-    def _send_zhipu(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to Zhipu AI (GLM models)"""
-        return self._send_openai_compatible(
-            messages, temperature, max_tokens,
-            base_url="https://open.bigmodel.cn/api/paas/v4",
-            response_name=response_name,
-            provider="zhipu"
-        )
-    
-    def _send_moonshot(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to Moonshot AI (Kimi)"""
-        return self._send_openai_compatible(
-            messages, temperature, max_tokens,
-            base_url="https://api.moonshot.cn/v1",
-            response_name=response_name,
-            provider="moonshot"
-        )
-    
-    def _send_groq(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to Groq API"""
-        return self._send_openai_compatible(
-            messages, temperature, max_tokens,
-            base_url="https://api.groq.com/openai/v1",
-            response_name=response_name,
-            provider="groq"
-        )
-    
-    def _send_baidu(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to Baidu ERNIE API"""
-        # Baidu has a different API structure, but we can try OpenAI-compatible endpoint
-        return self._send_openai_compatible(
-            messages, temperature, max_tokens,
-            base_url="https://aip.baidubce.com/rpc/2.0/ai_custom/v1",
-            response_name=response_name,
-            provider="baidu"
-        )
-    
-    def _send_tencent(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to Tencent Hunyuan API"""
-        return self._send_openai_compatible(
-            messages, temperature, max_tokens,
-            base_url="https://hunyuan.tencentcloudapi.com",
-            response_name=response_name,
-            provider="tencent"
-        )
-    
-    def _send_iflytek(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to iFLYTEK Spark API"""
-        return self._send_openai_compatible(
-            messages, temperature, max_tokens,
-            base_url="https://spark-api.xf-yun.com/v1",
-            response_name=response_name,
-            provider="iflytek"
-        )
-    
-    def _send_bytedance(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to ByteDance Doubao API"""
-        return self._send_openai_compatible(
-            messages, temperature, max_tokens,
-            base_url="https://ark.cn-beijing.volcanicengine.com/api/v3",
-            response_name=response_name,
-            provider="bytedance"
-        )
-    
-    def _send_minimax(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to MiniMax API"""
-        return self._send_openai_compatible(
-            messages, temperature, max_tokens,
-            base_url="https://api.minimax.chat/v1",
-            response_name=response_name,
-            provider="minimax"
-        )
-    
-    def _send_sensenova(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to SenseNova API"""
-        return self._send_openai_compatible(
-            messages, temperature, max_tokens,
-            base_url="https://api.sensenova.com/v1",
-            response_name=response_name,
-            provider="sensenova"
-        )
-    
-    def _send_internlm(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to InternLM API"""
-        return self._send_openai_compatible(
-            messages, temperature, max_tokens,
-            base_url="https://internlm-chat.intern-ai.org.cn/puyu/api/v1",
-            response_name=response_name,
-            provider="internlm"
-        )
-    
-    def _send_tii(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to TII Falcon API"""
-        return self._send_openai_compatible(
-            messages, temperature, max_tokens,
-            base_url="https://api.tii.ae/v1",
-            response_name=response_name,
-            provider="tii"
-        )
-    
-    def _send_microsoft(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to Microsoft Phi API"""
-        # Note: Phi models are often accessed through Azure OpenAI
-        return self._send_openai_compatible(
-            messages, temperature, max_tokens,
-            base_url="https://api.microsoft.com/v1",  # Placeholder - usually through Azure
-            response_name=response_name,
-            provider="microsoft"
-        )
-    
-    def _send_azure(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to Azure OpenAI"""
-        # Azure needs special handling - endpoint from environment
-        azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", "https://your-resource.openai.azure.com")
-        api_version = os.getenv("AZURE_API_VERSION", "2024-02-01")
-        
-        base_url = f"{azure_endpoint}/openai/deployments/{self.model}"
-        
-        # Azure uses different auth header
         headers = {
-            "api-key": self.api_key,
+            'Authorization': f'Bearer {self.api_key}',
+            'Content-Type': 'application/json'
+        }
+        
+        # Convert messages to text prompt
+        prompt = self._messages_to_prompt(messages)
+        
+        # Poe uses a different format for images
+        payload = {
+            'query': prompt,
+            'bot': poe_model,
+            'conversation_id': hashlib.md5(str(time.time()).encode()).hexdigest()[:16],
+            'attachments': [{
+                'type': 'image',
+                'data': f'data:image/jpeg;base64,{image_base64}'
+            }]
+        }
+        
+        if temperature is not None:
+            payload['temperature'] = temperature
+        if max_tokens:
+            payload['max_tokens'] = max_tokens
+        
+        # Check if safety settings are disabled
+        disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
+        if disable_safety:
+            payload['safe_mode'] = False
+        
+        base_url = os.getenv("POE_API_URL", "https://api.poe.com/bot")
+        
+        try:
+            resp = requests.post(
+                f"{base_url}/{poe_model}",
+                headers=headers,
+                json=payload,
+                timeout=self.request_timeout
+            )
+            
+            if resp.status_code != 200:
+                raise UnifiedClientError(f"Poe Vision API error: {resp.status_code} - {resp.text}")
+            
+            json_resp = resp.json()
+            content = json_resp.get("text", "") or json_resp.get("response", "")
+            finish_reason = json_resp.get("finish_reason", "stop")
+            
+            if finish_reason in ["max_tokens", "max_length"]:
+                finish_reason = "length"
+            
+            return UnifiedResponse(
+                content=content,
+                finish_reason=finish_reason,
+                raw_response=json_resp
+            )
+            
+        except Exception as e:
+            logger.error(f"Poe Vision API error: {e}")
+            raise UnifiedClientError(f"Poe Vision API error: {e}")
+    
+    def _send_openrouter_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send image request through OpenRouter"""
+        # OpenRouter uses OpenAI-compatible format
+        disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
+        
+        # Strip prefix
+        model_name = self.model
+        for prefix in ['or/', 'openrouter/']:
+            if model_name.startswith(prefix):
+                model_name = model_name[len(prefix):]
+                break
+        
+        # Format messages with image
+        vision_messages = []
+        for msg in messages:
+            if msg['role'] == 'user':
+                vision_messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": msg['content']},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{image_base64}"
+                            }
+                        }
+                    ]
+                })
+            else:
+                vision_messages.append(msg)
+        
+        headers = {
+            'Authorization': f'Bearer {self.api_key}',
+            'Content-Type': 'application/json',
+            'HTTP-Referer': os.getenv('OPENROUTER_REFERER', 'https://github.com/your-app'),
+            'X-Title': os.getenv('OPENROUTER_APP_NAME', 'Glossarion Translation')
+        }
+        
+        if disable_safety:
+            headers['X-Safe-Mode'] = 'false'
+        
+        payload = {
+            "model": model_name,
+            "messages": vision_messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens
+        }
+        
+        try:
+            resp = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=self.request_timeout
+            )
+            
+            if resp.status_code != 200:
+                raise UnifiedClientError(f"OpenRouter Vision API error: {resp.status_code} - {resp.text}")
+            
+            json_resp = resp.json()
+            content = json_resp['choices'][0]['message']['content']
+            finish_reason = json_resp['choices'][0].get('finish_reason', 'stop')
+            
+            return UnifiedResponse(
+                content=content,
+                finish_reason=finish_reason,
+                raw_response=json_resp
+            )
+            
+        except Exception as e:
+            logger.error(f"OpenRouter Vision API error: {e}")
+            raise UnifiedClientError(f"OpenRouter Vision API error: {e}")
+    
+    def _send_cohere_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """Send image request to Cohere Aya Vision API"""
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
         
-        return self._send_openai_compatible(
-            messages, temperature, max_tokens,
-            base_url=base_url,
-            response_name=response_name,
-            provider="azure"
-        )
-    
-    def _send_google_palm(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to Google PaLM/Bard API"""
-        # PaLM is being deprecated in favor of Gemini
-        logger.warning("PaLM API is deprecated. Consider using Gemini models instead.")
-        return self._send_gemini(messages, temperature, max_tokens, response_name)
-    
-    def _send_alephalpha(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to Aleph Alpha API"""
-        return self._send_openai_compatible(
-            messages, temperature, max_tokens,
-            base_url="https://api.aleph-alpha.com/v1",
-            response_name=response_name,
-            provider="alephalpha"
-        )
-    
-    def _send_databricks(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to Databricks API"""
-        # Databricks endpoint from environment
-        databricks_url = os.getenv("DATABRICKS_API_URL", "https://your-workspace.databricks.com/api/2.0")
+        # Format prompt
+        prompt = ""
+        for msg in messages:
+            if msg['role'] == 'system':
+                prompt += f"{msg['content']}\n\n"
+            elif msg['role'] == 'user':
+                prompt += msg['content']
         
-        return self._send_openai_compatible(
-            messages, temperature, max_tokens,
-            base_url=f"{databricks_url}/serving-endpoints/{self.model}/invocations",
-            response_name=response_name,
-            provider="databricks"
-        )
-    
-    def _send_huggingface(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to HuggingFace Inference API"""
-        # HuggingFace models typically through Inference API
-        return self._send_openai_compatible(
-            messages, temperature, max_tokens,
-            base_url="https://api-inference.huggingface.co/models",
-            response_name=response_name,
-            provider="huggingface"
-        )
-    
-    def _send_salesforce(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to Salesforce CodeGen API"""
-        # Salesforce models often through custom endpoints
-        salesforce_url = os.getenv("SALESFORCE_API_URL", "https://api.salesforce.com/v1")
+        # Cohere Aya Vision uses a different format
+        data = {
+            "model": self.model,
+            "prompt": prompt,
+            "image": f"data:image/jpeg;base64,{image_base64}",
+            "temperature": temperature,
+            "max_tokens": max_tokens
+        }
         
-        return self._send_openai_compatible(
-            messages, temperature, max_tokens,
-            base_url=salesforce_url,
-            response_name=response_name,
-            provider="salesforce"
-        )
+        try:
+            resp = requests.post(
+                "https://api.cohere.ai/v1/vision",
+                headers=headers,
+                json=data,
+                timeout=self.request_timeout
+            )
+            
+            if resp.status_code != 200:
+                raise UnifiedClientError(f"Cohere Vision API error: {resp.status_code} - {resp.text}")
+            
+            json_resp = resp.json()
+            content = json_resp.get("text", "")
+            
+            return UnifiedResponse(
+                content=content,
+                finish_reason='stop',
+                raw_response=json_resp
+            )
+            
+        except Exception as e:
+            logger.error(f"Cohere Vision API error: {e}")
+            raise UnifiedClientError(f"Cohere Vision API error: {e}")
+            
+    def _log_truncation_failure(self, messages, response_content, finish_reason, context=None, attempts=None, error_details=None):
+        """Log truncation failures for analysis - saves to CSV, TXT, and HTML in truncation_logs subfolder"""
+        try:
+            # Use output directory if provided, otherwise current directory
+            base_dir = self.output_dir if self.output_dir else "."
+            
+            # Create truncation_logs subfolder inside the output directory
+            log_dir = os.path.join(base_dir, "truncation_logs")
+            os.makedirs(log_dir, exist_ok=True)
+            
+            # Generate log filename with date
+            log_date = datetime.now().strftime("%Y%m")
+            
+            # CSV log file (keeping for compatibility)
+            csv_log_file = os.path.join(log_dir, f"truncation_failures_{log_date}.csv")
+            
+            # TXT log file (human-readable format)
+            txt_log_file = os.path.join(log_dir, f"truncation_failures_{log_date}.txt")
+            
+            # HTML log file (web-viewable format)
+            html_log_file = os.path.join(log_dir, f"truncation_failures_{log_date}.html")
+            
+            # Summary file to track truncated outputs
+            summary_file = os.path.join(log_dir, f"truncation_summary_{log_date}.json")
+            
+            # Check if CSV file exists to determine if we need headers
+            csv_file_exists = os.path.exists(csv_log_file)
+            
+            # Extract output filename - UPDATED LOGIC
+            output_filename = 'unknown'
+            
+            # PRIORITY 1: Use the actual output filename if set via set_output_filename()
+            if hasattr(self, '_actual_output_filename') and self._actual_output_filename:
+                output_filename = self._actual_output_filename
+            # PRIORITY 2: Use current output file if available
+            elif hasattr(self, '_current_output_file') and self._current_output_file:
+                output_filename = self._current_output_file
+            # PRIORITY 3: Use tracked response filename from _save_response
+            elif hasattr(self, '_last_response_filename') and self._last_response_filename:
+                # Skip if it's a generic Payloads filename
+                if not self._last_response_filename.startswith(('response_', 'translation_')):
+                    output_filename = self._last_response_filename
+            
+            # FALLBACK: Try to extract from context/messages if no filename was set
+            if output_filename == 'unknown':
+                if context == 'translation':
+                    # Try to extract chapter/response filename
+                    chapter_match = re.search(r'Chapter (\d+)', str(messages))
+                    if chapter_match:
+                        chapter_num = chapter_match.group(1)
+                        # Use the standard format that matches book output
+                        safe_title = f"Chapter_{chapter_num}"
+                        output_filename = f"response_{chapter_num.zfill(3)}_{safe_title}.html"
+                    else:
+                        # Try chunk pattern
+                        chunk_match = re.search(r'Chunk (\d+)/(\d+).*Chapter (\d+)', str(messages))
+                        if chunk_match:
+                            chunk_num = chunk_match.group(1)
+                            chapter_num = chunk_match.group(3)
+                            safe_title = f"Chapter_{chapter_num}"
+                            output_filename = f"response_{chapter_num.zfill(3)}_{safe_title}_chunk_{chunk_num}.html"
+                elif context == 'image_translation':
+                    # Extract image filename if available
+                    img_match = re.search(r'([\w\-]+\.(jpg|jpeg|png|gif|webp))', str(messages), re.IGNORECASE)
+                    if img_match:
+                        output_filename = f"image_{img_match.group(1)}"
+                        
+            # Load or create summary tracking
+            summary_data = {"truncated_files": set(), "total_truncations": 0, "by_type": {}}
+            if os.path.exists(summary_file):
+                try:
+                    with open(summary_file, 'r', encoding='utf-8') as f:
+                        loaded_data = json.load(f)
+                        summary_data["truncated_files"] = set(loaded_data.get("truncated_files", []))
+                        summary_data["total_truncations"] = loaded_data.get("total_truncations", 0)
+                        summary_data["by_type"] = loaded_data.get("by_type", {})
+                except:
+                    pass
+            
+            # Update summary
+            summary_data["truncated_files"].add(output_filename)
+            summary_data["total_truncations"] += 1
+            truncation_type_key = f"{finish_reason}_{context or 'unknown'}"
+            summary_data["by_type"][truncation_type_key] = summary_data["by_type"].get(truncation_type_key, 0) + 1
+            
+            # Save summary
+            save_summary = {
+                "truncated_files": sorted(list(summary_data["truncated_files"])),
+                "total_truncations": summary_data["total_truncations"],
+                "by_type": summary_data["by_type"],
+                "last_updated": datetime.now().isoformat()
+            }
+            with open(summary_file, 'w', encoding='utf-8') as f:
+                json.dump(save_summary, f, indent=2, ensure_ascii=False)
+            
+            # Prepare log entry
+            log_entry = {
+                'timestamp': datetime.now().isoformat(),
+                'model': self.model,
+                'provider': self.client_type,
+                'context': context or 'unknown',
+                'finish_reason': finish_reason,
+                'attempts': attempts or 1,
+                'input_length': sum(len(msg.get('content', '')) for msg in messages),
+                'output_length': len(response_content) if response_content else 0,
+                'truncation_type': 'silent' if finish_reason == 'length' else 'explicit',
+                'content_refused': 'yes' if finish_reason == 'content_filter' else 'no',
+                'last_50_chars': response_content[-50:] if response_content else '',
+                'error_details': json.dumps(error_details) if error_details else '',
+                'input_preview': self._get_safe_preview(messages),
+                'output_preview': response_content[:200] if response_content else '',
+                'output_filename': output_filename  # Add output filename to log entry
+            }
+            
+            # Write to CSV
+            with open(csv_log_file, 'a', newline='', encoding='utf-8') as f:
+                fieldnames = [
+                    'timestamp', 'model', 'provider', 'context', 'finish_reason',
+                    'attempts', 'input_length', 'output_length', 'truncation_type',
+                    'content_refused', 'last_50_chars', 'error_details',
+                    'input_preview', 'output_preview', 'output_filename'
+                ]
+                
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                
+                # Write header if new file
+                if not csv_file_exists:
+                    writer.writeheader()
+                
+                writer.writerow(log_entry)
+            
+            # Write to TXT file with human-readable format
+            with open(txt_log_file, 'a', encoding='utf-8') as f:
+                f.write(f"\n{'='*80}\n")
+                f.write(f"TRUNCATION LOG ENTRY - {log_entry['timestamp']}\n")
+                f.write(f"{'='*80}\n")
+                f.write(f"Output File: {log_entry['output_filename']}\n")
+                f.write(f"Model: {log_entry['model']}\n")
+                f.write(f"Provider: {log_entry['provider']}\n")
+                f.write(f"Context: {log_entry['context']}\n")
+                f.write(f"Finish Reason: {log_entry['finish_reason']}\n")
+                f.write(f"Attempts: {log_entry['attempts']}\n")
+                f.write(f"Input Length: {log_entry['input_length']} chars\n")
+                f.write(f"Output Length: {log_entry['output_length']} chars\n")
+                f.write(f"Truncation Type: {log_entry['truncation_type']}\n")
+                f.write(f"Content Refused: {log_entry['content_refused']}\n")
+                
+                if log_entry['error_details']:
+                    f.write(f"Error Details: {log_entry['error_details']}\n")
+                
+                f.write(f"\n--- Input Preview ---\n")
+                f.write(f"{log_entry['input_preview']}\n")
+                
+                f.write(f"\n--- Output Preview ---\n")
+                f.write(f"{log_entry['output_preview']}\n")
+                
+                if log_entry['last_50_chars']:
+                    f.write(f"\n--- Last 50 Characters ---\n")
+                    f.write(f"{log_entry['last_50_chars']}\n")
+                
+                f.write(f"\n{'='*80}\n")
+            
+            # Write to HTML file with nice formatting
+            html_file_exists = os.path.exists(html_log_file)
+            
+            # Create or update HTML file
+            if not html_file_exists:
+                # Create new HTML file with header
+                html_content = """<!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>Truncation Failures Log</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                background-color: #f5f5f5;
+                margin: 20px;
+                line-height: 1.6;
+            }
+            .summary {
+                background-color: #e3f2fd;
+                border: 2px solid #1976d2;
+                border-radius: 8px;
+                padding: 20px;
+                margin-bottom: 30px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            }
+            .summary h2 {
+                color: #1976d2;
+                margin-top: 0;
+            }
+            .summary-stats {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 15px;
+                margin-bottom: 20px;
+            }
+            .stat-box {
+                background-color: white;
+                padding: 10px;
+                border-radius: 4px;
+                border: 1px solid #ddd;
+            }
+            .stat-label {
+                font-size: 12px;
+                color: #666;
+                text-transform: uppercase;
+            }
+            .stat-value {
+                font-size: 24px;
+                font-weight: bold;
+                color: #333;
+            }
+            .truncated-files {
+                background-color: white;
+                padding: 15px;
+                border-radius: 4px;
+                border: 1px solid #ddd;
+                max-height: 200px;
+                overflow-y: auto;
+            }
+            .truncated-files h3 {
+                margin-top: 0;
+                color: #333;
+            }
+            .file-list {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+            }
+            .file-badge {
+                background-color: #ffecb3;
+                border: 1px solid #ffc107;
+                padding: 4px 8px;
+                border-radius: 4px;
+                font-size: 13px;
+                font-family: 'Courier New', monospace;
+            }
+            .log-entry {
+                background-color: white;
+                border: 1px solid #ddd;
+                border-radius: 8px;
+                padding: 20px;
+                margin-bottom: 20px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            }
+            .timestamp {
+                color: #666;
+                font-size: 14px;
+                margin-bottom: 10px;
+            }
+            .metadata {
+                display: grid;
+                grid-template-columns: 200px 1fr;
+                gap: 10px;
+                margin-bottom: 15px;
+            }
+            .label {
+                font-weight: bold;
+                color: #333;
+            }
+            .value {
+                color: #555;
+            }
+            .content-preview {
+                background-color: #f8f8f8;
+                border: 1px solid #e0e0e0;
+                border-radius: 4px;
+                padding: 10px;
+                margin: 10px 0;
+                font-family: 'Courier New', monospace;
+                font-size: 13px;
+                white-space: pre-wrap;
+                word-break: break-word;
+                max-height: 200px;
+                overflow-y: auto;
+            }
+            .error {
+                color: #d9534f;
+            }
+            .warning {
+                color: #f0ad4e;
+            }
+            .section-title {
+                font-weight: bold;
+                color: #2c5aa0;
+                margin-top: 15px;
+                margin-bottom: 5px;
+            }
+            h1 {
+                color: #333;
+                border-bottom: 2px solid #2c5aa0;
+                padding-bottom: 10px;
+            }
+            .truncation-type-silent {
+                background-color: #fff3cd;
+                border-left: 4px solid #ffc107;
+            }
+            .truncation-type-explicit {
+                background-color: #f8d7da;
+                border-left: 4px solid #dc3545;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>Truncation Failures Log</h1>
+        <div id="summary-container">
+            <!-- Summary will be inserted here -->
+        </div>
+        <div id="entries-container">
+            <!-- Log entries will be inserted here -->
+        </div>
+    """
+                # Write initial HTML structure
+                with open(html_log_file, 'w', encoding='utf-8') as f:
+                    f.write(html_content)
+                # Make sure HTML is properly closed
+                if not html_content.rstrip().endswith('</html>'):
+                    with open(html_log_file, 'a', encoding='utf-8') as f:
+                        f.write('\n</body>\n</html>')
+            
+            # Read existing HTML content
+            with open(html_log_file, 'r', encoding='utf-8') as f:
+                html_content = f.read()
+            
+            # Generate summary HTML
+            summary_html = f"""
+        <div class="summary">
+            <h2>Summary</h2>
+            <div class="summary-stats">
+                <div class="stat-box">
+                    <div class="stat-label">Total Truncations</div>
+                    <div class="stat-value">{summary_data['total_truncations']}</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-label">Affected Files</div>
+                    <div class="stat-value">{len(summary_data['truncated_files'])}</div>
+                </div>
+            </div>
+            <div class="truncated-files">
+                <h3>Truncated Output Files:</h3>
+                <div class="file-list">
+    """
+            
+            # Add file badges
+            for filename in sorted(summary_data['truncated_files']):
+                summary_html += f'                <span class="file-badge">{html.escape(filename)}</span>\n'
+            
+            summary_html += """            </div>
+            </div>
+        </div>
+    """
+            
+            # Update summary in HTML
+            if '<div id="summary-container">' in html_content:
+                # Replace existing summary
+                start = html_content.find('<div id="summary-container">') + len('<div id="summary-container">')
+                end = html_content.find('</div>', start) 
+                html_content = html_content[:start] + '\n' + summary_html + '\n    ' + html_content[end:]
+            
+            # Generate new log entry HTML
+            truncation_class = 'truncation-type-silent' if log_entry['truncation_type'] == 'silent' else 'truncation-type-explicit'
+            
+            entry_html = f"""    <div class="log-entry {truncation_class}">
+            <div class="timestamp">{log_entry["timestamp"]} - Output: {html.escape(output_filename)}</div>
+            <div class="metadata">
+                <span class="label">Model:</span><span class="value">{html.escape(str(log_entry["model"]))}</span>
+                <span class="label">Provider:</span><span class="value">{html.escape(str(log_entry["provider"]))}</span>
+                <span class="label">Context:</span><span class="value">{html.escape(str(log_entry["context"]))}</span>
+                <span class="label">Finish Reason:</span><span class="value {("error" if log_entry["finish_reason"] == "content_filter" else "warning")}">{html.escape(str(log_entry["finish_reason"]))}</span>
+                <span class="label">Attempts:</span><span class="value">{log_entry["attempts"]}</span>
+                <span class="label">Input Length:</span><span class="value">{log_entry["input_length"]:,} chars</span>
+                <span class="label">Output Length:</span><span class="value">{log_entry["output_length"]:,} chars</span>
+                <span class="label">Truncation Type:</span><span class="value">{html.escape(str(log_entry["truncation_type"]))}</span>
+                <span class="label">Content Refused:</span><span class="value {("error" if log_entry["content_refused"] == "yes" else "")}">{html.escape(str(log_entry["content_refused"]))}</span>
+    """
+            
+            if log_entry['error_details']:
+                entry_html += f'            <span class="label">Error Details:</span><span class="value error">{html.escape(str(log_entry["error_details"]))}</span>\n'
+            
+            entry_html += f"""        </div>
+            <div class="section-title">Input Preview</div>
+            <div class="content-preview">{html.escape(str(log_entry["input_preview"]))}</div>
+            <div class="section-title">Output Preview</div>
+            <div class="content-preview">{html.escape(str(log_entry["output_preview"]))}</div>
+    """
+            
+            if log_entry['last_50_chars']:
+                entry_html += f"""        <div class="section-title">Last 50 Characters</div>
+            <div class="content-preview">{html.escape(str(log_entry["last_50_chars"]))}</div>
+    """
+            
+            entry_html += """    </div>
+    """
+            
+            # Insert new entry
+            if '<div id="entries-container">' in html_content:
+                insert_pos = html_content.find('<div id="entries-container">') + len('<div id="entries-container">')
+                # Find the next newline after the container div
+                newline_pos = html_content.find('\n', insert_pos)
+                if newline_pos != -1:
+                    insert_pos = newline_pos + 1
+                html_content = html_content[:insert_pos] + entry_html + html_content[insert_pos:]
+            else:
+                # Fallback: append before closing body tag
+                insert_pos = html_content.rfind('</body>')
+                html_content = html_content[:insert_pos] + entry_html + '\n' + html_content[insert_pos:]
+            
+            # Write updated HTML
+            with open(html_log_file, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            
+            # Log to console with FULL PATH so user knows where to look
+            csv_log_path = os.path.abspath(csv_log_file)
+            txt_log_path = os.path.abspath(txt_log_file)
+            html_log_path = os.path.abspath(html_log_file)
+            
+            if finish_reason == 'content_filter':
+                print(f"⛔ Content refused by {self.model}")
+                print(f"   📁 CSV log: {csv_log_path}")
+                print(f"   📁 TXT log: {txt_log_path}")
+                print(f"   📁 HTML log: {html_log_path}")
+            else:
+                print(f"✂️ Response truncated by {self.model}")
+                print(f"   📁 CSV log: {csv_log_path}")
+                print(f"   📁 TXT log: {txt_log_path}")
+                print(f"   📁 HTML log: {html_log_path}")
+            
+        except Exception as e:
+            # Don't crash the translation just because logging failed
+            logger.error(f"Failed to log truncation failure: {e}")
+
+    def _get_safe_preview(self, messages: List[Dict], max_length: int = 100) -> str:
+        """Get a safe preview of the input messages for logging"""
+        try:
+            # Get the last user message
+            for msg in reversed(messages):
+                if msg.get('role') == 'user':
+                    content = msg.get('content', '')
+                    if len(content) > max_length:
+                        return content[:max_length] + "..."
+                    return content
+            return "No user content found"
+        except:
+            return "Error extracting preview"
