@@ -6041,25 +6041,31 @@ Recent translations to summarize:
                                  bootstyle="warning", state=tk.NORMAL if scan_html_folder and not any_process_running else tk.DISABLED)   
 
     def stop_translation(self):
-       """Stop translation while preserving loaded file"""
-       current_file = self.entry_epub.get() if hasattr(self, 'entry_epub') else None
-       
-       self.stop_requested = True
-       if translation_stop_flag:
-           translation_stop_flag(True)
-       
-       try:
-           import TransateKRtoEN
-           if hasattr(TransateKRtoEN, 'set_stop_flag'):
-               TransateKRtoEN.set_stop_flag(True)
-       except: pass
-       
-       self.append_log("❌ Translation stop requested.")
-       self.append_log("⏳ Please wait... stopping after current operation completes.")
-       self.update_run_button()
-       
-       if current_file and hasattr(self, 'entry_epub'):
-           self.master.after(100, lambda: self.preserve_file_path(current_file))
+        """Stop translation while preserving loaded file"""
+        current_file = self.entry_epub.get() if hasattr(self, 'entry_epub') else None
+        
+        self.stop_requested = True
+        if translation_stop_flag:
+            translation_stop_flag(True)
+        
+        try:
+            import TransateKRtoEN
+            if hasattr(TransateKRtoEN, 'set_stop_flag'):
+                TransateKRtoEN.set_stop_flag(True)
+        except: pass
+        
+        # Save and encrypt config when stopping
+        try:
+            self.save_config(show_message=False)
+        except:
+            pass
+        
+        self.append_log("❌ Translation stop requested.")
+        self.append_log("⏳ Please wait... stopping after current operation completes.")
+        self.update_run_button()
+        
+        if current_file and hasattr(self, 'entry_epub'):
+            self.master.after(100, lambda: self.preserve_file_path(current_file))
 
     def preserve_file_path(self, file_path):
        """Helper to ensure file path stays in the entry field"""
@@ -6104,10 +6110,17 @@ Recent translations to summarize:
        
 
     def on_close(self):
-       if messagebox.askokcancel("Quit", "Are you sure you want to exit?"):
-           self.stop_requested = True
-           self.master.destroy()
-           sys.exit(0)
+        if messagebox.askokcancel("Quit", "Are you sure you want to exit?"):
+            self.stop_requested = True
+            
+            # Save and encrypt config before closing
+            try:
+                self.save_config(show_message=False)
+            except:
+                pass  # Don't prevent closing if save fails
+            
+            self.master.destroy()
+            sys.exit(0)
 
     def append_log(self, message):
        """Append message to log with special formatting for memory"""
