@@ -49,6 +49,7 @@ for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'charde
 
 # Main application files
 
+# Main application files
 app_files = [
     # Core GUI
     ('translator_gui.py', '.'),
@@ -73,6 +74,7 @@ app_files = [
     ('image_translator.py', '.'),
     ('check_epub_directory.py', '.'),
     ('direct_imports.py', '.'),
+    ('api_key_encryption.py', '.'),  # ADD THIS LINE
     
     # AI Hunter Enhanced
     ('ai_hunter_enhanced.py', '.'),
@@ -648,6 +650,15 @@ utility_modules = [
     'packaging.version',
     'packaging.specifiers',
     'packaging.requirements',
+	'cryptography',
+    'cryptography.fernet',
+    'cryptography.hazmat',
+    'cryptography.hazmat.primitives',
+    'cryptography.hazmat.primitives.kdf',
+    'cryptography.hazmat.primitives.kdf.pbkdf2',
+    'cryptography.hazmat.primitives.hashes',
+    'cryptography.hazmat.backends',
+    'cryptography.hazmat.backends.openssl',
 ]
 
 # Encoding support
@@ -760,15 +771,7 @@ a = Analysis(
     pathex=[],
     binaries=binaries,
     datas=datas,
-    hiddenimports=[
-        'cryptography',
-        'cryptography.fernet',
-        'cryptography.hazmat',
-        'cryptography.hazmat.primitives',
-        'cryptography.hazmat.primitives.kdf',
-        'cryptography.hazmat.primitives.kdf.pbkdf2',
-        'cryptography.hazmat.primitives.hashes',
-    ],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
