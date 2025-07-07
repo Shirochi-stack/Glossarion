@@ -204,15 +204,36 @@ regex>=2023.0.0
 
 ### Supported AI Providers
 
-| Provider | Model Format | Example Models | Notes |
-|----------|--------------|----------------|-------|
-| **OpenAI** | `gpt-*`, `o1-*`, `o3-*`, `o4-*` | GPT-4, GPT-4-turbo, o1-preview, o3, o4-mini | Industry standard |
-| **Google Gemini** | `gemini-*` | gemini-1.5-flash, gemini-1.5-pro, gemini-2.0-flash-exp | Free tier available |
-| **Anthropic** | `claude-*` | claude-3-opus, claude-3-sonnet, claude-3-haiku | High quality output |
-| **DeepSeek** | `deepseek-*` | deepseek-chat, deepseek-coder | Cost-effective option |
-| **Mistral** | `mistral-*`, `open-mistral-*` | mistral-large, mistral-medium, open-mistral-7b | European provider |
-| **ElectronHub** | `eh/*`, `electronhub/*` | Access to GPT-4, Claude, Yi, Qwen, and many others | API aggregator service |
-| **Cohere** | `command-*` | command-r, command-r-plus | Specialized for tasks |
+Here's the updated API provider table based on the unified API client support:
+
+| Provider | Model Format | Example Models |
+|----------|--------------|----------------|
+| **OpenAI** | `gpt-*`, `o1-*`, `o3-*`, `o4-*` | gpt-4, gpt-4-turbo, gpt-4o, o1-preview, o1-mini, o3, o4-mini |
+| **Google Gemini** | `gemini-*` | gemini-1.5-flash, gemini-1.5-pro, gemini-2.0-flash, gemini-2.5-flash, gemini-2.5-pro |
+| **Anthropic** | `claude-*` | claude-3-opus, claude-3-sonnet, claude-3-haiku, claude-3.5-sonnet |
+| **DeepSeek** | `deepseek-*` | deepseek-chat, deepseek-coder |
+| **Mistral** | `mistral-*`, `open-mistral-*` | mistral-large, mistral-medium, open-mistral-7b |
+| **Cohere** | `command-*` | command-r, command-r-plus |
+| **ElectronHub** | `eh/*`, `electronhub/*` | eh/gpt-4, eh/claude-3-opus, eh/gemini-2.5-flash, eh/yi-large |
+| **Groq** | `groq/*`, `llama-*`, `mixtral-*` | groq/llama-3.1-70b, groq/mixtral-8x7b |
+| **Together AI** | `together/*`, `meta-llama/*` | together/llama-3-70b, meta-llama/Llama-3-70b |
+| **Fireworks** | `fireworks/*`, `accounts/fireworks/*` | fireworks/llama-v3-70b, accounts/fireworks/models/mixtral-8x7b |
+| **OpenRouter** | `openrouter/*` | openrouter/auto, openrouter/gpt-4, openrouter/claude-3-opus |
+| **Perplexity** | `perplexity/*`, `llama-*`, `pplx-*` | perplexity/llama-3.1-70b, pplx-7b-online |
+| **Anyscale** | `anyscale/*`, `meta-llama/*` | anyscale/llama-3-70b, meta-llama/Llama-3-70b |
+| **Hugging Face** | `huggingface/*` | huggingface/meta-llama/Llama-3-70b |
+| **Replicate** | `replicate/*`, `meta/*` | replicate/meta/llama-3-70b |
+| **AI21** | `ai21/*`, `jamba-*`, `j2-*` | ai21/jamba-1.5-large, j2-ultra |
+| **Voyage AI** | `voyage/*` | voyage/voyage-3 |
+| **Reka** | `reka-*` | reka-flash, reka-core, reka-edge |
+| **xAI** | `xai/*`, `grok-*` | xai/grok-beta, grok-2 |
+| **Poe** | `poe/*` | poe/gpt-4, poe/claude-3-opus, poe/gemini-2.5-flash |
+| **LeptonAI** | `lepton/*`, `llama-*`, `mixtral-*` | lepton/llama-3.1-70b, lepton/mixtral-8x7b |
+| **DeepInfra** | `deepinfra/*` | deepinfra/meta-llama/Llama-3-70b |
+| **Qwen** | `qwen-*`, `qwen/*` | qwen-max, qwen-plus, qwen-turbo |
+| **Yi** | `yi-*`, `yi/*`, `zero-one-ai/*` | yi-large, yi-medium, zero-one-ai/yi-34b |
+| **Moonshot** | `moonshot-*` | moonshot-v1-128k, moonshot-v1-32k |
+| **GLM** | `glm-*` | glm-4-plus, glm-4, glm-3-turbo |
 
 ### Additional Supported Providers
 Yi, Qwen, Baichuan, Zhipu AI, Moonshot, Groq, Baidu, Tencent, iFLYTEK, ByteDance, MiniMax, Together AI, Perplexity, and many more. See the full list in `unified_api_client.py`.
