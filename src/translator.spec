@@ -755,11 +755,13 @@ excludes = [
 # ============================================================================
 
 a = Analysis(
-    ['translator_gui.py'],
+    ['translator_gui.py', 'api_key_encryption.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,
-    hiddenimports=hiddenimports,
+    hiddenimports=['cryptography', 'cryptography.fernet', 'cryptography.hazmat', 
+                   'cryptography.hazmat.primitives', 'cryptography.hazmat.primitives.kdf',
+                   'cryptography.hazmat.primitives.kdf.pbkdf2', 'cryptography.hazmat.primitives.hashes'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
