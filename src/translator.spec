@@ -115,6 +115,7 @@ app_modules = [
     'manga_integration',   # Manga GUI integration
     'manga_settings_dialog', 
     'update_manager',      # ADDED: Update manager module
+	'api_key_encryption',
 ]
 
 # GUI Framework
@@ -755,13 +756,19 @@ excludes = [
 # ============================================================================
 
 a = Analysis(
-    ['translator_gui.py', 'api_key_encryption.py'],
+    ['translator_gui.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,
-    hiddenimports=['cryptography', 'cryptography.fernet', 'cryptography.hazmat', 
-                   'cryptography.hazmat.primitives', 'cryptography.hazmat.primitives.kdf',
-                   'cryptography.hazmat.primitives.kdf.pbkdf2', 'cryptography.hazmat.primitives.hashes'],
+    hiddenimports=[
+        'cryptography',
+        'cryptography.fernet',
+        'cryptography.hazmat',
+        'cryptography.hazmat.primitives',
+        'cryptography.hazmat.primitives.kdf',
+        'cryptography.hazmat.primitives.kdf.pbkdf2',
+        'cryptography.hazmat.primitives.hashes',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
