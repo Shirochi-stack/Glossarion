@@ -1397,7 +1397,7 @@ Recent translations to summarize:
         # Token limit
         tb.Label(self.frame, text="Input Token limit:").grid(row=6, column=0, sticky=tk.W, padx=5, pady=5)
         self.token_limit_entry = tb.Entry(self.frame, width=8)
-        self.token_limit_entry.insert(0, str(self.config.get('token_limit', 50000)))
+        self.token_limit_entry.insert(0, str(self.config.get('token_limit', 200000)))
         self.token_limit_entry.grid(row=6, column=1, sticky=tk.W, padx=5, pady=5)
         
         self.toggle_token_btn = tb.Button(self.frame, text="Disable Input Token Limit",
