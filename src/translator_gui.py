@@ -707,7 +707,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.1.8"
+        __version__ = "3.1.9"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1283,7 +1283,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.1.8 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.1.9 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -2980,7 +2980,7 @@ Recent translations to summarize:
                 
                 # Get duplicate detection mode from config first, then environment
                 duplicate_key_mode = self.config.get('glossary_duplicate_key_mode',
-                                                   os.getenv('GLOSSARY_DUPLICATE_KEY_MODE', 'fuzzy'))
+                                                   os.getenv('GLOSSARY_DUPLICATE_KEY_MODE', 'auto'))
                 
                 # Debug logging
                 self.append_log(f"🔍 Duplicate detection mode: {duplicate_key_mode}")
@@ -3802,25 +3802,25 @@ Recent translations to summarize:
                 except ValueError:
                     messagebox.showerror("Error", "Please enter valid numbers")
 
-                # Create inner frame for buttons
-                button_inner_frame = tk.Frame(button_frame)
-                button_inner_frame.pack()  # This centers it
+            # Create inner frame for buttons
+            button_inner_frame = tk.Frame(button_frame)
+            button_inner_frame.pack()  # This centers it
 
-                # Now pack the buttons in the inner frame
-                tb.Button(button_inner_frame, text="Apply Trim", command=apply_smart_trim,
-                     bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
-                tb.Button(button_inner_frame, text="Cancel", command=dialog.destroy,
-                     bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
+            # Now pack the buttons in the inner frame
+            tb.Button(button_inner_frame, text="Apply Trim", command=apply_smart_trim,
+                 bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
+            tb.Button(button_inner_frame, text="Cancel", command=dialog.destroy,
+                 bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
 
-                # Info section at bottom
-                info_frame = tk.Frame(main_frame)
-                info_frame.pack(fill=tk.X, pady=(0, 20), padx=20)
+            # Info section at bottom
+            info_frame = tk.Frame(main_frame)
+            info_frame.pack(fill=tk.X, pady=(0, 20), padx=20)
 
-                tk.Label(info_frame, text="💡 Tip: Always backup your glossary before applying major changes!",
-                    font=('TkDefaultFont', 9, 'italic'), fg='#666').pack()
+            tk.Label(info_frame, text="💡 Tip: Always backup your glossary before applying major changes!",
+                font=('TkDefaultFont', 9, 'italic'), fg='#666').pack()
 
-                # Auto-resize the dialog to fit content
-                self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.2)
+            # Auto-resize the dialog to fit content
+            self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.2)
        
        
         def filter_entries_dialog():
@@ -7571,7 +7571,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.1.8...")
+    print("🚀 Starting Glossarion v3.1.9...")
     
     # Initialize splash screen
     splash_manager = None
