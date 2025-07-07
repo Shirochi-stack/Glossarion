@@ -2844,11 +2844,11 @@ class MangaTranslator:
                 
                 # Original proximity and merge checks
                 if self._regions_are_nearby(region1, region2, threshold):
-                    self._log(f"      ✓ Regions are nearby", "info")
+                    #self._log(f"      ✓ Regions are nearby", "info")
                     
                     # Then check if they should merge
                     if self._regions_should_merge(region1, region2, threshold):
-                        self._log(f"      ✓ Regions should merge!", "success")
+                        #self._log(f"      ✓ Regions should merge!", "success")
                         
                         # Actually perform the merge
                         merged_text += " " + region2.text
@@ -2935,10 +2935,10 @@ class MangaTranslator:
         x1, y1, w1, h1 = region1.bounding_box
         x2, y2, w2, h2 = region2.bounding_box
         
-        self._log(f"\n    === NEARBY CHECK DEBUG ===", "info")
-        self._log(f"    Region 1: pos({x1},{y1}) size({w1}x{h1})", "info")
-        self._log(f"    Region 2: pos({x2},{y2}) size({w2}x{h2})", "info")
-        self._log(f"    Threshold: {threshold}", "info")
+        #self._log(f"\n    === NEARBY CHECK DEBUG ===", "info")
+        #self._log(f"    Region 1: pos({x1},{y1}) size({w1}x{h1})", "info")
+        #self._log(f"    Region 2: pos({x2},{y2}) size({w2}x{h2})", "info")
+        #self._log(f"    Threshold: {threshold}", "info")
         
         # Calculate gaps between closest edges
         horizontal_gap = 0
@@ -2953,8 +2953,8 @@ class MangaTranslator:
         elif y2 + h2 < y1:  # region2 is above
             vertical_gap = y1 - (y2 + h2)
         
-        self._log(f"    Horizontal gap: {horizontal_gap}", "info")
-        self._log(f"    Vertical gap: {vertical_gap}", "info")
+        #self._log(f"    Horizontal gap: {horizontal_gap}", "info")
+        #self._log(f"    Vertical gap: {vertical_gap}", "info")
         
         # Detect if regions are likely vertical text based on aspect ratio
         aspect1 = w1 / max(h1, 1)
@@ -2979,32 +2979,32 @@ class MangaTranslator:
         
         # SIMPLE APPROACH: Just check if gaps are within threshold
         # Don't overthink it
-        #if horizontal_gap <= threshold and vertical_gap <= threshold:
-        #    self._log(f"    ✅ NEARBY: Both gaps within threshold", "success")
-        #    return True
+        if horizontal_gap <= threshold and vertical_gap <= threshold:
+            #self._log(f"    ✅ NEARBY: Both gaps within threshold", "success")
+            return True
         
         # SPECIAL CASE: Vertically stacked text with good alignment
         # This is specifically for multi-line text in bubbles
-        #if horizontal_center_diff < avg_width * 0.8 and vertical_gap <= threshold * 1.5:
-        #    self._log(f"    ✅ NEARBY: Vertically aligned text in same bubble", "success")
-        #    return True
+        if horizontal_center_diff < avg_width * 0.8 and vertical_gap <= threshold * 1.5:
+            #self._log(f"    ✅ NEARBY: Vertically aligned text in same bubble", "success")
+            return True
         
         # If one gap is small and the other is slightly over, still consider nearby
-        #if (horizontal_gap <= threshold * 0.5 and vertical_gap <= threshold * 1.5) or \
-        #   (vertical_gap <= threshold * 0.5 and horizontal_gap <= threshold * 1.5):
-        #    self._log(f"    ✅ NEARBY: One small gap, other slightly over", "success")
-        #    return True
+        if (horizontal_gap <= threshold * 0.5 and vertical_gap <= threshold * 1.5) or \
+           (vertical_gap <= threshold * 0.5 and horizontal_gap <= threshold * 1.5):
+            #self._log(f"    ✅ NEARBY: One small gap, other slightly over", "success")
+            return True
         
         # Special case: Wide bubbles with text on sides
         # If regions are at nearly the same vertical position, they might be in a wide bubble
-        #if abs(y1 - y2) < 10:  # Nearly same vertical position
+        if abs(y1 - y2) < 10:  # Nearly same vertical position
             # Check if this could be a wide bubble spanning both regions
-        #    if horizontal_gap <= threshold * 3:  # Allow up to 3x threshold for wide bubbles
-        #        self._log(f"    ✅ NEARBY: Same vertical level, possibly wide bubble", "success")
-        #        return True
+            if horizontal_gap <= threshold * 3:  # Allow up to 3x threshold for wide bubbles
+                #self._log(f"    ✅ NEARBY: Same vertical level, possibly wide bubble", "success")
+                return True
         
         #self._log(f"    ❌ NOT NEARBY: Gaps exceed threshold", "warning")
-        #return False
+        return False
     
     def _find_font(self) -> str:
         """Find a suitable font for text rendering"""
