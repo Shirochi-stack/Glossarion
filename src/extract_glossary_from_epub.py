@@ -777,7 +777,7 @@ def main(log_callback=None, stop_callback=None):
                os.getenv("GEMINI_API_KEY") or
                config.get('api_key'))
 
-    client = UnifiedClient(model=model, api_key=api_key)
+    client = UnifiedClient(api_key=config.API_KEY, model=config.MODEL, output_dir=out)
     
     #API call delay
     api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
