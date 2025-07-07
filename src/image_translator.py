@@ -903,8 +903,12 @@ class ImageTranslator:
             "role": "user", 
             "content": context if context else ""
         })
-        
-        # Rest of the method stays EXACTLY the same...
+        if hasattr(self, 'current_chapter_num'):
+            chapter_num = self.current_chapter_num
+            image_idx = getattr(self, 'current_image_index', 0)
+            output_filename = f"response_{chapter_num:03d}_Chapter_{chapter_num}_image_{image_idx}.html"
+            self.client.set_output_filename(output_filename)        
+
         retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "1") == "1"
         chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "180")) if retry_timeout_enabled else None
         max_timeout_retries = 2
