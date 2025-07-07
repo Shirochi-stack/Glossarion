@@ -8,6 +8,7 @@ import traceback
 import ttkbootstrap as tb
 from ttkbootstrap.constants import *
 from splash_utils import SplashManager
+from api_key_encryption import encrypt_config, decrypt_config
 
 if getattr(sys, 'frozen', False):
     try:
@@ -724,6 +725,7 @@ class TranslatorGUI:
         self.stop_requested = False
         self.translation_thread = self.glossary_thread = self.qa_thread = self.epub_thread = None
         self.qa_thread = None
+        
         # Glossary tracking
         self.manual_glossary_path = None
         self.auto_loaded_glossary_path = None
@@ -749,6 +751,8 @@ class TranslatorGUI:
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 self.config = json.load(f)
+                # Decrypt API keys
+                self.config = decrypt_config(self.config)
         except: 
             self.config = {}
             
@@ -938,7 +942,24 @@ class TranslatorGUI:
         self._init_default_prompts()
         self._init_variables()
         self._setup_gui()
-  
+        
+        try:
+            needs_encryption = False
+            if 'api_key' in self.config and self.config['api_key']:
+                if not self.config['api_key'].startswith('ENC:'):
+                    needs_encryption = True
+            if 'replicate_api_key' in self.config and self.config['replicate_api_key']:
+                if not self.config['replicate_api_key'].startswith('ENC:'):
+                    needs_encryption = True
+            
+            if needs_encryption:
+                # Auto-migrate to encrypted format
+                print("Auto-encrypting API keys...")
+                self.save_config(show_message=False)
+                print("API keys encrypted successfully!")
+        except Exception as e:
+            print(f"Auto-encryption check failed: {e}")
+        
     def _check_updates_on_startup(self):
         """Check for updates on startup with debug logging"""
         print("[DEBUG] Running startup update check...")
@@ -7554,8 +7575,10 @@ Recent translations to summarize:
             else:
                 self.config['token_limit'] = None
             
+            encrypted_config = encrypt_config(self.config)
+
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-                json.dump(self.config, f, ensure_ascii=False, indent=2)
+                json.dump(encrypted_config, f, ensure_ascii=False, indent=2) 
             
             # Only show message if requested
             if show_message:
