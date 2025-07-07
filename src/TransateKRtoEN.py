@@ -2299,7 +2299,19 @@ class TranslationProcessor:
                 print(f"[DEBUG] Chunk {chunk_idx}/{total_chunks} tokens = {total_tokens:,} / {self.get_token_budget_str()} [File: {file_ref}]")            
                 
                 self.client.context = 'translation'
-                
+
+                # Generate filename for chunks
+                if chunk_idx and total_chunks > 1:
+                    # This is a chunk - use chunk naming format
+                    fname = f"response_{c['num']:03d}_chunk_{chunk_idx}.html"
+                else:
+                    # Not a chunk - use regular naming
+                    fname = FileUtilities.create_chapter_filename(c, c.get('actual_chapter_num', c['num']))
+
+                # Track the filename so truncation logs know which file this is
+                if hasattr(self.client, '_current_output_file'):
+                    self.client._current_output_file = fname
+
                 result, finish_reason = send_with_interrupt(
                     msgs, self.client, current_temp, current_max_tokens, 
                     self.check_stop, chunk_timeout
@@ -2526,6 +2538,13 @@ class BatchTranslationProcessor:
             
             chapter_msgs = self.base_msg + [{"role": "user", "content": chapter_body}]
             
+            # Generate filename before API call
+            fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+            client.set_output_filename(fname)
+
+            if hasattr(self.client, '_current_output_file'):
+                self.client._current_output_file = fname
+
             print(f"📤 Sending Chapter {actual_num} to API...")
             result, finish_reason = send_with_interrupt(
                 chapter_msgs, self.client, self.config.TEMP, 
@@ -2737,7 +2756,7 @@ class GlossaryManager:
                 print(f"📑 Using AI-assisted extraction with custom prompt")
                 
                 from unified_api_client import UnifiedClient
-                client = UnifiedClient(model=MODEL, api_key=API_KEY)
+                client = UnifiedClient(model=MODEL, api_key=API_KEY, output_dir=output_dir)
                 
                 text_sample = all_text[:50000] if len(all_text) > 50000 else all_text
                 
@@ -3066,7 +3085,7 @@ class GlossaryManager:
             translations = {term: term for term in all_terms}
         else:
             print(f"📑 Translating {len(all_terms)} terms...")
-            translations = self._translate_terms_batch(all_terms, language_hint, batch_size)
+            translations = self._translate_terms_batch(all_terms, language_hint, batch_size, output_dir)
         
         glossary_entries = {}
         
@@ -3229,7 +3248,7 @@ class GlossaryManager:
                         names_with_honorifics[full_form] = count
                         standalone_names[potential_name] = count
     
-    def _translate_terms_batch(self, term_list, profile_name, batch_size=50):
+    def _translate_terms_batch(self, term_list, profile_name, batch_size=50, output_dir=None):
         """Use GUI-controlled batch size for translation"""
         if not term_list or os.getenv("DISABLE_GLOSSARY_TRANSLATION", "0") == "1":
             print(f"📑 Glossary translation disabled or no terms to translate")
@@ -3249,7 +3268,7 @@ class GlossaryManager:
             print(f"📑 Translating {len(term_list)} {profile_name} terms to English using batch size {batch_size}...")
             
             from unified_api_client import UnifiedClient
-            client = UnifiedClient(model=MODEL, api_key=API_KEY)
+            client = UnifiedClient(model=MODEL, api_key=API_KEY, output_dir=output_dir)
             
             all_translations = {}
             
@@ -4381,7 +4400,7 @@ def main(log_callback=None, stop_callback=None):
     print(f"[DEBUG] Using model = {config.MODEL}")
     print(f"[DEBUG] Max output tokens = {config.MAX_OUTPUT_TOKENS}")
 
-    client = UnifiedClient(model=config.MODEL, api_key=config.API_KEY)
+    client = UnifiedClient(model=config.MODEL, api_key=config.API_KEY, output_dir=out)
     
     if is_text_file:
         print("📄 Processing text file...")
@@ -4432,7 +4451,7 @@ def main(log_callback=None, stop_callback=None):
     metadata["chapter_titles"] = {str(c["num"]): c["title"] for c in chapters}
 
     print(f"[DEBUG] Initializing client with model = {config.MODEL}")
-    client = UnifiedClient(model=config.MODEL, api_key=config.API_KEY)
+    client = UnifiedClient(api_key=config.API_KEY, model=config.MODEL, output_dir=out)
     
     if "title" in metadata and config.TRANSLATE_BOOK_TITLE and not metadata.get("title_translated", False):
         original_title = metadata["title"]
@@ -5514,7 +5533,9 @@ def main(log_callback=None, stop_callback=None):
                 fname = FileUtilities.create_chapter_filename(c, c['num'])  # Use the decimal num directly
             else:
                 fname = FileUtilities.create_chapter_filename(c, actual_num)
+            client.set_output_filename(fname)
 
+            client.set_output_filename(fname)
             cleaned = re.sub(r"^```(?:html)?\s*\n?", "", merged_result, count=1, flags=re.MULTILINE)
             cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
 
