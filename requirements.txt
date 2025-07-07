@@ -51,5 +51,9 @@ grpcio-status
 proto-plus
 protobuf
 
-# lama inpainting
-#simple-lama-inpainting
+# inpainting
+replicate
+
+#Encryption/Decryption
+cryptography
+
