@@ -2540,7 +2540,7 @@ class BatchTranslationProcessor:
             
             # Generate filename before API call
             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
-            client.set_output_filename(fname)
+            self.client.set_output_filename(fname)
 
             if hasattr(self.client, '_current_output_file'):
                 self.client._current_output_file = fname
@@ -5533,7 +5533,6 @@ def main(log_callback=None, stop_callback=None):
                 fname = FileUtilities.create_chapter_filename(c, c['num'])  # Use the decimal num directly
             else:
                 fname = FileUtilities.create_chapter_filename(c, actual_num)
-            client.set_output_filename(fname)
 
             client.set_output_filename(fname)
             cleaned = re.sub(r"^```(?:html)?\s*\n?", "", merged_result, count=1, flags=re.MULTILINE)
