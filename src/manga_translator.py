@@ -2973,38 +2973,38 @@ class MangaTranslator:
         # If regions are vertically stacked with aligned centers, treat as vertical text
         is_vertically_stacked = (horizontal_center_diff < avg_width * 1.5) and (vertical_gap >= 0)
         
-        self._log(f"    Is vertical text: {is_vertical_text}", "info")
-        self._log(f"    Is vertically stacked: {is_vertically_stacked}", "info")
-        self._log(f"    Horizontal center diff: {horizontal_center_diff:.1f}", "info")
+        #self._log(f"    Is vertical text: {is_vertical_text}", "info")
+        #self._log(f"    Is vertically stacked: {is_vertically_stacked}", "info")
+        #self._log(f"    Horizontal center diff: {horizontal_center_diff:.1f}", "info")
         
         # SIMPLE APPROACH: Just check if gaps are within threshold
         # Don't overthink it
-        if horizontal_gap <= threshold and vertical_gap <= threshold:
-            self._log(f"    ✅ NEARBY: Both gaps within threshold", "success")
-            return True
+        #if horizontal_gap <= threshold and vertical_gap <= threshold:
+        #    self._log(f"    ✅ NEARBY: Both gaps within threshold", "success")
+        #    return True
         
         # SPECIAL CASE: Vertically stacked text with good alignment
         # This is specifically for multi-line text in bubbles
-        if horizontal_center_diff < avg_width * 0.8 and vertical_gap <= threshold * 1.5:
-            self._log(f"    ✅ NEARBY: Vertically aligned text in same bubble", "success")
-            return True
+        #if horizontal_center_diff < avg_width * 0.8 and vertical_gap <= threshold * 1.5:
+        #    self._log(f"    ✅ NEARBY: Vertically aligned text in same bubble", "success")
+        #    return True
         
         # If one gap is small and the other is slightly over, still consider nearby
-        if (horizontal_gap <= threshold * 0.5 and vertical_gap <= threshold * 1.5) or \
-           (vertical_gap <= threshold * 0.5 and horizontal_gap <= threshold * 1.5):
-            self._log(f"    ✅ NEARBY: One small gap, other slightly over", "success")
-            return True
+        #if (horizontal_gap <= threshold * 0.5 and vertical_gap <= threshold * 1.5) or \
+        #   (vertical_gap <= threshold * 0.5 and horizontal_gap <= threshold * 1.5):
+        #    self._log(f"    ✅ NEARBY: One small gap, other slightly over", "success")
+        #    return True
         
         # Special case: Wide bubbles with text on sides
         # If regions are at nearly the same vertical position, they might be in a wide bubble
-        if abs(y1 - y2) < 10:  # Nearly same vertical position
+        #if abs(y1 - y2) < 10:  # Nearly same vertical position
             # Check if this could be a wide bubble spanning both regions
-            if horizontal_gap <= threshold * 3:  # Allow up to 3x threshold for wide bubbles
-                self._log(f"    ✅ NEARBY: Same vertical level, possibly wide bubble", "success")
-                return True
+        #    if horizontal_gap <= threshold * 3:  # Allow up to 3x threshold for wide bubbles
+        #        self._log(f"    ✅ NEARBY: Same vertical level, possibly wide bubble", "success")
+        #        return True
         
-        self._log(f"    ❌ NOT NEARBY: Gaps exceed threshold", "warning")
-        return False
+        #self._log(f"    ❌ NOT NEARBY: Gaps exceed threshold", "warning")
+        #return False
     
     def _find_font(self) -> str:
         """Find a suitable font for text rendering"""
