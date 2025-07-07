@@ -247,7 +247,7 @@ def dedupe_keep_order(old, new):
             lx = x.lower()
             if lx not in seen:
                 seen.add(lx)
-                out.append(lx)
+                out.append(x)
     return out
 
 
@@ -420,8 +420,10 @@ Text:
 def merge_glossary_entries(glossary):
     """
     Merge duplicate glossary entries based on configurable key field.
-    Respects GLOSSARY_EXTRACT_ORIGINAL_NAME and GLOSSARY_DUPLICATE_KEY_MODE settings.
+    Supports fuzzy matching for finding similar entries.
     """
+    from difflib import SequenceMatcher
+    
     merged = {}
     
     # Get list of custom fields
@@ -438,6 +440,7 @@ def merge_glossary_entries(glossary):
     config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config.json')
     duplicate_key_mode = 'auto'
     custom_field = ''
+    fuzzy_threshold = 0.85
     
     try:
         if os.path.exists(config_path):
@@ -447,12 +450,16 @@ def merge_glossary_entries(glossary):
                                               os.getenv('GLOSSARY_DUPLICATE_KEY_MODE', 'auto'))
                 custom_field = config.get('glossary_duplicate_custom_field',
                                         os.getenv('GLOSSARY_DUPLICATE_CUSTOM_FIELD', ''))
+                fuzzy_threshold = float(config.get('glossary_fuzzy_threshold', 
+                                                 os.getenv('GLOSSARY_FUZZY_THRESHOLD', '85'))) / 100.0
         else:
             duplicate_key_mode = os.getenv('GLOSSARY_DUPLICATE_KEY_MODE', 'auto')
             custom_field = os.getenv('GLOSSARY_DUPLICATE_CUSTOM_FIELD', '')
+            fuzzy_threshold = float(os.getenv('GLOSSARY_FUZZY_THRESHOLD', '85')) / 100.0
     except:
         duplicate_key_mode = os.getenv('GLOSSARY_DUPLICATE_KEY_MODE', 'auto')
         custom_field = os.getenv('GLOSSARY_DUPLICATE_CUSTOM_FIELD', '')
+        fuzzy_threshold = 0.85
     
     extract_original_name = os.getenv('GLOSSARY_EXTRACT_ORIGINAL_NAME', '1') == '1'
     
@@ -461,32 +468,28 @@ def merge_glossary_entries(glossary):
         'total_entries': len(glossary),
         'unique_entries': 0,
         'merged_entries': 0,
-        'key_field_used': None
+        'key_field_used': None,
+        'fuzzy_matches': 0
     }
     
-    for entry in glossary:
-        # Determine the key to use for merging based on mode
+    # Helper function to get the key from an entry
+    def get_entry_key(entry):
         key = None
         
         if duplicate_key_mode == 'original_name':
-            # Force use of original_name only
             key = entry.get('original_name')
             merge_stats['key_field_used'] = 'original_name'
         elif duplicate_key_mode == 'name':
-            # Force use of name only
             key = entry.get('name')
             merge_stats['key_field_used'] = 'name'
         elif duplicate_key_mode == 'custom':
-            # Use custom field
             if custom_field:
                 key = entry.get(custom_field)
                 merge_stats['key_field_used'] = f'custom ({custom_field})'
             else:
-                # Fallback to auto if no custom field specified
                 key = entry.get('original_name') or entry.get('name')
                 merge_stats['key_field_used'] = 'fallback (no custom field specified)'
-        elif duplicate_key_mode == 'auto':
-            # Auto mode: respect the extraction setting
+        elif duplicate_key_mode == 'auto' or duplicate_key_mode == 'fuzzy':
             if extract_original_name and 'original_name' in entry:
                 key = entry['original_name']
                 merge_stats['key_field_used'] = 'original_name (auto)'
@@ -494,51 +497,183 @@ def merge_glossary_entries(glossary):
                 key = entry['name']
                 merge_stats['key_field_used'] = 'name (auto)'
             else:
-                # Fallback: try original_name first, then name
                 key = entry.get('original_name') or entry.get('name')
                 merge_stats['key_field_used'] = 'fallback'
         
-        # Skip entries without any identifier
+        return str(key).strip() if key else None
+    
+    # Helper function to find fuzzy match
+    def find_fuzzy_match(key, existing_keys):
+        """Find the best fuzzy match for a key among existing keys"""
         if not key:
-            print(f"⚠️  Skipping entry without key field: {entry}")
-            continue
+            return None
             
-        if key not in merged:
-            merged[key] = entry.copy()
-            merge_stats['unique_entries'] += 1
+        best_match = None
+        best_score = 0
+        
+        for existing_key in existing_keys:
+            # Calculate similarity
+            score = SequenceMatcher(None, key.lower(), existing_key.lower()).ratio()
             
-            # Initial normalize all list fields
-            for field in list_fields:
-                if field in merged[key]:
-                    merged[key][field] = dedupe_keep_order(
-                        entry.get(field) or [], []
-                    )
-        else:
-            merge_stats['merged_entries'] += 1
+            if score >= fuzzy_threshold and score > best_score:
+                best_match = existing_key
+                best_score = score
+        
+        if best_match and best_score < 1.0:  # Only count as fuzzy if not exact
+            merge_stats['fuzzy_matches'] += 1
+            print(f"🔍 Fuzzy match: '{key}' → '{best_match}' (similarity: {best_score:.2%})")
+        
+        return best_match
+    
+    # Helper function to calculate entry completeness score
+    def calculate_entry_score(entry):
+        """Calculate how complete/informative an entry is"""
+        score = 0
+        
+        # Check each field
+        if entry.get('original_name'):
+            score += 2  # Original name is important
+        if entry.get('name'):
+            score += 2
+        if entry.get('gender'):
+            score += 1
+        if entry.get('title'):
+            score += 1
+        
+        # List fields - count non-empty lists
+        for field in ['traits', 'locations', 'group_affiliation']:
+            if entry.get(field) and len(entry[field]) > 0:
+                score += len(entry[field])
+        
+        # How they refer to others
+        if entry.get('how_they_refer_to_others'):
+            score += len(entry.get('how_they_refer_to_others', {}))
+        
+        # Custom fields
+        for field in custom_fields_list:
+            if entry.get(field):
+                if isinstance(entry[field], list):
+                    score += len(entry[field])
+                else:
+                    score += 1
+        
+        return score
+    
+    # Process entries based on mode
+    if duplicate_key_mode == 'fuzzy':
+        print(f"🔍 Using fuzzy matching with threshold: {fuzzy_threshold:.0%}")
+        
+        # For fuzzy matching, we need to process entries one by one
+        for entry in glossary:
+            key = get_entry_key(entry)
             
-            # Merge list fields
-            for field in list_fields:
-                old = merged[key].get(field) or []
-                new = entry.get(field) or []
-                merged[key][field] = dedupe_keep_order(old, new)
+            if not key:
+                print(f"⚠️  Skipping entry without key field: {entry}")
+                continue
             
-            # Merge how_they_refer_to_others
-            old_map = merged[key].get('how_they_refer_to_others', {}) or {}
-            new_map = entry.get('how_they_refer_to_others', {}) or {}
-            for k, v in new_map.items():
-                if v is not None and k not in old_map:
-                    old_map[k] = v
-            merged[key]['how_they_refer_to_others'] = old_map
+            # Find best fuzzy match among existing keys
+            existing_keys = list(merged.keys())
+            match_key = find_fuzzy_match(key, existing_keys)
             
-            # Merge single-value fields (keep first non-None value)
-            single_value_fields = ['name', 'gender', 'title']
-            if extract_original_name:
-                single_value_fields.insert(0, 'original_name')
+            if match_key:
+                # Merge with existing entry
+                merge_stats['merged_entries'] += 1
+                existing_entry = merged[match_key]
+                
+                # Compare scores to decide which entry to keep as base
+                existing_score = calculate_entry_score(existing_entry)
+                new_score = calculate_entry_score(entry)
+                
+                if new_score > existing_score:
+                    # New entry is more complete, use it as base but preserve the matched key
+                    merged_entry = entry.copy()
+                    # Merge in any missing fields from existing
+                    for field in existing_entry:
+                        if field not in merged_entry or not merged_entry[field]:
+                            merged_entry[field] = existing_entry[field]
+                    merged[match_key] = merged_entry
+                else:
+                    # Existing entry is more complete, merge new data into it
+                    # Merge list fields
+                    for field in list_fields:
+                        old = existing_entry.get(field) or []
+                        new = entry.get(field) or []
+                        existing_entry[field] = dedupe_keep_order(old, new)
+                    
+                    # Merge how_they_refer_to_others
+                    old_map = existing_entry.get('how_they_refer_to_others', {}) or {}
+                    new_map = entry.get('how_they_refer_to_others', {}) or {}
+                    for k, v in new_map.items():
+                        if v is not None and k not in old_map:
+                            old_map[k] = v
+                    existing_entry['how_they_refer_to_others'] = old_map
+                    
+                    # Merge single-value fields (keep first non-None value)
+                    single_value_fields = ['name', 'gender', 'title']
+                    if extract_original_name:
+                        single_value_fields.insert(0, 'original_name')
+                    
+                    for field in single_value_fields:
+                        if field not in existing_entry or existing_entry.get(field) is None:
+                            if field in entry and entry[field] is not None:
+                                existing_entry[field] = entry[field]
+            else:
+                # No fuzzy match found, add as new entry
+                merged[key] = entry.copy()
+                merge_stats['unique_entries'] += 1
+                
+                # Initial normalize all list fields
+                for field in list_fields:
+                    if field in merged[key]:
+                        merged[key][field] = dedupe_keep_order(
+                            entry.get(field) or [], []
+                        )
+    
+    else:
+        # Non-fuzzy modes - use exact matching (original logic)
+        for entry in glossary:
+            key = get_entry_key(entry)
             
-            for field in single_value_fields:
-                if field not in merged[key] or merged[key].get(field) is None:
-                    if field in entry and entry[field] is not None:
-                        merged[key][field] = entry[field]
+            if not key:
+                print(f"⚠️  Skipping entry without key field: {entry}")
+                continue
+            
+            if key not in merged:
+                merged[key] = entry.copy()
+                merge_stats['unique_entries'] += 1
+                
+                # Initial normalize all list fields
+                for field in list_fields:
+                    if field in merged[key]:
+                        merged[key][field] = dedupe_keep_order(
+                            entry.get(field) or [], []
+                        )
+            else:
+                merge_stats['merged_entries'] += 1
+                
+                # Merge list fields
+                for field in list_fields:
+                    old = merged[key].get(field) or []
+                    new = entry.get(field) or []
+                    merged[key][field] = dedupe_keep_order(old, new)
+                
+                # Merge how_they_refer_to_others
+                old_map = merged[key].get('how_they_refer_to_others', {}) or {}
+                new_map = entry.get('how_they_refer_to_others', {}) or {}
+                for k, v in new_map.items():
+                    if v is not None and k not in old_map:
+                        old_map[k] = v
+                merged[key]['how_they_refer_to_others'] = old_map
+                
+                # Merge single-value fields (keep first non-None value)
+                single_value_fields = ['name', 'gender', 'title']
+                if extract_original_name:
+                    single_value_fields.insert(0, 'original_name')
+                
+                for field in single_value_fields:
+                    if field not in merged[key] or merged[key].get(field) is None:
+                        if field in entry and entry[field] is not None:
+                            merged[key][field] = entry[field]
     
     # Strip out any None fields
     for entry in merged.values():
@@ -560,8 +695,11 @@ def merge_glossary_entries(glossary):
             entry.pop('how_they_refer_to_others', None)
     
     # Log merge statistics
-    if merge_stats['merged_entries'] > 0:
+    if merge_stats['merged_entries'] > 0 or merge_stats['fuzzy_matches'] > 0:
         print(f"🔀 Merged {merge_stats['merged_entries']} duplicate entries")
+        if duplicate_key_mode == 'fuzzy':
+            print(f"   Fuzzy matches: {merge_stats['fuzzy_matches']}")
+            print(f"   Threshold: {fuzzy_threshold:.0%}")
         print(f"   Key field: {merge_stats['key_field_used']}")
         print(f"   Total entries: {merge_stats['total_entries']} → {merge_stats['unique_entries']}")
     
