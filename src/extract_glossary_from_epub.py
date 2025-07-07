@@ -768,8 +768,7 @@ def main(log_callback=None, stop_callback=None):
     )
 
     config = load_config(args.config)
-    # Get model from environment variable (set by GUI) or config file
-    model = os.getenv("MODEL") or config.get('model', 'gemini-1.5-flash')
+    
     # Get API key from environment variables (set by GUI) or config file
     api_key = (os.getenv("API_KEY") or 
                os.getenv("OPENAI_API_KEY") or 
@@ -777,7 +776,14 @@ def main(log_callback=None, stop_callback=None):
                os.getenv("GEMINI_API_KEY") or
                config.get('api_key'))
 
-    client = UnifiedClient(api_key=config.API_KEY, model=config.MODEL, output_dir=out)
+    # Get model from environment or config
+    model = os.getenv("MODEL") or config.get('model', 'gemini-1.5-flash')
+
+    # Define output directory (use current directory as default)
+    out = os.path.dirname(args.output) if hasattr(args, 'output') else os.getcwd()
+
+    # Use the variables we just retrieved
+    client = UnifiedClient(api_key=api_key, model=model, output_dir=out)
     
     #API call delay
     api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
