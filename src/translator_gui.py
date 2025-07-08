@@ -4644,6 +4644,7 @@ Recent translations to summarize:
 
                 # Set environment variables
                 env_vars = self._get_environment_variables(epub_path, api_key)
+                print(f"DEBUG: MANUAL_GLOSSARY env var = '{env_vars.get('MANUAL_GLOSSARY', 'NOT SET')}'")
                 os.environ.update(env_vars)
 
                 chap_range = self.chapter_range_entry.get().strip()
@@ -7507,6 +7508,50 @@ Recent translations to summarize:
             filetypes=[("JSON files", "*.json")]
         )
         if not path:
+            return
+        
+        # Try to load and fix if needed
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Try normal JSON load first
+            try:
+                json.loads(content)
+            except json.JSONDecodeError as e:
+                self.append_log(f"⚠️ JSON error detected, attempting auto-fix: {str(e)}")
+                
+                # Auto-fix common JSON errors
+                import re
+                
+                # Fix trailing commas in objects: ,}
+                content = re.sub(r',\s*}', '}', content)
+                
+                # Fix trailing commas in arrays: ,]
+                content = re.sub(r',\s*]', ']', content)
+                
+                # Fix multiple commas: ,,
+                content = re.sub(r',\s*,+', ',', content)
+                
+                # Try to parse again
+                try:
+                    json.loads(content)
+                    
+                    # If successful, save the fixed version
+                    backup_path = path.replace('.json', '_backup.json')
+                    shutil.copy2(path, backup_path)
+                    
+                    with open(path, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    
+                    self.append_log(f"✅ Auto-fixed JSON and saved. Backup created: {os.path.basename(backup_path)}")
+                    
+                except json.JSONDecodeError as e2:
+                    messagebox.showerror("JSON Error", f"Could not auto-fix JSON file:\n{str(e2)}")
+                    return
+        
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to read glossary file: {str(e)}")
             return
         
         # Clear auto-loaded tracking when manually loading
