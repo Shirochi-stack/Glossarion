@@ -1539,15 +1539,29 @@ img {
                          chapter_titles_info: Dict[int, Tuple[str, float, str]],
                          css_items: List[epub.EpubItem], processed_images: Dict[str, str],
                          spine: List, toc: List, metadata: dict) -> int:
-        """Process chapters - NO FANCY PARSING"""
+        """Process chapters with progressive pattern detection"""
         chapters_added = 0
         
         self.log(f"\n📚 Processing {len(html_files)} chapters...")
         
-        # Process in EXACT order - no parsing, no reordering
-        for idx, filename in enumerate(html_files):
-            # Use index + 1 as chapter number
-            chapter_num = idx + 1
+        # Sort files using the same robust logic as _find_html_files
+        sorted_files = sorted(html_files, key=self.get_robust_sort_key)
+        
+        # Process in sorted order
+        for idx, filename in enumerate(sorted_files):
+            # Determine chapter number using multiple methods
+            chapter_num = self._extract_chapter_number(filename, idx)
+            
+            # Log what pattern we're using
+            sort_key = self.get_robust_sort_key(filename)
+            pattern_names = {
+                1: "-h-N", 2: "chapter-N", 3: "ch-N", 4: "response_N_",
+                5: "book/part-N", 6: "split_N", 7: "N.html", 8: "-N.html",
+                9: "_N.html", 10: "(N)", 11: "[N]", 12: "page-N",
+                13: "*N.html", 14: "Roman", 15: "first number", 99: "alphabetical"
+            }
+            pattern = pattern_names.get(sort_key[0], "position-based")
+            self.log(f"\n[Chapter {chapter_num}] Processing: {filename} (pattern: {pattern})")
             
             try:
                 if self._process_single_chapter(
@@ -1556,22 +1570,27 @@ img {
                 ):
                     chapters_added += 1
             except Exception as e:
-                self.log(f"[ERROR] Chapter {chapter_num} failed: {e}")
+                self.log(f"❌ Chapter {chapter_num} failed: {e}")
                 
-                # Add placeholder
+                # Add placeholder with more detail about the failure
                 try:
                     chapter = epub.EpubHtml(
                         title=f"Chapter {chapter_num}",
                         file_name=f"chapter_{chapter_num:03d}.xhtml",
                         lang=metadata.get("language", "en")
                     )
+                    
+                    # More informative error page
+                    error_details = str(e).replace('<', '&lt;').replace('>', '&gt;')
                     chapter.content = f"""<?xml version="1.0" encoding="utf-8"?>
     <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
     <html xmlns="http://www.w3.org/1999/xhtml">
     <head><title>Chapter {chapter_num}</title></head>
     <body>
     <h1>Chapter {chapter_num}</h1>
-    <p>Error loading: {filename}</p>
+    <p><strong>Error loading chapter from file:</strong> {filename}</p>
+    <p><em>Error details:</em> {error_details}</p>
+    <p>The original file may have an incompatible format or structure.</p>
     </body>
     </html>""".encode('utf-8')
                     
@@ -1579,17 +1598,83 @@ img {
                     spine.append(chapter)
                     toc.append(chapter)
                     chapters_added += 1
+                    self.log(f"⚠️  Added placeholder for chapter {chapter_num}")
                 except:
                     pass
         
-        self.log(f"Added {chapters_added} chapters")
+        self.log(f"\n✅ Successfully added {chapters_added} chapters")
         return chapters_added
-    
+
+    def _extract_chapter_number(self, filename: str, default_idx: int) -> int:
+        """Extract chapter number using multiple patterns
+        
+        Args:
+            filename: The filename to extract from
+            default_idx: Default index to use if extraction fails
+            
+        Returns:
+            int: The extracted or calculated chapter number
+        """
+        # Try various extraction patterns in order of reliability
+        
+        # Pattern 1: response_NUMBER_ (standard pattern)
+        match = re.match(r"response_(\d+)_", filename)
+        if match:
+            return int(match.group(1))
+        
+        # Pattern 2: chapter-NUMBER, chapter_NUMBER, chapterNUMBER
+        match = re.search(r'chapter[-_\s]?(\d+)', filename, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        
+        # Pattern 3: ch-NUMBER, ch_NUMBER, chNUMBER
+        match = re.search(r'\bch[-_\s]?(\d+)\b', filename, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        
+        # Pattern 4: -h-NUMBER (specific pattern)
+        match = re.search(r'-h-(\d+)', filename)
+        if match:
+            return int(match.group(1))
+        
+        # Pattern 5: Just NUMBER.html (like 127.html)
+        match = re.match(r'^(\d+)\.(?:html?|xhtml)$', filename)
+        if match:
+            return int(match.group(1))
+        
+        # Pattern 6: _NUMBER at end before extension
+        match = re.search(r'_(\d+)\.(?:html?|xhtml)$', filename)
+        if match:
+            return int(match.group(1))
+        
+        # Pattern 7: -NUMBER at end before extension
+        match = re.search(r'-(\d+)\.(?:html?|xhtml)$', filename)
+        if match:
+            return int(match.group(1))
+        
+        # Pattern 8: (NUMBER) in parentheses
+        match = re.search(r'\((\d+)\)', filename)
+        if match:
+            return int(match.group(1))
+        
+        # Pattern 9: [NUMBER] in brackets
+        match = re.search(r'\[(\d+)\]', filename)
+        if match:
+            return int(match.group(1))
+        
+        # Pattern 10: Use the sort key logic
+        sort_key = self.get_robust_sort_key(filename)
+        if isinstance(sort_key[1], int) and sort_key[1] > 0:
+            return sort_key[1]
+        
+        # Final fallback: use position + 1
+        return default_idx + 1
+
     def _process_single_chapter(self, book: epub.EpubBook, num: int, filename: str,
                                chapter_titles_info: Dict[int, Tuple[str, float, str]],
                                css_items: List[epub.EpubItem], processed_images: Dict[str, str],
                                spine: List, toc: List, metadata: dict) -> bool:
-        """Process a single chapter"""
+        """Process a single chapter with better content extraction"""
         path = os.path.join(self.output_dir, filename)
         
         try:
@@ -1601,10 +1686,11 @@ img {
             raw_content = HTMLEntityDecoder.decode(raw_content)
             
             if not raw_content.strip():
-                self.log(f"[WARNING] Chapter {num} is empty")
+                self.log(f"⚠️  Chapter {num} is empty")
                 return False
             
-            # Clean content
+            # Clean content - with special handling for web-scraped pages
+            raw_content = self._extract_main_content(raw_content, filename)
             raw_content = ContentProcessor.clean_chapter_content(raw_content)
             
             # Get title
@@ -1617,7 +1703,7 @@ img {
             try:
                 xhtml_content = XHTMLConverter.ensure_compliance(raw_content, title, css_links)
             except Exception as e:
-                self.log(f"[WARNING] XHTML conversion failed for chapter {num}: {e}")
+                self.log(f"⚠️  XHTML conversion failed for chapter {num}: {e}")
                 # Create minimal valid XHTML
                 xhtml_content = XHTMLConverter._build_xhtml(
                     title,
@@ -1668,72 +1754,172 @@ img {
             return True
             
         except Exception as e:
-            self.log(f"[ERROR] Failed to process chapter {num}: {e}")
-            # Add a placeholder chapter
-            try:
-                title = f"Chapter {num}"
-                if num in chapter_titles_info:
-                    title = chapter_titles_info[num][0]
-                
-                placeholder_content = '<?xml version="1.0" encoding="utf-8"?>\n' + \
-                    '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" ' + \
-                    '"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">\n' + \
-                    '<html xmlns="http://www.w3.org/1999/xhtml">\n' + \
-                    '<head>\n' + \
-                    '<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />\n' + \
-                    f'<title>{ContentProcessor.safe_escape(title)}</title>\n' + \
-                    '</head>\n' + \
-                    '<body>\n' + \
-                    f'<h1>{ContentProcessor.safe_escape(title)}</h1>\n' + \
-                    '<p>Error loading chapter content.</p>\n' + \
-                    '</body>\n' + \
-                    '</html>'
-                
-                safe_fn = f"chapter_{num:03d}.xhtml"
-                chapter = epub.EpubHtml(
-                    title=title,
-                    file_name=safe_fn,
-                    lang=metadata.get("language", "en")
-                )
-                chapter.content = FileUtils.ensure_bytes(placeholder_content)
-                
-                book.add_item(chapter)
-                spine.append(chapter)
-                toc.append(chapter)
-                
-                self.log(f"⚠️ Added placeholder for chapter {num}")
-                return True
-            except:
-                return False
-    
-    def _get_chapter_title(self, num: int, filename: str, content: str,
+            self.log(f"❌ Failed to process chapter {num} ({filename}): {e}")
+    def _get_chapter_title(self, num: int, filename: str, html_content: str, 
                           chapter_titles_info: Dict[int, Tuple[str, float, str]]) -> str:
-        """Get chapter title with fallbacks"""
-        title = None
-        confidence = 0.0
+        """Get chapter title with multiple fallback methods
         
-        # Try pre-analyzed title
+        Tries to extract title from:
+        1. Pre-analyzed chapter_titles_info
+        2. HTML content (h1, title tags, etc.)
+        3. Filename patterns
+        4. Default "Chapter N"
+        """
+        # First check if we have pre-analyzed title info
         if num in chapter_titles_info:
             title, confidence, _ = chapter_titles_info[num]
+            if confidence > 0.3:  # Use if we have decent confidence
+                return title
         
-        # Re-extract if low confidence
-        if not title or confidence < 0.5:
-            backup_title, backup_confidence = TitleExtractor.extract_from_html(content, num, filename)
-            if backup_confidence > confidence:
-                title = backup_title
-                confidence = backup_confidence
+        # Try to extract from HTML content
+        extracted_title = self._extract_title_from_html(html_content, num, filename)
+        if extracted_title:
+            return extracted_title
         
-        # Clean and validate
-        if title:
-            title = TitleExtractor.clean_title(title)
-            if not TitleExtractor.is_valid_title(title):
-                title = None
+        # Try to extract from filename
+        filename_title = self._extract_title_from_filename(filename, num)
+        if filename_title:
+            return filename_title
         
-        # Fallback
-        if not title:
-            title = f"Chapter {num}"
+        # Default fallback
+        return f"Chapter {num}"
+
+    def _extract_title_from_html(self, html_content: str, num: int, filename: str) -> Optional[str]:
+        """Extract title from HTML content using multiple strategies"""
         
-        return title
+        # Strategy 1: Look for h1 tags with chapter info
+        h1_patterns = [
+            r'<h1[^>]*>([^<]*Chapter\s*\d+[^<]*)</h1>',
+            r'<h1[^>]*>([^<]+)</h1>',
+        ]
+        
+        for pattern in h1_patterns:
+            match = re.search(pattern, html_content, re.IGNORECASE)
+            if match:
+                title = match.group(1).strip()
+                # Clean up common HTML entities
+                title = title.replace('&nbsp;', ' ')
+                title = title.replace('&#8211;', '-')
+                title = title.replace('&#8217;', "'")
+                title = HTMLEntityDecoder.decode(title)
+                
+                # Make sure it's not too long or too short
+                if 3 < len(title) < 200:
+                    self.log(f"📝 Extracted title from h1: '{title}'")
+                    return title
+        
+        # Strategy 2: Look for title tags
+        title_match = re.search(r'<title[^>]*>([^<]+)</title>', html_content, re.IGNORECASE)
+        if title_match:
+            full_title = title_match.group(1).strip()
+            # Often contains site name, try to extract just the chapter part
+            # Look for patterns like "Chapter X - Title | Site Name"
+            chapter_patterns = [
+                r'(Chapter\s*\d+[^|–-]*?)(?:\||–|-|$)',
+                r'^([^|–-]+?)(?:\||–|-)',
+            ]
+            
+            for pattern in chapter_patterns:
+                match = re.search(pattern, full_title, re.IGNORECASE)
+                if match:
+                    title = match.group(1).strip()
+                    if 3 < len(title) < 200:
+                        self.log(f"📝 Extracted title from <title>: '{title}'")
+                        return title
+        
+        # Strategy 3: Look for specific class/id patterns
+        content_title_patterns = [
+            r'<[^>]*class="[^"]*entry-title[^"]*"[^>]*>([^<]+)<',
+            r'<[^>]*class="[^"]*chapter-title[^"]*"[^>]*>([^<]+)<',
+            r'<[^>]*class="[^"]*post-title[^"]*"[^>]*>([^<]+)<',
+            r'<div[^>]*class="[^"]*cat-series[^"]*"[^>]*>([^<]+)<',  # From your example
+        ]
+        
+        for pattern in content_title_patterns:
+            match = re.search(pattern, html_content, re.IGNORECASE)
+            if match:
+                title = match.group(1).strip()
+                title = HTMLEntityDecoder.decode(title)
+                if 3 < len(title) < 200:
+                    self.log(f"📝 Extracted title from class pattern: '{title}'")
+                    return title
+        
+        return None
+
+    def _extract_title_from_filename(self, filename: str, num: int) -> Optional[str]:
+        """Extract title from filename patterns"""
+        
+        # Remove extension
+        base_name = re.sub(r'\.(html?|xhtml)$', '', filename, flags=re.IGNORECASE)
+        
+        # Common patterns in filenames
+        patterns = [
+            # "chapter-127-apocalypse-7" -> "Chapter 127 - Apocalypse 7"
+            r'chapter[-_](\d+)[-_](.+)',
+            # "ch127-title" -> "Chapter 127 - Title"
+            r'ch[-_]?(\d+)[-_](.+)',
+            # "127-title" -> "Chapter 127 - Title"
+            r'^(\d+)[-_](.+)',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, base_name, re.IGNORECASE)
+            if match:
+                chapter_num = match.group(1)
+                title_part = match.group(2)
+                # Clean up the title part
+                title_part = title_part.replace('-', ' ').replace('_', ' ')
+                title_part = ' '.join(word.capitalize() for word in title_part.split())
+                
+                title = f"Chapter {chapter_num} - {title_part}"
+                self.log(f"📝 Extracted title from filename: '{title}'")
+                return title
+        
+        return None
+
+    def _extract_main_content(self, html_content: str, filename: str) -> str:
+        """Extract main content from web-scraped HTML pages
+        
+        This method tries to find the actual chapter content within a full webpage
+        """
+        try:
+            # For web-scraped content, try to extract just the chapter part
+            # Common patterns for chapter content containers
+            content_patterns = [
+                # Look for specific class names commonly used for content
+                (r'<div[^>]*class="[^"]*(?:chapter-content|entry-content|epcontent|post-content|content-area|main-content)[^"]*"[^>]*>(.*?)</div>', re.DOTALL | re.IGNORECASE),
+                # Look for article tags with content
+                (r'<article[^>]*>(.*?)</article>', re.DOTALL | re.IGNORECASE),
+                # Look for main tags
+                (r'<main[^>]*>(.*?)</main>', re.DOTALL | re.IGNORECASE),
+                # Look for specific id patterns
+                (r'<div[^>]*id="[^"]*(?:content|chapter|post)[^"]*"[^>]*>(.*?)</div>', re.DOTALL | re.IGNORECASE),
+            ]
+            
+            for pattern, flags in content_patterns:
+                match = re.search(pattern, html_content, flags)
+                if match:
+                    extracted = match.group(1)
+                    # Make sure we got something substantial
+                    if len(extracted.strip()) > 100:
+                        self.log(f"📄 Extracted main content using pattern for {filename}")
+                        return extracted
+            
+            # If no patterns matched, check if this looks like a full webpage
+            if '<html' in html_content.lower() and '<body' in html_content.lower():
+                # Try to extract body content
+                body_match = re.search(r'<body[^>]*>(.*?)</body>', html_content, re.DOTALL | re.IGNORECASE)
+                if body_match:
+                    self.log(f"📄 Extracted body content for {filename}")
+                    return body_match.group(1)
+            
+            # If all else fails, return original content
+            self.log(f"📄 Using original content for {filename}")
+            return html_content
+            
+        except Exception as e:
+            self.log(f"⚠️  Content extraction failed for {filename}: {e}")
+            return html_content
     
     def _process_chapter_images(self, xhtml_content: str, processed_images: Dict[str, str]) -> str:
         """Process image paths in chapter content"""
