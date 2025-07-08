@@ -1016,140 +1016,158 @@ class EPUBCompiler:
             self.log("⚠️  No resource directories found (CSS/images/fonts)")
 
     def _analyze_chapters(self) -> Dict[int, Tuple[str, float, str]]:
-        """Analyze chapter files and extract titles"""
-        self.log("\n📖 Extracting translated titles from chapter files...")
-        
-        chapter_info = {}
-        
-        # Check if we have standard files
-        if self._has_standard_files():
-            # Original logic for standard files
-            html_files = [f for f in os.listdir(self.output_dir) 
-                         if f.startswith("response_") and f.endswith(".html")]
-        else:
-            # Progressive logic for non-standard files
-            html_extensions = ('.html', '.htm', '.xhtml')
-            all_html = [f for f in os.listdir(self.output_dir) 
-                       if f.lower().endswith(html_extensions)]
+            """Analyze chapter files and extract titles"""
+            self.log("\n📖 Extracting translated titles from chapter files...")
             
-            # Filter out obvious non-chapter files
-            exclude_patterns = [
-                'index', 'toc', 'contents', 'cover', 'title',
-                'copyright', 'about', 'nav', 'style', 'template',
-                'metadata', 'acknowledgments', 'dedication'
-            ]
+            chapter_info = {}
             
-            html_files = [f for f in all_html 
-                         if not any(exclude in f.lower() for exclude in exclude_patterns)]
-        
-        if not html_files:
-            self.log("⚠️ No translated chapter files found!")
-            return chapter_info
-        
-        self.log(f"📖 Analyzing {len(html_files)} translated chapter files for titles...")
-        
-        # Sort files
-        if self._has_standard_files():
-            # Original sorting for standard files
-            sorted_files = sorted(html_files)
-        else:
-            # Progressive sorting for non-standard files
-            sorted_files = sorted(html_files, key=self.get_robust_sort_key)
-        
-        for idx, filename in enumerate(sorted_files):
-            file_path = os.path.join(self.output_dir, filename)
+            # Check if we have standard files
+            if self._has_standard_files():
+                # Original logic for standard files
+                html_files = [f for f in os.listdir(self.output_dir) 
+                             if f.startswith("response_") and f.endswith(".html")]
+            else:
+                # Progressive logic for non-standard files
+                html_extensions = ('.html', '.htm', '.xhtml')
+                all_html = [f for f in os.listdir(self.output_dir) 
+                           if f.lower().endswith(html_extensions)]
+                
+                # Filter out obvious non-chapter files
+                exclude_patterns = [
+                    'index', 'toc', 'contents', 'cover', 'title',
+                    'copyright', 'about', 'nav', 'style', 'template',
+                    'metadata', 'acknowledgments', 'dedication'
+                ]
+                
+                html_files = [f for f in all_html 
+                             if not any(exclude in f.lower() for exclude in exclude_patterns)]
             
-            try:
-                # Extract chapter number
-                if self._has_standard_files():
-                    # Original extraction for standard files
-                    match = re.match(r"response_(\d+)_", filename)
-                    if not match:
-                        self.log(f"⚠️ Could not extract chapter number from: {filename}")
-                        continue
-                    chapter_num = int(match.group(1))
+            if not html_files:
+                self.log("⚠️ No translated chapter files found!")
+                return chapter_info
+            
+            self.log(f"📖 Analyzing {len(html_files)} translated chapter files for titles...")
+            
+            # Sort files using the same logic as _find_html_files
+            if self._has_standard_files():
+                # Check if files have the -h- pattern
+                if any('-h-' in f for f in html_files):
+                    # Use the robust sort key for -h- pattern files
+                    sorted_files = sorted(html_files, key=self.get_robust_sort_key)
                 else:
-                    # Progressive extraction for non-standard files
+                    # Use numeric sorting for standard response_ files without -h-
+                    def extract_number(filename):
+                        match = re.match(r'response_(\d+)_', filename)
+                        if match:
+                            return int(match.group(1))
+                        return 0
+                    
+                    sorted_files = sorted(html_files, key=extract_number)
+            else:
+                # Progressive sorting for non-standard files
+                sorted_files = sorted(html_files, key=self.get_robust_sort_key)
+            
+            for idx, filename in enumerate(sorted_files):
+                file_path = os.path.join(self.output_dir, filename)
+                
+                try:
+                    # FIXED: Extract chapter number using the unified extraction method
+                    # This now properly checks for -h- pattern FIRST
                     chapter_num = self._extract_chapter_number(filename, idx)
-                
-                # Read content
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    html_content = f.read()
-                
-                # Extract title
-                title, confidence = TitleExtractor.extract_from_html(
-                    html_content, chapter_num, filename
-                )
-                
-                chapter_info[chapter_num] = (title, confidence, filename)
-                
-                # Log with confidence indicator
-                indicator = "✅" if confidence > 0.7 else "🟡" if confidence > 0.4 else "🔴"
-                self.log(f"  {indicator} Chapter {chapter_num}: '{title}' (confidence: {confidence:.2f})")
-                
-            except Exception as e:
-                self.log(f"❌ Error processing {filename}: {e}")
-                if self._has_standard_files() and match:
-                    chapter_info[chapter_num] = (f"Chapter {chapter_num}", 0.0, filename)
-                elif not self._has_standard_files():
-                    fallback_num = idx + 1
+                    
+                    # Read content
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        html_content = f.read()
+                    
+                    # Extract title
+                    title, confidence = TitleExtractor.extract_from_html(
+                        html_content, chapter_num, filename
+                    )
+                    
+                    chapter_info[chapter_num] = (title, confidence, filename)
+                    
+                    # Log with confidence indicator
+                    indicator = "✅" if confidence > 0.7 else "🟡" if confidence > 0.4 else "🔴"
+                    self.log(f"  {indicator} Chapter {chapter_num}: '{title}' (confidence: {confidence:.2f})")
+                    
+                except Exception as e:
+                    self.log(f"❌ Error processing {filename}: {e}")
+                    # Use fallback chapter number
+                    fallback_num = self._extract_chapter_number(filename, idx)
                     chapter_info[fallback_num] = (f"Chapter {fallback_num}", 0.0, filename)
-        
-        if chapter_info:
-            confident = sum(1 for _, (_, conf, _) in chapter_info.items() if conf > 0.5)
-            self.log(f"📊 Title extraction summary: {confident}/{len(chapter_info)} with high confidence")
-        
-        return chapter_info
+            
+            if chapter_info:
+                confident = sum(1 for _, (_, conf, _) in chapter_info.items() if conf > 0.5)
+                self.log(f"📊 Title extraction summary: {confident}/{len(chapter_info)} with high confidence")
+            
+            return chapter_info
 
     def _find_html_files(self) -> List[str]:
-        """Find HTML files with ROBUST sorting for ANY pattern"""
-        self.log(f"\n[DEBUG] Scanning directory: {self.output_dir}")
-        
-        all_files = os.listdir(self.output_dir)
-        
-        # Get ALL HTML files, not just response_ ones
-        html_extensions = ('.html', '.htm', '.xhtml')
-        html_files = [f for f in all_files if f.lower().endswith(html_extensions)]
-        
-        # Filter out common non-chapter files
-        exclude_patterns = [
-            'index', 'toc', 'contents', 'cover', 'title',
-            'copyright', 'about', 'nav', 'style', 'template'
-        ]
-        
-        # First, try to find response_ files (your current pattern)
-        response_files = [f for f in html_files if f.startswith('response_')]
-        
-        # If we have response_ files, use those
-        if response_files:
-            html_files = response_files
-            self.log(f"[DEBUG] Found {len(response_files)} response_ files")
-        else:
-            # Otherwise, filter out obvious non-chapter files
-            html_files = [f for f in html_files 
-                         if not any(exclude in f.lower() for exclude in exclude_patterns)]
-            self.log(f"[DEBUG] Found {len(html_files)} HTML files (no response_ prefix)")
-        
-        if not html_files:
-            self.log("[ERROR] No HTML files found!")
-            return []
-        
-        # Sort files
-        if response_files:
-            # Original sorting for standard files
-            html_files.sort()
-        else:
-            # Progressive sorting for non-standard files
-            html_files.sort(key=self.get_robust_sort_key)
-        
-        # Debug output
-        self.log(f"\n[DEBUG] Sorted {len(html_files)} files:")
-        for i, f in enumerate(html_files[:10]):
-            self.log(f"  {i+1}. {f}")
-        if len(html_files) > 10:
-            self.log(f"  ... and {len(html_files)-10} more")
-        
-        return html_files
+            """Find HTML files with ROBUST sorting for ANY pattern"""
+            self.log(f"\n[DEBUG] Scanning directory: {self.output_dir}")
+            
+            all_files = os.listdir(self.output_dir)
+            
+            # Get ALL HTML files, not just response_ ones
+            html_extensions = ('.html', '.htm', '.xhtml')
+            html_files = [f for f in all_files if f.lower().endswith(html_extensions)]
+            
+            # Filter out common non-chapter files
+            exclude_patterns = [
+                'index', 'toc', 'contents', 'cover', 'title',
+                'copyright', 'about', 'nav', 'style', 'template'
+            ]
+            
+            # First, try to find response_ files (your current pattern)
+            response_files = [f for f in html_files if f.startswith('response_')]
+            
+            # If we have response_ files, use those
+            if response_files:
+                html_files = response_files
+                self.log(f"[DEBUG] Found {len(response_files)} response_ files")
+            else:
+                # Otherwise, filter out obvious non-chapter files
+                html_files = [f for f in html_files 
+                             if not any(exclude in f.lower() for exclude in exclude_patterns)]
+                self.log(f"[DEBUG] Found {len(html_files)} HTML files (no response_ prefix)")
+            
+            if not html_files:
+                self.log("[ERROR] No HTML files found!")
+                return []
+            
+            # Sort files
+            if response_files:
+                # FIXED: Check if files have -h- pattern
+                if any('-h-' in f for f in response_files):
+                    # Use special sorting for -h- pattern
+                    def extract_h_number(filename):
+                        match = re.search(r'-h-(\d+)', filename)
+                        if match:
+                            return int(match.group(1))
+                        return 999999  # Put non-matching files at end
+                    
+                    html_files.sort(key=extract_h_number)
+                else:
+                    # Use numeric sorting for standard response_ files
+                    def extract_number(filename):
+                        match = re.match(r'response_(\d+)_', filename)
+                        if match:
+                            return int(match.group(1))
+                        return 0
+                    
+                    html_files.sort(key=extract_number)
+            else:
+                # Progressive sorting for non-standard files
+                html_files.sort(key=self.get_robust_sort_key)
+            
+            # Debug output
+            self.log(f"\n[DEBUG] Sorted {len(html_files)} files:")
+            for i, f in enumerate(html_files[:10]):
+                self.log(f"  {i+1}. {f}")
+            if len(html_files) > 10:
+                self.log(f"  ... and {len(html_files)-10} more")
+            
+            return html_files
 
     def _process_chapters(self, book: epub.EpubBook, html_files: List[str],
                          chapter_titles_info: Dict[int, Tuple[str, float, str]],
@@ -1165,13 +1183,8 @@ class EPUBCompiler:
         
         # Process in EXACT order - no parsing, no reordering
         for idx, filename in enumerate(html_files):
-            # Use index + 1 as chapter number
-            if is_standard:
-                # Original logic for standard files
-                chapter_num = idx + 1
-            else:
-                # Progressive logic for non-standard files
-                chapter_num = self._extract_chapter_number(filename, idx)
+            # FIXED: Always extract chapter number from filename, not from position
+            chapter_num = self._extract_chapter_number(filename, idx)
             
             try:
                 if self._process_single_chapter(
@@ -1468,62 +1481,60 @@ class EPUBCompiler:
         return (99, filename)
 
     def _extract_chapter_number(self, filename: str, default_idx: int) -> int:
-        """Extract chapter number using multiple patterns"""
-        
-        # Try various extraction patterns in order of reliability
-        
-        # Pattern 1: response_NUMBER_ (standard pattern)
-        match = re.match(r"response_(\d+)_", filename)
-        if match:
-            return int(match.group(1))
-        
-        # Pattern 2: chapter-NUMBER, chapter_NUMBER, chapterNUMBER
-        match = re.search(r'chapter[-_\s]?(\d+)', filename, re.IGNORECASE)
-        if match:
-            return int(match.group(1))
-        
-        # Pattern 3: ch-NUMBER, ch_NUMBER, chNUMBER
-        match = re.search(r'\bch[-_\s]?(\d+)\b', filename, re.IGNORECASE)
-        if match:
-            return int(match.group(1))
-        
-        # Pattern 4: -h-NUMBER (specific pattern)
-        match = re.search(r'-h-(\d+)', filename)
-        if match:
-            return int(match.group(1))
-        
-        # Pattern 5: Just NUMBER.html (like 127.html)
-        match = re.match(r'^(\d+)\.(?:html?|xhtml)$', filename)
-        if match:
-            return int(match.group(1))
-        
-        # Pattern 6: _NUMBER at end before extension
-        match = re.search(r'_(\d+)\.(?:html?|xhtml)$', filename)
-        if match:
-            return int(match.group(1))
-        
-        # Pattern 7: -NUMBER at end before extension
-        match = re.search(r'-(\d+)\.(?:html?|xhtml)$', filename)
-        if match:
-            return int(match.group(1))
-        
-        # Pattern 8: (NUMBER) in parentheses
-        match = re.search(r'\((\d+)\)', filename)
-        if match:
-            return int(match.group(1))
-        
-        # Pattern 9: [NUMBER] in brackets
-        match = re.search(r'\[(\d+)\]', filename)
-        if match:
-            return int(match.group(1))
-        
-        # Pattern 10: Use the sort key logic
-        sort_key = self.get_robust_sort_key(filename)
-        if isinstance(sort_key[1], int) and sort_key[1] > 0:
-            return sort_key[1]
-        
-        # Final fallback: use position + 1
-        return default_idx + 1
+            """Extract chapter number using multiple patterns"""
+            
+            # FIXED: Pattern 1 - Check -h-NUMBER FIRST (YOUR FILES USE THIS!)
+            match = re.search(r'-h-(\d+)', filename)
+            if match:
+                return int(match.group(1))
+            
+            # Pattern 2: response_NUMBER_ (standard pattern)
+            match = re.match(r"response_(\d+)_", filename)
+            if match:
+                return int(match.group(1))
+            
+            # Pattern 3: chapter-NUMBER, chapter_NUMBER, chapterNUMBER
+            match = re.search(r'chapter[-_\s]?(\d+)', filename, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+            
+            # Pattern 4: ch-NUMBER, ch_NUMBER, chNUMBER
+            match = re.search(r'\bch[-_\s]?(\d+)\b', filename, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+            
+            # Pattern 5: Just NUMBER.html (like 127.html)
+            match = re.match(r'^(\d+)\.(?:html?|xhtml)$', filename)
+            if match:
+                return int(match.group(1))
+            
+            # Pattern 6: _NUMBER at end before extension
+            match = re.search(r'_(\d+)\.(?:html?|xhtml)$', filename)
+            if match:
+                return int(match.group(1))
+            
+            # Pattern 7: -NUMBER at end before extension
+            match = re.search(r'-(\d+)\.(?:html?|xhtml)$', filename)
+            if match:
+                return int(match.group(1))
+            
+            # Pattern 8: (NUMBER) in parentheses
+            match = re.search(r'\((\d+)\)', filename)
+            if match:
+                return int(match.group(1))
+            
+            # Pattern 9: [NUMBER] in brackets
+            match = re.search(r'\[(\d+)\]', filename)
+            if match:
+                return int(match.group(1))
+            
+            # Pattern 10: Use the sort key logic
+            sort_key = self.get_robust_sort_key(filename)
+            if isinstance(sort_key[1], int) and sort_key[1] > 0:
+                return sort_key[1]
+            
+            # Final fallback: use position + 1
+            return default_idx + 1
 
     def _extract_main_content(self, html_content: str, filename: str) -> str:
         """Extract main content from web-scraped HTML pages
