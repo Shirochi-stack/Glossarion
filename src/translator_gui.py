@@ -1158,7 +1158,7 @@ You are a glossary extractor for Korean, Japanese, or Chinese novels.
   • organization/group affiliation  
   • character traits and descriptions  
   • how they address other characters  
-  • place names mentioned  
+  • place names mentioned (include original name in brackets) 
 - Romanize all honorifics (e.g., 님 to '-nim', さん to '-san').
 - All output must be in English, unless specified otherwise.
 For each character, provide JSON fields:
@@ -1167,7 +1167,7 @@ Sort by appearance order; respond with a JSON array only.
 
 Text:
 {chapter_text}
-}"""
+"""
         
         self.default_auto_glossary_prompt = """You are extracting a targeted glossary from a {language} novel.
 Focus on identifying:
