@@ -801,17 +801,11 @@ class EPUBCompiler:
             print(message)
     
     def compile(self):
-        """Main compilation method with automatic progressive fallback"""
+        """Main compilation method"""
         try:
-            # Pre-flight check with automatic fallback
-            preflight_result = self._preflight_check_progressive()
-            if not preflight_result:
-                self.log("\n❌ All preflight checks failed - cannot proceed with compilation")
+            # Pre-flight check
+            if not self._preflight_check():
                 return
-            
-            # Log what mode we're proceeding with
-            mode = preflight_result.get('mode', 'unknown')
-            self.log(f"\n✅ Proceeding with compilation in {mode} mode")
             
             # Analyze chapters for titles
             chapter_titles_info = self._analyze_chapters()
@@ -886,43 +880,86 @@ class EPUBCompiler:
             raise
 
     def _preflight_check(self) -> bool:
-        """Legacy preflight check method - now uses progressive check"""
-        result = self._preflight_check_progressive()
-        return result is not None
+        """Pre-flight check before compilation with progressive fallback"""
+        # Check if we have standard files
+        if self._has_standard_files():
+            # Use original strict check
+            return self._preflight_check_strict()
+        else:
+            # Use progressive check for non-standard files
+            result = self._preflight_check_progressive()
+            return result is not None
+
+    def _has_standard_files(self) -> bool:
+        """Check if directory contains standard response_ files"""
+        if not os.path.exists(self.base_dir):
+            return False
+        
+        html_files = [f for f in os.listdir(self.base_dir) if f.endswith('.html')]
+        response_files = [f for f in html_files if f.startswith('response_')]
+        
+        return len(response_files) > 0
+
+    def _preflight_check_strict(self) -> bool:
+        """Original strict pre-flight check - for standard files"""
+        self.log("\n📋 Pre-flight Check")
+        self.log("=" * 50)
+        
+        issues = []
+        
+        if not os.path.exists(self.base_dir):
+            issues.append(f"Directory does not exist: {self.base_dir}")
+            return False
+        
+        html_files = [f for f in os.listdir(self.base_dir) if f.endswith('.html')]
+        response_files = [f for f in html_files if f.startswith('response_')]
+        
+        if not html_files:
+            issues.append("No HTML files found in directory")
+        elif not response_files:
+            issues.append(f"Found {len(html_files)} HTML files but none start with 'response_'")
+        else:
+            self.log(f"✅ Found {len(response_files)} chapter files")
+        
+        if not os.path.exists(self.metadata_path):
+            self.log("⚠️  No metadata.json found (will use defaults)")
+        else:
+            self.log("✅ Found metadata.json")
+        
+        for subdir in ['css', 'images', 'fonts']:
+            path = os.path.join(self.base_dir, subdir)
+            if os.path.exists(path):
+                count = len(os.listdir(path))
+                self.log(f"✅ Found {subdir}/ with {count} files")
+        
+        if issues:
+            self.log("\n❌ Pre-flight check FAILED:")
+            for issue in issues:
+                self.log(f"  • {issue}")
+            return False
+        
+        self.log("\n✅ Pre-flight check PASSED")
+        return True
 
     def _preflight_check_progressive(self) -> dict:
-        """Progressive pre-flight check that automatically falls back through modes
-        
-        Returns:
-            dict: Result dictionary with 'success' and 'mode' keys, or None if all checks fail
-        """
+        """Progressive pre-flight check for non-standard files"""
         self.log("\n📋 Starting Progressive Pre-flight Check")
         self.log("=" * 50)
         
         # Critical check - always required
         if not os.path.exists(self.base_dir):
             self.log(f"❌ CRITICAL: Directory does not exist: {self.base_dir}")
-            self.log("Cannot proceed without a valid directory")
             return None
         
-        # Phase 1: Try strict mode (response_ files)
-        self.log("\n[Phase 1] Checking for standard naming (response_*.html)...")
-        
-        html_files = [f for f in os.listdir(self.base_dir) if f.endswith('.html')]
-        response_files = [f for f in html_files if f.startswith('response_')]
-        
-        if response_files:
-            self.log(f"✅ Found {len(response_files)} response_*.html files")
-            self._check_optional_resources()
-            self.log("\n✅ Pre-flight check PASSED (strict mode)")
-            return {'success': True, 'mode': 'strict'}
+        # Phase 1: Try strict mode (response_ files) - already checked in caller
         
         # Phase 2: Try relaxed mode (any HTML files)
-        self.log(f"⚠️  No response_*.html files found")
-        self.log("\n[Phase 2] Falling back to relaxed mode (any HTML files)...")
+        self.log("\n[Phase 2] Checking for any HTML files...")
+        
+        html_files = [f for f in os.listdir(self.base_dir) if f.endswith('.html')]
         
         if html_files:
-            self.log(f"✅ Found {len(html_files)} HTML files with non-standard naming:")
+            self.log(f"✅ Found {len(html_files)} HTML files:")
             # Show first 5 files as examples
             for i, f in enumerate(html_files[:5]):
                 self.log(f"    • {f}")
@@ -933,18 +970,17 @@ class EPUBCompiler:
             self.log("\n⚠️  Pre-flight check PASSED with warnings (relaxed mode)")
             return {'success': True, 'mode': 'relaxed'}
         
-        # Phase 3: No HTML files at all - try bypass mode
+        # Phase 3: No HTML files at all
         self.log("❌ No HTML files found in directory")
-        self.log("\n[Phase 3] Attempting bypass mode as last resort...")
+        self.log("\n[Phase 3] Checking directory contents...")
         
-        # Check if there might be files in subdirectories or other formats
         all_files = os.listdir(self.base_dir)
         self.log(f"📁 Directory contains {len(all_files)} total files")
         
         # Look for any potential content
         potential_content = [f for f in all_files if not f.startswith('.')]
         if potential_content:
-            self.log("⚠️  Found non-HTML files that might contain content:")
+            self.log("⚠️  Found non-HTML files:")
             for i, f in enumerate(potential_content[:5]):
                 self.log(f"    • {f}")
             if len(potential_content) > 5:
@@ -953,21 +989,18 @@ class EPUBCompiler:
             self.log("\n⚠️  BYPASSING standard checks - compilation may fail!")
             return {'success': True, 'mode': 'bypass'}
         
-        # Complete failure - empty directory
-        self.log("\n❌ Directory appears to be empty or contains no usable files")
+        self.log("\n❌ Directory appears to be empty")
         return None
 
     def _check_optional_resources(self):
         """Check for optional resources (metadata, CSS, images, fonts)"""
         self.log("\n📁 Checking optional resources:")
         
-        # Check metadata
         if os.path.exists(self.metadata_path):
             self.log("✅ Found metadata.json")
         else:
             self.log("⚠️  No metadata.json found (will use defaults)")
         
-        # Check resource directories
         resources_found = False
         for subdir in ['css', 'images', 'fonts']:
             path = os.path.join(self.base_dir, subdir)
@@ -983,18 +1016,18 @@ class EPUBCompiler:
             self.log("⚠️  No resource directories found (CSS/images/fonts)")
 
     def _analyze_chapters(self) -> Dict[int, Tuple[str, float, str]]:
-        """Analyze chapter files and extract titles - now supports any HTML pattern"""
+        """Analyze chapter files and extract titles"""
         self.log("\n📖 Extracting translated titles from chapter files...")
         
         chapter_info = {}
         
-        # First try response_ files (standard pattern)
-        html_files = [f for f in os.listdir(self.output_dir) 
-                     if f.startswith("response_") and f.endswith(".html")]
-        
-        # If no response_ files, get all HTML files (progressive fallback)
-        if not html_files:
-            self.log("⚠️  No response_*.html files found - checking all HTML files...")
+        # Check if we have standard files
+        if self._has_standard_files():
+            # Original logic for standard files
+            html_files = [f for f in os.listdir(self.output_dir) 
+                         if f.startswith("response_") and f.endswith(".html")]
+        else:
+            # Progressive logic for non-standard files
             html_extensions = ('.html', '.htm', '.xhtml')
             all_html = [f for f in os.listdir(self.output_dir) 
                        if f.lower().endswith(html_extensions)]
@@ -1010,33 +1043,34 @@ class EPUBCompiler:
                          if not any(exclude in f.lower() for exclude in exclude_patterns)]
         
         if not html_files:
-            self.log("⚠️ No chapter files found for title extraction!")
+            self.log("⚠️ No translated chapter files found!")
             return chapter_info
         
-        self.log(f"📖 Analyzing {len(html_files)} chapter files for titles...")
+        self.log(f"📖 Analyzing {len(html_files)} translated chapter files for titles...")
         
-        # Sort files using the same robust logic as _find_html_files
-        html_files = sorted(html_files, key=self.get_robust_sort_key)
+        # Sort files
+        if self._has_standard_files():
+            # Original sorting for standard files
+            sorted_files = sorted(html_files)
+        else:
+            # Progressive sorting for non-standard files
+            sorted_files = sorted(html_files, key=self.get_robust_sort_key)
         
-        for idx, filename in enumerate(html_files):
+        for idx, filename in enumerate(sorted_files):
             file_path = os.path.join(self.output_dir, filename)
             
             try:
-                # Extract chapter number - try multiple patterns
-                chapter_num = None
-                
-                # Pattern 1: response_NUMBER_
-                match = re.match(r"response_(\d+)_", filename)
-                if match:
+                # Extract chapter number
+                if self._has_standard_files():
+                    # Original extraction for standard files
+                    match = re.match(r"response_(\d+)_", filename)
+                    if not match:
+                        self.log(f"⚠️ Could not extract chapter number from: {filename}")
+                        continue
                     chapter_num = int(match.group(1))
                 else:
-                    # Try to extract from sorted position
-                    sort_key = self.get_robust_sort_key(filename)
-                    if isinstance(sort_key[1], int):
-                        chapter_num = sort_key[1]
-                    else:
-                        # Use position in sorted list as fallback
-                        chapter_num = idx + 1
+                    # Progressive extraction for non-standard files
+                    chapter_num = self._extract_chapter_number(filename, idx)
                 
                 # Read content
                 with open(file_path, 'r', encoding='utf-8') as f:
@@ -1055,9 +1089,11 @@ class EPUBCompiler:
                 
             except Exception as e:
                 self.log(f"❌ Error processing {filename}: {e}")
-                # Use position-based chapter number as fallback
-                fallback_num = idx + 1
-                chapter_info[fallback_num] = (f"Chapter {fallback_num}", 0.0, filename)
+                if self._has_standard_files() and match:
+                    chapter_info[chapter_num] = (f"Chapter {chapter_num}", 0.0, filename)
+                elif not self._has_standard_files():
+                    fallback_num = idx + 1
+                    chapter_info[fallback_num] = (f"Chapter {fallback_num}", 0.0, filename)
         
         if chapter_info:
             confident = sum(1 for _, (_, conf, _) in chapter_info.items() if conf > 0.5)
@@ -1067,7 +1103,7 @@ class EPUBCompiler:
 
     def _find_html_files(self) -> List[str]:
         """Find HTML files with ROBUST sorting for ANY pattern"""
-        self.log(f"\n📂 Scanning for chapter files in: {self.output_dir}")
+        self.log(f"\n[DEBUG] Scanning directory: {self.output_dir}")
         
         all_files = os.listdir(self.output_dir)
         
@@ -1078,8 +1114,7 @@ class EPUBCompiler:
         # Filter out common non-chapter files
         exclude_patterns = [
             'index', 'toc', 'contents', 'cover', 'title',
-            'copyright', 'about', 'nav', 'style', 'template',
-            'metadata', 'acknowledgments', 'dedication'
+            'copyright', 'about', 'nav', 'style', 'template'
         ]
         
         # First, try to find response_ files (your current pattern)
@@ -1088,38 +1123,252 @@ class EPUBCompiler:
         # If we have response_ files, use those
         if response_files:
             html_files = response_files
-            self.log(f"✅ Using {len(response_files)} response_*.html files (standard pattern)")
+            self.log(f"[DEBUG] Found {len(response_files)} response_ files")
         else:
             # Otherwise, filter out obvious non-chapter files
             html_files = [f for f in html_files 
                          if not any(exclude in f.lower() for exclude in exclude_patterns)]
-            self.log(f"⚠️  No response_*.html files found - using {len(html_files)} HTML files with alternative patterns")
+            self.log(f"[DEBUG] Found {len(html_files)} HTML files (no response_ prefix)")
         
         if not html_files:
-            self.log("❌ No HTML files found!")
+            self.log("[ERROR] No HTML files found!")
             return []
         
-        # Sort files using robust sorting
-        self.log("\n🔢 Detecting chapter order...")
-        html_files.sort(key=self.get_robust_sort_key)
+        # Sort files
+        if response_files:
+            # Original sorting for standard files
+            html_files.sort()
+        else:
+            # Progressive sorting for non-standard files
+            html_files.sort(key=self.get_robust_sort_key)
         
         # Debug output
-        self.log(f"📚 Sorted {len(html_files)} chapter files:")
-        pattern_names = {
-            1: "-h-N", 2: "chapter-N", 3: "ch-N", 4: "response_N_",
-            5: "book/part-N", 6: "split_N", 7: "N.html", 8: "-N.html",
-            9: "_N.html", 10: "(N)", 11: "[N]", 12: "page-N",
-            13: "*N.html", 14: "Roman", 15: "first number", 99: "alphabetical"
-        }
-        
+        self.log(f"\n[DEBUG] Sorted {len(html_files)} files:")
         for i, f in enumerate(html_files[:10]):
-            key = self.get_robust_sort_key(f)
-            pattern = pattern_names.get(key[0], "unknown")
-            self.log(f"  {i+1}. {f} [pattern: {pattern}, sort key: {key[1]}]")
+            self.log(f"  {i+1}. {f}")
         if len(html_files) > 10:
-            self.log(f"  ... and {len(html_files)-10} more files")
+            self.log(f"  ... and {len(html_files)-10} more")
         
         return html_files
+
+    def _process_chapters(self, book: epub.EpubBook, html_files: List[str],
+                         chapter_titles_info: Dict[int, Tuple[str, float, str]],
+                         css_items: List[epub.EpubItem], processed_images: Dict[str, str],
+                         spine: List, toc: List, metadata: dict) -> int:
+        """Process chapters - NO FANCY PARSING"""
+        chapters_added = 0
+        
+        self.log(f"\n📚 Processing {len(html_files)} chapters...")
+        
+        # Check if we're dealing with standard files
+        is_standard = any(f.startswith('response_') for f in html_files)
+        
+        # Process in EXACT order - no parsing, no reordering
+        for idx, filename in enumerate(html_files):
+            # Use index + 1 as chapter number
+            if is_standard:
+                # Original logic for standard files
+                chapter_num = idx + 1
+            else:
+                # Progressive logic for non-standard files
+                chapter_num = self._extract_chapter_number(filename, idx)
+            
+            try:
+                if self._process_single_chapter(
+                    book, chapter_num, filename, chapter_titles_info, css_items, 
+                    processed_images, spine, toc, metadata
+                ):
+                    chapters_added += 1
+            except Exception as e:
+                self.log(f"[ERROR] Chapter {chapter_num} failed: {e}")
+                
+                # Add placeholder
+                try:
+                    chapter = epub.EpubHtml(
+                        title=f"Chapter {chapter_num}",
+                        file_name=f"chapter_{chapter_num:03d}.xhtml",
+                        lang=metadata.get("language", "en")
+                    )
+                    chapter.content = f"""<?xml version="1.0" encoding="utf-8"?>
+    <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+    <html xmlns="http://www.w3.org/1999/xhtml">
+    <head><title>Chapter {chapter_num}</title></head>
+    <body>
+    <h1>Chapter {chapter_num}</h1>
+    <p>Error loading: {filename}</p>
+    </body>
+    </html>""".encode('utf-8')
+                    
+                    book.add_item(chapter)
+                    spine.append(chapter)
+                    toc.append(chapter)
+                    chapters_added += 1
+                except:
+                    pass
+        
+        self.log(f"Added {chapters_added} chapters")
+        return chapters_added
+
+    def _process_single_chapter(self, book: epub.EpubBook, num: int, filename: str,
+                               chapter_titles_info: Dict[int, Tuple[str, float, str]],
+                               css_items: List[epub.EpubItem], processed_images: Dict[str, str],
+                               spine: List, toc: List, metadata: dict) -> bool:
+        """Process a single chapter"""
+        path = os.path.join(self.output_dir, filename)
+        
+        try:
+            # Read content
+            with open(path, 'r', encoding='utf-8') as f:
+                raw_content = f.read()
+            
+            # Decode entities
+            raw_content = HTMLEntityDecoder.decode(raw_content)
+            
+            if not raw_content.strip():
+                self.log(f"[WARNING] Chapter {num} is empty")
+                return False
+            
+            # Clean content - with progressive handling for web-scraped pages
+            if not filename.startswith('response_'):
+                # Try to extract main content for non-standard files
+                raw_content = self._extract_main_content(raw_content, filename)
+            
+            raw_content = ContentProcessor.clean_chapter_content(raw_content)
+            
+            # Get title
+            title = self._get_chapter_title(num, filename, raw_content, chapter_titles_info)
+            
+            # Prepare CSS links
+            css_links = [f"css/{item.file_name.split('/')[-1]}" for item in css_items]
+            
+            # Convert to XHTML
+            try:
+                xhtml_content = XHTMLConverter.ensure_compliance(raw_content, title, css_links)
+            except Exception as e:
+                self.log(f"[WARNING] XHTML conversion failed for chapter {num}: {e}")
+                # Create minimal valid XHTML
+                xhtml_content = XHTMLConverter._build_xhtml(
+                    title,
+                    f'<h1>{ContentProcessor.safe_escape(title)}</h1><p>Chapter content could not be processed.</p>',
+                    css_links
+                )
+            
+            # Process images in content
+            xhtml_content = self._process_chapter_images(xhtml_content, processed_images)
+            
+            # Validate
+            final_content = XHTMLConverter.validate(xhtml_content)
+            
+            # Final validation check
+            try:
+                ET.fromstring(final_content.encode('utf-8'))
+            except ET.ParseError:
+                # Use a simple fallback that we know is valid
+                final_content = '<?xml version="1.0" encoding="utf-8"?>\n' + \
+                    '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" ' + \
+                    '"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">\n' + \
+                    '<html xmlns="http://www.w3.org/1999/xhtml">\n' + \
+                    '<head>\n' + \
+                    '<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />\n' + \
+                    f'<title>{ContentProcessor.safe_escape(title)}</title>\n' + \
+                    '</head>\n' + \
+                    '<body>\n' + \
+                    f'<h1>{ContentProcessor.safe_escape(title)}</h1>\n' + \
+                    '<p>Chapter content could not be processed properly.</p>\n' + \
+                    '</body>\n' + \
+                    '</html>'
+            
+            # Create chapter
+            safe_fn = f"chapter_{num:03d}.xhtml"
+            chapter = epub.EpubHtml(
+                title=title,
+                file_name=safe_fn,
+                lang=metadata.get("language", "en")
+            )
+            chapter.content = FileUtils.ensure_bytes(final_content)
+            
+            # Add to book
+            book.add_item(chapter)
+            spine.append(chapter)
+            toc.append(chapter)
+            
+            self.log(f"✅ Added chapter {num}: '{title}'")
+            return True
+            
+        except Exception as e:
+            self.log(f"[ERROR] Failed to process chapter {num}: {e}")
+            # Add a placeholder chapter
+            try:
+                title = f"Chapter {num}"
+                if num in chapter_titles_info:
+                    title = chapter_titles_info[num][0]
+                
+                placeholder_content = '<?xml version="1.0" encoding="utf-8"?>\n' + \
+                    '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" ' + \
+                    '"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">\n' + \
+                    '<html xmlns="http://www.w3.org/1999/xhtml">\n' + \
+                    '<head>\n' + \
+                    '<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />\n' + \
+                    f'<title>{ContentProcessor.safe_escape(title)}</title>\n' + \
+                    '</head>\n' + \
+                    '<body>\n' + \
+                    f'<h1>{ContentProcessor.safe_escape(title)}</h1>\n' + \
+                    '<p>Error loading chapter content.</p>\n' + \
+                    '</body>\n' + \
+                    '</html>'
+                
+                safe_fn = f"chapter_{num:03d}.xhtml"
+                chapter = epub.EpubHtml(
+                    title=title,
+                    file_name=safe_fn,
+                    lang=metadata.get("language", "en")
+                )
+                chapter.content = FileUtils.ensure_bytes(placeholder_content)
+                
+                book.add_item(chapter)
+                spine.append(chapter)
+                toc.append(chapter)
+                
+                self.log(f"⚠️ Added placeholder for chapter {num}")
+                return True
+            except:
+                return False
+
+    def _get_chapter_title(self, num: int, filename: str, content: str,
+                          chapter_titles_info: Dict[int, Tuple[str, float, str]]) -> str:
+        """Get chapter title with fallbacks"""
+        title = None
+        confidence = 0.0
+        
+        # Try pre-analyzed title
+        if num in chapter_titles_info:
+            title, confidence, _ = chapter_titles_info[num]
+        
+        # Re-extract if low confidence
+        if not title or confidence < 0.5:
+            backup_title, backup_confidence = TitleExtractor.extract_from_html(content, num, filename)
+            if backup_confidence > confidence:
+                title = backup_title
+                confidence = backup_confidence
+        
+        # Clean and validate
+        if title:
+            title = TitleExtractor.clean_title(title)
+            if not TitleExtractor.is_valid_title(title):
+                title = None
+        
+        # NEW FALLBACK LOGIC - only if TitleExtractor failed AND not standard file
+        if not title and not filename.startswith('response_'):
+            # Try enhanced extraction methods for web-scraped content
+            title = self._fallback_title_extraction(content, filename, num)
+        
+        # Final fallback
+        if not title:
+            title = f"Chapter {num}"
+        
+        return title
+
+    # Progressive helper methods - only used for non-standard files
 
     def get_robust_sort_key(self, filename):
         """Extract chapter/sequence number using multiple patterns"""
@@ -1217,7 +1466,200 @@ class EPUBCompiler:
         
         # Final fallback: alphabetical
         return (99, filename)
+
+    def _extract_chapter_number(self, filename: str, default_idx: int) -> int:
+        """Extract chapter number using multiple patterns"""
         
+        # Try various extraction patterns in order of reliability
+        
+        # Pattern 1: response_NUMBER_ (standard pattern)
+        match = re.match(r"response_(\d+)_", filename)
+        if match:
+            return int(match.group(1))
+        
+        # Pattern 2: chapter-NUMBER, chapter_NUMBER, chapterNUMBER
+        match = re.search(r'chapter[-_\s]?(\d+)', filename, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        
+        # Pattern 3: ch-NUMBER, ch_NUMBER, chNUMBER
+        match = re.search(r'\bch[-_\s]?(\d+)\b', filename, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        
+        # Pattern 4: -h-NUMBER (specific pattern)
+        match = re.search(r'-h-(\d+)', filename)
+        if match:
+            return int(match.group(1))
+        
+        # Pattern 5: Just NUMBER.html (like 127.html)
+        match = re.match(r'^(\d+)\.(?:html?|xhtml)$', filename)
+        if match:
+            return int(match.group(1))
+        
+        # Pattern 6: _NUMBER at end before extension
+        match = re.search(r'_(\d+)\.(?:html?|xhtml)$', filename)
+        if match:
+            return int(match.group(1))
+        
+        # Pattern 7: -NUMBER at end before extension
+        match = re.search(r'-(\d+)\.(?:html?|xhtml)$', filename)
+        if match:
+            return int(match.group(1))
+        
+        # Pattern 8: (NUMBER) in parentheses
+        match = re.search(r'\((\d+)\)', filename)
+        if match:
+            return int(match.group(1))
+        
+        # Pattern 9: [NUMBER] in brackets
+        match = re.search(r'\[(\d+)\]', filename)
+        if match:
+            return int(match.group(1))
+        
+        # Pattern 10: Use the sort key logic
+        sort_key = self.get_robust_sort_key(filename)
+        if isinstance(sort_key[1], int) and sort_key[1] > 0:
+            return sort_key[1]
+        
+        # Final fallback: use position + 1
+        return default_idx + 1
+
+    def _extract_main_content(self, html_content: str, filename: str) -> str:
+        """Extract main content from web-scraped HTML pages
+        
+        This method tries to find the actual chapter content within a full webpage
+        """
+        try:
+            # For web-scraped content, try to extract just the chapter part
+            # Common patterns for chapter content containers
+            content_patterns = [
+                # Look for specific class names commonly used for content
+                (r'<div[^>]*class="[^"]*(?:chapter-content|entry-content|epcontent|post-content|content-area|main-content)[^"]*"[^>]*>(.*?)</div>', re.DOTALL | re.IGNORECASE),
+                # Look for article tags with content
+                (r'<article[^>]*>(.*?)</article>', re.DOTALL | re.IGNORECASE),
+                # Look for main tags
+                (r'<main[^>]*>(.*?)</main>', re.DOTALL | re.IGNORECASE),
+                # Look for specific id patterns
+                (r'<div[^>]*id="[^"]*(?:content|chapter|post)[^"]*"[^>]*>(.*?)</div>', re.DOTALL | re.IGNORECASE),
+            ]
+            
+            for pattern, flags in content_patterns:
+                match = re.search(pattern, html_content, flags)
+                if match:
+                    extracted = match.group(1)
+                    # Make sure we got something substantial
+                    if len(extracted.strip()) > 100:
+                        self.log(f"📄 Extracted main content using pattern for {filename}")
+                        return extracted
+            
+            # If no patterns matched, check if this looks like a full webpage
+            if '<html' in html_content.lower() and '<body' in html_content.lower():
+                # Try to extract body content
+                body_match = re.search(r'<body[^>]*>(.*?)</body>', html_content, re.DOTALL | re.IGNORECASE)
+                if body_match:
+                    self.log(f"📄 Extracted body content for {filename}")
+                    return body_match.group(1)
+            
+            # If all else fails, return original content
+            self.log(f"📄 Using original content for {filename}")
+            return html_content
+            
+        except Exception as e:
+            self.log(f"⚠️  Content extraction failed for {filename}: {e}")
+            return html_content
+
+    def _fallback_title_extraction(self, content: str, filename: str, num: int) -> Optional[str]:
+        """Fallback title extraction for when TitleExtractor fails
+        
+        This handles web-scraped pages and other non-standard formats
+        """
+        # Try filename-based extraction first (often more reliable for web scrapes)
+        filename_title = self._extract_title_from_filename_fallback(filename, num)
+        if filename_title:
+            return filename_title
+        
+        # Try HTML content extraction with patterns TitleExtractor might miss
+        html_title = self._extract_title_from_html_fallback(content, num)
+        if html_title:
+            return html_title
+        
+        return None
+
+    def _extract_title_from_html_fallback(self, content: str, num: int) -> Optional[str]:
+        """Fallback HTML title extraction for web-scraped content"""
+        
+        # Look for title patterns that TitleExtractor might miss
+        # Specifically for web-scraped novel sites
+        patterns = [
+            # Title tags with site separators
+            r'<title[^>]*>([^|–\-]+?)(?:\s*[|–\-]\s*[^<]+)?</title>',
+            # Specific class patterns from novel sites
+            r'<div[^>]*class="[^"]*cat-series[^"]*"[^>]*>([^<]+)</div>',
+            r'<h1[^>]*class="[^"]*entry-title[^"]*"[^>]*>([^<]+)</h1>',
+            r'<span[^>]*class="[^"]*chapter-title[^"]*"[^>]*>([^<]+)</span>',
+            # Meta property patterns
+            r'<meta[^>]*property="og:title"[^>]*content="([^"]+)"',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, content, re.IGNORECASE)
+            if match:
+                title = match.group(1).strip()
+                # Decode HTML entities
+                title = HTMLEntityDecoder.decode(title)
+                
+                # Additional cleanup for web-scraped content
+                title = re.sub(r'\s+', ' ', title)  # Normalize whitespace
+                title = title.strip()
+                
+                # Validate it's reasonable
+                if 3 < len(title) < 200 and title.lower() != 'untitled':
+                    self.log(f"📝 Fallback extracted title from HTML: '{title}'")
+                    return title
+        
+        return None
+
+    def _extract_title_from_filename_fallback(self, filename: str, num: int) -> Optional[str]:
+        """Fallback filename title extraction"""
+        
+        # Remove extension
+        base_name = re.sub(r'\.(html?|xhtml)$', '', filename, flags=re.IGNORECASE)
+        
+        # Web-scraped filename patterns
+        patterns = [
+            # "theend-chapter-127-apocalypse-7" -> "Chapter 127 - Apocalypse 7"
+            r'(?:theend|story|novel)[-_]chapter[-_](\d+)[-_](.+)',
+            # "chapter-127-apocalypse-7" -> "Chapter 127 - Apocalypse 7"  
+            r'chapter[-_](\d+)[-_](.+)',
+            # "ch127-title" -> "Chapter 127 - Title"
+            r'ch[-_]?(\d+)[-_](.+)',
+            # Just the title part after number
+            r'^\d+[-_](.+)',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, base_name, re.IGNORECASE)
+            if match:
+                if match.lastindex == 2:  # Pattern with chapter number and title
+                    chapter_num = match.group(1)
+                    title_part = match.group(2)
+                else:  # Pattern with just title
+                    chapter_num = str(num)
+                    title_part = match.group(1)
+                
+                # Clean up the title part
+                title_part = title_part.replace('-', ' ').replace('_', ' ')
+                # Capitalize properly
+                words = title_part.split()
+                title_part = ' '.join(word.capitalize() if len(word) > 2 else word for word in words)
+                
+                title = f"Chapter {chapter_num} - {title_part}"
+                self.log(f"📝 Fallback extracted title from filename: '{title}'")
+                return title
+        
+        return None
+    
     def _load_metadata(self) -> dict:
         """Load metadata from JSON file"""
         if os.path.exists(self.metadata_path):
@@ -1533,393 +1975,6 @@ img {
         except Exception as e:
             self.log(f"[WARNING] Failed to add cover: {e}")
             return None
-    
-
-    def _process_chapters(self, book: epub.EpubBook, html_files: List[str],
-                         chapter_titles_info: Dict[int, Tuple[str, float, str]],
-                         css_items: List[epub.EpubItem], processed_images: Dict[str, str],
-                         spine: List, toc: List, metadata: dict) -> int:
-        """Process chapters with progressive pattern detection"""
-        chapters_added = 0
-        
-        self.log(f"\n📚 Processing {len(html_files)} chapters...")
-        
-        # Sort files using the same robust logic as _find_html_files
-        sorted_files = sorted(html_files, key=self.get_robust_sort_key)
-        
-        # Process in sorted order
-        for idx, filename in enumerate(sorted_files):
-            # Determine chapter number using multiple methods
-            chapter_num = self._extract_chapter_number(filename, idx)
-            
-            # Log what pattern we're using
-            sort_key = self.get_robust_sort_key(filename)
-            pattern_names = {
-                1: "-h-N", 2: "chapter-N", 3: "ch-N", 4: "response_N_",
-                5: "book/part-N", 6: "split_N", 7: "N.html", 8: "-N.html",
-                9: "_N.html", 10: "(N)", 11: "[N]", 12: "page-N",
-                13: "*N.html", 14: "Roman", 15: "first number", 99: "alphabetical"
-            }
-            pattern = pattern_names.get(sort_key[0], "position-based")
-            self.log(f"\n[Chapter {chapter_num}] Processing: {filename} (pattern: {pattern})")
-            
-            try:
-                if self._process_single_chapter(
-                    book, chapter_num, filename, chapter_titles_info, css_items, 
-                    processed_images, spine, toc, metadata
-                ):
-                    chapters_added += 1
-            except Exception as e:
-                self.log(f"❌ Chapter {chapter_num} failed: {e}")
-                
-                # Add placeholder with more detail about the failure
-                try:
-                    chapter = epub.EpubHtml(
-                        title=f"Chapter {chapter_num}",
-                        file_name=f"chapter_{chapter_num:03d}.xhtml",
-                        lang=metadata.get("language", "en")
-                    )
-                    
-                    # More informative error page
-                    error_details = str(e).replace('<', '&lt;').replace('>', '&gt;')
-                    chapter.content = f"""<?xml version="1.0" encoding="utf-8"?>
-    <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
-    <html xmlns="http://www.w3.org/1999/xhtml">
-    <head><title>Chapter {chapter_num}</title></head>
-    <body>
-    <h1>Chapter {chapter_num}</h1>
-    <p><strong>Error loading chapter from file:</strong> {filename}</p>
-    <p><em>Error details:</em> {error_details}</p>
-    <p>The original file may have an incompatible format or structure.</p>
-    </body>
-    </html>""".encode('utf-8')
-                    
-                    book.add_item(chapter)
-                    spine.append(chapter)
-                    toc.append(chapter)
-                    chapters_added += 1
-                    self.log(f"⚠️  Added placeholder for chapter {chapter_num}")
-                except:
-                    pass
-        
-        self.log(f"\n✅ Successfully added {chapters_added} chapters")
-        return chapters_added
-
-    def _extract_chapter_number(self, filename: str, default_idx: int) -> int:
-        """Extract chapter number using multiple patterns
-        
-        Args:
-            filename: The filename to extract from
-            default_idx: Default index to use if extraction fails
-            
-        Returns:
-            int: The extracted or calculated chapter number
-        """
-        # Try various extraction patterns in order of reliability
-        
-        # Pattern 1: response_NUMBER_ (standard pattern)
-        match = re.match(r"response_(\d+)_", filename)
-        if match:
-            return int(match.group(1))
-        
-        # Pattern 2: chapter-NUMBER, chapter_NUMBER, chapterNUMBER
-        match = re.search(r'chapter[-_\s]?(\d+)', filename, re.IGNORECASE)
-        if match:
-            return int(match.group(1))
-        
-        # Pattern 3: ch-NUMBER, ch_NUMBER, chNUMBER
-        match = re.search(r'\bch[-_\s]?(\d+)\b', filename, re.IGNORECASE)
-        if match:
-            return int(match.group(1))
-        
-        # Pattern 4: -h-NUMBER (specific pattern)
-        match = re.search(r'-h-(\d+)', filename)
-        if match:
-            return int(match.group(1))
-        
-        # Pattern 5: Just NUMBER.html (like 127.html)
-        match = re.match(r'^(\d+)\.(?:html?|xhtml)$', filename)
-        if match:
-            return int(match.group(1))
-        
-        # Pattern 6: _NUMBER at end before extension
-        match = re.search(r'_(\d+)\.(?:html?|xhtml)$', filename)
-        if match:
-            return int(match.group(1))
-        
-        # Pattern 7: -NUMBER at end before extension
-        match = re.search(r'-(\d+)\.(?:html?|xhtml)$', filename)
-        if match:
-            return int(match.group(1))
-        
-        # Pattern 8: (NUMBER) in parentheses
-        match = re.search(r'\((\d+)\)', filename)
-        if match:
-            return int(match.group(1))
-        
-        # Pattern 9: [NUMBER] in brackets
-        match = re.search(r'\[(\d+)\]', filename)
-        if match:
-            return int(match.group(1))
-        
-        # Pattern 10: Use the sort key logic
-        sort_key = self.get_robust_sort_key(filename)
-        if isinstance(sort_key[1], int) and sort_key[1] > 0:
-            return sort_key[1]
-        
-        # Final fallback: use position + 1
-        return default_idx + 1
-
-    def _process_single_chapter(self, book: epub.EpubBook, num: int, filename: str,
-                               chapter_titles_info: Dict[int, Tuple[str, float, str]],
-                               css_items: List[epub.EpubItem], processed_images: Dict[str, str],
-                               spine: List, toc: List, metadata: dict) -> bool:
-        """Process a single chapter with better content extraction"""
-        path = os.path.join(self.output_dir, filename)
-        
-        try:
-            # Read content
-            with open(path, 'r', encoding='utf-8') as f:
-                raw_content = f.read()
-            
-            # Decode entities
-            raw_content = HTMLEntityDecoder.decode(raw_content)
-            
-            if not raw_content.strip():
-                self.log(f"⚠️  Chapter {num} is empty")
-                return False
-            
-            # Clean content - with special handling for web-scraped pages
-            raw_content = self._extract_main_content(raw_content, filename)
-            raw_content = ContentProcessor.clean_chapter_content(raw_content)
-            
-            # Get title
-            title = self._get_chapter_title(num, filename, raw_content, chapter_titles_info)
-            
-            # Prepare CSS links
-            css_links = [f"css/{item.file_name.split('/')[-1]}" for item in css_items]
-            
-            # Convert to XHTML
-            try:
-                xhtml_content = XHTMLConverter.ensure_compliance(raw_content, title, css_links)
-            except Exception as e:
-                self.log(f"⚠️  XHTML conversion failed for chapter {num}: {e}")
-                # Create minimal valid XHTML
-                xhtml_content = XHTMLConverter._build_xhtml(
-                    title,
-                    f'<h1>{ContentProcessor.safe_escape(title)}</h1><p>Chapter content could not be processed.</p>',
-                    css_links
-                )
-            
-            # Process images in content
-            xhtml_content = self._process_chapter_images(xhtml_content, processed_images)
-            
-            # Validate
-            final_content = XHTMLConverter.validate(xhtml_content)
-            
-            # Final validation check
-            try:
-                ET.fromstring(final_content.encode('utf-8'))
-            except ET.ParseError:
-                # Use a simple fallback that we know is valid
-                final_content = '<?xml version="1.0" encoding="utf-8"?>\n' + \
-                    '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" ' + \
-                    '"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">\n' + \
-                    '<html xmlns="http://www.w3.org/1999/xhtml">\n' + \
-                    '<head>\n' + \
-                    '<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />\n' + \
-                    f'<title>{ContentProcessor.safe_escape(title)}</title>\n' + \
-                    '</head>\n' + \
-                    '<body>\n' + \
-                    f'<h1>{ContentProcessor.safe_escape(title)}</h1>\n' + \
-                    '<p>Chapter content could not be processed properly.</p>\n' + \
-                    '</body>\n' + \
-                    '</html>'
-            
-            # Create chapter
-            safe_fn = f"chapter_{num:03d}.xhtml"
-            chapter = epub.EpubHtml(
-                title=title,
-                file_name=safe_fn,
-                lang=metadata.get("language", "en")
-            )
-            chapter.content = FileUtils.ensure_bytes(final_content)
-            
-            # Add to book
-            book.add_item(chapter)
-            spine.append(chapter)
-            toc.append(chapter)
-            
-            self.log(f"✅ Added chapter {num}: '{title}'")
-            return True
-            
-        except Exception as e:
-            self.log(f"❌ Failed to process chapter {num} ({filename}): {e}")
-    def _get_chapter_title(self, num: int, filename: str, html_content: str, 
-                          chapter_titles_info: Dict[int, Tuple[str, float, str]]) -> str:
-        """Get chapter title with multiple fallback methods
-        
-        Tries to extract title from:
-        1. Pre-analyzed chapter_titles_info
-        2. HTML content (h1, title tags, etc.)
-        3. Filename patterns
-        4. Default "Chapter N"
-        """
-        # First check if we have pre-analyzed title info
-        if num in chapter_titles_info:
-            title, confidence, _ = chapter_titles_info[num]
-            if confidence > 0.3:  # Use if we have decent confidence
-                return title
-        
-        # Try to extract from HTML content
-        extracted_title = self._extract_title_from_html(html_content, num, filename)
-        if extracted_title:
-            return extracted_title
-        
-        # Try to extract from filename
-        filename_title = self._extract_title_from_filename(filename, num)
-        if filename_title:
-            return filename_title
-        
-        # Default fallback
-        return f"Chapter {num}"
-
-    def _extract_title_from_html(self, html_content: str, num: int, filename: str) -> Optional[str]:
-        """Extract title from HTML content using multiple strategies"""
-        
-        # Strategy 1: Look for h1 tags with chapter info
-        h1_patterns = [
-            r'<h1[^>]*>([^<]*Chapter\s*\d+[^<]*)</h1>',
-            r'<h1[^>]*>([^<]+)</h1>',
-        ]
-        
-        for pattern in h1_patterns:
-            match = re.search(pattern, html_content, re.IGNORECASE)
-            if match:
-                title = match.group(1).strip()
-                # Clean up common HTML entities
-                title = title.replace('&nbsp;', ' ')
-                title = title.replace('&#8211;', '-')
-                title = title.replace('&#8217;', "'")
-                title = HTMLEntityDecoder.decode(title)
-                
-                # Make sure it's not too long or too short
-                if 3 < len(title) < 200:
-                    self.log(f"📝 Extracted title from h1: '{title}'")
-                    return title
-        
-        # Strategy 2: Look for title tags
-        title_match = re.search(r'<title[^>]*>([^<]+)</title>', html_content, re.IGNORECASE)
-        if title_match:
-            full_title = title_match.group(1).strip()
-            # Often contains site name, try to extract just the chapter part
-            # Look for patterns like "Chapter X - Title | Site Name"
-            chapter_patterns = [
-                r'(Chapter\s*\d+[^|–-]*?)(?:\||–|-|$)',
-                r'^([^|–-]+?)(?:\||–|-)',
-            ]
-            
-            for pattern in chapter_patterns:
-                match = re.search(pattern, full_title, re.IGNORECASE)
-                if match:
-                    title = match.group(1).strip()
-                    if 3 < len(title) < 200:
-                        self.log(f"📝 Extracted title from <title>: '{title}'")
-                        return title
-        
-        # Strategy 3: Look for specific class/id patterns
-        content_title_patterns = [
-            r'<[^>]*class="[^"]*entry-title[^"]*"[^>]*>([^<]+)<',
-            r'<[^>]*class="[^"]*chapter-title[^"]*"[^>]*>([^<]+)<',
-            r'<[^>]*class="[^"]*post-title[^"]*"[^>]*>([^<]+)<',
-            r'<div[^>]*class="[^"]*cat-series[^"]*"[^>]*>([^<]+)<',  # From your example
-        ]
-        
-        for pattern in content_title_patterns:
-            match = re.search(pattern, html_content, re.IGNORECASE)
-            if match:
-                title = match.group(1).strip()
-                title = HTMLEntityDecoder.decode(title)
-                if 3 < len(title) < 200:
-                    self.log(f"📝 Extracted title from class pattern: '{title}'")
-                    return title
-        
-        return None
-
-    def _extract_title_from_filename(self, filename: str, num: int) -> Optional[str]:
-        """Extract title from filename patterns"""
-        
-        # Remove extension
-        base_name = re.sub(r'\.(html?|xhtml)$', '', filename, flags=re.IGNORECASE)
-        
-        # Common patterns in filenames
-        patterns = [
-            # "chapter-127-apocalypse-7" -> "Chapter 127 - Apocalypse 7"
-            r'chapter[-_](\d+)[-_](.+)',
-            # "ch127-title" -> "Chapter 127 - Title"
-            r'ch[-_]?(\d+)[-_](.+)',
-            # "127-title" -> "Chapter 127 - Title"
-            r'^(\d+)[-_](.+)',
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, base_name, re.IGNORECASE)
-            if match:
-                chapter_num = match.group(1)
-                title_part = match.group(2)
-                # Clean up the title part
-                title_part = title_part.replace('-', ' ').replace('_', ' ')
-                title_part = ' '.join(word.capitalize() for word in title_part.split())
-                
-                title = f"Chapter {chapter_num} - {title_part}"
-                self.log(f"📝 Extracted title from filename: '{title}'")
-                return title
-        
-        return None
-
-    def _extract_main_content(self, html_content: str, filename: str) -> str:
-        """Extract main content from web-scraped HTML pages
-        
-        This method tries to find the actual chapter content within a full webpage
-        """
-        try:
-            # For web-scraped content, try to extract just the chapter part
-            # Common patterns for chapter content containers
-            content_patterns = [
-                # Look for specific class names commonly used for content
-                (r'<div[^>]*class="[^"]*(?:chapter-content|entry-content|epcontent|post-content|content-area|main-content)[^"]*"[^>]*>(.*?)</div>', re.DOTALL | re.IGNORECASE),
-                # Look for article tags with content
-                (r'<article[^>]*>(.*?)</article>', re.DOTALL | re.IGNORECASE),
-                # Look for main tags
-                (r'<main[^>]*>(.*?)</main>', re.DOTALL | re.IGNORECASE),
-                # Look for specific id patterns
-                (r'<div[^>]*id="[^"]*(?:content|chapter|post)[^"]*"[^>]*>(.*?)</div>', re.DOTALL | re.IGNORECASE),
-            ]
-            
-            for pattern, flags in content_patterns:
-                match = re.search(pattern, html_content, flags)
-                if match:
-                    extracted = match.group(1)
-                    # Make sure we got something substantial
-                    if len(extracted.strip()) > 100:
-                        self.log(f"📄 Extracted main content using pattern for {filename}")
-                        return extracted
-            
-            # If no patterns matched, check if this looks like a full webpage
-            if '<html' in html_content.lower() and '<body' in html_content.lower():
-                # Try to extract body content
-                body_match = re.search(r'<body[^>]*>(.*?)</body>', html_content, re.DOTALL | re.IGNORECASE)
-                if body_match:
-                    self.log(f"📄 Extracted body content for {filename}")
-                    return body_match.group(1)
-            
-            # If all else fails, return original content
-            self.log(f"📄 Using original content for {filename}")
-            return html_content
-            
-        except Exception as e:
-            self.log(f"⚠️  Content extraction failed for {filename}: {e}")
-            return html_content
     
     def _process_chapter_images(self, xhtml_content: str, processed_images: Dict[str, str]) -> str:
         """Process image paths in chapter content"""
