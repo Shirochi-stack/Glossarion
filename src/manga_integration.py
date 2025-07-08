@@ -1638,14 +1638,14 @@ class MangaTranslationTab:
             self.main_gui.master,
             "Replicate API Key",
             width=400,
-            height=165,
+            height=200,
             hide_initially=True  # Hide initially so we can position it
         )
         
         # Force the height by overriding after creation
         dialog.update_idletasks()  # Process pending geometry
-        dialog.minsize(400, 165)   # Set minimum size
-        dialog.maxsize(720, 165)   # Set maximum size to lock it
+        dialog.minsize(400, 200)   # Set minimum size
+        dialog.maxsize(720, 250)   # Set maximum size to lock it
         
         # Get cursor position
         cursor_x = self.main_gui.master.winfo_pointerx()
