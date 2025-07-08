@@ -29,9 +29,8 @@ translation_main = translation_stop_flag = translation_stop_check = None
 glossary_main = glossary_stop_flag = glossary_stop_check = None
 fallback_compile_epub = scan_html_folder = None
 
-# Constants
 CONFIG_FILE = "config.json"
-BASE_WIDTH, BASE_HEIGHT = 1550, 1000
+BASE_WIDTH, BASE_HEIGHT = 1920, 1080
 
 def load_application_icon(window, base_dir):
     """Load application icon with fallback handling"""
@@ -708,12 +707,29 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.2.2"
+        __version__ = "3.2.3"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
-        self.wm.responsive_size(master, BASE_WIDTH, BASE_HEIGHT)
-        master.minsize(1800, 1000)
+        # Get screen dimensions
+        screen_width = master.winfo_screenwidth()
+        screen_height = master.winfo_screenheight()
+        
+        # Set window size as ratio of screen (e.g., 0.8 = 80% of screen)
+        width_ratio = 1.2  # 120% of screen width
+        height_ratio = 1.2  # 120% of screen height
+        
+        window_width = int(screen_width * width_ratio)
+        window_height = int(screen_height * height_ratio)
+        
+        # Apply size
+        master.geometry(f"{window_width}x{window_height}")
+        
+        # Set minimum size as ratio too
+        min_width = int(screen_width * 0.6)  # 60% minimum
+        min_height = int(screen_height * 0.6)  # 60% minimum
+        master.minsize(min_width, min_height)
+        
         self.wm.center_window(master)
         
         # Setup fullscreen support
@@ -1304,7 +1320,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.2.2 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.2.3 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -4789,7 +4805,8 @@ Recent translations to summarize:
            'COMPRESSION_FACTOR': self.compression_factor_var.get(),
            'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower(),
            'GLOSSARY_DUPLICATE_KEY_MODE': self.config.get('glossary_duplicate_key_mode', 'auto'),
-           'GLOSSARY_DUPLICATE_CUSTOM_FIELD': self.config.get('glossary_duplicate_custom_field', '')
+           'GLOSSARY_DUPLICATE_CUSTOM_FIELD': self.config.get('glossary_duplicate_custom_field', ''),
+           'MANUAL_GLOSSARY': self.manual_glossary_path if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path else ''
            
        }
 
@@ -7607,7 +7624,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.2.2...")
+    print("🚀 Starting Glossarion v3.2.3...")
     
     # Initialize splash screen
     splash_manager = None
