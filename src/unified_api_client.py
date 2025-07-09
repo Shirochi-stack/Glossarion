@@ -1177,42 +1177,87 @@ class UnifiedClient:
             self.model = original_model
     
     def _send_poe(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to Poe API with safety settings"""
+        """Send request to Poe API with proper cookie authentication"""
         # Check if safety settings are disabled via GUI toggle
         disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
         
         # Strip 'poe/' prefix from model name
         poe_model = self.model.replace('poe/', '', 1)
         
-        # Poe API uses a different format, typically through their bot system
-        # This is a simplified implementation - actual Poe API may require different auth
+        # Parse Poe authentication cookies from api_key
+        # Expected format: "p-b:cookie_value" or "p-b:cookie1|p-lat:cookie2"
+        cookies = {}
+        auth_error_msg = (
+            "Poe requires cookie authentication. Please provide your p-b cookie as the API key.\n"
+            "Format: 'p-b:your_p-b_cookie_value' or 'p-b:cookie1|p-lat:cookie2'\n"
+            "To get these cookies:\n"
+            "1. Log into poe.com\n"
+            "2. Open browser developer tools (F12)\n"
+            "3. Go to Application/Storage > Cookies > poe.com\n"
+            "4. Copy the 'p-b' cookie value (and optionally 'p-lat')"
+        )
+        
+        try:
+            # Parse cookie format
+            if '|' in self.api_key:
+                # Multiple cookies format: "p-b:value1|p-lat:value2"
+                for cookie_pair in self.api_key.split('|'):
+                    if ':' in cookie_pair:
+                        name, value = cookie_pair.split(':', 1)
+                        cookies[name.strip()] = value.strip()
+            elif ':' in self.api_key:
+                # Single cookie format: "p-b:value"
+                name, value = self.api_key.split(':', 1)
+                cookies[name.strip()] = value.strip()
+            else:
+                # Assume it's just the p-b cookie value
+                cookies['p-b'] = self.api_key.strip()
+                
+            if 'p-b' not in cookies:
+                logger.error("Missing required p-b cookie for Poe authentication")
+                raise UnifiedClientError(auth_error_msg, error_type="auth_error")
+                
+        except Exception as e:
+            logger.error(f"Failed to parse Poe authentication: {e}")
+            raise UnifiedClientError(auth_error_msg, error_type="auth_error")
+        
+        # Build headers with cookies
         headers = {
-            'Authorization': f'Bearer {self.api_key}',
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'Cookie': '; '.join([f'{k}={v}' for k, v in cookies.items()]),
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/json',
+            'Origin': 'https://poe.com',
+            'Referer': 'https://poe.com/'
         }
         
         # Convert messages to text prompt
         prompt = self._messages_to_prompt(messages)
         
+        # Note: The actual Poe API structure is complex and may require GraphQL
+        # This is a simplified version that may need adjustment based on current API
         payload = {
             'query': prompt,
             'bot': poe_model,
-            'conversation_id': hashlib.md5(str(time.time()).encode()).hexdigest()[:16]
+            'chatId': None,  # For new conversations
+            'source': None,
+            'withChatBreak': False,
+            'messageAttachments': []
         }
         
         if temperature is not None:
             payload['temperature'] = temperature
         if max_tokens:
-            payload['max_tokens'] = max_tokens
+            payload['messageLimit'] = max_tokens
         
         # Add safety parameter if disabled
         if disable_safety:
-            payload['safe_mode'] = False
-            logger.info("🔓 Safety toggle enabled for Poe")
-            print("🔓 Poe Safety: Safe mode disabled")
+            payload['allowUserContext'] = True
+            logger.info("🔓 Safety settings adjusted for Poe")
         
-        # Use Poe API endpoint
-        base_url = os.getenv("POE_API_URL", "https://api.poe.com/bot")
+        # Use appropriate Poe endpoint
+        # Note: Actual endpoint may be GraphQL-based
+        base_url = os.getenv("POE_API_URL", "https://poe.com/api/gql_POST")
         
         # Get response using HTTP request
         max_retries = 3
@@ -1223,31 +1268,96 @@ class UnifiedClient:
                 if self._cancelled:
                     raise UnifiedClientError("Operation cancelled")
                 
+                # Log attempt for debugging
+                logger.info(f"Attempting Poe API call to {poe_model} (attempt {attempt + 1})")
+                
+                # Make the request
                 resp = requests.post(
-                    f"{base_url}/{poe_model}",
+                    base_url,
                     headers=headers,
-                    json=payload,
+                    json={
+                        "query": prompt,
+                        "variables": {
+                            "bot": poe_model,
+                            "query": prompt,
+                            "chatId": payload.get('chatId'),
+                            "source": "chat_input",
+                            "withChatBreak": False
+                        }
+                    },
                     timeout=self.request_timeout
                 )
                 
-                if resp.status_code == 429:  # Rate limit
+                # Check response status
+                if resp.status_code == 401:
+                    error_msg = (
+                        "Poe authentication failed. Your cookies may be expired or invalid.\n"
+                        "Please log into poe.com and get fresh cookies."
+                    )
+                    raise UnifiedClientError(error_msg, error_type="auth_error", http_status=401)
+                    
+                elif resp.status_code == 429:  # Rate limit
                     if attempt < max_retries - 1:
                         wait_time = api_delay * 10
                         logger.warning(f"Poe rate limit hit, waiting {wait_time}s")
                         time.sleep(wait_time)
                         continue
+                        
+                elif resp.status_code == 500:
+                    # Specific handling for 500 errors
+                    error_detail = "Internal server error"
+                    try:
+                        error_data = resp.json()
+                        error_detail = error_data.get('error', {}).get('message', resp.text)
+                    except:
+                        error_detail = resp.text[:200] if resp.text else "No error details"
+                        
+                    error_msg = (
+                        f"Poe API returned 500 Internal Server Error.\n"
+                        f"This usually means:\n"
+                        f"1. Invalid authentication (expired/incorrect cookies)\n"
+                        f"2. Incorrect bot name ('{poe_model}' may not exist)\n"
+                        f"3. API endpoint has changed\n"
+                        f"Error detail: {error_detail}"
+                    )
+                    
+                    if attempt < max_retries - 1:
+                        logger.warning(f"{error_msg} (attempt {attempt + 1})")
+                        time.sleep(api_delay * 2)
+                        continue
+                        
+                    raise UnifiedClientError(error_msg, http_status=500)
+                    
                 elif resp.status_code != 200:
-                    error_msg = f"Poe API error: {resp.status_code} - {resp.text}"
+                    error_msg = f"Poe API error: {resp.status_code} - {resp.text[:200]}"
                     if attempt < max_retries - 1:
                         logger.warning(f"{error_msg} (attempt {attempt + 1})")
                         time.sleep(api_delay)
                         continue
                     raise UnifiedClientError(error_msg, http_status=resp.status_code)
                 
+                # Parse response
                 json_resp = resp.json()
                 
                 # Extract content based on Poe's response format
-                content = json_resp.get("text", "") or json_resp.get("response", "")
+                # Note: Actual format may vary
+                content = ""
+                if 'data' in json_resp:
+                    # GraphQL response format
+                    if 'messageEdgeCreate' in json_resp.get('data', {}):
+                        message_data = json_resp['data']['messageEdgeCreate']
+                        content = message_data.get('message', {}).get('text', '')
+                    elif 'viewer' in json_resp.get('data', {}):
+                        # Alternative format
+                        content = json_resp['data'].get('text', '')
+                else:
+                    # Fallback to simple format
+                    content = json_resp.get("text", "") or json_resp.get("response", "")
+                    
+                if not content:
+                    logger.warning(f"Empty response from Poe API. Raw response: {json_resp}")
+                    content = ""
+                    
                 finish_reason = json_resp.get("finish_reason", "stop")
                 
                 # Normalize finish reasons
@@ -1262,11 +1372,17 @@ class UnifiedClient:
                 
             except requests.RequestException as e:
                 if attempt < max_retries - 1:
-                    logger.warning(f"Poe API error (attempt {attempt + 1}): {e}")
+                    logger.warning(f"Poe API network error (attempt {attempt + 1}): {e}")
                     time.sleep(api_delay)
                     continue
                 logger.error(f"Poe API error after all retries: {e}")
-                raise UnifiedClientError(f"Poe API error: {e}")
+                raise UnifiedClientError(
+                    f"Poe API network error: {e}\n"
+                    f"Please check your internet connection and Poe cookie validity."
+                )
+        
+        # If we get here, all retries failed
+        raise UnifiedClientError("Failed to get response from Poe API after all retries")
     
     def _send_openrouter(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to OpenRouter API with safety settings"""
@@ -3449,25 +3565,72 @@ class UnifiedClient:
                 raise UnifiedClientError(f"ElectronHub Vision API error: {e}")
     
     def _send_poe_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send image request to Poe API"""
+        """Send image request to Poe API with proper cookie authentication"""
         # Poe supports vision through certain bots
         # Strip 'poe/' prefix from model name
         poe_model = self.model.replace('poe/', '', 1)
         
+        # Parse Poe authentication cookies from api_key (same as in _send_poe)
+        cookies = {}
+        auth_error_msg = (
+            "Poe requires cookie authentication. Please provide your p-b cookie as the API key.\n"
+            "Format: 'p-b:your_p-b_cookie_value' or 'p-b:cookie1|p-lat:cookie2'\n"
+            "To get these cookies:\n"
+            "1. Log into poe.com\n"
+            "2. Open browser developer tools (F12)\n"
+            "3. Go to Application/Storage > Cookies > poe.com\n"
+            "4. Copy the 'p-b' cookie value (and optionally 'p-lat')"
+        )
+        
+        try:
+            # Parse cookie format
+            if '|' in self.api_key:
+                # Multiple cookies format: "p-b:value1|p-lat:value2"
+                for cookie_pair in self.api_key.split('|'):
+                    if ':' in cookie_pair:
+                        name, value = cookie_pair.split(':', 1)
+                        cookies[name.strip()] = value.strip()
+            elif ':' in self.api_key:
+                # Single cookie format: "p-b:value"
+                name, value = self.api_key.split(':', 1)
+                cookies[name.strip()] = value.strip()
+            else:
+                # Assume it's just the p-b cookie value
+                cookies['p-b'] = self.api_key.strip()
+                
+            if 'p-b' not in cookies:
+                logger.error("Missing required p-b cookie for Poe authentication")
+                raise UnifiedClientError(auth_error_msg, error_type="auth_error")
+                
+        except Exception as e:
+            logger.error(f"Failed to parse Poe authentication: {e}")
+            raise UnifiedClientError(auth_error_msg, error_type="auth_error")
+        
+        # Build headers with cookies
         headers = {
-            'Authorization': f'Bearer {self.api_key}',
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'Cookie': '; '.join([f'{k}={v}' for k, v in cookies.items()]),
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/json',
+            'Origin': 'https://poe.com',
+            'Referer': 'https://poe.com/'
         }
         
         # Convert messages to text prompt
         prompt = self._messages_to_prompt(messages)
         
-        # Poe uses a different format for images
+        # Check if safety settings are disabled
+        disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
+        
+        # Prepare image attachment
+        # Note: The actual format may vary based on Poe's current API
         payload = {
             'query': prompt,
             'bot': poe_model,
-            'conversation_id': hashlib.md5(str(time.time()).encode()).hexdigest()[:16],
-            'attachments': [{
+            'chatId': None,  # For new conversations
+            'source': 'chat_input',
+            'withChatBreak': False,
+            'messageAttachments': [{
                 'type': 'image',
                 'data': f'data:image/jpeg;base64,{image_base64}'
             }]
@@ -3476,42 +3639,147 @@ class UnifiedClient:
         if temperature is not None:
             payload['temperature'] = temperature
         if max_tokens:
-            payload['max_tokens'] = max_tokens
-        
-        # Check if safety settings are disabled
-        disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
+            payload['messageLimit'] = max_tokens
+            
         if disable_safety:
-            payload['safe_mode'] = False
+            payload['allowUserContext'] = True
+            logger.info("🔓 Safety settings adjusted for Poe Vision")
         
-        base_url = os.getenv("POE_API_URL", "https://api.poe.com/bot")
+        # Use appropriate Poe endpoint
+        base_url = os.getenv("POE_API_URL", "https://poe.com/api/gql_POST")
         
-        try:
-            resp = requests.post(
-                f"{base_url}/{poe_model}",
-                headers=headers,
-                json=payload,
-                timeout=self.request_timeout
-            )
-            
-            if resp.status_code != 200:
-                raise UnifiedClientError(f"Poe Vision API error: {resp.status_code} - {resp.text}")
-            
-            json_resp = resp.json()
-            content = json_resp.get("text", "") or json_resp.get("response", "")
-            finish_reason = json_resp.get("finish_reason", "stop")
-            
-            if finish_reason in ["max_tokens", "max_length"]:
-                finish_reason = "length"
-            
-            return UnifiedResponse(
-                content=content,
-                finish_reason=finish_reason,
-                raw_response=json_resp
-            )
-            
-        except Exception as e:
-            logger.error(f"Poe Vision API error: {e}")
-            raise UnifiedClientError(f"Poe Vision API error: {e}")
+        # Get response using HTTP request with retries
+        max_retries = 3
+        api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+        
+        for attempt in range(max_retries):
+            try:
+                if self._cancelled:
+                    raise UnifiedClientError("Operation cancelled")
+                
+                # Log attempt for debugging
+                logger.info(f"Attempting Poe Vision API call to {poe_model} (attempt {attempt + 1})")
+                
+                # Make the request with GraphQL-style payload
+                resp = requests.post(
+                    base_url,
+                    headers=headers,
+                    json={
+                        "query": prompt,
+                        "variables": {
+                            "bot": poe_model,
+                            "query": prompt,
+                            "chatId": payload.get('chatId'),
+                            "source": "chat_input",
+                            "withChatBreak": False,
+                            "attachments": payload['messageAttachments']
+                        }
+                    },
+                    timeout=self.request_timeout
+                )
+                
+                # Check response status
+                if resp.status_code == 401:
+                    error_msg = (
+                        "Poe authentication failed. Your cookies may be expired or invalid.\n"
+                        "Please log into poe.com and get fresh cookies."
+                    )
+                    raise UnifiedClientError(error_msg, error_type="auth_error", http_status=401)
+                    
+                elif resp.status_code == 429:  # Rate limit
+                    if attempt < max_retries - 1:
+                        wait_time = api_delay * 10
+                        logger.warning(f"Poe Vision rate limit hit, waiting {wait_time}s")
+                        time.sleep(wait_time)
+                        continue
+                        
+                elif resp.status_code == 500:
+                    # Specific handling for 500 errors
+                    error_detail = "Internal server error"
+                    try:
+                        error_data = resp.json()
+                        error_detail = error_data.get('error', {}).get('message', resp.text)
+                    except:
+                        error_detail = resp.text[:200] if resp.text else "No error details"
+                        
+                    error_msg = (
+                        f"Poe Vision API returned 500 Internal Server Error.\n"
+                        f"This usually means:\n"
+                        f"1. Invalid authentication (expired/incorrect cookies)\n"
+                        f"2. Bot '{poe_model}' doesn't support vision/images\n"
+                        f"3. Image format/size issue\n"
+                        f"4. API endpoint has changed\n"
+                        f"Error detail: {error_detail}"
+                    )
+                    
+                    if attempt < max_retries - 1:
+                        logger.warning(f"{error_msg} (attempt {attempt + 1})")
+                        time.sleep(api_delay * 2)
+                        continue
+                        
+                    raise UnifiedClientError(error_msg, http_status=500)
+                    
+                elif resp.status_code != 200:
+                    error_msg = f"Poe Vision API error: {resp.status_code} - {resp.text[:200]}"
+                    if attempt < max_retries - 1:
+                        logger.warning(f"{error_msg} (attempt {attempt + 1})")
+                        time.sleep(api_delay)
+                        continue
+                    raise UnifiedClientError(error_msg, http_status=resp.status_code)
+                
+                # Parse response
+                json_resp = resp.json()
+                
+                # Extract content based on Poe's response format
+                content = ""
+                if 'data' in json_resp:
+                    # GraphQL response format
+                    if 'messageEdgeCreate' in json_resp.get('data', {}):
+                        message_data = json_resp['data']['messageEdgeCreate']
+                        content = message_data.get('message', {}).get('text', '')
+                    elif 'viewer' in json_resp.get('data', {}):
+                        # Alternative format
+                        content = json_resp['data'].get('text', '')
+                else:
+                    # Fallback to simple format
+                    content = json_resp.get("text", "") or json_resp.get("response", "")
+                    
+                if not content:
+                    logger.warning(f"Empty response from Poe Vision API. Raw response: {json_resp}")
+                    content = ""
+                    
+                finish_reason = json_resp.get("finish_reason", "stop")
+                
+                # Normalize finish reasons
+                if finish_reason in ["max_tokens", "max_length"]:
+                    finish_reason = "length"
+                
+                return UnifiedResponse(
+                    content=content,
+                    finish_reason=finish_reason,
+                    raw_response=json_resp
+                )
+                
+            except requests.RequestException as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Poe Vision API network error (attempt {attempt + 1}): {e}")
+                    time.sleep(api_delay)
+                    continue
+                logger.error(f"Poe Vision API error after all retries: {e}")
+                raise UnifiedClientError(
+                    f"Poe Vision API network error: {e}\n"
+                    f"Please check your internet connection and Poe cookie validity."
+                )
+            except Exception as e:
+                # Catch any other exceptions
+                logger.error(f"Unexpected Poe Vision API error: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(api_delay)
+                    continue
+                raise UnifiedClientError(f"Poe Vision API error: {e}")
+        
+        # If we get here, all retries failed
+        raise UnifiedClientError("Failed to get response from Poe Vision API after all retries")
     
     def _send_openrouter_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send image request through OpenRouter"""
