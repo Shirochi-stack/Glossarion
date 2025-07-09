@@ -227,7 +227,6 @@ Here's the updated API provider table based on the unified API client support:
 | **Voyage AI** | `voyage/*` | voyage/voyage-3 |
 | **Reka** | `reka-*` | reka-flash, reka-core, reka-edge |
 | **xAI** | `xai/*`, `grok-*` | xai/grok-beta, grok-2 |
-| **Poe** | `poe/*` | poe/gpt-4, poe/claude-3-opus, poe/gemini-2.5-flash |
 | **LeptonAI** | `lepton/*`, `llama-*`, `mixtral-*` | lepton/llama-3.1-70b, lepton/mixtral-8x7b |
 | **DeepInfra** | `deepinfra/*` | deepinfra/meta-llama/Llama-3-70b |
 | **Qwen** | `qwen-*`, `qwen/*` | qwen-max, qwen-plus, qwen-turbo |
