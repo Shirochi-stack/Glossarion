@@ -71,3 +71,4 @@ A: Not that i know of. POE uses HttpOnly cookies specifically to prevent program
 ---
 
 *Note: This method is a workaround since the POE API key is meant for bots only*
+*Warning: you may get blocked, as POE doesn't officially support this*
