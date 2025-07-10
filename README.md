@@ -216,6 +216,7 @@ Here's the updated API provider table based on the unified API client support:
 | **Cohere** | `command-*` | command-r, command-r-plus |
 | **ElectronHub** | `eh/*`, `electronhub/*` | eh/gpt-4, eh/claude-3-opus, eh/gemini-2.5-flash, eh/yi-large |
 | **Groq** | `groq/*`, `llama-*`, `mixtral-*` | groq/llama-3.1-70b, groq/mixtral-8x7b |
+| **POE**        | [poe/*](https://github.com/Shirochi-stack/Glossarion/blob/main/docs/poeguide.md)     | poe/gemini-2.5-flash, poe/claude-3.5-instant, poe/anthropic-instant-v1 |
 | **Together AI** | `together/*`, `meta-llama/*` | together/llama-3-70b, meta-llama/Llama-3-70b |
 | **Fireworks** | `fireworks/*`, `accounts/fireworks/*` | fireworks/llama-v3-70b, accounts/fireworks/models/mixtral-8x7b |
 | **OpenRouter** | `openrouter/*` | openrouter/auto, openrouter/gpt-4, openrouter/claude-3-opus |
