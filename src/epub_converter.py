@@ -2073,24 +2073,60 @@ img {
         
         book.add_item(gallery_page)
         return gallery_page
-    
-    def _finalize_book(self, book: epub.EpubBook, spine: List, toc: List, 
-                      cover_exists: bool):
-        """Finalize book structure"""
-        # Add navigation
-        book.add_item(epub.EpubNav())
-        book.add_item(epub.EpubNcx())
+
+    def _create_nav_content(self, toc_items, book_title="Book"):
+        """Create navigation content manually"""
+        nav_content = '''<?xml version="1.0" encoding="utf-8"?>
+    <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+    <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+    <head>
+    <title>Table of Contents</title>
+    </head>
+    <body>
+    <nav epub:type="toc" id="toc">
+    <h1>Table of Contents</h1>
+    <ol>'''
         
-        # Set TOC
+        for item in toc_items:
+            if hasattr(item, 'title') and hasattr(item, 'file_name'):
+                nav_content += f'\n<li><a href="{item.file_name}">{ContentProcessor.safe_escape(item.title)}</a></li>'
+        
+        nav_content += '''
+    </ol>
+    </nav>
+    </body>
+    </html>'''
+        
+        return nav_content   
+        
+    def _finalize_book(self, book: epub.EpubBook, spine: List, toc: List, 
+                      cover_file: Optional[str]):
+        """Finalize book structure"""
+        # Check if this is a large book
+        is_large_book = len(spine) > 400
+        
+        if is_large_book:
+            self.log("[INFO] Large book detected - skipping navigation to avoid errors")
+            book.toc = []
+            book.spine = spine
+            return
+        
+        # Normal processing for smaller books
         book.toc = toc
         
-        # Set spine
-        if spine and spine[0].title == "Cover":
-            book.spine = [spine[0], 'nav'] + spine[1:]
-            self.log("📖 Reading order: Cover → Table of Contents → Chapters")
-        else:
-            book.spine = ['nav'] + spine
-            self.log("📖 Reading order: Table of Contents → Chapters")
+        # Create NCX
+        ncx = epub.EpubNcx()
+        book.add_item(ncx)
+        
+        # Create Nav with manual content
+        nav = epub.EpubNav()
+        nav.content = self._create_nav_content(toc[:100], book.title).encode('utf-8')
+        nav.uid = 'nav'
+        nav.file_name = 'nav.xhtml'
+        book.add_item(nav)
+        
+        # Add navigation files to spine
+        book.spine = [nav] + spine
 
     
     def _write_epub(self, book: epub.EpubBook, metadata: dict):
