@@ -63,7 +63,7 @@ A: POE API key doesn't work for some reason. This integration works by mimicking
 A: Typically every 3-7 days, or whenever you see authentication errors.
 
 **Q: Is this safe?**  
-A: Yes-ish, but treat your cookie like a password. Anyone with your cookie can access your POE account.
+A: I hope, please treat your cookie like a password. Anyone with your cookie can access your POE account.
 
 **Q: Can this be automated?**  
 A: Not that i know of. POE uses HttpOnly cookies specifically to prevent programmatic access for security reasons.
