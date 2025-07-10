@@ -707,7 +707,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.2.4"
+        __version__ = "3.2.5"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1320,7 +1320,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.2.4 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.2.5 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -4870,74 +4870,89 @@ Recent translations to summarize:
     def _get_environment_variables(self, epub_path, api_key):
        """Get all environment variables for translation/glossary"""
        return {
-           'EPUB_PATH': epub_path,
-           'MODEL': self.model_var.get(),
-           'CONTEXTUAL': '1' if self.contextual_var.get() else '0',
-           'SEND_INTERVAL_SECONDS': str(self.delay_entry.get()),
-           'MAX_OUTPUT_TOKENS': str(self.max_output_tokens),
-           'API_KEY': api_key,
-           'OPENAI_API_KEY': api_key,
-           'OPENAI_OR_Gemini_API_KEY': api_key,
-           'GEMINI_API_KEY': api_key,
-           'SYSTEM_PROMPT': self.prompt_text.get("1.0", "end").strip(),
-           'TRANSLATE_BOOK_TITLE': "1" if self.translate_book_title_var.get() else "0",
-           'BOOK_TITLE_PROMPT': self.book_title_prompt,
-           'BOOK_TITLE_SYSTEM_PROMPT': self.config.get('book_title_system_prompt', 
+            'EPUB_PATH': epub_path,
+            'MODEL': self.model_var.get(),
+            'CONTEXTUAL': '1' if self.contextual_var.get() else '0',
+            'SEND_INTERVAL_SECONDS': str(self.delay_entry.get()),
+            'MAX_OUTPUT_TOKENS': str(self.max_output_tokens),
+            'API_KEY': api_key,
+            'OPENAI_API_KEY': api_key,
+            'OPENAI_OR_Gemini_API_KEY': api_key,
+            'GEMINI_API_KEY': api_key,
+            'SYSTEM_PROMPT': self.prompt_text.get("1.0", "end").strip(),
+            'TRANSLATE_BOOK_TITLE': "1" if self.translate_book_title_var.get() else "0",
+            'BOOK_TITLE_PROMPT': self.book_title_prompt,
+            'BOOK_TITLE_SYSTEM_PROMPT': self.config.get('book_title_system_prompt', 
                 "You are a translator. Respond with only the translated text, nothing else. Do not add any explanation or additional content."),
-           'REMOVE_AI_ARTIFACTS': "1" if self.REMOVE_AI_ARTIFACTS_var.get() else "0",
-           'USE_ROLLING_SUMMARY': "1" if self.config.get('use_rolling_summary') else "0",
-           'SUMMARY_ROLE': self.config.get('summary_role', 'user'),
-           'ROLLING_SUMMARY_EXCHANGES': self.rolling_summary_exchanges_var.get(),
-           'ROLLING_SUMMARY_MODE': self.rolling_summary_mode_var.get(),
-           'ROLLING_SUMMARY_SYSTEM_PROMPT': self.rolling_summary_system_prompt,
-           'ROLLING_SUMMARY_USER_PROMPT': self.rolling_summary_user_prompt,
-           'PROFILE_NAME': self.lang_var.get().lower(),
-           'TRANSLATION_TEMPERATURE': str(self.trans_temp.get()),
-           'TRANSLATION_HISTORY_LIMIT': str(self.trans_history.get()),
-           'EPUB_OUTPUT_DIR': os.getcwd(),
-           'DISABLE_AUTO_GLOSSARY': "0" if self.enable_auto_glossary_var.get() else "1",
-           'DISABLE_GLOSSARY_TRANSLATION': "0" if self.enable_auto_glossary_var.get() else "1",
-           'APPEND_GLOSSARY': "1" if self.append_glossary_var.get() else "0",
-           'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt,
-           'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var.get() else "0",
-           'REINFORCEMENT_FREQUENCY': self.reinforcement_freq_var.get(),
-           'RESET_FAILED_CHAPTERS': "1" if self.reset_failed_chapters_var.get() else "0",
-           'RETRY_TRUNCATED': "1" if self.retry_truncated_var.get() else "0",
-           'MAX_RETRY_TOKENS': self.max_retry_tokens_var.get(),
-           'RETRY_DUPLICATE_BODIES': "1" if self.retry_duplicate_var.get() else "0",
-           'DUPLICATE_LOOKBACK_CHAPTERS': self.duplicate_lookback_var.get(),
-           'GLOSSARY_MIN_FREQUENCY': self.glossary_min_frequency_var.get(),
-           'GLOSSARY_MAX_NAMES': self.glossary_max_names_var.get(),
-           'GLOSSARY_MAX_TITLES': self.glossary_max_titles_var.get(),
-           'GLOSSARY_BATCH_SIZE': self.glossary_batch_size_var.get(),
-           'ENABLE_IMAGE_TRANSLATION': "1" if self.enable_image_translation_var.get() else "0",
-           'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var.get() else "0",
-           'WEBNOVEL_MIN_HEIGHT': self.webnovel_min_height_var.get(),
-           'MAX_IMAGES_PER_CHAPTER': self.max_images_per_chapter_var.get(),
-           'IMAGE_API_DELAY': '1.0',
-           'SAVE_IMAGE_TRANSLATIONS': '1',
-           'IMAGE_CHUNK_HEIGHT': self.image_chunk_height_var.get(),
-           'HIDE_IMAGE_TRANSLATION_LABEL': "1" if self.hide_image_translation_label_var.get() else "0",
-           'RETRY_TIMEOUT': "1" if self.retry_timeout_var.get() else "0",
-           'CHUNK_TIMEOUT': self.chunk_timeout_var.get(),
-           'BATCH_TRANSLATION': "1" if self.batch_translation_var.get() else "0",
-           'BATCH_SIZE': self.batch_size_var.get(),
-           'DISABLE_ZERO_DETECTION': "1" if self.disable_zero_detection_var.get() else "0",
-           'TRANSLATION_HISTORY_ROLLING': "1" if self.translation_history_rolling_var.get() else "0",
-           'COMPREHENSIVE_EXTRACTION': "1" if self.comprehensive_extraction_var.get() else "0",
-           'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var.get() else "0",
-           'DUPLICATE_DETECTION_MODE': self.duplicate_detection_mode_var.get(),
-           'CHAPTER_NUMBER_OFFSET': str(self.chapter_number_offset_var.get()), 
-           'USE_HEADER_AS_OUTPUT': "1" if self.use_header_as_output_var.get() else "0",
-           'ENABLE_DECIMAL_CHAPTERS': "1" if self.enable_decimal_chapters_var.get() else "0",
-           'ENABLE_WATERMARK_REMOVAL': "1" if self.enable_watermark_removal_var.get() else "0",
-           'ADVANCED_WATERMARK_REMOVAL': "1" if self.advanced_watermark_removal_var.get() else "0",
-           'SAVE_CLEANED_IMAGES': "1" if self.save_cleaned_images_var.get() else "0",
-           'COMPRESSION_FACTOR': self.compression_factor_var.get(),
-           'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower(),
-           'GLOSSARY_DUPLICATE_KEY_MODE': self.config.get('glossary_duplicate_key_mode', 'auto'),
-           'GLOSSARY_DUPLICATE_CUSTOM_FIELD': self.config.get('glossary_duplicate_custom_field', ''),
-           'MANUAL_GLOSSARY': self.manual_glossary_path if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path else ''
+            'REMOVE_AI_ARTIFACTS': "1" if self.REMOVE_AI_ARTIFACTS_var.get() else "0",
+            'USE_ROLLING_SUMMARY': "1" if self.config.get('use_rolling_summary') else "0",
+            'SUMMARY_ROLE': self.config.get('summary_role', 'user'),
+            'ROLLING_SUMMARY_EXCHANGES': self.rolling_summary_exchanges_var.get(),
+            'ROLLING_SUMMARY_MODE': self.rolling_summary_mode_var.get(),
+            'ROLLING_SUMMARY_SYSTEM_PROMPT': self.rolling_summary_system_prompt,
+            'ROLLING_SUMMARY_USER_PROMPT': self.rolling_summary_user_prompt,
+            'PROFILE_NAME': self.lang_var.get().lower(),
+            'TRANSLATION_TEMPERATURE': str(self.trans_temp.get()),
+            'TRANSLATION_HISTORY_LIMIT': str(self.trans_history.get()),
+            'EPUB_OUTPUT_DIR': os.getcwd(),
+            'DISABLE_AUTO_GLOSSARY': "0" if self.enable_auto_glossary_var.get() else "1",
+            'DISABLE_GLOSSARY_TRANSLATION': "0" if self.enable_auto_glossary_var.get() else "1",
+            'APPEND_GLOSSARY': "1" if self.append_glossary_var.get() else "0",
+            'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt,
+            'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var.get() else "0",
+            'REINFORCEMENT_FREQUENCY': self.reinforcement_freq_var.get(),
+            'RESET_FAILED_CHAPTERS': "1" if self.reset_failed_chapters_var.get() else "0",
+            'RETRY_TRUNCATED': "1" if self.retry_truncated_var.get() else "0",
+            'MAX_RETRY_TOKENS': self.max_retry_tokens_var.get(),
+            'RETRY_DUPLICATE_BODIES': "1" if self.retry_duplicate_var.get() else "0",
+            'DUPLICATE_LOOKBACK_CHAPTERS': self.duplicate_lookback_var.get(),
+            'GLOSSARY_MIN_FREQUENCY': self.glossary_min_frequency_var.get(),
+            'GLOSSARY_MAX_NAMES': self.glossary_max_names_var.get(),
+            'GLOSSARY_MAX_TITLES': self.glossary_max_titles_var.get(),
+            'GLOSSARY_BATCH_SIZE': self.glossary_batch_size_var.get(),
+            'ENABLE_IMAGE_TRANSLATION': "1" if self.enable_image_translation_var.get() else "0",
+            'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var.get() else "0",
+            'WEBNOVEL_MIN_HEIGHT': self.webnovel_min_height_var.get(),
+            'MAX_IMAGES_PER_CHAPTER': self.max_images_per_chapter_var.get(),
+            'IMAGE_API_DELAY': '1.0',
+            'SAVE_IMAGE_TRANSLATIONS': '1',
+            'IMAGE_CHUNK_HEIGHT': self.image_chunk_height_var.get(),
+            'HIDE_IMAGE_TRANSLATION_LABEL': "1" if self.hide_image_translation_label_var.get() else "0",
+            'RETRY_TIMEOUT': "1" if self.retry_timeout_var.get() else "0",
+            'CHUNK_TIMEOUT': self.chunk_timeout_var.get(),
+            'BATCH_TRANSLATION': "1" if self.batch_translation_var.get() else "0",
+            'BATCH_SIZE': self.batch_size_var.get(),
+            'DISABLE_ZERO_DETECTION': "1" if self.disable_zero_detection_var.get() else "0",
+            'TRANSLATION_HISTORY_ROLLING': "1" if self.translation_history_rolling_var.get() else "0",
+            'COMPREHENSIVE_EXTRACTION': "1" if self.comprehensive_extraction_var.get() else "0",
+            'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var.get() else "0",
+            'DUPLICATE_DETECTION_MODE': self.duplicate_detection_mode_var.get(),
+            'CHAPTER_NUMBER_OFFSET': str(self.chapter_number_offset_var.get()), 
+            'USE_HEADER_AS_OUTPUT': "1" if self.use_header_as_output_var.get() else "0",
+            'ENABLE_DECIMAL_CHAPTERS': "1" if self.enable_decimal_chapters_var.get() else "0",
+            'ENABLE_WATERMARK_REMOVAL': "1" if self.enable_watermark_removal_var.get() else "0",
+            'ADVANCED_WATERMARK_REMOVAL': "1" if self.advanced_watermark_removal_var.get() else "0",
+            'SAVE_CLEANED_IMAGES': "1" if self.save_cleaned_images_var.get() else "0",
+            'COMPRESSION_FACTOR': self.compression_factor_var.get(),
+            'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower(),
+            'GLOSSARY_DUPLICATE_KEY_MODE': self.config.get('glossary_duplicate_key_mode', 'auto'),
+            'GLOSSARY_DUPLICATE_CUSTOM_FIELD': self.config.get('glossary_duplicate_custom_field', ''),
+            'MANUAL_GLOSSARY': self.manual_glossary_path if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path else '',
+
+            # Anti-duplicate parameters
+            'ENABLE_ANTI_DUPLICATE': '1' if hasattr(self, 'enable_anti_duplicate_var') and self.enable_anti_duplicate_var.get() else '0',
+            'TOP_P': str(self.top_p_var.get()) if hasattr(self, 'top_p_var') else '1.0',
+            'TOP_K': str(self.top_k_var.get()) if hasattr(self, 'top_k_var') else '0',
+            'FREQUENCY_PENALTY': str(self.frequency_penalty_var.get()) if hasattr(self, 'frequency_penalty_var') else '0.0',
+            'PRESENCE_PENALTY': str(self.presence_penalty_var.get()) if hasattr(self, 'presence_penalty_var') else '0.0',
+            'REPETITION_PENALTY': str(self.repetition_penalty_var.get()) if hasattr(self, 'repetition_penalty_var') else '1.0',
+            'CANDIDATE_COUNT': str(self.candidate_count_var.get()) if hasattr(self, 'candidate_count_var') else '1',
+            'CUSTOM_STOP_SEQUENCES': self.custom_stop_sequences_var.get() if hasattr(self, 'custom_stop_sequences_var') else '',
+            'LOGIT_BIAS_ENABLED': '1' if hasattr(self, 'logit_bias_enabled_var') and self.logit_bias_enabled_var.get() else '0',
+            'LOGIT_BIAS_STRENGTH': str(self.logit_bias_strength_var.get()) if hasattr(self, 'logit_bias_strength_var') else '-0.5',
+            'BIAS_COMMON_WORDS': '1' if hasattr(self, 'bias_common_words_var') and self.bias_common_words_var.get() else '0',
+            'BIAS_REPETITIVE_PHRASES': '1' if hasattr(self, 'bias_repetitive_phrases_var') and self.bias_repetitive_phrases_var.get() else '0'
+            
            
        }
 
@@ -6808,6 +6823,9 @@ Recent translations to summarize:
        # Section 5: Image Translation
        self._create_image_translation_section(scrollable_frame)
        
+       # Section 6: Anti-Duplicate Parameters
+       self._create_anti_duplicate_section(scrollable_frame)
+       
        # Save & Close buttons
        self._create_settings_buttons(scrollable_frame, dialog, canvas)
        
@@ -7380,7 +7398,309 @@ Recent translations to summarize:
         
         # Call once to set initial state
         toggle_watermark_options()
+
+    def _create_anti_duplicate_section(self, parent):
+        """Create comprehensive anti-duplicate parameter controls with tabs"""
+        # Anti-Duplicate Parameters section
+        ad_frame = tk.LabelFrame(parent, text="🎯 Anti-Duplicate Parameters", padx=15, pady=10)
+        ad_frame.grid(row=6, column=0, columnspan=2, sticky="ew", padx=20, pady=(0, 15))
         
+        # Description
+        desc_label = tk.Label(ad_frame, 
+            text="Configure parameters to reduce duplicate translations across all AI providers.",
+            font=('TkDefaultFont', 9), fg='gray', wraplength=520)
+        desc_label.pack(anchor=tk.W, pady=(0, 10))
+        
+        # Enable/Disable toggle
+        self.enable_anti_duplicate_var = tk.BooleanVar(value=self.config.get('enable_anti_duplicate', False))
+        enable_cb = tb.Checkbutton(ad_frame, text="Enable Anti-Duplicate Parameters", 
+                                  variable=self.enable_anti_duplicate_var,
+                                  command=self._toggle_anti_duplicate_controls)
+        enable_cb.pack(anchor=tk.W, pady=(0, 10))
+        
+        # Create notebook for organized parameters
+        self.anti_duplicate_notebook = ttk.Notebook(ad_frame)
+        self.anti_duplicate_notebook.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        # Tab 1: Core Parameters
+        core_frame = tk.Frame(self.anti_duplicate_notebook)
+        self.anti_duplicate_notebook.add(core_frame, text="Core Parameters")
+        
+        # Top-P (Nucleus Sampling)
+        top_p_frame = tk.Frame(core_frame)
+        top_p_frame.pack(fill=tk.X, pady=5)
+        
+        tk.Label(top_p_frame, text="Top-P (Nucleus Sampling):", width=25, anchor='w').pack(side=tk.LEFT)
+        self.top_p_var = tk.DoubleVar(value=self.config.get('top_p', 1.0))
+        top_p_scale = tk.Scale(top_p_frame, from_=0.1, to=1.0, resolution=0.01, 
+                              orient=tk.HORIZONTAL, variable=self.top_p_var, length=200)
+        top_p_scale.pack(side=tk.LEFT, padx=5)
+        self.top_p_value_label = tk.Label(top_p_frame, text="", width=8)
+        self.top_p_value_label.pack(side=tk.LEFT, padx=5)
+        
+        def update_top_p_label(*args):
+            val = self.top_p_var.get()
+            self.top_p_value_label.config(text=f"{val:.2f}")
+        self.top_p_var.trace('w', update_top_p_label)
+        update_top_p_label()
+        
+        # Top-K (Vocabulary Limit)
+        top_k_frame = tk.Frame(core_frame)
+        top_k_frame.pack(fill=tk.X, pady=5)
+        
+        tk.Label(top_k_frame, text="Top-K (Vocabulary Limit):", width=25, anchor='w').pack(side=tk.LEFT)
+        self.top_k_var = tk.IntVar(value=self.config.get('top_k', 0))
+        top_k_scale = tk.Scale(top_k_frame, from_=0, to=100, orient=tk.HORIZONTAL, 
+                              variable=self.top_k_var, length=200)
+        top_k_scale.pack(side=tk.LEFT, padx=5)
+        self.top_k_value_label = tk.Label(top_k_frame, text="", width=8)
+        self.top_k_value_label.pack(side=tk.LEFT, padx=5)
+        
+        def update_top_k_label(*args):
+            val = self.top_k_var.get()
+            self.top_k_value_label.config(text=f"{val}" if val > 0 else "OFF")
+        self.top_k_var.trace('w', update_top_k_label)
+        update_top_k_label()
+        
+        # Frequency Penalty
+        freq_penalty_frame = tk.Frame(core_frame)
+        freq_penalty_frame.pack(fill=tk.X, pady=5)
+        
+        tk.Label(freq_penalty_frame, text="Frequency Penalty:", width=25, anchor='w').pack(side=tk.LEFT)
+        self.frequency_penalty_var = tk.DoubleVar(value=self.config.get('frequency_penalty', 0.0))
+        freq_scale = tk.Scale(freq_penalty_frame, from_=0.0, to=2.0, resolution=0.1, 
+                             orient=tk.HORIZONTAL, variable=self.frequency_penalty_var, length=200)
+        freq_scale.pack(side=tk.LEFT, padx=5)
+        self.freq_penalty_value_label = tk.Label(freq_penalty_frame, text="", width=8)
+        self.freq_penalty_value_label.pack(side=tk.LEFT, padx=5)
+        
+        def update_freq_label(*args):
+            val = self.frequency_penalty_var.get()
+            self.freq_penalty_value_label.config(text=f"{val:.1f}" if val > 0 else "OFF")
+        self.frequency_penalty_var.trace('w', update_freq_label)
+        update_freq_label()
+        
+        # Presence Penalty
+        pres_penalty_frame = tk.Frame(core_frame)
+        pres_penalty_frame.pack(fill=tk.X, pady=5)
+        
+        tk.Label(pres_penalty_frame, text="Presence Penalty:", width=25, anchor='w').pack(side=tk.LEFT)
+        self.presence_penalty_var = tk.DoubleVar(value=self.config.get('presence_penalty', 0.0))
+        pres_scale = tk.Scale(pres_penalty_frame, from_=0.0, to=2.0, resolution=0.1, 
+                             orient=tk.HORIZONTAL, variable=self.presence_penalty_var, length=200)
+        pres_scale.pack(side=tk.LEFT, padx=5)
+        self.pres_penalty_value_label = tk.Label(pres_penalty_frame, text="", width=8)
+        self.pres_penalty_value_label.pack(side=tk.LEFT, padx=5)
+        
+        def update_pres_label(*args):
+            val = self.presence_penalty_var.get()
+            self.pres_penalty_value_label.config(text=f"{val:.1f}" if val > 0 else "OFF")
+        self.presence_penalty_var.trace('w', update_pres_label)
+        update_pres_label()
+        
+        # Tab 2: Advanced Parameters
+        advanced_frame = tk.Frame(self.anti_duplicate_notebook)
+        self.anti_duplicate_notebook.add(advanced_frame, text="Advanced")
+        
+        # Repetition Penalty
+        rep_penalty_frame = tk.Frame(advanced_frame)
+        rep_penalty_frame.pack(fill=tk.X, pady=5)
+        
+        tk.Label(rep_penalty_frame, text="Repetition Penalty:", width=25, anchor='w').pack(side=tk.LEFT)
+        self.repetition_penalty_var = tk.DoubleVar(value=self.config.get('repetition_penalty', 1.0))
+        rep_scale = tk.Scale(rep_penalty_frame, from_=1.0, to=2.0, resolution=0.05, 
+                            orient=tk.HORIZONTAL, variable=self.repetition_penalty_var, length=200)
+        rep_scale.pack(side=tk.LEFT, padx=5)
+        self.rep_penalty_value_label = tk.Label(rep_penalty_frame, text="", width=8)
+        self.rep_penalty_value_label.pack(side=tk.LEFT, padx=5)
+        
+        def update_rep_label(*args):
+            val = self.repetition_penalty_var.get()
+            self.rep_penalty_value_label.config(text=f"{val:.2f}" if val > 1.0 else "OFF")
+        self.repetition_penalty_var.trace('w', update_rep_label)
+        update_rep_label()
+        
+        # Candidate Count (Gemini)
+        candidate_frame = tk.Frame(advanced_frame)
+        candidate_frame.pack(fill=tk.X, pady=5)
+        
+        tk.Label(candidate_frame, text="Candidate Count (Gemini):", width=25, anchor='w').pack(side=tk.LEFT)
+        self.candidate_count_var = tk.IntVar(value=self.config.get('candidate_count', 1))
+        candidate_scale = tk.Scale(candidate_frame, from_=1, to=4, orient=tk.HORIZONTAL, 
+                                  variable=self.candidate_count_var, length=200)
+        candidate_scale.pack(side=tk.LEFT, padx=5)
+        self.candidate_value_label = tk.Label(candidate_frame, text="", width=8)
+        self.candidate_value_label.pack(side=tk.LEFT, padx=5)
+        
+        def update_candidate_label(*args):
+            val = self.candidate_count_var.get()
+            self.candidate_value_label.config(text=f"{val}")
+        self.candidate_count_var.trace('w', update_candidate_label)
+        update_candidate_label()
+        
+        # Tab 3: Stop Sequences
+        stop_frame = tk.Frame(self.anti_duplicate_notebook)
+        self.anti_duplicate_notebook.add(stop_frame, text="Stop Sequences")
+        
+        # Custom Stop Sequences
+        stop_seq_frame = tk.Frame(stop_frame)
+        stop_seq_frame.pack(fill=tk.X, pady=5)
+        
+        tk.Label(stop_seq_frame, text="Custom Stop Sequences:", width=25, anchor='w').pack(side=tk.LEFT)
+        self.custom_stop_sequences_var = tk.StringVar(value=self.config.get('custom_stop_sequences', ''))
+        stop_entry = tb.Entry(stop_seq_frame, textvariable=self.custom_stop_sequences_var, width=30)
+        stop_entry.pack(side=tk.LEFT, padx=5)
+        tk.Label(stop_seq_frame, text="(comma-separated)", font=('TkDefaultFont', 8), fg='gray').pack(side=tk.LEFT)
+        
+        # Tab 4: Logit Bias (OpenAI)
+        bias_frame = tk.Frame(self.anti_duplicate_notebook)
+        self.anti_duplicate_notebook.add(bias_frame, text="Logit Bias")
+        
+        # Logit Bias Enable
+        self.logit_bias_enabled_var = tk.BooleanVar(value=self.config.get('logit_bias_enabled', False))
+        bias_cb = tb.Checkbutton(bias_frame, text="Enable Logit Bias (OpenAI only)", 
+                                variable=self.logit_bias_enabled_var)
+        bias_cb.pack(anchor=tk.W, pady=5)
+        
+        # Logit Bias Strength
+        bias_strength_frame = tk.Frame(bias_frame)
+        bias_strength_frame.pack(fill=tk.X, pady=5)
+        
+        tk.Label(bias_strength_frame, text="Bias Strength:", width=25, anchor='w').pack(side=tk.LEFT)
+        self.logit_bias_strength_var = tk.DoubleVar(value=self.config.get('logit_bias_strength', -0.5))
+        bias_scale = tk.Scale(bias_strength_frame, from_=-2.0, to=2.0, resolution=0.1, 
+                             orient=tk.HORIZONTAL, variable=self.logit_bias_strength_var, length=200)
+        bias_scale.pack(side=tk.LEFT, padx=5)
+        self.bias_strength_value_label = tk.Label(bias_strength_frame, text="", width=8)
+        self.bias_strength_value_label.pack(side=tk.LEFT, padx=5)
+        
+        def update_bias_strength_label(*args):
+            val = self.logit_bias_strength_var.get()
+            self.bias_strength_value_label.config(text=f"{val:.1f}")
+        self.logit_bias_strength_var.trace('w', update_bias_strength_label)
+        update_bias_strength_label()
+        
+        # Preset bias targets
+        preset_frame = tk.Frame(bias_frame)
+        preset_frame.pack(fill=tk.X, pady=5)
+        
+        tk.Label(preset_frame, text="Preset Bias Targets:", font=('TkDefaultFont', 9, 'bold')).pack(anchor=tk.W)
+        
+        self.bias_common_words_var = tk.BooleanVar(value=self.config.get('bias_common_words', False))
+        tb.Checkbutton(preset_frame, text="Bias against common words (the, and, said)", 
+                      variable=self.bias_common_words_var).pack(anchor=tk.W)
+        
+        self.bias_repetitive_phrases_var = tk.BooleanVar(value=self.config.get('bias_repetitive_phrases', False))
+        tb.Checkbutton(preset_frame, text="Bias against repetitive phrases", 
+                      variable=self.bias_repetitive_phrases_var).pack(anchor=tk.W)
+        
+        # Provider compatibility info
+        compat_frame = tk.Frame(ad_frame)
+        compat_frame.pack(fill=tk.X, pady=(15, 0))
+
+        tk.Label(compat_frame, text="Parameter Compatibility:", 
+                font=('TkDefaultFont', 9, 'bold')).pack(anchor=tk.W)
+
+        compat_text = tk.Label(compat_frame, 
+            text="• Core: Most providers • Advanced: DeepSeek, Mistral, Groq • Logit Bias: OpenAI only",
+            font=('TkDefaultFont', 8), fg='gray', justify=tk.LEFT)
+        compat_text.pack(anchor=tk.W, pady=(5, 0))
+
+        # Reset button
+        reset_frame = tk.Frame(ad_frame)
+        reset_frame.pack(fill=tk.X, pady=(10, 0))
+
+        tb.Button(reset_frame, text="🔄 Reset to Defaults", 
+                 command=self._reset_anti_duplicate_defaults,
+                 bootstyle="secondary", width=20).pack(side=tk.LEFT)
+
+        tk.Label(reset_frame, text="Reset all anti-duplicate parameters to default values", 
+                font=('TkDefaultFont', 8), fg='gray').pack(side=tk.LEFT, padx=(10, 0))
+
+        # Store all tab frames for enable/disable
+        self.anti_duplicate_tabs = [core_frame, advanced_frame, stop_frame, bias_frame]
+
+        # Initial state
+        self._toggle_anti_duplicate_controls()
+
+    def _toggle_anti_duplicate_controls(self):
+        """Enable/disable anti-duplicate parameter controls"""
+        state = tk.NORMAL if self.enable_anti_duplicate_var.get() else tk.DISABLED
+        
+        # Disable/enable the notebook itself
+        if hasattr(self, 'anti_duplicate_notebook'):
+            try:
+                self.anti_duplicate_notebook.config(state=state)
+            except tk.TclError:
+                pass
+        
+        # Disable/enable all controls in tabs
+        if hasattr(self, 'anti_duplicate_tabs'):
+            for tab_frame in self.anti_duplicate_tabs:
+                for widget in tab_frame.winfo_children():
+                    for child in widget.winfo_children():
+                        if hasattr(child, 'config'):
+                            try:
+                                child.config(state=state)
+                            except tk.TclError:
+                                pass
+                                
+    def _reset_anti_duplicate_defaults(self):
+        """Reset all anti-duplicate parameters to their default values"""
+        import tkinter.messagebox as messagebox
+        
+        # Ask for confirmation
+        if not messagebox.askyesno("Reset Anti-Duplicate Parameters", 
+                                  "Are you sure you want to reset all anti-duplicate parameters to their default values?"):
+            return
+        
+        # Reset all variables to defaults
+        if hasattr(self, 'enable_anti_duplicate_var'):
+            self.enable_anti_duplicate_var.set(False)
+        
+        if hasattr(self, 'top_p_var'):
+            self.top_p_var.set(1.0)  # Default = no effect
+        
+        if hasattr(self, 'top_k_var'):
+            self.top_k_var.set(0)  # Default = disabled
+        
+        if hasattr(self, 'frequency_penalty_var'):
+            self.frequency_penalty_var.set(0.0)  # Default = no penalty
+        
+        if hasattr(self, 'presence_penalty_var'):
+            self.presence_penalty_var.set(0.0)  # Default = no penalty
+        
+        if hasattr(self, 'repetition_penalty_var'):
+            self.repetition_penalty_var.set(1.0)  # Default = no penalty
+        
+        if hasattr(self, 'candidate_count_var'):
+            self.candidate_count_var.set(1)  # Default = single response
+        
+        if hasattr(self, 'custom_stop_sequences_var'):
+            self.custom_stop_sequences_var.set("")  # Default = empty
+        
+        if hasattr(self, 'logit_bias_enabled_var'):
+            self.logit_bias_enabled_var.set(False)  # Default = disabled
+        
+        if hasattr(self, 'logit_bias_strength_var'):
+            self.logit_bias_strength_var.set(-0.5)  # Default strength
+        
+        if hasattr(self, 'bias_common_words_var'):
+            self.bias_common_words_var.set(False)  # Default = disabled
+        
+        if hasattr(self, 'bias_repetitive_phrases_var'):
+            self.bias_repetitive_phrases_var.set(False)  # Default = disabled
+        
+        # Update enable/disable state
+        self._toggle_anti_duplicate_controls()
+        
+        # Show success message
+        messagebox.showinfo("Reset Complete", "All anti-duplicate parameters have been reset to their default values.")
+        
+        # Log the reset
+        if hasattr(self, 'append_log'):
+            self.append_log("🔄 Anti-duplicate parameters reset to defaults")        
+     
     def _create_settings_buttons(self, parent, dialog, canvas):
         """Create save and close buttons for settings dialog"""
         button_frame = tk.Frame(parent)
@@ -7388,7 +7708,7 @@ Recent translations to summarize:
         
         button_container = tk.Frame(button_frame)
         button_container.pack(expand=True)
-        
+
         def save_and_close():
             try:
                 def safe_int(value, default):
@@ -7424,7 +7744,22 @@ Recent translations to summarize:
                     'enable_decimal_chapters': self.enable_decimal_chapters_var.get(),
                     'use_header_as_output': self.use_header_as_output_var.get(),
                     'disable_gemini_safety': self.disable_gemini_safety_var.get(),
-                    'auto_update_check': self.auto_update_check_var.get()
+                    'auto_update_check': self.auto_update_check_var.get(),
+                    
+                    # ALL Anti-duplicate parameters (moved below other settings)
+                    'enable_anti_duplicate': getattr(self, 'enable_anti_duplicate_var', type('', (), {'get': lambda: False})).get(),
+                    'top_p': float(getattr(self, 'top_p_var', type('', (), {'get': lambda: 1.0})).get()),
+                    'top_k': safe_int(getattr(self, 'top_k_var', type('', (), {'get': lambda: 0})).get(), 0),
+                    'frequency_penalty': float(getattr(self, 'frequency_penalty_var', type('', (), {'get': lambda: 0.0})).get()),
+                    'presence_penalty': float(getattr(self, 'presence_penalty_var', type('', (), {'get': lambda: 0.0})).get()),
+                    'repetition_penalty': float(getattr(self, 'repetition_penalty_var', type('', (), {'get': lambda: 1.0})).get()),
+                    'candidate_count': safe_int(getattr(self, 'candidate_count_var', type('', (), {'get': lambda: 1})).get(), 1),
+                    'custom_stop_sequences': getattr(self, 'custom_stop_sequences_var', type('', (), {'get': lambda: ''})).get(),
+                    'logit_bias_enabled': getattr(self, 'logit_bias_enabled_var', type('', (), {'get': lambda: False})).get(),
+                    'logit_bias_strength': float(getattr(self, 'logit_bias_strength_var', type('', (), {'get': lambda: -0.5})).get()),
+                    'bias_common_words': getattr(self, 'bias_common_words_var', type('', (), {'get': lambda: False})).get(),
+                    'bias_repetitive_phrases': getattr(self, 'bias_repetitive_phrases_var', type('', (), {'get': lambda: False})).get(),
+                    
                 })
                 
                 # Validate numeric fields
@@ -7479,7 +7814,21 @@ Recent translations to summarize:
                     'TRANSLATION_CHUNK_PROMPT': str(getattr(self, 'translation_chunk_prompt', '')),  # FIXED: Convert to string
                     'IMAGE_CHUNK_PROMPT': str(getattr(self, 'image_chunk_prompt', '')),  # FIXED: Convert to string
                     "DISABLE_GEMINI_SAFETY": str(self.config.get('disable_gemini_safety', False)).lower(),
-                    'auto_update_check': str(self.auto_update_check_var.get())  # FIXED: Convert to string
+                    'auto_update_check': str(self.auto_update_check_var.get()),
+                    
+                    # ALL Anti-duplicate environment variables (moved below other settings)
+                    'ENABLE_ANTI_DUPLICATE': '1' if hasattr(self, 'enable_anti_duplicate_var') and self.enable_anti_duplicate_var.get() else '0',
+                    'TOP_P': str(self.top_p_var.get()) if hasattr(self, 'top_p_var') else '1.0',
+                    'TOP_K': str(self.top_k_var.get()) if hasattr(self, 'top_k_var') else '0',
+                    'FREQUENCY_PENALTY': str(self.frequency_penalty_var.get()) if hasattr(self, 'frequency_penalty_var') else '0.0',
+                    'PRESENCE_PENALTY': str(self.presence_penalty_var.get()) if hasattr(self, 'presence_penalty_var') else '0.0',
+                    'REPETITION_PENALTY': str(self.repetition_penalty_var.get()) if hasattr(self, 'repetition_penalty_var') else '1.0',
+                    'CANDIDATE_COUNT': str(self.candidate_count_var.get()) if hasattr(self, 'candidate_count_var') else '1',
+                    'CUSTOM_STOP_SEQUENCES': self.custom_stop_sequences_var.get() if hasattr(self, 'custom_stop_sequences_var') else '',
+                    'LOGIT_BIAS_ENABLED': '1' if hasattr(self, 'logit_bias_enabled_var') and self.logit_bias_enabled_var.get() else '0',
+                    'LOGIT_BIAS_STRENGTH': str(self.logit_bias_strength_var.get()) if hasattr(self, 'logit_bias_strength_var') else '-0.5',
+                    'BIAS_COMMON_WORDS': '1' if hasattr(self, 'bias_common_words_var') and self.bias_common_words_var.get() else '0',
+                    'BIAS_REPETITIVE_PHRASES': '1' if hasattr(self, 'bias_repetitive_phrases_var') and self.bias_repetitive_phrases_var.get() else '0',
                 }
                 os.environ.update(env_updates)
                 
@@ -7492,12 +7841,12 @@ Recent translations to summarize:
             except Exception as e:
                 print(f"❌ Failed to save Other Settings: {e}")
                 messagebox.showerror("Error", f"Failed to save settings: {e}")
-        
+
         tb.Button(button_container, text="💾 Save Settings", command=save_and_close, 
                  bootstyle="success", width=20).pack(side=tk.LEFT, padx=5)
-        
+
         tb.Button(button_container, text="❌ Cancel", command=lambda: [dialog._cleanup_scrolling(), dialog.destroy()], 
-                 bootstyle="secondary", width=20).pack(side=tk.LEFT, padx=5)
+                 bootstyle="secondary", width=20).pack(side=tk.LEFT, padx=5)       
 
     def validate_epub_structure_gui(self):
         """GUI wrapper for EPUB structure validation"""
@@ -7772,6 +8121,22 @@ Recent translations to summarize:
             self.config['compression_factor'] = self.compression_factor_var.get()
             self.config['translation_chunk_prompt'] = self.translation_chunk_prompt
             self.config['image_chunk_prompt'] = self.image_chunk_prompt
+            
+            
+            # Add anti-duplicate parameters
+            if hasattr(self, 'enable_anti_duplicate_var'):
+                self.config['enable_anti_duplicate'] = self.enable_anti_duplicate_var.get()
+                self.config['top_p'] = self.top_p_var.get()
+                self.config['top_k'] = self.top_k_var.get()
+                self.config['frequency_penalty'] = self.frequency_penalty_var.get()
+                self.config['presence_penalty'] = self.presence_penalty_var.get()
+                self.config['repetition_penalty'] = self.repetition_penalty_var.get()
+                self.config['candidate_count'] = self.candidate_count_var.get()  
+                self.config['custom_stop_sequences'] = self.custom_stop_sequences_var.get()
+                self.config['logit_bias_enabled'] = self.logit_bias_enabled_var.get()
+                self.config['logit_bias_strength'] = self.logit_bias_strength_var.get()
+                self.config['bias_common_words'] = self.bias_common_words_var.get()
+                self.config['bias_repetitive_phrases'] = self.bias_repetitive_phrases_var.get()
 
 
             _tl = self.token_limit_entry.get().strip()
@@ -7799,7 +8164,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.2.4...")
+    print("🚀 Starting Glossarion v3.2.5...")
     
     # Initialize splash screen
     splash_manager = None
