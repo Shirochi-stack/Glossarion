@@ -354,6 +354,29 @@ api_modules = [
     'anyio._core._eventloop',
     'anyio.streams',
     'anyio.streams.memory',
+	
+	# POE API Wrapper (add these at the end)
+    'poe_api_wrapper',
+    'poe_api_wrapper.api',
+    'poe_api_wrapper.client',
+    'poe_api_wrapper.models',
+    'poe_api_wrapper.utils',
+    'ballyregan',
+    'ballyregan.proxies',
+    
+    # WebSocket support for POE
+    'websocket',
+    'websocket._core',
+    'websocket._app',
+    'websocket._url',
+    'websocket._http',
+    'websocket._logging',
+    'websocket._socket',
+    'websocket._ssl_compat',
+    'websocket._abnf',
+    'websocket._handshake',
+    'websocket._exceptions',
+    'websockets',
 ]
 
 # Text Processing & NLP
