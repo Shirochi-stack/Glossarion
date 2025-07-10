@@ -1394,6 +1394,12 @@ Recent translations to summarize:
             "wizardlm-70b", "wizardlm-13b",
             "openchat-3.5",
             
+            # For POE, prefix with 'poe/'
+            "poe/gpt-4", "poe/gpt-4o", "poe/gpt-4.5", "poe/gpt-4.1",
+            "poe/claude-3-opus", "poe/claude-4-opus", "poe/claude-3-sonnet", "poe/claude-4-sonnet",
+            "poe/claude", "poe/Assistant",
+            "poe/gemini-2.5-flash", "poe/gemini-2.5-pro",
+            
             # For ElectronHub, prefix with 'eh/'
             "eh/gpt-4", "eh/gpt-3.5-turbo", "eh/claude-3-opus", "eh/claude-3-sonnet",
             "eh/llama-2-70b-chat", "eh/yi-34b-chat-200k", "eh/mistral-large",
@@ -1401,6 +1407,7 @@ Recent translations to summarize:
         ]
         tb.Combobox(self.frame, textvariable=self.model_var, values=models, state="normal").grid(
             row=1, column=1, columnspan=2, sticky=tk.EW, padx=5, pady=5)
+        self.model_var.trace('w', self._check_poe_model)
     
     def _create_profile_section(self):
         """Create profile/profile section"""
@@ -1547,6 +1554,129 @@ Recent translations to summarize:
         self.log_text.bind("<Button-3>", self._show_context_menu)
         if sys.platform == "darwin":
             self.log_text.bind("<Button-2>", self._show_context_menu)
+
+    def _check_poe_model(self, *args):
+        """Automatically show POE helper when POE model is selected"""
+        model = self.model_var.get().lower()
+        
+        # Check if POE model is selected
+        if model.startswith('poe/'):
+            current_key = self.api_key_entry.get().strip()
+            
+            # Only show helper if no valid POE cookie is set
+            if not current_key.startswith('p-b:'):
+                # Use a flag to prevent showing multiple times in same session
+                if not getattr(self, '_poe_helper_shown', False):
+                    self._poe_helper_shown = True
+                    # Change self.root to self.master
+                    self.master.after(100, self._show_poe_setup_dialog)
+        else:
+            # Reset flag when switching away from POE
+            self._poe_helper_shown = False
+
+    def _show_poe_setup_dialog(self):
+        """Show POE cookie setup dialog"""
+        # Create dialog using WindowManager
+        dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
+            self.master,
+            "POE Authentication Required",
+            width=650,
+            height=450,
+            max_width_ratio=0.8,
+            max_height_ratio=0.85
+        )
+        
+        # Header
+        header_frame = tk.Frame(scrollable_frame)
+        header_frame.pack(fill='x', padx=20, pady=(20, 10))
+        
+        tk.Label(header_frame, text="POE Cookie Authentication",
+                font=('TkDefaultFont', 12, 'bold')).pack()
+        
+        # Important notice
+        notice_frame = tk.Frame(scrollable_frame)
+        notice_frame.pack(fill='x', padx=20, pady=(0, 20))
+        
+        tk.Label(notice_frame, 
+                text="⚠️ POE uses HttpOnly cookies that cannot be accessed by JavaScript",
+                foreground='red', font=('TkDefaultFont', 10, 'bold')).pack()
+        
+        tk.Label(notice_frame,
+                text="You must manually copy the cookie from Developer Tools",
+                foreground='gray').pack()
+        
+        # Instructions
+        self._create_poe_manual_instructions(scrollable_frame)
+        
+        # Button
+        button_frame = tk.Frame(scrollable_frame)
+        button_frame.pack(fill='x', padx=20, pady=(10, 20))
+        
+        def close_dialog():
+            dialog.destroy()
+            # Check if user added a cookie
+            current_key = self.api_key_entry.get().strip()
+            if model := self.model_var.get().lower():
+                if model.startswith('poe/') and not current_key.startswith('p-b:'):
+                    self.append_log("⚠️ POE models require cookie authentication. Please add your p-b cookie to the API key field.")
+        
+        tb.Button(button_frame, text="Close", command=close_dialog,
+                 bootstyle="secondary").pack()
+        
+        # Auto-resize and show
+        self.wm.auto_resize_dialog(dialog, canvas)
+
+    def _create_poe_manual_instructions(self, parent):
+        """Create manual instructions for getting POE cookie"""
+        frame = tk.LabelFrame(parent, text="How to Get Your POE Cookie")
+        frame.pack(fill='both', expand=True, padx=20, pady=10)
+        
+        # Step-by-step with visual formatting
+        steps = [
+            ("1.", "Go to poe.com and LOG IN to your account", None),
+            ("2.", "Press F12 to open Developer Tools", None),
+            ("3.", "Navigate to:", None),
+            ("", "• Chrome/Edge: Application → Cookies → https://poe.com", "indent"),
+            ("", "• Firefox: Storage → Cookies → https://poe.com", "indent"),
+            ("", "• Safari: Storage → Cookies → poe.com", "indent"),
+            ("4.", "Find the cookie named 'p-b'", None),
+            ("5.", "Double-click its Value to select it", None),
+            ("6.", "Copy the value (Ctrl+C or right-click → Copy)", None),
+            ("7.", "In Glossarion's API key field, type: p-b:", None),
+            ("8.", "Paste the cookie value after p-b:", None)
+        ]
+        
+        for num, text, style in steps:
+            step_frame = tk.Frame(frame)
+            step_frame.pack(anchor='w', padx=20, pady=2)
+            
+            if style == "indent":
+                tk.Label(step_frame, text="    ").pack(side='left')
+            
+            if num:
+                tk.Label(step_frame, text=num, font=('TkDefaultFont', 10, 'bold'),
+                        width=3).pack(side='left')
+            
+            tk.Label(step_frame, text=text).pack(side='left')
+        
+        # Example
+        example_frame = tk.LabelFrame(parent, text="Example API Key Format")
+        example_frame.pack(fill='x', padx=20, pady=(10, 0))
+        
+        example_entry = tk.Entry(example_frame, font=('Consolas', 11))
+        example_entry.pack(padx=10, pady=10, fill='x')
+        example_entry.insert(0, "p-b:RyP5ORQXFO8qXbiTBKD2vA%3D%3D")
+        example_entry.config(state='readonly')
+        
+        # Additional info
+        info_frame = tk.Frame(parent)
+        info_frame.pack(fill='x', padx=20, pady=(10, 0))
+        
+        info_text = """Note: The cookie value is usually a long string ending with %3D%3D
+    If you see multiple p-b cookies, use the one with the longest value."""
+        
+        tk.Label(info_frame, text=info_text, foreground='gray',
+                justify='left').pack(anchor='w')
 
     def _lazy_load_modules(self, splash_callback=None):
         """Load heavy modules only when needed - Enhanced with thread safety, retry logic, and progress tracking"""
