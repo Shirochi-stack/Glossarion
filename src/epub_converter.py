@@ -2074,16 +2074,51 @@ img {
         book.add_item(gallery_page)
         return gallery_page
         
+    def _create_nav_content(self, toc_items, book_title="Book"):
+        """Create navigation content manually"""
+        nav_content = '''<?xml version="1.0" encoding="utf-8"?>
+    <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+    <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+    <head>
+    <title>Table of Contents</title>
+    </head>
+    <body>
+    <nav epub:type="toc" id="toc">
+    <h1>Table of Contents</h1>
+    <ol>'''
+        
+        for item in toc_items:
+            if hasattr(item, 'title') and hasattr(item, 'file_name'):
+                nav_content += f'\n<li><a href="{item.file_name}">{ContentProcessor.safe_escape(item.title)}</a></li>'
+        
+        nav_content += '''
+    </ol>
+    </nav>
+    </body>
+    </html>'''
+        
+        return nav_content
+
     def _finalize_book(self, book: epub.EpubBook, spine: List, toc: List, 
                       cover_file: Optional[str]):
         """Finalize book structure with automatic EPUB2 fallback for large TOCs"""
         # Check if we need EPUB2 fallback
         is_large_toc = len(toc) > 400
         
+        # Check if first item in spine is a cover
+        has_cover = False
+        cover_item = None
+        if spine and len(spine) > 0:
+            first_item = spine[0]
+            if hasattr(first_item, 'title') and first_item.title == "Cover":
+                has_cover = True
+                cover_item = first_item
+                spine = spine[1:]  # Remove cover from spine temporarily
+        
         if is_large_toc:
             self.log(f"[INFO] Large TOC detected ({len(toc)} items) - using EPUB2 format")
             # Set marker for EPUB2 format
-            book._format = 'epub2'  # Custom attribute to track format
+            book._format = 'epub2'
             
             # Set the full TOC
             book.toc = toc
@@ -2092,10 +2127,20 @@ img {
             ncx = epub.EpubNcx()
             book.add_item(ncx)
             
-            # Set spine without nav
-            book.spine = spine
+            # Build final spine: Cover (if exists) → Chapters
+            final_spine = []
+            if has_cover:
+                final_spine.append(cover_item)
+            final_spine.extend(spine)
+            
+            book.spine = final_spine
             
             self.log("📖 Using EPUB2 format with NCX navigation only")
+            if has_cover:
+                self.log("📖 Reading order: Cover → Chapters")
+            else:
+                self.log("📖 Reading order: Chapters")
+                
         else:
             # Normal EPUB3 processing for smaller books
             self.log(f"[INFO] Normal TOC size ({len(toc)} items) - using EPUB3 format")
@@ -2103,18 +2148,32 @@ img {
             # Set TOC
             book.toc = toc
             
-            # Add both NCX and Nav for EPUB3
+            # Add NCX
             ncx = epub.EpubNcx()
             book.add_item(ncx)
             
+            # Create Nav with manual content
             nav = epub.EpubNav()
+            nav.content = self._create_nav_content(toc, book.title).encode('utf-8')
+            nav.uid = 'nav'
+            nav.file_name = 'nav.xhtml'
             book.add_item(nav)
             
-            # Add nav to spine for EPUB3
-            book.spine = [nav] + spine
+            # Build final spine: Cover (if exists) → Nav → Chapters
+            final_spine = []
+            if has_cover:
+                final_spine.append(cover_item)
+            final_spine.append(nav)
+            final_spine.extend(spine)
+            
+            book.spine = final_spine
             
             self.log("📖 Using EPUB3 format with full navigation")
-
+            if has_cover:
+                self.log("📖 Reading order: Cover → Table of Contents → Chapters")
+            else:
+                self.log("📖 Reading order: Table of Contents → Chapters")
+            
     def _write_epub(self, book: epub.EpubBook, metadata: dict):
         """Write EPUB file with automatic format selection"""
         # Determine output filename
