@@ -1221,7 +1221,13 @@ class UnifiedClient:
             self.model = original_model
  
     def _send_poe(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to Poe using direct HTTP API instead of poe-api-wrapper"""
+        """Send request using poe-api-wrapper"""
+        try:
+            from poe_api_wrapper import PoeApi
+        except ImportError:
+            raise UnifiedClientError(
+                "poe-api-wrapper not installed. Run: pip install poe-api-wrapper"
+            )
         
         # Parse cookies
         tokens = {}
@@ -1236,195 +1242,81 @@ class UnifiedClient:
         else:
             tokens['p-b'] = self.api_key.strip()
         
-        if 'p-b' not in tokens:
-            raise UnifiedClientError(
-                "Poe requires p-b cookie for authentication. "
-                "Format: 'p-b:your_cookie_value' or 'p-b:cookie1|p-lat:cookie2'"
-            )
+        # If no p-lat provided, add empty string (some versions of poe-api-wrapper need this)
+        if 'p-lat' not in tokens:
+            tokens['p-lat'] = ''
+            logger.info("No p-lat cookie provided, using empty string")
         
-        # Build cookie header
-        cookie_header = '; '.join([f'{k}={v}' for k, v in tokens.items()])
+        logger.info(f"Tokens being sent: p-b={len(tokens.get('p-b', ''))} chars, p-lat={len(tokens.get('p-lat', ''))} chars")
         
-        # Get bot name mapping
-        requested_model = self.model.replace('poe/', '', 1)
-        bot_map = {
-            'gpt-4': 'GPT-4',
-            'gpt-4.5': 'GPT-4',
-            'claude-3-opus': 'Claude-3-Opus',
-            'claude-4-opus': 'Claude-3-Opus',
-            'claude-3-sonnet': 'Claude-3-Sonnet',
-            'claude-4-sonnet': 'Claude-3-Sonnet',
-            'claude': 'Claude-instant',
-            'gemini-2.5-flash': 'Gemini-1.5-Flash',
-            'gemini-2.5-pro': 'Gemini-1.5-Pro',
-            'assistant': 'Assistant'
-        }
-        bot_name = bot_map.get(requested_model.lower(), requested_model)
-        
-        # Convert messages to prompt
-        prompt = self._messages_to_prompt(messages)
-        
-        # Use direct HTTP approach
-        headers = {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json, text/plain, */*',
-            'Cookie': cookie_header,
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Origin': 'https://poe.com',
-            'Referer': 'https://poe.com/',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-origin'
-        }
-        
-        # GraphQL query for sending message
-        query = """
-        mutation SendMessageMutation(
-            $bot: String!,
-            $query: String!,
-            $chatId: BigInt,
-            $source: MessageSource,
-            $withChatBreak: Boolean!,
-            $messageLimit: Int
-        ) {
-            messageEdgeCreate(
-                bot: $bot,
-                query: $query,
-                chatId: $chatId,
-                source: $source,
-                withChatBreak: $withChatBreak,
-                messageLimit: $messageLimit
-            ) {
-                message {
-                    id
-                    text
-                    state
-                    author
-                    contentType
-                }
-                chatBreak
-                status
+        try:
+            # Create Poe client
+            poe_client = PoeApi(tokens=tokens)
+            
+            # Get bot name
+            requested_model = self.model.replace('poe/', '', 1)
+            bot_map = {
+                # GPT models
+                'gpt-4': 'beaver',
+                'gpt-4o': 'GPT-4o',
+                'gpt-3.5-turbo': 'chinchilla',
+                
+                # Claude models
+                'claude': 'a2',
+                'claude-instant': 'a2',
+                'claude-2': 'claude_2',
+                'claude-3-opus': 'claude_3_opus',
+                'claude-3-sonnet': 'claude_3_sonnet',
+                'claude-3-haiku': 'claude_3_haiku',
+                
+                # Gemini models
+                'gemini-2.5-flash': 'gemini_1_5_flash',
+                'gemini-2.5-pro': 'gemini_1_5_pro',
+                'gemini-pro': 'gemini_pro',
+                
+                # Other models
+                'assistant': 'assistant',
+                'web-search': 'web_search',
             }
-        }
-        """
-        
-        variables = {
-            "bot": bot_name,
-            "query": prompt,
-            "chatId": None,
-            "source": "chat_input",
-            "withChatBreak": False
-        }
-        
-        if max_tokens:
-            variables["messageLimit"] = max_tokens
-        
-        payload = {
-            "query": query,
-            "variables": variables
-        }
-        
-        # Make the request
-        max_retries = 3
-        api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
-        
-        for attempt in range(max_retries):
-            try:
-                logger.info(f"Attempting Poe API call to {bot_name} (attempt {attempt + 1})")
-                
-                # First, we need to get the channel URL and other settings
-                # This is a simplified approach - in production you'd need proper channel management
-                settings_resp = requests.post(
-                    "https://poe.com/api/settings",
-                    headers=headers,
-                    json={},
-                    timeout=30
+            bot_name = bot_map.get(requested_model.lower(), requested_model)
+            logger.info(f"Using bot name: {bot_name}")
+            
+            # Send message
+            prompt = self._messages_to_prompt(messages)
+            full_response = ""
+            
+            # Handle temperature and max_tokens if supported
+            # Note: poe-api-wrapper might not support these parameters directly
+            for chunk in poe_client.send_message(bot_name, prompt):
+                if 'response' in chunk:
+                    full_response = chunk['response']
+            
+            # Get the final text
+            final_text = chunk.get('text', full_response) if 'chunk' in locals() else full_response
+            
+            return UnifiedResponse(
+                content=final_text,
+                finish_reason="stop",
+                raw_response=chunk if 'chunk' in locals() else {"response": full_response}
+            )
+            
+        except Exception as e:
+            logger.error(f"Poe API error details: {str(e)}")
+            # Check for specific errors
+            error_str = str(e).lower()
+            if "rate limit" in error_str:
+                raise UnifiedClientError(
+                    "POE rate limit exceeded. Please wait before trying again.",
+                    error_type="rate_limit"
                 )
-                
-                if settings_resp.status_code == 403:
-                    raise UnifiedClientError(
-                        "Poe authentication failed (403 Forbidden). "
-                        "Your cookies may be expired. Please log into poe.com and get fresh cookies.",
-                        error_type="auth_error"
-                    )
-                
-                # Send the actual message
-                resp = requests.post(
-                    "https://poe.com/api/gql_POST",
-                    headers=headers,
-                    json=payload,
-                    timeout=self.request_timeout
+            elif "auth" in error_str or "unauthorized" in error_str:
+                raise UnifiedClientError(
+                    "POE authentication failed. Your cookies may be expired. "
+                    "Please get fresh cookies from poe.com.",
+                    error_type="auth_error"
                 )
-                
-                if resp.status_code == 400:
-                    # Check if it's actually a rate limit or other error
-                    try:
-                        error_data = resp.json()
-                        if "rate limit" in str(error_data).lower():
-                            if attempt < max_retries - 1:
-                                wait_time = api_delay * (attempt + 1) * 5
-                                logger.warning(f"Poe rate limit hit, waiting {wait_time}s")
-                                time.sleep(wait_time)
-                                continue
-                    except:
-                        pass
-                        
-                    raise UnifiedClientError(
-                        f"Poe API error (400): {resp.text[:200]}. "
-                        "This may be due to expired cookies or API changes.",
-                        http_status=400
-                    )
-                    
-                elif resp.status_code != 200:
-                    if attempt < max_retries - 1:
-                        logger.warning(f"Poe API error {resp.status_code} (attempt {attempt + 1})")
-                        time.sleep(api_delay * (attempt + 1))
-                        continue
-                    raise UnifiedClientError(
-                        f"Poe API error: {resp.status_code} - {resp.text[:200]}",
-                        http_status=resp.status_code
-                    )
-                
-                # Parse response
-                json_resp = resp.json()
-                
-                # Extract the message text from the GraphQL response
-                content = ""
-                if 'data' in json_resp and 'messageEdgeCreate' in json_resp['data']:
-                    message_data = json_resp['data']['messageEdgeCreate']
-                    if 'message' in message_data:
-                        content = message_data['message'].get('text', '')
-                
-                if not content:
-                    # Try alternative response format
-                    content = json_resp.get('text', '') or json_resp.get('response', '')
-                    
-                if not content:
-                    logger.warning(f"Empty response from Poe. Raw response: {json_resp}")
-                    content = ""
-                
-                return UnifiedResponse(
-                    content=content,
-                    finish_reason="stop",
-                    raw_response=json_resp
-                )
-                
-            except requests.RequestException as e:
-                if attempt < max_retries - 1:
-                    logger.warning(f"Poe API network error (attempt {attempt + 1}): {e}")
-                    time.sleep(api_delay * (attempt + 1))
-                    continue
-                logger.error(f"Poe API error after all retries: {e}")
-                raise UnifiedClientError(f"Poe API network error: {e}")
-            except Exception as e:
-                if "UnifiedClientError" in str(type(e)):
-                    raise
-                logger.error(f"Unexpected Poe API error: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(api_delay * (attempt + 1))
-                    continue
-                raise UnifiedClientError(f"Poe API error: {e}")
-
+            raise UnifiedClientError(f"Poe API error: {e}")
+            
     def _send_openrouter(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to OpenRouter API with safety settings"""
         # Check if safety settings are disabled via GUI toggle
@@ -3644,7 +3536,13 @@ class UnifiedClient:
                 raise UnifiedClientError(f"ElectronHub Vision API error: {e}")
     
     def _send_poe_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send image request to Poe using direct HTTP API"""
+        """Send image request using poe-api-wrapper"""
+        try:
+            from poe_api_wrapper import PoeApi
+        except ImportError:
+            raise UnifiedClientError(
+                "poe-api-wrapper not installed. Run: pip install poe-api-wrapper"
+            )
         
         # Parse cookies (same as _send_poe)
         tokens = {}
@@ -3659,211 +3557,120 @@ class UnifiedClient:
         else:
             tokens['p-b'] = self.api_key.strip()
         
-        if 'p-b' not in tokens:
-            raise UnifiedClientError(
-                "Poe requires p-b cookie for authentication. "
-                "Format: 'p-b:your_cookie_value' or 'p-b:cookie1|p-lat:cookie2'"
-            )
+        if 'p-lat' not in tokens:
+            tokens['p-lat'] = ''
+            logger.info("No p-lat cookie provided, using empty string")
         
-        # Build cookie header
-        cookie_header = '; '.join([f'{k}={v}' for k, v in tokens.items()])
+        logger.info(f"Tokens being sent for image: p-b={len(tokens.get('p-b', ''))} chars, p-lat={len(tokens.get('p-lat', ''))} chars")
         
-        # Get bot name mapping (same as _send_poe)
-        requested_model = self.model.replace('poe/', '', 1)
-        bot_map = {
-            'gpt-4': 'GPT-4',
-            'gpt-4.5': 'GPT-4',
-            'gpt-4o': 'GPT-4o',
-            'gpt-4-vision': 'GPT-4V',  # Vision model
-            'claude-3-opus': 'Claude-3-Opus',
-            'claude-4-opus': 'Claude-3-Opus',
-            'claude-3-sonnet': 'Claude-3-Sonnet',
-            'claude-4-sonnet': 'Claude-3-Sonnet',
-            'claude': 'Claude-instant',
-            'claude-vision': 'Claude-3-Opus',  # Claude with vision
-            'gemini-2.5-flash': 'Gemini-1.5-Flash',
-            'gemini-2.5-pro': 'Gemini-1.5-Pro',
-            'gemini-vision': 'Gemini-1.5-Pro',  # Gemini with vision
-            'assistant': 'Assistant'
-        }
-        bot_name = bot_map.get(requested_model.lower(), requested_model)
-        
-        # Convert messages to prompt
-        prompt = self._messages_to_prompt(messages)
-        
-        # Headers
-        headers = {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json, text/plain, */*',
-            'Cookie': cookie_header,
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Origin': 'https://poe.com',
-            'Referer': 'https://poe.com/',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-origin'
-        }
-        
-        # For images, we need to upload the image first, then send the message
-        # This is a simplified approach - POE's actual image handling is more complex
-        # GraphQL query for sending message with image
-        query = """
-        mutation SendMessageMutation(
-            $bot: String!,
-            $query: String!,
-            $chatId: BigInt,
-            $source: MessageSource,
-            $withChatBreak: Boolean!,
-            $messageLimit: Int,
-            $attachments: [MessageAttachment!]
-        ) {
-            messageEdgeCreate(
-                bot: $bot,
-                query: $query,
-                chatId: $chatId,
-                source: $source,
-                withChatBreak: $withChatBreak,
-                messageLimit: $messageLimit,
-                attachments: $attachments
-            ) {
-                message {
-                    id
-                    text
-                    state
-                    author
-                    contentType
-                }
-                chatBreak
-                status
+        try:
+            # Create Poe client
+            poe_client = PoeApi(tokens=tokens)
+            
+            # Get bot name - use vision-capable bots
+            requested_model = self.model.replace('poe/', '', 1)
+            bot_map = {
+                # Vision-capable models
+                'gpt-4-vision': 'GPT-4V',
+                'gpt-4v': 'GPT-4V',
+                'claude-3-opus': 'claude_3_opus',  # Claude 3 models support vision
+                'claude-3-sonnet': 'claude_3_sonnet',
+                'claude-3-haiku': 'claude_3_haiku',
+                'gemini-pro-vision': 'gemini_pro_vision',
+                'gemini-2.5-flash': 'gemini_1_5_flash',  # Gemini 1.5 supports vision
+                'gemini-2.5-pro': 'gemini_1_5_pro',
+                
+                # Fallback to regular models
+                'gpt-4': 'beaver',
+                'claude': 'a2',
+                'assistant': 'assistant',
             }
-        }
-        """
-        
-        # Note: POE's actual image upload is complex and requires multiple steps
-        # This is a simplified version that may need adjustment
-        variables = {
-            "bot": bot_name,
-            "query": prompt,
-            "chatId": None,
-            "source": "chat_input",
-            "withChatBreak": False,
-            "attachments": [{
-                "type": "image",
-                "data": f"data:image/jpeg;base64,{image_base64[:100]}..."  # Truncated for example
-                # In reality, POE requires uploading the image first and getting an attachment ID
-            }]
-        }
-        
-        if max_tokens:
-            variables["messageLimit"] = max_tokens
-        
-        payload = {
-            "query": query,
-            "variables": variables
-        }
-        
-        # Make the request
-        max_retries = 3
-        api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
-        
-        for attempt in range(max_retries):
+            bot_name = bot_map.get(requested_model.lower(), requested_model)
+            logger.info(f"Using bot name for vision: {bot_name}")
+            
+            # Convert messages to prompt
+            prompt = self._messages_to_prompt(messages)
+            
+            # Note: poe-api-wrapper's image support varies by version
+            # Some versions support file_path parameter, others need different approaches
+            full_response = ""
+            
             try:
-                logger.info(f"Attempting Poe Vision API call to {bot_name} (attempt {attempt + 1})")
+                # First, try to save the base64 image temporarily
+                import tempfile
+                import base64
                 
-                # Note: Image support in POE is complex and may require:
-                # 1. First uploading the image to get an attachment ID
-                # 2. Then sending the message with the attachment ID
-                # This is a simplified version
+                with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_file:
+                    tmp_file.write(base64.b64decode(image_base64))
+                    tmp_path = tmp_file.name
                 
-                resp = requests.post(
-                    "https://poe.com/api/gql_POST",
-                    headers=headers,
-                    json=payload,
-                    timeout=self.request_timeout
+                logger.info(f"Saved temporary image to: {tmp_path}")
+                
+                # Try sending with file_path if supported
+                try:
+                    for chunk in poe_client.send_message(bot_name, prompt, file_path=tmp_path):
+                        if 'response' in chunk:
+                            full_response = chunk['response']
+                except TypeError:
+                    # If file_path not supported, try alternative method
+                    logger.warning("file_path parameter not supported, trying without image")
+                    # Fall back to text-only
+                    for chunk in poe_client.send_message(bot_name, prompt):
+                        if 'response' in chunk:
+                            full_response = chunk['response']
+                
+                # Clean up temp file
+                try:
+                    import os
+                    os.unlink(tmp_path)
+                except:
+                    pass
+                    
+            except Exception as img_error:
+                logger.error(f"Image handling error: {img_error}")
+                # Fall back to text-only message
+                logger.warning("Falling back to text-only message due to image error")
+                for chunk in poe_client.send_message(bot_name, prompt):
+                    if 'response' in chunk:
+                        full_response = chunk['response']
+            
+            # Get the final text
+            final_text = chunk.get('text', full_response) if 'chunk' in locals() else full_response
+            
+            if not final_text:
+                raise UnifiedClientError(
+                    "POE returned empty response for image. "
+                    "The bot may not support image inputs or the image format is unsupported."
                 )
-                
-                if resp.status_code == 400:
-                    # Check if it's a rate limit or other error
-                    try:
-                        error_data = resp.json()
-                        if "rate limit" in str(error_data).lower():
-                            if attempt < max_retries - 1:
-                                wait_time = api_delay * (attempt + 1) * 5
-                                logger.warning(f"Poe rate limit hit, waiting {wait_time}s")
-                                time.sleep(wait_time)
-                                continue
-                    except:
-                        pass
-                    
-                    # POE may not support images through this method
-                    raise UnifiedClientError(
-                        f"Poe Vision API error (400): {resp.text[:200]}. "
-                        "Note: POE's image support is limited and may not work with all bots. "
-                        "Consider using text-only queries or alternative providers.",
-                        http_status=400
-                    )
-                
-                elif resp.status_code == 403:
-                    raise UnifiedClientError(
-                        "Poe authentication failed (403 Forbidden). "
-                        "Your cookies may be expired. Please log into poe.com and get fresh cookies.",
-                        error_type="auth_error"
-                    )
-                    
-                elif resp.status_code != 200:
-                    if attempt < max_retries - 1:
-                        logger.warning(f"Poe API error {resp.status_code} (attempt {attempt + 1})")
-                        time.sleep(api_delay * (attempt + 1))
-                        continue
-                    raise UnifiedClientError(
-                        f"Poe API error: {resp.status_code} - {resp.text[:200]}",
-                        http_status=resp.status_code
-                    )
-                
-                # Parse response
-                json_resp = resp.json()
-                
-                # Extract the message text from the GraphQL response
-                content = ""
-                if 'data' in json_resp and 'messageEdgeCreate' in json_resp['data']:
-                    message_data = json_resp['data']['messageEdgeCreate']
-                    if 'message' in message_data:
-                        content = message_data['message'].get('text', '')
-                
-                if not content:
-                    # Try alternative response format
-                    content = json_resp.get('text', '') or json_resp.get('response', '')
-                    
-                if not content:
-                    logger.warning(f"Empty response from Poe Vision. Raw response: {json_resp}")
-                    # For vision requests, POE might not support the model
-                    raise UnifiedClientError(
-                        "POE returned empty response. "
-                        "The selected bot may not support image inputs. "
-                        "Try using a vision-capable bot like GPT-4V or Claude-3-Opus."
-                    )
-                
-                return UnifiedResponse(
-                    content=content,
-                    finish_reason="stop",
-                    raw_response=json_resp
+            
+            return UnifiedResponse(
+                content=final_text,
+                finish_reason="stop",
+                raw_response=chunk if 'chunk' in locals() else {"response": full_response}
+            )
+            
+        except Exception as e:
+            logger.error(f"Poe image API error details: {str(e)}")
+            error_str = str(e).lower()
+            
+            if "rate limit" in error_str:
+                raise UnifiedClientError(
+                    "POE rate limit exceeded. Please wait before trying again.",
+                    error_type="rate_limit"
                 )
-                
-            except requests.RequestException as e:
-                if attempt < max_retries - 1:
-                    logger.warning(f"Poe API network error (attempt {attempt + 1}): {e}")
-                    time.sleep(api_delay * (attempt + 1))
-                    continue
-                logger.error(f"Poe API error after all retries: {e}")
-                raise UnifiedClientError(f"Poe API network error: {e}")
-            except Exception as e:
-                if "UnifiedClientError" in str(type(e)):
-                    raise
-                logger.error(f"Unexpected Poe API error: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(api_delay * (attempt + 1))
-                    continue
-                raise UnifiedClientError(f"Poe API error: {e}")
+            elif "auth" in error_str or "unauthorized" in error_str:
+                raise UnifiedClientError(
+                    "POE authentication failed. Your cookies may be expired.",
+                    error_type="auth_error"
+                )
+            elif "not support" in error_str or "vision" in error_str:
+                raise UnifiedClientError(
+                    f"The selected POE bot '{requested_model}' may not support image inputs. "
+                    "Try using a vision-capable model like gpt-4-vision or claude-3-opus.",
+                    error_type="capability_error"
+                )
+            
+            raise UnifiedClientError(f"Poe image API error: {e}")
     
     def _send_openrouter_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send image request through OpenRouter"""
