@@ -2101,36 +2101,23 @@ img {
         
     def _finalize_book(self, book: epub.EpubBook, spine: List, toc: List, 
                       cover_file: Optional[str]):
-        """Finalize book structure"""
-        # Check if this is a large book
-        is_large_book = len(spine) > 400
-        
-        if is_large_book:
-            self.log("[INFO] Large book detected - skipping navigation to avoid errors")
-            book.toc = []
-            book.spine = spine
-            return
-        
-        # Normal processing for smaller books
+        """Finalize book structure using EPUB2 NCX only"""
+        # Set the full TOC
         book.toc = toc
         
-        # Create NCX
+        # Add ONLY NCX (EPUB2), skip Nav (EPUB3)
         ncx = epub.EpubNcx()
         book.add_item(ncx)
         
-        # Create Nav with manual content
-        nav = epub.EpubNav()
-        nav.content = self._create_nav_content(toc[:100], book.title).encode('utf-8')
-        nav.uid = 'nav'
-        nav.file_name = 'nav.xhtml'
-        book.add_item(nav)
+        # DON'T add EpubNav - this is what causes the error
+        # nav = epub.EpubNav()  # <-- Skip this
+        # book.add_item(nav)    # <-- Skip this
         
-        # Add navigation files to spine
-        book.spine = [nav] + spine
+        # Set spine without nav
+        book.spine = spine
 
-    
     def _write_epub(self, book: epub.EpubBook, metadata: dict):
-        """Write EPUB file"""
+        """Write EPUB file in EPUB2 format"""
         # Determine output filename
         book_title = book.title
         if book_title and book_title != os.path.basename(self.output_dir):
@@ -2142,22 +2129,25 @@ img {
         
         self.log(f"\n[DEBUG] Writing EPUB to: {out_path}")
         
-        # Write file
-        epub.write_epub(out_path, book, {})
+        try:
+            # Force EPUB2 format which only uses NCX
+            opts = {'epub3': False}
+            epub.write_epub(out_path, book, opts)
+            self.log("[SUCCESS] Written as EPUB2 with NCX navigation only")
+            
+        except Exception as e:
+            self.log(f"[ERROR] EPUB2 write failed: {e}")
+            raise
         
-        # Verify
+        # Verify the file
         if os.path.exists(out_path):
             file_size = os.path.getsize(out_path)
-            self.log(f"✅ EPUB created: {out_path}")
-            self.log(f"📊 File size: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
-            
-            # Quick validation
-            try:
-                with zipfile.ZipFile(out_path, 'r') as test_zip:
-                    if 'mimetype' in test_zip.namelist():
-                        self.log("✅ EPUB structure verified")
-            except Exception as e:
-                self.log(f"⚠️ EPUB validation warning: {e}")
+            if file_size > 0:
+                self.log(f"✅ EPUB created: {out_path}")
+                self.log(f"📊 File size: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
+                self.log("📝 Note: This is an EPUB2 file with NCX navigation only")
+            else:
+                raise Exception("EPUB file is empty")
         else:
             raise Exception("EPUB file was not created")
     
