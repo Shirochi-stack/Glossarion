@@ -57,3 +57,5 @@ replicate
 #Encryption/Decryption
 cryptography
 
+#other
+poe-api-wrapper
