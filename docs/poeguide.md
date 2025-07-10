@@ -72,4 +72,4 @@ A: Not that i know of. POE uses HttpOnly cookies specifically to prevent program
 
 *Note: This method is a workaround since the POE API key is meant for bots only*
 
-*Warning: you may get blocked, as POE doesn't officially support this, i think*
+*Warning: your POE account can get banned for abusing this. Please increase your API delay limit to reduce this risk.*
