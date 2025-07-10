@@ -18,6 +18,8 @@ anthropic
 mistralai
 cohere
 tiktoken
+poe-api-wrapper
+ballyregan
 
 # Data processing
 datasketch
@@ -58,6 +60,3 @@ replicate
 #Encryption/Decryption
 cryptography
 
-#other
-poe-api-wrapper
-ballyregan
