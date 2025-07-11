@@ -1701,8 +1701,8 @@ class EPUBCompiler:
         book.set_language(metadata.get("language", "en"))
         
         # Add original title if different
-        if metadata.get('original_title') and metadata.get('original_title') != book_title:
-            book.add_metadata('DC', 'title', metadata['original_title'], {'type': 'original'})
+        #if metadata.get('original_title') and metadata.get('original_title') != book_title:
+        #    book.add_metadata('DC', 'title', metadata['original_title'], {'type': 'original'})
         
         # Set author
         if metadata.get("creator"):
@@ -1958,6 +1958,7 @@ img {
             book.add_item(cover_img)
             
             # Set cover metadata
+            cover_img.properties = ["cover-image"]
             book.add_metadata('http://purl.org/dc/elements/1.1/', 'cover', 'cover-image')
             
             # Create cover page
@@ -2101,9 +2102,9 @@ img {
 
     def _finalize_book(self, book: epub.EpubBook, spine: List, toc: List, 
                       cover_file: Optional[str]):
-        """Finalize book structure with automatic EPUB2 fallback for large TOCs"""
-        # Check if we need EPUB2 fallback
-        is_large_toc = len(toc) > 400
+        """Finalize book structure"""
+        # Check if we should use NCX-only
+        use_ncx_only = os.environ.get('FORCE_NCX_ONLY', '1') == '1'
         
         # Check if first item in spine is a cover
         has_cover = False
@@ -2115,17 +2116,15 @@ img {
                 cover_item = first_item
                 spine = spine[1:]  # Remove cover from spine temporarily
         
-        if is_large_toc:
-            self.log(f"[INFO] Large TOC detected ({len(toc)} items) - using EPUB2 format")
-            # Set marker for EPUB2 format
-            book._format = 'epub2'
-            
-            # Set the full TOC
-            book.toc = toc
-            
-            # Add ONLY NCX for EPUB2
-            ncx = epub.EpubNcx()
-            book.add_item(ncx)
+        # Set TOC
+        book.toc = toc
+        
+        # Add NCX
+        ncx = epub.EpubNcx()
+        book.add_item(ncx)
+        
+        if use_ncx_only:
+            self.log(f"[INFO] NCX-only navigation forced - {len(toc)} chapters")
             
             # Build final spine: Cover (if exists) → Chapters
             final_spine = []
@@ -2135,22 +2134,15 @@ img {
             
             book.spine = final_spine
             
-            self.log("📖 Using EPUB2 format with NCX navigation only")
+            self.log("📖 Using EPUB 3.3 with NCX navigation only")
             if has_cover:
                 self.log("📖 Reading order: Cover → Chapters")
             else:
                 self.log("📖 Reading order: Chapters")
                 
         else:
-            # Normal EPUB3 processing for smaller books
-            self.log(f"[INFO] Normal TOC size ({len(toc)} items) - using EPUB3 format")
-            
-            # Set TOC
-            book.toc = toc
-            
-            # Add NCX
-            ncx = epub.EpubNcx()
-            book.add_item(ncx)
+            # Normal EPUB3 processing with Nav
+            self.log(f"[INFO] EPUB3 format - {len(toc)} chapters")
             
             # Create Nav with manual content
             nav = epub.EpubNav()
@@ -2173,7 +2165,7 @@ img {
                 self.log("📖 Reading order: Cover → Table of Contents → Chapters")
             else:
                 self.log("📖 Reading order: Table of Contents → Chapters")
-            
+
     def _write_epub(self, book: epub.EpubBook, metadata: dict):
         """Write EPUB file with automatic format selection"""
         # Determine output filename
@@ -2187,36 +2179,15 @@ img {
         
         self.log(f"\n[DEBUG] Writing EPUB to: {out_path}")
         
-        # Check format (set in _finalize_book)
-        use_epub2 = hasattr(book, '_format') and book._format == 'epub2'
-        
+        # Always write as EPUB3
         try:
-            if use_epub2:
-                # Write as EPUB2
-                opts = {'epub3': False}
-                epub.write_epub(out_path, book, opts)
-                self.log("[SUCCESS] Written as EPUB2 (large TOC fallback)")
-            else:
-                # Write as EPUB3
-                opts = {'epub3': True}
-                epub.write_epub(out_path, book, opts)
-                self.log("[SUCCESS] Written as EPUB3")
-                
+            opts = {'epub3': True}
+            epub.write_epub(out_path, book, opts)
+            self.log("[SUCCESS] Written as EPUB 3.3")
+            
         except Exception as e:
             self.log(f"[ERROR] Write failed: {e}")
-            
-            # If EPUB3 failed, try EPUB2 as emergency fallback
-            if not use_epub2:
-                self.log("[WARNING] Attempting EPUB2 fallback after EPUB3 failure...")
-                try:
-                    opts = {'epub3': False}
-                    epub.write_epub(out_path, book, opts)
-                    self.log("[SUCCESS] Written as EPUB2 (emergency fallback)")
-                except Exception as e2:
-                    self.log(f"[ERROR] EPUB2 fallback also failed: {e2}")
-                    raise
-            else:
-                raise
+            raise
         
         # Verify the file
         if os.path.exists(out_path):
@@ -2224,12 +2195,7 @@ img {
             if file_size > 0:
                 self.log(f"✅ EPUB created: {out_path}")
                 self.log(f"📊 File size: {file_size:,} bytes ({file_size/1024/1024:.2f} MB)")
-                
-                if use_epub2 or (hasattr(book, '_emergency_epub2') and book._emergency_epub2):
-                    self.log("📝 Format: EPUB 2.0.1 (NCX navigation only)")
-                else:
-                    self.log("📝 Format: EPUB 3.x (with Nav document)")
-                    
+                self.log("📝 Format: EPUB 3.3")
             else:
                 raise Exception("EPUB file is empty")
         else:
