@@ -707,7 +707,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.2.5"
+        __version__ = "3.2.6"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -792,7 +792,7 @@ class TranslatorGUI:
     
         # Initialize auto-update check variable
         self.auto_update_check_var = tk.BooleanVar(value=self.config.get('auto_update_check', True))
-        
+        self.force_ncx_only_var = tk.BooleanVar(value=self.config.get('force_ncx_only', True))      
         self.max_output_tokens = self.config.get('max_output_tokens', self.max_output_tokens)
         
         # Initialize update manager AFTER config is loaded
@@ -1320,7 +1320,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.2.5 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.2.6 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -4938,6 +4938,7 @@ Recent translations to summarize:
             'GLOSSARY_DUPLICATE_KEY_MODE': self.config.get('glossary_duplicate_key_mode', 'auto'),
             'GLOSSARY_DUPLICATE_CUSTOM_FIELD': self.config.get('glossary_duplicate_custom_field', ''),
             'MANUAL_GLOSSARY': self.manual_glossary_path if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path else '',
+            'FORCE_NCX_ONLY': '1' if self.force_ncx_only_var.get() else '0',
 
             # Anti-duplicate parameters
             'ENABLE_ANTI_DUPLICATE': '1' if hasattr(self, 'enable_anti_duplicate_var') and self.enable_anti_duplicate_var.get() else '0',
@@ -7129,8 +7130,7 @@ Recent translations to summarize:
                  command=self.configure_title_prompt,
                  bootstyle="info-outline", width=20).pack(side=tk.LEFT, padx=(10, 0))
         
-        tk.Label(section_frame, text="When enabled: Book titles will be translated to English\n"
-                    "When disabled: Book titles remain in original language",
+        tk.Label(section_frame, text="When enabled: Book titles will be translated to English",
                     font=('TkDefaultFont', 11), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
             
         # EPUB Validation
@@ -7143,8 +7143,14 @@ Recent translations to summarize:
                  bootstyle="success-outline",
                  width=25).pack(anchor=tk.W, pady=2)
         
-        tk.Label(section_frame, text="Check if all required EPUB files are\npresent for compilation",
+        tk.Label(section_frame, text="Check if all required EPUB files are present for compilation",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 5))
+        
+        # NCX-only navigation toggle
+        
+        tb.Checkbutton(section_frame, text="Use NCX-only Navigation (Compatibility Mode)", 
+                      variable=self.force_ncx_only_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W, pady=(5, 5))
                 
         ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
         
@@ -7745,6 +7751,7 @@ Recent translations to summarize:
                     'use_header_as_output': self.use_header_as_output_var.get(),
                     'disable_gemini_safety': self.disable_gemini_safety_var.get(),
                     'auto_update_check': self.auto_update_check_var.get(),
+                    'force_ncx_only': self.force_ncx_only_var.get(),
                     
                     # ALL Anti-duplicate parameters (moved below other settings)
                     'enable_anti_duplicate': getattr(self, 'enable_anti_duplicate_var', type('', (), {'get': lambda: False})).get(),
@@ -7815,6 +7822,7 @@ Recent translations to summarize:
                     'IMAGE_CHUNK_PROMPT': str(getattr(self, 'image_chunk_prompt', '')),  # FIXED: Convert to string
                     "DISABLE_GEMINI_SAFETY": str(self.config.get('disable_gemini_safety', False)).lower(),
                     'auto_update_check': str(self.auto_update_check_var.get()),
+                    'FORCE_NCX_ONLY': '1' if self.force_ncx_only_var.get() else '0',
                     
                     # ALL Anti-duplicate environment variables (moved below other settings)
                     'ENABLE_ANTI_DUPLICATE': '1' if hasattr(self, 'enable_anti_duplicate_var') and self.enable_anti_duplicate_var.get() else '0',
@@ -8121,6 +8129,9 @@ Recent translations to summarize:
             self.config['compression_factor'] = self.compression_factor_var.get()
             self.config['translation_chunk_prompt'] = self.translation_chunk_prompt
             self.config['image_chunk_prompt'] = self.image_chunk_prompt
+            self.config['force_ncx_only'] = self.force_ncx_only_var.get()
+
+
             
             
             # Add anti-duplicate parameters
@@ -8164,7 +8175,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.2.5...")
+    print("🚀 Starting Glossarion v3.2.6...")
     
     # Initialize splash screen
     splash_manager = None
