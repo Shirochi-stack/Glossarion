@@ -2104,7 +2104,7 @@ img {
                       cover_file: Optional[str]):
         """Finalize book structure"""
         # Check if we should use NCX-only
-        use_ncx_only = os.environ.get('FORCE_NCX_ONLY', '1') == '1'
+        use_ncx_only = os.environ.get('FORCE_NCX_ONLY', '0') == '1'
         
         # Check if first item in spine is a cover
         has_cover = False
