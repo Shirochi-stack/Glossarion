@@ -792,7 +792,7 @@ class TranslatorGUI:
     
         # Initialize auto-update check variable
         self.auto_update_check_var = tk.BooleanVar(value=self.config.get('auto_update_check', True))
-        self.force_ncx_only_var = tk.BooleanVar(value=self.config.get('force_ncx_only', True))      
+        self.force_ncx_only_var = tk.BooleanVar(value=self.config.get('force_ncx_only', False))      
         self.max_output_tokens = self.config.get('max_output_tokens', self.max_output_tokens)
         
         # Initialize update manager AFTER config is loaded
