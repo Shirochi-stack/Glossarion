@@ -20,7 +20,7 @@ mistralai==0.1.8
 cohere==5.1.0
 tiktoken==0.6.0
 poe-api-wrapper==1.2.4
-ballyregan==0.2.4
+ballyregan
 
 # Data processing with compatible versions
 datasketch==1.6.4
