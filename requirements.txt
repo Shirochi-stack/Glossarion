@@ -19,7 +19,7 @@ openai==1.12.0
 anthropic==0.18.1
 mistralai
 cohere==4.37
-tiktoken==0.5.2
+tiktoken
 poe-api-wrapper
 #ballyregan==1.0.6
 
@@ -29,7 +29,7 @@ numpy==1.26.4
 scipy==1.12.0
 
 # HTTP/Networking
-httpx==0.24.1  # Required by poe-api-wrapper
+httpx==0.26.0
 httpcore==0.17.3
 anyio==3.7.1
 sniffio==1.3.0
