@@ -1,5 +1,5 @@
 # Python 3.12.9
-# Fixed requirements.txt - Option 1: Without mistralai
+# Fixed requirements.txt
 
 # Core packages
 pyinstaller==6.3.0
@@ -18,7 +18,7 @@ langdetect==1.0.9
 google-generativeai==0.3.2
 openai==1.12.0
 anthropic==0.18.1
-# mistralai removed due to httpx conflict
+mistralai
 cohere==4.37
 tiktoken==0.5.2
 poe-api-wrapper==1.2.4
