@@ -24,6 +24,7 @@ OPTIMIZATION TIPS:
 import os
 import hashlib
 import json
+import zipfile
 import csv
 from bs4 import BeautifulSoup
 from langdetect import detect, LangDetectException
@@ -169,7 +170,8 @@ TRANSLATION_ARTIFACTS = {
     'encoding_issues': re.compile(r'[�□◇]{2,}'),  # Replacement characters
     'repeated_watermarks': re.compile(r'(\[[\w\s]+\.(?:com|net|org)\])\s*\1{2,}', re.IGNORECASE),
     'chapter_continuation': re.compile(r'(to be continued|continued from|continuation of|cont\.)', re.IGNORECASE),
-    'split_indicators': re.compile(r'(part \d+|section \d+|\(\d+/\d+\))', re.IGNORECASE)
+    'split_indicators': re.compile(r'(part \d+|section \d+|\(\d+/\d+\))', re.IGNORECASE),
+    'api_response_unavailable': re.compile(r'\[AI RESPONSE UNAVAILABLE\]|\[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED\]|\[IMAGE TRANSLATION FAILED\]', re.IGNORECASE)
 }
 
 def extract_text_from_html(file_path):
@@ -1973,7 +1975,159 @@ def update_legacy_format_progress(prog, faulty_chapters, log):
     
     log(f"🔧 Removed {removed_count} chapters from legacy completed list")
 
-def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', qa_settings=None):
+def extract_epub_word_counts(epub_path, log=print):
+    """Extract word counts for each chapter from the original EPUB"""
+    try:
+        word_counts = {}
+        
+        with zipfile.ZipFile(epub_path, 'r') as zf:
+            # Get all HTML/XHTML files
+            html_files = [f for f in zf.namelist() 
+                         if f.endswith(('.html', '.xhtml', '.htm'))]
+            
+            for file_path in html_files:
+                try:
+                    # Extract chapter number from filename
+                    basename = os.path.basename(file_path)
+                    chapter_num = None
+                    
+                    # Try various patterns to extract chapter number
+                    patterns = [
+                        r'(\d{3,4})',  # 3-4 digit numbers
+                        r'chapter[\s_-]*(\d+)',
+                        r'ch[\s_-]*(\d+)',
+                        r'c(\d+)',
+                        r'第(\d+)[章话回]',
+                        r'제(\d+)[장화회]'
+                    ]
+                    
+                    for pattern in patterns:
+                        match = re.search(pattern, basename, re.IGNORECASE)
+                        if match:
+                            chapter_num = int(match.group(1))
+                            break
+                    
+                    # Read and parse the file
+                    content = zf.read(file_path).decode('utf-8', errors='ignore')
+                    soup = BeautifulSoup(content, 'html.parser')
+                    
+                    # Get text and count words
+                    text = soup.get_text(strip=True)
+                    # Count words for CJK languages differently
+                    if any('\u4e00' <= char <= '\u9fff' or  # Chinese
+                          '\u3040' <= char <= '\u309f' or  # Hiragana
+                          '\u30a0' <= char <= '\u30ff' or  # Katakana
+                          '\uac00' <= char <= '\ud7af'     # Korean
+                          for char in text):
+                        # For CJK, count characters as words
+                        word_count = len(re.findall(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]', text))
+                    else:
+                        # For other languages, count space-separated words
+                        word_count = len(text.split())
+                    
+                    if chapter_num is not None:
+                        word_counts[chapter_num] = {
+                            'word_count': word_count,
+                            'filename': basename,
+                            'full_path': file_path
+                        }
+                    
+                except Exception as e:
+                    log(f"⚠️ Error processing {file_path}: {e}")
+                    continue
+        
+        return word_counts
+        
+    except Exception as e:
+        log(f"❌ Error reading EPUB file: {e}")
+        return {}
+
+def detect_multiple_headers(html_content):
+    """Detect if HTML content has 2 or more header tags"""
+    soup = BeautifulSoup(html_content, 'html.parser')
+    
+    # Find all header tags (h1 through h6)
+    headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+    
+    if len(headers) >= 2:
+        header_info = []
+        for header in headers[:5]:  # Show first 5 headers
+            header_info.append({
+                'tag': header.name,
+                'text': header.get_text(strip=True)[:50]  # First 50 chars
+            })
+        return True, len(headers), header_info
+    
+    return False, len(headers), []
+
+def cross_reference_word_counts(original_counts, translated_file, translated_text, log=print):
+    """Cross-reference word counts between original and translated files"""
+    # Extract chapter number from translated filename
+    basename = os.path.basename(translated_file)
+    chapter_num = None
+    
+    # Try to extract chapter number
+    patterns = [
+        r'response_(\d+)',
+        r'response_chapter(\d+)',
+        r'chapter[\s_-]*(\d+)',
+        r'(\d{3,4})',
+        r'ch[\s_-]*(\d+)'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, basename, re.IGNORECASE)
+        if match:
+            chapter_num = int(match.group(1))
+            break
+    
+    if chapter_num is None:
+        # Try content-based matching as fallback
+        content_patterns = [
+            r'Chapter\s+(\d+)',
+            r'第\s*(\d+)\s*章',
+            r'제\s*(\d+)\s*장'
+        ]
+        
+        for pattern in content_patterns:
+            match = re.search(pattern, translated_text[:500], re.IGNORECASE)
+            if match:
+                chapter_num = int(match.group(1))
+                break
+    
+    if chapter_num and chapter_num in original_counts:
+        original_wc = original_counts[chapter_num]['word_count']
+        
+        # Count words in translated text
+        translated_wc = len(translated_text.split())
+        
+        # Calculate ratio (accounting for language differences)
+        # Korean/Japanese/Chinese typically expand 1.2-2.5x when translated to English
+        ratio = translated_wc / max(1, original_wc)
+        
+        # Define reasonable ratio ranges
+        min_ratio = 0.8  # Some compression is possible
+        max_ratio = 3.0  # Maximum reasonable expansion
+        
+        is_reasonable = min_ratio <= ratio <= max_ratio
+        
+        return {
+            'found_match': True,
+            'chapter_num': chapter_num,
+            'original_wc': original_wc,
+            'translated_wc': translated_wc,
+            'ratio': ratio,
+            'is_reasonable': is_reasonable,
+            'original_file': original_counts[chapter_num]['filename']
+        }
+    
+    return {
+        'found_match': False,
+        'chapter_num': chapter_num,
+        'reason': 'No matching chapter found in original'
+    }
+
+def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', qa_settings=None, epub_path=None):
     """
     Scan HTML folder for QA issues with configurable settings
     
@@ -2022,6 +2176,21 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'report_format': 'detailed',
             'auto_save_report': True
         }
+        # Get settings for new features (OUTSIDE the if block!)
+    check_word_count = qa_settings.get('check_word_count_ratio', False)
+    check_multiple_headers = qa_settings.get('check_multiple_headers', False)
+    
+    # Extract word counts from original EPUB if needed
+    original_word_counts = {}
+    if check_word_count:
+        if epub_path and os.path.exists(epub_path):
+            log(f"📚 Extracting word counts from original EPUB: {os.path.basename(epub_path)}")
+            original_word_counts = extract_epub_word_counts(epub_path, log)
+            log(f"   Found word counts for {len(original_word_counts)} chapters")
+        else:
+            log("⚠️ Word count cross-reference enabled but no valid EPUB provided - skipping this check")
+            check_word_count = False
+            
     log(f"\n📋 QA Settings Status:")
     log(f"   ✓ Encoding issues check: {'ENABLED' if qa_settings.get('check_encoding_issues', True) else 'DISABLED'}")
     log(f"   ✓ Repetition check: {'ENABLED' if qa_settings.get('check_repetition', True) else 'DISABLED'}")
@@ -2150,11 +2319,41 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             if original_count != len(artifacts):
                 log(f"      → Filtered out encoding artifacts (check disabled)")
         
-        results.append({
+        # Initialize issues list
+        issues = []
+        
+        # Check for multiple headers
+        if check_multiple_headers:
+            has_multiple, header_count, header_info = detect_multiple_headers(raw_text)
+            if has_multiple:
+                issues.append(f"multiple_headers_{header_count}_found")
+        
+        # Check word count ratio
+        word_count_check = None
+        if check_word_count and original_word_counts:
+            wc_result = cross_reference_word_counts(
+                original_word_counts, 
+                filename, 
+                preview,  # Use the preview text
+                log
+            )
+            
+            if wc_result['found_match']:
+                word_count_check = wc_result
+                if not wc_result['is_reasonable']:
+                    issues.append(f"word_count_mismatch_ratio_{wc_result['ratio']:.2f}")
+                    log(f"   {filename}: Word count ratio {wc_result['ratio']:.2f} " +
+                        f"(Original: {wc_result['original_wc']}, Translated: {wc_result['translated_wc']})")
+            else:
+                word_count_check = wc_result
+                issues.append("word_count_no_match_found")
+        
+        # Create result dictionary
+        result = {
             "file_index": idx,
             "filename": filename,
             "filepath": full_path,
-            "issues": [],
+            "issues": issues,  # Use the issues list we created
             "preview": preview,
             "preview_normalized": preview_normalized,
             "score": 0,
@@ -2162,7 +2361,17 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             "hashes": hashes,
             "raw_text": raw_text,
             "translation_artifacts": artifacts
-        })
+        }
+        
+        # Add optional fields if they exist
+        if check_multiple_headers and has_multiple:
+            result['header_count'] = header_count
+            result['header_info'] = header_info
+        
+        if word_count_check:
+            result['word_count_check'] = word_count_check
+        
+        results.append(result)
     
     # Clear the progress line
     print()  # New line after progress indicator
