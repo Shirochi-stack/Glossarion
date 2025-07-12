@@ -74,7 +74,7 @@ app_files = [
     ('image_translator.py', '.'),
     ('check_epub_directory.py', '.'),
     ('direct_imports.py', '.'),
-    ('api_key_encryption.py', '.'),  # ADD THIS LINE
+    ('api_key_encryption.py', '.'), 
     
     # AI Hunter Enhanced
     ('ai_hunter_enhanced.py', '.'),
@@ -86,6 +86,9 @@ app_files = [
     
     # Update Manager - ADDED
     ('update_manager.py', '.'),
+	
+	# Async Processing - ADDED
+    ('async_api_processor.py', '.'),
     
     # Resources
     ('Halgakos.ico', '.'),
@@ -116,8 +119,9 @@ app_modules = [
     'manga_translator',    # Manga translator module
     'manga_integration',   # Manga GUI integration
     'manga_settings_dialog', 
-    'update_manager',      # ADDED: Update manager module
+    'update_manager',     
 	'api_key_encryption',
+	'async_api_processor',
 ]
 
 # GUI Framework
@@ -254,6 +258,8 @@ api_modules = [
     'google.generativeai',
     'google.ai',
     'google.ai.generativelanguage',
+	'google.genai',
+	'google.genai.types',
     'google.auth',
     'google.auth.transport',
     'google.auth.transport.requests',
