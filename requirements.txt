@@ -22,6 +22,7 @@ cohere
 tiktoken
 poe-api-wrapper
 #ballyregan
+google-genai
 
 # Data processing
 datasketch
