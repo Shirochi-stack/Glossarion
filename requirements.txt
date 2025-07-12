@@ -1,32 +1,32 @@
 # Python 3.12.9
 
 # Core packages
-pyinstaller==6.3.0
-pyinstaller-hooks-contrib==2024.0
-ttkbootstrap==1.10.1
-pillow==10.2.0
-beautifulsoup4==4.12.3
-lxml==5.1.0
-html5lib==1.1
-ebooklib==0.18
-requests==2.31.0
-tqdm==4.66.1
-langdetect==1.0.9
+pyinstaller
+pyinstaller-hooks-contrib
+ttkbootstrap
+pillow
+beautifulsoup4
+lxml
+html5lib
+ebooklib
+requests
+tqdm
+langdetect
 
-# AI/API Clients - Compatible set
-google-generativeai==0.3.2
-openai==1.12.0
-anthropic==0.18.1
+# AI/API Clients
+google-generativeai
+openai
+anthropic
 mistralai
-cohere==4.37
+cohere
 tiktoken
 poe-api-wrapper
-#ballyregan==1.0.6
+#ballyregan
 
 # Data processing
-datasketch==1.6.4
-numpy==1.26.4
-scipy==1.12.0
+datasketch
+numpy
+scipy
 
 # HTTP/Networking
 httpx
@@ -43,27 +43,27 @@ charset-normalizer
 olefile
 
 # Image processing
-opencv-python==4.9.0.80
+opencv-python
 
 # Pin typing-extensions
-typing-extensions==4.9.0
+typing-extensions
 
 # Google Cloud Vision
-google-cloud-vision==3.5.0
-google-auth==2.27.0
-google-auth-httplib2==0.2.0
-google-api-core==2.16.2
-googleapis-common-protos==1.62.0
-grpcio==1.60.1
-grpcio-status==1.60.1
-proto-plus==1.23.0
-protobuf==4.25.3
+google-cloud-vision
+google-auth
+google-auth-httplib2
+google-api-core
+googleapis-common-protos
+grpcio
+grpcio-status
+proto-plus
+protobuf
 
 # Inpainting
-replicate==0.22.0
+replicate
 
 # Encryption/Decryption
-cryptography==42.0.2
+cryptography
 
 # Version management
-packaging==23.2
+packaging
