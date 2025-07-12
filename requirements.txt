@@ -13,7 +13,7 @@ langdetect
 
 # AI/API Clients
 google-generativeai
-openai>=1.93.0,<1.94.0
+openai>=<1.94.0
 anthropic
 mistralai
 cohere
