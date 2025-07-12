@@ -23,6 +23,17 @@ try:
 except ImportError:
     MANGA_SUPPORT = False
     print("Manga translation modules not found.")
+
+# Async processing support (lazy loaded)
+ASYNC_SUPPORT = False
+try:
+    # Check if module exists without importing
+    import importlib.util
+    spec = importlib.util.find_spec('async_api_processor')
+    if spec is not None:
+        ASYNC_SUPPORT = True
+except ImportError:
+    pass
     
 # Deferred modules
 translation_main = translation_stop_flag = translation_stop_check = None
@@ -32,6 +43,70 @@ fallback_compile_epub = scan_html_folder = None
 CONFIG_FILE = "config.json"
 BASE_WIDTH, BASE_HEIGHT = 1920, 1080
 
+def check_epub_folder_match(epub_name, folder_name, custom_suffixes=''):
+    """
+    Check if EPUB name and folder name likely refer to the same content
+    Uses strict matching to avoid false positives with similar numbered titles
+    """
+    # Normalize names for comparison
+    epub_norm = normalize_name_for_comparison(epub_name)
+    folder_norm = normalize_name_for_comparison(folder_name)
+    
+    # Direct match
+    if epub_norm == folder_norm:
+        return True
+    
+    # Check if folder has common output suffixes that should be ignored
+    output_suffixes = ['_output', '_translated', '_trans', '_en', '_english', '_done', '_complete', '_final']
+    if custom_suffixes:
+        custom_list = [s.strip() for s in custom_suffixes.split(',') if s.strip()]
+        output_suffixes.extend(custom_list)
+    
+    for suffix in output_suffixes:
+        if folder_norm.endswith(suffix):
+            folder_base = folder_norm[:-len(suffix)]
+            if folder_base == epub_norm:
+                return True
+        if epub_norm.endswith(suffix):
+            epub_base = epub_norm[:-len(suffix)]
+            if epub_base == folder_norm:
+                return True
+    
+    # Check for exact match with version numbers removed
+    version_pattern = r'[\s_-]v\d+$'
+    epub_no_version = re.sub(version_pattern, '', epub_norm)
+    folder_no_version = re.sub(version_pattern, '', folder_norm)
+    
+    if epub_no_version == folder_no_version and (epub_no_version != epub_norm or folder_no_version != folder_norm):
+        return True
+    
+    # STRICT NUMBER CHECK - all numbers must match exactly
+    epub_numbers = re.findall(r'\d+', epub_name)
+    folder_numbers = re.findall(r'\d+', folder_name)
+    
+    if epub_numbers != folder_numbers:
+        return False
+    
+    # If we get here, numbers match, so check if the text parts are similar enough
+    epub_text_only = re.sub(r'\d+', '', epub_norm).strip()
+    folder_text_only = re.sub(r'\d+', '', folder_norm).strip()
+    
+    if epub_numbers and folder_numbers:
+        return epub_text_only == folder_text_only
+    
+    return False
+
+def normalize_name_for_comparison(name):
+    """Normalize a filename for comparison - preserving number positions"""
+    name = name.lower()
+    name = re.sub(r'\.(epub|txt|html?)$', '', name)
+    name = re.sub(r'[-_\s]+', ' ', name)
+    name = re.sub(r'\[(?![^\]]*\d)[^\]]*\]', '', name)
+    name = re.sub(r'\((?![^)]*\d)[^)]*\)', '', name)
+    name = re.sub(r'[^\w\s\-]', ' ', name)
+    name = ' '.join(name.split())
+    return name.strip()
+        
 def load_application_icon(window, base_dir):
     """Load application icon with fallback handling"""
     ico_path = os.path.join(base_dir, 'Halgakos.ico')
@@ -707,7 +782,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.2.6"
+        __version__ = "3.3.0"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -794,6 +869,10 @@ class TranslatorGUI:
         self.auto_update_check_var = tk.BooleanVar(value=self.config.get('auto_update_check', True))
         self.force_ncx_only_var = tk.BooleanVar(value=self.config.get('force_ncx_only', False))      
         self.max_output_tokens = self.config.get('max_output_tokens', self.max_output_tokens)
+        
+        # Async processing settings
+        self.async_wait_for_completion_var = tk.BooleanVar(value=False)
+        self.async_poll_interval_var = tk.IntVar(value=60)
         
         # Initialize update manager AFTER config is loaded
         try:
@@ -1038,7 +1117,8 @@ class TranslatorGUI:
             self.append_log("⏱️ TIMEOUT ERROR")
             self.append_log("   The API request took too long to respond.")
             self.append_log("   Consider increasing timeout settings or retrying.")
-        
+
+    
     def create_glossary_backup(self, operation_name="manual"):
         """Create a backup of the current glossary if auto-backup is enabled"""
         # For manual backups, always proceed. For automatic backups, check the setting.
@@ -1089,6 +1169,38 @@ class TranslatorGUI:
             return messagebox.askyesno("Backup Failed", 
                                       f"Failed to create backup: {str(e)}\n\nContinue anyway?")
 
+    def get_current_epub_path(self):
+        """Get the currently selected EPUB path from various sources"""
+        epub_path = None
+        
+        # Try different sources in order of preference
+        sources = [
+            # Direct selection
+            lambda: getattr(self, 'selected_epub_path', None),
+            # From config
+            lambda: self.config.get('last_epub_path', None) if hasattr(self, 'config') else None,
+            # From file path variable (if it exists)
+            lambda: self.epub_file_path.get() if hasattr(self, 'epub_file_path') and self.epub_file_path.get() else None,
+            # From current translation
+            lambda: getattr(self, 'current_epub_path', None),
+        ]
+        
+        for source in sources:
+            try:
+                path = source()
+                if path and os.path.exists(path):
+                    epub_path = path
+                    print(f"[DEBUG] Found EPUB path from source: {path}")  # Debug line
+                    break
+            except Exception as e:
+                print(f"[DEBUG] Error checking source: {e}")  # Debug line
+                continue
+        
+        if not epub_path:
+            print("[DEBUG] No EPUB path found from any source")  # Debug line
+        
+        return epub_path
+    
     def _clean_old_backups(self, backup_dir, original_name, max_backups):
         """Remove old backups exceeding the limit"""
         try:
@@ -1320,7 +1432,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.2.6 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.3.0 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -1677,6 +1789,49 @@ Recent translations to summarize:
         
         tk.Label(info_frame, text=info_text, foreground='gray',
                 justify='left').pack(anchor='w')
+
+    def open_async_processing(self):
+        """Open the async processing dialog"""
+        # Check if translation is running
+        if hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive():
+            self.append_log("⚠️ Cannot open async processing while translation is in progress.")
+            messagebox.showwarning("Process Running", "Please wait for the current translation to complete.")
+            return
+        
+        # Check if glossary extraction is running
+        if hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive():
+            self.append_log("⚠️ Cannot open async processing while glossary extraction is in progress.")
+            messagebox.showwarning("Process Running", "Please wait for glossary extraction to complete.")
+            return
+        
+        # Check if file is selected
+        if not hasattr(self, 'file_path') or not self.file_path:
+            self.append_log("⚠️ Please select a file before opening async processing.")
+            messagebox.showwarning("No File Selected", "Please select an EPUB or TXT file first.")
+            return
+        
+        try:
+            # Lazy import the async processor
+            if not hasattr(self, '_async_processor_imported'):
+                self.append_log("Loading async processing module...")
+                from async_api_processor import show_async_processing_dialog
+                self._async_processor_imported = True
+                self._show_async_processing_dialog = show_async_processing_dialog
+            
+            # Show the dialog
+            self.append_log("Opening async processing dialog...")
+            self._show_async_processing_dialog(self.master, self)
+            
+        except ImportError as e:
+            self.append_log(f"❌ Failed to load async processing module: {e}")
+            messagebox.showerror(
+                "Module Not Found", 
+                "The async processing module could not be loaded.\n"
+                "Please ensure async_api_processor.py is in the same directory."
+            )
+        except Exception as e:
+            self.append_log(f"❌ Error opening async processing: {e}")
+            messagebox.showerror("Error", f"Failed to open async processing: {str(e)}")
 
     def _lazy_load_modules(self, splash_callback=None):
         """Load heavy modules only when needed - Enhanced with thread safety, retry logic, and progress tracking"""
@@ -4658,6 +4813,9 @@ Recent translations to summarize:
         # Add Manga Translator if available
         if MANGA_SUPPORT:
             toolbar_items.append(("Manga Translator", self.open_manga_translator, "primary"))
+         
+        # Async Processing 
+        toolbar_items.append(("Async Translation)", self.open_async_processing, "success"))
         
         toolbar_items.extend([
             ("Retranslate", self.force_retranslation, "warning"),
@@ -4678,6 +4836,8 @@ Recent translations to summarize:
                 self.epub_button = btn
             elif "1080p" in lbl:
                 self.safe_ratios_btn = btn
+            elif lbl == "Async Processing (50% Off)":
+                self.async_button = btn
         
         self.frame.grid_rowconfigure(12, weight=0)
 
@@ -5266,6 +5426,9 @@ Recent translations to summarize:
                 'report_format': 'detailed',
                 'auto_save_report': True
             })
+            # Debug: Print current settings
+            print(f"[DEBUG] QA Settings: {qa_settings}")
+            print(f"[DEBUG] Word count check enabled: {qa_settings.get('check_word_count_ratio', False)}")
             
             # ALWAYS show mode selection dialog with settings
             mode_dialog = self.wm.create_simple_dialog(
@@ -5802,12 +5965,125 @@ Recent translations to summarize:
                 if not settings_saved:
                     self.append_log("⚠️ QA scan canceled - no custom settings were saved.")
                     return
+            # Check if word count cross-reference is enabled but no EPUB is selected
+            check_word_count = qa_settings.get('check_word_count_ratio', False)
+            epub_path = None
             
+            if check_word_count:
+                print("[DEBUG] Word count check is enabled, looking for EPUB...")
+                epub_path = self.get_current_epub_path()
+                print(f"[DEBUG] get_current_epub_path returned: {epub_path}")
+                    
+                if not epub_path:
+                    result = messagebox.askyesnocancel(
+                        "No Source EPUB Selected",
+                        "Word count cross-reference is enabled but no source EPUB file is selected.\n\n" +
+                        "Would you like to:\n" +
+                        "• YES - Continue scan without word count analysis\n" +
+                        "• NO - Select an EPUB file now\n" +
+                        "• CANCEL - Cancel the scan",
+                        icon='warning'
+                    )
+                    
+                    if result is None:  # Cancel
+                        self.append_log("⚠️ QA scan canceled.")
+                        return
+                    elif result is False:  # No - Select EPUB now
+                        epub_path = filedialog.askopenfilename(
+                            title="Select Source EPUB File",
+                            filetypes=[("EPUB files", "*.epub"), ("All files", "*.*")]
+                        )
+                        
+                        if not epub_path:
+                            retry = messagebox.askyesno(
+                                "No File Selected",
+                                "No EPUB file was selected.\n\n" +
+                                "Do you want to continue the scan without word count analysis?",
+                                icon='question'
+                            )
+                            
+                            if not retry:
+                                self.append_log("⚠️ QA scan canceled.")
+                                return
+                            else:
+                                qa_settings = qa_settings.copy()
+                                qa_settings['check_word_count_ratio'] = False
+                                self.append_log("ℹ️ Proceeding without word count analysis.")
+                        else:
+                            self.selected_epub_path = epub_path
+                            self.config['last_epub_path'] = epub_path
+                            self.save_config(show_message=False)
+                            self.append_log(f"✅ Selected EPUB: {os.path.basename(epub_path)}")
+                    else:  # Yes - Continue without word count
+                        qa_settings = qa_settings.copy()
+                        qa_settings['check_word_count_ratio'] = False
+                        self.append_log("ℹ️ Proceeding without word count analysis.")
             # Now get the folder
             folder_path = filedialog.askdirectory(title="Select Folder with HTML Files")
             if not folder_path:
                 self.append_log("⚠️ QA scan canceled.")
                 return
+
+            # Check for EPUB/folder name mismatch
+            if epub_path and qa_settings.get('check_word_count_ratio', False) and qa_settings.get('warn_name_mismatch', True):
+                epub_name = os.path.splitext(os.path.basename(epub_path))[0]
+                folder_name = os.path.basename(folder_path.rstrip('/\\'))
+                
+                if not check_epub_folder_match(epub_name, folder_name, qa_settings.get('custom_output_suffixes', '')):
+                    result = messagebox.askyesnocancel(
+                        "EPUB/Folder Name Mismatch",
+                        f"The source EPUB and output folder names don't match:\n\n" +
+                        f"📖 EPUB: {epub_name}\n" +
+                        f"📁 Folder: {folder_name}\n\n" +
+                        "This might mean you're comparing the wrong files.\n" +
+                        "Common issues:\n" +
+                        "• 'Novel123' vs 'Novel124' (different books)\n" +
+                        "• 'Book_1' vs 'Book_2' (different volumes)\n\n" +
+                        "Would you like to:\n" +
+                        "• YES - Continue anyway (I'm sure these match)\n" +
+                        "• NO - Select a different EPUB file\n" +
+                        "• CANCEL - Select a different folder",
+                        icon='warning'
+                    )
+                    
+                    if result is None:  # Cancel - select different folder
+                        new_folder_path = filedialog.askdirectory(
+                            title="Select Different Folder with HTML Files"
+                        )
+                        if new_folder_path:
+                            folder_path = new_folder_path
+                        else:
+                            self.append_log("⚠️ QA scan canceled.")
+                            return
+                            
+                    elif result is False:  # No - select different EPUB
+                        new_epub_path = filedialog.askopenfilename(
+                            title="Select Different Source EPUB File",
+                            filetypes=[("EPUB files", "*.epub"), ("All files", "*.*")]
+                        )
+                        
+                        if new_epub_path:
+                            epub_path = new_epub_path
+                            self.selected_epub_path = epub_path
+                            self.config['last_epub_path'] = epub_path
+                            self.save_config(show_message=False)
+                        else:
+                            proceed = messagebox.askyesno(
+                                "No File Selected",
+                                "No EPUB file was selected.\n\n" +
+                                "Continue scan without word count analysis?",
+                                icon='question'
+                            )
+                            if not proceed:
+                                self.append_log("⚠️ QA scan canceled.")
+                                return
+                            else:
+                                qa_settings = qa_settings.copy()
+                                qa_settings['check_word_count_ratio'] = False
+                                epub_path = None
+                                self.append_log("ℹ️ Proceeding without word count analysis.")
+                    else:
+                        self.append_log(f"⚠️ Warning: EPUB/folder name mismatch - {epub_name} vs {folder_name}")
             
             mode = selected_mode_value
             self.append_log(f"🔍 Starting QA scan in {mode.upper()} mode for folder: {folder_path}")
@@ -5824,7 +6100,8 @@ Recent translations to summarize:
                         log=self.append_log, 
                         stop_flag=lambda: self.stop_requested, 
                         mode=mode,
-                        qa_settings=qa_settings  # Pass settings to the scanner
+                        qa_settings=qa_settings,
+                        epub_path=epub_path             # Pass settings to the scanner
                     )
                     self.append_log("✅ QA scan completed successfully.")
                 except Exception as e:
@@ -6014,6 +6291,116 @@ Recent translations to summarize:
             bootstyle="primary"
         )
         min_length_spinbox.pack(side=tk.LEFT, padx=(10, 0))
+
+        # Add a separator
+        separator = ttk.Separator(main_frame, orient='horizontal')
+        separator.pack(fill=tk.X, pady=15)
+        
+        # Word Count Cross-Reference Section
+        wordcount_section = tk.LabelFrame(
+            main_frame,
+            text="Word Count Analysis",
+            font=('Arial', 12, 'bold'),
+            padx=20,
+            pady=15
+        )
+        wordcount_section.pack(fill=tk.X, pady=(0, 20))
+        
+        check_word_count_var = tk.BooleanVar(value=qa_settings.get('check_word_count_ratio', False))
+        tb.Checkbutton(
+            wordcount_section,
+            text="Cross-reference word counts with original EPUB",
+            variable=check_word_count_var,
+            bootstyle="primary"
+        ).pack(anchor=tk.W, pady=(0, 5))
+        
+        tk.Label(
+            wordcount_section,
+            text="Compares word counts between original and translated files to detect missing content.\n" +
+                 "Accounts for typical expansion ratios when translating from CJK to English.",
+            wraplength=700,
+            justify=tk.LEFT,
+            fg='gray'
+        ).pack(anchor=tk.W, padx=(20, 0))
+ 
+        # Show current EPUB status and allow selection
+        epub_frame = tk.Frame(wordcount_section)
+        epub_frame.pack(anchor=tk.W, pady=(10, 5))
+
+        current_epub = self.get_current_epub_path()
+        if current_epub:
+            status_text = f"📖 Current EPUB: {os.path.basename(current_epub)}"
+            status_color = 'green'
+        else:
+            status_text = "📖 No EPUB file selected"
+            status_color = 'red'
+
+        status_label = tk.Label(
+            epub_frame,
+            text=status_text,
+            fg=status_color,
+            font=('Arial', 10)
+        )
+        status_label.pack(side=tk.LEFT)
+
+        def select_epub_for_qa():
+            epub_path = filedialog.askopenfilename(
+                title="Select Source EPUB File",
+                filetypes=[("EPUB files", "*.epub"), ("All files", "*.*")],
+                parent=dialog
+            )
+            if epub_path:
+                self.selected_epub_path = epub_path
+                self.config['last_epub_path'] = epub_path
+                self.save_config(show_message=False)
+                status_label.config(
+                    text=f"📖 Current EPUB: {os.path.basename(epub_path)}",
+                    fg='green'
+                )
+                self.append_log(f"✅ Selected EPUB for QA: {os.path.basename(epub_path)}")
+
+        tk.Button(
+            epub_frame,
+            text="Select EPUB",
+            command=select_epub_for_qa,
+            font=('Arial', 9)
+        ).pack(side=tk.LEFT, padx=(10, 0))
+ 
+        # Add option to disable mismatch warning
+        warn_mismatch_var = tk.BooleanVar(value=qa_settings.get('warn_name_mismatch', True))
+        tb.Checkbutton(
+            wordcount_section,
+            text="Warn when EPUB and folder names don't match",
+            variable=warn_mismatch_var,
+            bootstyle="primary"
+        ).pack(anchor=tk.W, pady=(10, 5))
+        
+        # Header Detection Section  
+        header_section = tk.LabelFrame(
+            main_frame,
+            text="Header Detection",
+            font=('Arial', 12, 'bold'),
+            padx=20,
+            pady=15
+        )
+        header_section.pack(fill=tk.X, pady=(0, 20))
+        
+        check_multiple_headers_var = tk.BooleanVar(value=qa_settings.get('check_multiple_headers', False))
+        tb.Checkbutton(
+            header_section,
+            text="Detect files with 2 or more headers (h1-h6 tags)",
+            variable=check_multiple_headers_var,
+            bootstyle="primary"
+        ).pack(anchor=tk.W, pady=(0, 5))
+        
+        tk.Label(
+            header_section,
+            text="Identifies files that may have been incorrectly split or merged.\n" +
+                 "Useful for detecting chapters that contain multiple sections.",
+            wraplength=700,
+            justify=tk.LEFT,
+            fg='gray'
+        ).pack(anchor=tk.W, padx=(20, 0))
         
         # Report Settings Section
         report_section = tk.LabelFrame(
@@ -6078,6 +6465,9 @@ Recent translations to summarize:
                 qa_settings['min_file_length'] = min_length_var.get()
                 qa_settings['report_format'] = format_var.get()
                 qa_settings['auto_save_report'] = auto_save_var.get()
+                qa_settings['check_word_count_ratio'] = check_word_count_var.get()
+                qa_settings['check_multiple_headers'] = check_multiple_headers_var.get()
+                qa_settings['warn_name_mismatch'] = warn_mismatch_var.get()
                 
                 # Save to main config
                 self.config['qa_scanner_settings'] = qa_settings
@@ -8175,7 +8565,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.2.6...")
+    print("🚀 Starting Glossarion v3.3.0...")
     
     # Initialize splash screen
     splash_manager = None
