@@ -1,5 +1,4 @@
 # Python 3.12.9
-# Fixed requirements.txt
 
 # Core packages
 pyinstaller==6.3.0
@@ -21,8 +20,8 @@ anthropic==0.18.1
 mistralai
 cohere==4.37
 tiktoken==0.5.2
-poe-api-wrapper==1.2.4
-ballyregan==1.0.6
+poe-api-wrapper
+#ballyregan==1.0.6
 
 # Data processing
 datasketch==1.6.4
