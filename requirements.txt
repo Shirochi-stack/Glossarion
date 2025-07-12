@@ -14,12 +14,12 @@ requests==2.31.0
 tqdm==4.66.1
 langdetect==1.0.9
 
-# AI/API Clients - Adjusted for httpx compatibility
+# AI/API Clients - Fixed for httpx compatibility
 google-generativeai==0.3.2
 openai==1.12.0
 anthropic==0.18.1
-mistralai==0.1.8
-cohere==4.37  # Downgraded to use httpx<1
+mistralai==0.1.3  # Older version that's compatible with httpx 0.24.1
+cohere==4.37
 tiktoken==0.5.2
 poe-api-wrapper==1.2.4
 ballyregan==1.0.6
@@ -29,10 +29,10 @@ datasketch==1.6.4
 numpy==1.26.4
 scipy==1.12.0
 
-# HTTP/Networking - Fixed versions
-httpx
-httpcore==1.0.2
-anyio==4.2.0
+# HTTP/Networking - Pin to exact version that works with poe-api-wrapper
+httpx==0.24.1  # This exact version is required by poe-api-wrapper
+httpcore==0.17.3  # Compatible with httpx 0.24.1
+anyio==3.7.1  # Compatible version
 sniffio==1.3.0
 
 # Text processing
