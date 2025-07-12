@@ -4815,7 +4815,7 @@ Recent translations to summarize:
             toolbar_items.append(("Manga Translator", self.open_manga_translator, "primary"))
          
         # Async Processing 
-        toolbar_items.append(("Async Translation)", self.open_async_processing, "success"))
+        toolbar_items.append(("Async Translation", self.open_async_processing, "success"))
         
         toolbar_items.extend([
             ("Retranslate", self.force_retranslation, "warning"),
