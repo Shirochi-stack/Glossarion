@@ -474,73 +474,86 @@ class AsyncAPIProcessor:
         else:
             raise ValueError(f"Unsupported provider: {provider}")
             
-    def _submit_openai_batch_sync(self, batch_data: Dict[str, Any], model: str, api_key: str) -> AsyncJobInfo:
-        """Submit OpenAI batch (synchronous version)"""
-        import tempfile
-        import aiofiles
-        
+    def _submit_openai_batch_sync(self, batch_data, model, api_key):
+        """Submit OpenAI batch synchronously"""
         try:
-            # Create JSONL file for OpenAI batch API
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
-                for request in batch_data['requests']:
-                    f.write(json.dumps(request) + '\n')
-                input_file = f.name
-                
-            # Upload file
-            headers = {
-                'Authorization': f'Bearer {api_key}'
-            }
+            # Remove aiofiles import - not needed for sync operations
+            import tempfile
+            import json
             
-            with open(input_file, 'rb') as f:
-                files = {'file': ('batch.jsonl', f, 'application/jsonl')}
+            # Create temporary file for batch data
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+                # Write each request as JSONL
+                for request in batch_data['requests']:
+                    json.dump(request, f)
+                    f.write('\n')
+                temp_path = f.name
+            
+            try:
+                # Upload file to OpenAI
+                headers = {'Authorization': f'Bearer {api_key}'}
+                
+                with open(temp_path, 'rb') as f:
+                    files = {'file': ('batch.jsonl', f, 'application/jsonl')}
+                    data = {'purpose': 'batch'}
+                    
+                    response = requests.post(
+                        'https://api.openai.com/v1/files',
+                        headers=headers,
+                        files=files,
+                        data=data
+                    )
+                    
+                if response.status_code != 200:
+                    raise Exception(f"File upload failed: {response.text}")
+                    
+                file_id = response.json()['id']
+                
+                # Create batch job
+                batch_request = {
+                    'input_file_id': file_id,
+                    'endpoint': '/v1/chat/completions',
+                    'completion_window': '24h'
+                }
+                
                 response = requests.post(
-                    'https://api.openai.com/v1/files',
-                    headers=headers,
-                    files=files,
-                    data={'purpose': 'batch'}
+                    'https://api.openai.com/v1/batches',
+                    headers={**headers, 'Content-Type': 'application/json'},
+                    json=batch_request
                 )
                 
-            if response.status_code != 200:
-                raise Exception(f"File upload failed: {response.text}")
+                if response.status_code != 200:
+                    raise Exception(f"Batch creation failed: {response.text}")
+                    
+                batch_info = response.json()
                 
-            file_id = response.json()['id']
-            
-            # Create batch
-            batch_request = {
-                'input_file_id': file_id,
-                'endpoint': '/v1/chat/completions',
-                'completion_window': '24h'
-            }
-            
-            response = requests.post(
-                'https://api.openai.com/v1/batches',
-                headers={**headers, 'Content-Type': 'application/json'},
-                json=batch_request
-            )
-            
-            if response.status_code != 200:
-                raise Exception(f"Batch creation failed: {response.text}")
+                # Calculate cost estimate
+                total_tokens = sum(r.get('token_count', 15000) for r in batch_data['requests'])
+                async_cost, _ = self.estimate_cost(
+                    len(batch_data['requests']), 
+                    total_tokens // len(batch_data['requests']), 
+                    model
+                )
                 
-            batch_info = response.json()
-            
-            # Create job info
-            job = AsyncJobInfo(
-                job_id=batch_info['id'],
-                provider='openai',
-                model=model,
-                status=AsyncAPIStatus.PENDING,
-                created_at=datetime.now(),
-                updated_at=datetime.now(),
-                total_requests=len(batch_data['requests']),
-                input_file=file_id,
-                metadata={'batch_info': batch_info}
-            )
-            
-            # Clean up temp file
-            os.unlink(input_file)
-            
-            return job
-            
+                job = AsyncJobInfo(
+                    job_id=batch_info['id'],
+                    provider='openai',
+                    model=model,
+                    status=AsyncAPIStatus.PENDING,
+                    created_at=datetime.now(),
+                    updated_at=datetime.now(),
+                    total_requests=len(batch_data['requests']),
+                    cost_estimate=async_cost,
+                    metadata={'file_id': file_id, 'batch_info': batch_info}
+                )
+                
+                return job
+                
+            finally:
+                # Clean up temp file
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                
         except Exception as e:
             logger.error(f"OpenAI batch submission failed: {e}")
             raise
@@ -742,6 +755,9 @@ class AsyncAPIProcessor:
                 
             data = response.json()
             
+            # Log the full response for debugging
+            logger.debug(f"OpenAI batch status response: {json.dumps(data, indent=2)}")
+            
             # Map OpenAI status to our status
             status_map = {
                 'validating': AsyncAPIStatus.PENDING,
@@ -768,9 +784,32 @@ class AsyncAPIProcessor:
             job.metadata['raw_state'] = data['status']
             job.metadata['last_check'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
-            if data.get('output_file_id'):
-                job.output_file = data['output_file_id']
-                
+            # Handle completion
+            if data['status'] == 'completed':
+                # Check if all requests failed
+                if job.failed_requests > 0 and job.completed_requests == 0:
+                    logger.warning(f"OpenAI job completed but all {job.failed_requests} requests failed")
+                    job.status = AsyncAPIStatus.FAILED
+                    job.metadata['all_failed'] = True
+                    
+                    # Store error file if available
+                    if data.get('error_file_id'):
+                        job.metadata['error_file_id'] = data['error_file_id']
+                        logger.info(f"Error file available: {data['error_file_id']}")
+                else:
+                    # Normal completion with some successes
+                    if 'output_file_id' in data and data['output_file_id']:
+                        job.output_file = data['output_file_id']
+                        logger.info(f"OpenAI job completed with output file: {job.output_file}")
+                        
+                        # If there were also failures, note that
+                        if job.failed_requests > 0:
+                            job.metadata['partial_failure'] = True
+                            logger.warning(f"Job completed with {job.failed_requests} failed requests out of {job.total_requests}")
+                    else:
+                        logger.error(f"OpenAI job marked as completed but no output_file_id found: {data}")
+                        
+            # Always store error file if present
             if data.get('error_file_id'):
                 job.metadata['error_file_id'] = data['error_file_id']
                 
@@ -845,27 +884,35 @@ class AsyncAPIProcessor:
             return os.getenv('API_KEY', '') or os.getenv('GEMINI_API_KEY', '') or os.getenv('GOOGLE_API_KEY', '')
         
     def retrieve_results(self, job_id: str) -> List[Dict[str, Any]]:
-        """Retrieve results from completed job"""
-        if job_id not in self.jobs:
-            raise ValueError(f"Unknown job ID: {job_id}")
+        """Retrieve results from a completed batch job"""
+        job = self.jobs.get(job_id)
+        if not job:
+            raise ValueError(f"Job {job_id} not found")
             
-        job = self.jobs[job_id]
-        
         if job.status != AsyncAPIStatus.COMPLETED:
-            raise ValueError(f"Job not completed: {job.status.value}")
+            raise ValueError(f"Job is not completed. Current status: {job.status.value}")
+        
+        # If output file is missing, try to refresh status first
+        if not job.output_file:
+            logger.warning(f"No output file for completed job {job_id}, refreshing status...")
+            self.check_job_status(job_id)
             
-        if job.provider == 'openai':
+            # Re-check after status update
+            if not job.output_file:
+                # Log the job details for debugging
+                logger.error(f"Job details: {json.dumps(job.to_dict(), indent=2)}")
+                raise ValueError(f"No output file available for job {job_id} even after status refresh")
+        
+        provider = job.provider
+        
+        if provider == 'openai':
             return self._retrieve_openai_results(job)
-        elif job.provider == 'anthropic':
-            return self._retrieve_anthropic_results(job)
-        elif job.provider == 'gemini':
+        elif provider == 'gemini':
             return self._retrieve_gemini_results(job)
-        elif job.provider == 'mistral':
-            return self._retrieve_mistral_results(job)
-        elif job.provider == 'groq':
-            return self._retrieve_groq_results(job)
+        elif provider == 'anthropic':
+            return self._retrieve_anthropic_results(job)
         else:
-            raise ValueError(f"Unsupported provider: {job.provider}")
+            raise ValueError(f"Unknown provider: {provider}")
  
     def _retrieve_gemini_results(self, job: AsyncJobInfo) -> List[Dict[str, Any]]:
         """Retrieve Gemini batch results"""
@@ -955,32 +1002,48 @@ class AsyncAPIProcessor:
     def _retrieve_openai_results(self, job: AsyncJobInfo) -> List[Dict[str, Any]]:
         """Retrieve OpenAI batch results"""
         if not job.output_file:
-            raise ValueError("No output file available")
-            
-        api_key = self._get_api_key()
-        headers = {'Authorization': f'Bearer {api_key}'}
+            # Try one more status check
+            self._check_openai_status(job)
+            if not job.output_file:
+                raise ValueError(f"No output file available for OpenAI job {job.job_id}")
         
-        # Download results file
-        response = requests.get(
-            f'https://api.openai.com/v1/files/{job.output_file}/content',
-            headers=headers
-        )
-        
-        if response.status_code != 200:
-            raise Exception(f"Failed to download results: {response.text}")
+        try:
+            api_key = self._get_api_key()
+            headers = {'Authorization': f'Bearer {api_key}'}
             
-        # Parse JSONL results
-        results = []
-        for line in response.text.strip().split('\n'):
-            if line:
-                result = json.loads(line)
-                results.append({
-                    'custom_id': result['custom_id'],
-                    'content': result['response']['body']['choices'][0]['message']['content'],
-                    'finish_reason': result['response']['body']['choices'][0]['finish_reason']
-                })
+            # Download results file
+            response = requests.get(
+                f'https://api.openai.com/v1/files/{job.output_file}/content',
+                headers=headers
+            )
+            
+            if response.status_code != 200:
+                raise Exception(f"Failed to download results: {response.status_code} - {response.text}")
                 
-        return results
+            # Parse JSONL results
+            results = []
+            for line in response.text.strip().split('\n'):
+                if line:
+                    try:
+                        result = json.loads(line)
+                        # Extract the actual response content
+                        if 'response' in result and 'body' in result['response']:
+                            results.append({
+                                'custom_id': result.get('custom_id', ''),
+                                'content': result['response']['body']['choices'][0]['message']['content'],
+                                'finish_reason': result['response']['body']['choices'][0].get('finish_reason', 'stop')
+                            })
+                        else:
+                            logger.warning(f"Unexpected result format: {result}")
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Failed to parse result line: {line} - {e}")
+                        
+            return results
+            
+        except Exception as e:
+            logger.error(f"Failed to retrieve OpenAI results: {e}")
+            logger.error(f"Job details: {json.dumps(job.to_dict(), indent=2)}")
+            raise
         
     def _retrieve_anthropic_results(self, job: AsyncJobInfo) -> List[Dict[str, Any]]:
         """Retrieve Anthropic batch results"""
@@ -1534,24 +1597,27 @@ class AsyncProcessingDialog:
                 "Only completed jobs can have results retrieved."
             )
             return
-            
+        
         try:
-            # Disable button during retrieval
-            self.dialog.config(cursor="wait")
-            self.dialog.update()
+            # Set cursor to busy (with safety check)
+            if hasattr(self, 'dialog') and self.dialog.winfo_exists():
+                self.dialog.config(cursor="wait")
+                self.dialog.update()
             
-            # Actually handle the completed job
+            # Retrieve results
             self._handle_completed_job(self.selected_job_id)
             
-            # Update the job list to reflect any status changes
-            self._refresh_jobs_list()
-            
         except Exception as e:
+            self._log(f"❌ Error retrieving results: {e}")
             messagebox.showerror("Error", f"Failed to retrieve results: {str(e)}")
-            logger.error(f"Result retrieval error: {traceback.format_exc()}")
         finally:
-            # Restore cursor
-            self.dialog.config(cursor="")
+            # Reset cursor (with safety check)
+            if hasattr(self, 'dialog') and self.dialog.winfo_exists():
+                try:
+                    self.dialog.config(cursor="")
+                except tk.TclError:
+                    # Dialog was closed, ignore
+                    pass
             
     def _cancel_selected_job(self):
         """Cancel selected job"""
@@ -2657,20 +2723,57 @@ class AsyncProcessingDialog:
     def _handle_completed_job(self, job_id):
         """Handle a completed job - retrieve results and save"""
         try:
-            # Retrieve results
+            job = self.processor.jobs.get(job_id)
+            if not job:
+                self._log("❌ Job not found")
+                return
+                
+            # Check if all requests failed
+            if job.metadata.get('all_failed'):
+                self._log(f"❌ All {job.failed_requests} requests failed!")
+                
+                # Try to get error details
+                if job.metadata.get('error_file_id'):
+                    self._show_error_details(job)
+                else:
+                    messagebox.showerror(
+                        "All Requests Failed",
+                        f"All {job.failed_requests} requests in this batch failed.\n\n"
+                        "This usually means:\n"
+                        "• Invalid API key\n"
+                        "• Model access issues\n"
+                        "• Malformed requests\n\n"
+                        "Check the logs for details."
+                    )
+                return
+                
+            # Check for partial failures
+            if job.metadata.get('partial_failure'):
+                response = messagebox.askyesno(
+                    "Partial Success",
+                    f"The job completed with:\n"
+                    f"✓ {job.completed_requests} successful\n"
+                    f"✗ {job.failed_requests} failed\n\n"
+                    "Do you want to retrieve the successful results?"
+                )
+                if not response:
+                    return
+                    
+            # Normal retrieval for successful results
             results = self.processor.retrieve_results(job_id)
             
             if not results:
                 self._log("❌ No results retrieved from completed job")
                 return
                 
-            # Get output directory - same name as input file
+            # Get the directory where the Glossarion application is located
             app_dir = os.path.dirname(os.path.abspath(__file__))
+            
+            # Create output folder name - same as input file name (no extension)
             base_name = os.path.splitext(os.path.basename(self.gui.file_path))[0]
-            original_basename = base_name
             output_dir = os.path.join(app_dir, base_name)
             
-            # Handle existing directory
+            # If directory already exists, ask user what to do
             if os.path.exists(output_dir):
                 response = messagebox.askyesnocancel(
                     "Directory Exists",
@@ -2680,195 +2783,156 @@ class AsyncProcessingDialog:
                     "Cancel = Cancel operation"
                 )
                 
-                if response is None:
+                if response is None:  # Cancel
                     return
-                elif response is False:
+                elif response is False:  # No - create with number
                     counter = 1
                     while os.path.exists(f"{output_dir}_{counter}"):
                         counter += 1
                     output_dir = f"{output_dir}_{counter}"
             
+            # Create the directory
             os.makedirs(output_dir, exist_ok=True)
             
-            # Extract ALL resources from EPUB (CSS, fonts, images)
-            self._log("📦 Extracting EPUB resources...")
-            import zipfile
-            
-            with zipfile.ZipFile(self.gui.file_path, 'r') as zf:
-                # Create resource directories
-                for res_type in ['css', 'fonts', 'images']:
-                    os.makedirs(os.path.join(output_dir, res_type), exist_ok=True)
-                
-                # Extract all resources
-                for file_path in zf.namelist():
-                    if file_path.endswith('/'):
-                        continue
-                        
-                    file_lower = file_path.lower()
-                    file_name = os.path.basename(file_path)
-                    
-                    # Skip empty filenames
-                    if not file_name:
-                        continue
-                    
-                    # Determine resource type and extract
-                    if file_lower.endswith('.css'):
-                        zf.extract(file_path, os.path.join(output_dir, 'css'))
-                    elif file_lower.endswith(('.ttf', '.otf', '.woff', '.woff2')):
-                        zf.extract(file_path, os.path.join(output_dir, 'fonts'))
-                    elif file_lower.endswith(('.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp')):
-                        zf.extract(file_path, os.path.join(output_dir, 'images'))
-            
-            # Extract chapter info and metadata from source EPUB
-            self._log("📋 Extracting metadata from source EPUB...")
-            
-            import ebooklib
-            from ebooklib import epub
-            from bs4 import BeautifulSoup
-            from TransateKRtoEN import get_content_hash
-            
-            # Extract metadata
-            metadata = {}
-            book = epub.read_epub(self.gui.file_path)
-            
-            # Get book metadata
-            if book.get_metadata('DC', 'title'):
-                metadata['title'] = book.get_metadata('DC', 'title')[0][0]
-            if book.get_metadata('DC', 'creator'):
-                metadata['creator'] = book.get_metadata('DC', 'creator')[0][0]
-            if book.get_metadata('DC', 'language'):
-                metadata['language'] = book.get_metadata('DC', 'language')[0][0]
-            
-            # Save metadata.json
-            metadata_path = os.path.join(output_dir, 'metadata.json')
-            with open(metadata_path, 'w', encoding='utf-8') as f:
-                json.dump(metadata, f, ensure_ascii=False, indent=2)
-            
-            # Map chapter numbers to original info
-            chapter_map = {}
-            chapters_info = []
-            actual_chapter_num = 0
-            
-            for item in book.get_items():
-                if item.get_type() == ebooklib.ITEM_DOCUMENT:
-                    original_name = item.get_name()
-                    original_basename = os.path.splitext(os.path.basename(original_name))[0]
-                    
-                    soup = BeautifulSoup(item.get_content(), 'html.parser')
-                    text = soup.get_text().strip()
-                    
-                    if len(text) > 500:  # Valid chapter
-                        actual_chapter_num += 1
-                        
-                        # Try to find chapter number in content
-                        chapter_num = actual_chapter_num
-                        for element in soup.find_all(['h1', 'h2', 'h3', 'title']):
-                            element_text = element.get_text().strip()
-                            match = re.search(r'chapter\s*(\d+)', element_text, re.IGNORECASE)
-                            if match:
-                                chapter_num = int(match.group(1))
-                                break
-                        
-                        # Calculate real content hash
-                        content_hash = get_content_hash(text)
-                        
-                        chapter_map[chapter_num] = {
-                            'original_basename': original_basename,
-                            'content_hash': content_hash,
-                            'text_length': len(text),
-                            'has_images': bool(soup.find_all('img'))
-                        }
-                        
-                        chapters_info.append({
-                            'num': chapter_num,
-                            'title': element_text if 'element_text' in locals() else f"Chapter {chapter_num}",
-                            'original_filename': original_name,
-                            'has_images': bool(soup.find_all('img')),
-                            'text_length': len(text),
-                            'content_hash': content_hash
-                        })
-            
-            # Save chapters_info.json
-            chapters_info_path = os.path.join(output_dir, 'chapters_info.json')
-            with open(chapters_info_path, 'w', encoding='utf-8') as f:
-                json.dump(chapters_info, f, ensure_ascii=False, indent=2)
-            
-            # Create realistic progress tracking
-            progress_data = {
-                "version": "3.0",
-                "chapters": {},
-                "chapter_chunks": {},
-                "content_hashes": {},
-                "created": datetime.now().isoformat(),
-                "last_updated": datetime.now().isoformat(),
-                "total_chapters": len(results),
-                "completed_chapters": len(results),
-                "failed_chapters": 0,
-                "async_translated": True
-            }
-            
-            # Sort results and save with proper filenames
+            # Sort results by chapter number
             sorted_results = sorted(results, key=lambda x: self._extract_chapter_number(x['custom_id']))
             
-            self._log("💾 Saving translated chapters...")
+            # Save chapters
+            successful_saves = 0
             for result in sorted_results:
-                chapter_num = self._extract_chapter_number(result['custom_id'])
-                
-                # Get chapter info
-                chapter_info = chapter_map.get(chapter_num, {})
-                original_basename = chapter_info.get('original_basename', f"{chapter_num:04d}")
-                content_hash = chapter_info.get('content_hash', hashlib.md5(f"chapter_{chapter_num}".encode()).hexdigest())
-                
-                # Save file with correct name (only once!)
-                filename = f"response_{original_basename}.html"
-                file_path = os.path.join(output_dir, filename)
-                
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(result['content'])
-                
-                # Add realistic progress entry
-                progress_data["chapters"][content_hash] = {
-                    "status": "completed",
-                    "output_file": filename,
-                    "actual_num": chapter_num,
-                    "chapter_num": chapter_num,
-                    "content_hash": content_hash,
-                    "original_basename": original_basename,
-                    "started_at": datetime.now().isoformat(),
-                    "completed_at": datetime.now().isoformat(),
-                    "translation_time": 2.5,  # Fake but realistic
-                    "token_count": chapter_info.get('text_length', 5000) // 4,  # Rough estimate
-                    "model": self.gui.model_var.get(),
-                    "from_async": True
-                }
-                
-                # Add content hash tracking
-                progress_data["content_hashes"][content_hash] = {
-                    "chapter_key": content_hash,
-                    "chapter_num": chapter_num,
-                    "status": "completed",
-                    "index": chapter_num - 1
-                }
+                try:
+                    chapter_id = result['custom_id']
+                    content = result['content']
+                    
+                    # Extract chapter number
+                    chapter_num = self._extract_chapter_number(chapter_id)
+                    
+                    # Save as HTML files (epub_converter expects HTML)
+                    filename = f"Chapter_{chapter_num:04d}.html"
+                    output_file = os.path.join(output_dir, filename)
+                    
+                    # Basic HTML wrapper
+                    html_content = f"""<!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>Chapter {chapter_num}</title>
+    </head>
+    <body>
+    {content}
+    </body>
+    </html>"""
+                    
+                    with open(output_file, 'w', encoding='utf-8') as f:
+                        f.write(html_content)
+                        
+                    successful_saves += 1
+                        
+                except Exception as e:
+                    self._log(f"❌ Failed to save chapter {chapter_id}: {e}")
+                            
+            self._log(f"✅ {successful_saves} chapters saved to: {output_dir}")
             
-            # Save realistic progress file
-            progress_file = os.path.join(output_dir, 'translation_progress.json')
-            with open(progress_file, 'w', encoding='utf-8') as f:
-                json.dump(progress_data, f, indent=2)
-            
-            self._log(f"✅ Saved {len(sorted_results)} chapters to: {output_dir}")
-            
-            messagebox.showinfo(
-                "Async Translation Complete",
-                f"Successfully saved {len(sorted_results)} translated chapters to:\n{output_dir}\n\n"
-                "Ready for EPUB conversion or further processing."
-            )
+            # Show completion message
+            if job.metadata.get('partial_failure'):
+                messagebox.showinfo(
+                    "Async Translation Complete (Partial)",
+                    f"Successfully retrieved {successful_saves} chapters!\n"
+                    f"({job.failed_requests} chapters failed)\n\n"
+                    f"Results saved to:\n{output_dir}\n\n"
+                    "You can use the EPUB Converter button to compile the successful chapters into an EPUB."
+                )
+            else:
+                messagebox.showinfo(
+                    "Async Translation Complete",
+                    f"Successfully retrieved {successful_saves} chapters!\n\n"
+                    f"Results saved to:\n{output_dir}\n\n"
+                    "You can use the EPUB Converter button to compile these into an EPUB."
+                )
                 
+            # Ask about EPUB compilation
+            if messagebox.askyesno(
+                "Compile EPUB?", 
+                f"Would you like to compile these chapters into '{base_name}.epub'?"
+            ):
+                try:
+                    # Import and run EPUB converter
+                    from epub_converter import compile_epub
+                    
+                    self._log("Starting EPUB compilation...")
+                    compile_epub(output_dir, log_callback=self._log)
+                    self._log(f"✅ EPUB created successfully!")
+                    
+                    # Open the output directory
+                    if sys.platform == 'win32':
+                        os.startfile(output_dir)
+                    elif sys.platform == 'darwin':
+                        os.system(f'open "{output_dir}"')
+                    else:
+                        os.system(f'xdg-open "{output_dir}"')
+                        
+                except Exception as e:
+                    self._log(f"❌ EPUB compilation failed: {e}")
+                    messagebox.showerror("EPUB Compilation Failed", f"Failed to compile EPUB: {str(e)}")
+                    
         except Exception as e:
-            self._log(f"❌ Error handling completed job: {e}")
-            import traceback
-            self._log(traceback.format_exc())
-            messagebox.showerror("Error", f"Failed to process results: {str(e)}")
-    
+            self._log(f"❌ Error handling completed job: {str(e)}")
+            logger.error(f"Error handling completed job: {traceback.format_exc()}")
+            
+            # Show user-friendly error
+            if "No output file" in str(e):
+                messagebox.showerror(
+                    "No Results Available", 
+                    "The job completed but no results are available.\n\n"
+                    "This can happen when all requests fail.\n"
+                    "Check the job status for error details."
+                )
+            else:
+                messagebox.showerror("Error", f"Failed to process results: {str(e)}")
+ 
+    def _show_error_details(self, job):
+        """Show details from error file"""
+        if not job.metadata.get('error_file_id'):
+            return
+            
+        try:
+            api_key = self.gui.api_key_entry.get().strip()
+            headers = {'Authorization': f'Bearer {api_key}'}
+            
+            # Download error file
+            response = requests.get(
+                f'https://api.openai.com/v1/files/{job.metadata['error_file_id']}/content',
+                headers=headers
+            )
+            
+            if response.status_code == 200:
+                # Parse first few errors
+                errors = []
+                for i, line in enumerate(response.text.strip().split('\n')[:5]):  # Show first 5 errors
+                    if line:
+                        try:
+                            error_data = json.loads(line)
+                            error_msg = error_data.get('error', {}).get('message', 'Unknown error')
+                            errors.append(f"• {error_msg}")
+                        except:
+                            pass
+                            
+                error_text = '\n'.join(errors)
+                if len(response.text.strip().split('\n')) > 5:
+                    error_text += f"\n\n... and {len(response.text.strip().split('\n')) - 5} more errors"
+                    
+                messagebox.showerror(
+                    "Batch Processing Errors",
+                    f"All requests failed with errors:\n\n{error_text}\n\n"
+                    "Common causes:\n"
+                    "• Invalid API key or insufficient permissions\n"
+                    "• Model not available in your region\n"
+                    "• Malformed request format"
+                )
+            
+        except Exception as e:
+            logger.error(f"Failed to retrieve error details: {e}")
+ 
     def _extract_chapter_number(self, custom_id):
         """Extract chapter number from custom ID"""
         match = re.search(r'chapter[_-](\d+)', custom_id, re.IGNORECASE)
