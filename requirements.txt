@@ -1,9 +1,9 @@
 # Python 3.12.9
-# Fixed requirements.txt for dependency resolution
+# Fixed requirements.txt with resolved httpx conflicts
 
-# Core packages - Pin PyInstaller ecosystem
+# Core packages
 pyinstaller==6.3.0
-pyinstaller-hooks-contrib==2024.0  # Compatible with pyinstaller 6.3.0
+pyinstaller-hooks-contrib==2024.0
 ttkbootstrap==1.10.1
 pillow==10.2.0
 beautifulsoup4==4.12.3
@@ -14,13 +14,13 @@ requests==2.31.0
 tqdm==4.66.1
 langdetect==1.0.9
 
-# AI/API Clients - Fixed versions
+# AI/API Clients - Adjusted for httpx compatibility
 google-generativeai==0.3.2
 openai==1.12.0
 anthropic==0.18.1
 mistralai==0.1.8
-cohere==5.1.0
-tiktoken==0.5.2  # Older version to avoid tokenizers conflict
+cohere==4.37  # Downgraded to use httpx<1
+tiktoken==0.5.2
 poe-api-wrapper==1.2.4
 ballyregan==1.0.6
 
@@ -29,8 +29,8 @@ datasketch==1.6.4
 numpy==1.26.4
 scipy==1.12.0
 
-# HTTP/Networking - Pin for stability
-httpx
+# HTTP/Networking - Fixed versions
+httpx==0.25.2  # Middle ground version that works with all
 httpcore==1.0.2
 anyio==4.2.0
 sniffio==1.3.0
@@ -49,7 +49,7 @@ opencv-python==4.9.0.80
 # Pin typing-extensions explicitly
 typing-extensions==4.9.0
 
-# Google Cloud Vision - Carefully pinned versions
+# Google Cloud Vision
 google-cloud-vision==3.5.0
 google-auth==2.27.0
 google-auth-httplib2==0.2.0
