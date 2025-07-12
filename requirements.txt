@@ -13,13 +13,13 @@ tqdm==4.66.1
 langdetect==1.0.9
 
 # AI/API Clients with compatible versions
-google-generativeai==0.3.2
+google-generativeai
 openai==1.12.0
-anthropic==0.18.1
-mistralai==0.1.8
-cohere==5.1.0
-tiktoken==0.6.0
-poe-api-wrapper==1.2.4
+anthropic
+mistralai
+cohere
+tiktoken
+poe-api-wrapper
 ballyregan
 
 # Data processing with compatible versions
