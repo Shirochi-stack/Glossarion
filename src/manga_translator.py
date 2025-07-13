@@ -2645,6 +2645,15 @@ class MangaTranslator:
         x1, y1, w1, h1 = region1.bounding_box
         x2, y2, w2, h2 = region2.bounding_box
         
+        # SPECIAL CASE: If one region is very small, bypass strict checks
+        area1 = w1 * h1
+        area2 = w2 * h2
+        if area1 < 500 or area2 < 500:
+            # Small text has already passed _regions_are_nearby and bubble detection
+            # Don't apply additional strict checks that might reject valid merges
+            self._log(f"   Small text region (area: {min(area1, area2)}), bypassing strict alignment checks", "info")
+            return True
+        
         # Calculate actual gaps between regions
         horizontal_gap = 0
         if x1 + w1 < x2:
