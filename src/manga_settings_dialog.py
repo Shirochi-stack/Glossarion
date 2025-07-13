@@ -313,13 +313,20 @@ class MangaSettingsDialog:
     def show_dialog(self):
         """Display the settings dialog using WindowManager"""
         # Use WindowManager to create scrollable dialog
+        if self.main_gui.wm._force_safe_ratios:
+            max_width_ratio = 0.5
+            max_height_ratio = 0.85
+        else:
+            max_width_ratio = 0.5
+            max_height_ratio = 1.05
+            
         self.dialog, scrollable_frame, canvas = self.main_gui.wm.setup_scrollable(
             self.parent,
             "Manga Translation Settings",
             width=None,
             height=None,
-            max_width_ratio=0.5,
-            max_height_ratio=0.9
+            max_width_ratio=max_width_ratio,
+            max_height_ratio=max_height_ratio 
         )
         
         # Store canvas reference for potential cleanup
