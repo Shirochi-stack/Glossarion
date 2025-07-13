@@ -1257,11 +1257,13 @@ class AsyncProcessingDialog:
         self.gui = translator_gui
         self.processor = AsyncAPIProcessor(translator_gui)  # Pass translator_gui here
         self.selected_job_id = None
+        self.polling_jobs = set()  # ADD THIS if not already present
         
         # Use the correct attribute name 'wm' instead of 'window_manager'
         self.window_manager = translator_gui.wm  # WindowManager is stored as 'wm'
         
         self._create_dialog()
+        self._refresh_jobs_list()
         
     def _create_dialog(self):
         """Create the async processing dialog"""
@@ -1585,6 +1587,9 @@ class AsyncProcessingDialog:
         # Clear existing items
         for item in self.jobs_tree.get_children():
             self.jobs_tree.delete(item)
+        
+        # Re-load jobs from file to get latest state
+        self.processor._load_jobs()  # ADD THIS LINE - reload from disk
             
         # Add jobs
         for job_id, job in self.processor.jobs.items():
@@ -1642,6 +1647,12 @@ class AsyncProcessingDialog:
             job = self.processor.jobs.get(self.selected_job_id)
             if job:
                 self._update_selected_job_progress(job)
+        
+        # AUTO-RESUME POLLING for any processing jobs - ADD THIS SECTION
+        for job_id, job in self.processor.jobs.items():
+            if job.status == AsyncAPIStatus.PROCESSING and job_id not in self.polling_jobs:
+                self._log(f"📊 Auto-resuming polling for job {job_id}")
+                self._poll_job_status(job_id)
         
     def _on_job_select(self, event):
         """Handle job selection"""
@@ -3014,9 +3025,9 @@ class AsyncProcessingDialog:
                 return
                 
             # Get output directory - same name as input file
-            app_dir = os.path.dirname(os.path.abspath(__file__))
+            input_dir = os.path.dirname(self.gui.file_path)
             base_name = os.path.splitext(os.path.basename(self.gui.file_path))[0]
-            output_dir = os.path.join(app_dir, base_name)
+            output_dir = os.path.join(input_dir, base_name)
             
             # Handle existing directory
             if os.path.exists(output_dir):
