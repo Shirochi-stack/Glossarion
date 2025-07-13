@@ -3246,7 +3246,8 @@ class AsyncProcessingDialog:
                             
                 error_text = '\n'.join(errors)
                 if len(response.text.strip().split('\n')) > 5:
-                    error_text += f"\n\n... and {len(response.text.strip().split('\n')) - 5} more errors"
+                    newline = '\n'
+                    error_text += f"\n\n... and {len(response.text.strip().split(newline)) - 5} more errors"
                     
                 messagebox.showerror(
                     "Batch Processing Errors",
