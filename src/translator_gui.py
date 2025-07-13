@@ -857,6 +857,9 @@ class TranslatorGUI:
             except Exception as e:
                 print(f"Warning: Could not save config.json: {e}")
         
+        if 'force_ncx_only' not in self.config:
+            self.config['force_ncx_only'] = True
+            
         if self.config.get('force_safe_ratios', False):
             self.wm._force_safe_ratios = True
             # Update button after GUI is created
@@ -867,7 +870,7 @@ class TranslatorGUI:
     
         # Initialize auto-update check variable
         self.auto_update_check_var = tk.BooleanVar(value=self.config.get('auto_update_check', True))
-        self.force_ncx_only_var = tk.BooleanVar(value=self.config.get('force_ncx_only', False))      
+        self.force_ncx_only_var = tk.BooleanVar(value=self.config.get('force_ncx_only', True))      
         self.max_output_tokens = self.config.get('max_output_tokens', self.max_output_tokens)
         
         # Async processing settings
@@ -900,31 +903,39 @@ class TranslatorGUI:
                 "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use an easy to read and grammatically accurate comedy translation style.\n"
                 "- Retain honorifics like -nim, -ssi.\n"
+                "- Never guess a character's pronouns; always use gender neutral pronouns like they/them (and keep 'I' neutral in first-person) unless gender is specifically implied or mentioned in a glossary.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
+                "- Keep original Korean quotation marks (" ", ' ', 「」, 『』) as-is without converting to English quotes.\n"
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
             ),
             "japanese": (
                 "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use an easy to read and grammatically accurate comedy translation style.\n"
                 "- Retain honorifics like -san, -sama, -chan, -kun.\n"
+                "- Never guess a character's pronouns; always use gender neutral pronouns like they/them (and keep 'I' neutral in first-person) unless gender is specifically implied or mentioned in a glossary.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
+                "- Keep original Japanese quotation marks (「」 and 『』) as-is without converting to English quotes.\n"
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
             ),
             "chinese": (
                 "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use an easy to read and grammatically accurate comedy translation style.\n"
+                "- Never guess a character's pronouns; always use gender neutral pronouns like they/them (and keep 'I' neutral in first-person) unless gender is specifically implied or mentioned in a glossary.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
+                "- Keep original Chinese quotation marks (「」 for dialogue, 《》 for titles) as-is without converting to English quotes.\n"
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
             ),
             "korean_OCR": (
                 "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use an easy to read and grammatically accurate comedy translation style.\n"
                 "- Retain honorifics like -nim, -ssi.\n"
+                "- Never guess a character's pronouns; always use gender neutral pronouns like they/them (and keep 'I' neutral in first-person) unless gender is specifically implied or mentioned in a glossary.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
+                "- Keep original Korean quotation marks (" ", ' ', 「」, 『』) as-is without converting to English quotes.\n"
                 "- Add HTML tags for proper formatting as expected of a novel.\n"
                 "- Wrap every paragraph in <p> tags with an inline CSS first‐line indent of 1em (e.g. <p style=\"text-indent:1em;\">…</p>); do not insert any literal tabs or spaces."
             ),
@@ -932,16 +943,20 @@ class TranslatorGUI:
                 "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use an easy to read and grammatically accurate comedy translation style.\n"
                 "- Retain honorifics like -san, -sama, -chan, -kun.\n"
+                "- Never guess a character's pronouns; always use gender neutral pronouns like they/them (and keep 'I' neutral in first-person) unless gender is specifically implied or mentioned in a glossary.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
+                "- Keep original Japanese quotation marks (「」 and 『』) as-is without converting to English quotes.\n"
                 "- Add HTML tags for proper formatting as expected of a novel.\n"
                 "- Wrap every paragraph in <p> tags with an inline CSS first‐line indent of 1em (e.g. <p style=\"text-indent:1em;\">…</p>); do not insert any literal tabs or spaces."
             ),
             "chinese_OCR": (
                 "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use an easy to read and grammatically accurate comedy translation style.\n"
+                "- Never guess a character's pronouns; always use gender neutral pronouns like they/them (and keep 'I' neutral in first-person) unless gender is specifically implied or mentioned in a glossary.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
+                "- Keep original Chinese quotation marks (「」 for dialogue, 《》 for titles) as-is without converting to English quotes.\n"
                 "- Add HTML tags for proper formatting as expected of a novel.\n"
                 "- Wrap every paragraph in <p> tags with an inline CSS first‐line indent of 1em (e.g. <p style=\"text-indent:1em;\">…</p>); do not insert any literal tabs or spaces."
             ),
@@ -949,23 +964,29 @@ class TranslatorGUI:
                 "You are a professional Korean to English novel translator, you must strictly output only English text while following these rules:\n"
                 "- Use an easy to read and grammatically accurate comedy translation style.\n"
                 "- Retain honorifics like -nim, -ssi.\n"
+                "- Never guess a character's pronouns; always use gender neutral pronouns like they/them (and keep 'I' neutral in first-person) unless gender is specifically implied or mentioned in a glossary.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
+                "- Keep original Korean quotation marks (" ", ' ', 「」, 『』) as-is without converting to English quotes.\n"
                 "- Use line breaks for proper formatting as expected of a novel."
             ),
             "japanese_TXT": (
                 "You are a professional Japanese to English novel translator, you must strictly output only English text while following these rules:\n"
                 "- Use an easy to read and grammatically accurate comedy translation style.\n"
                 "- Retain honorifics like -san, -sama, -chan, -kun.\n"
+                "- Never guess a character's pronouns; always use gender neutral pronouns like they/them (and keep 'I' neutral in first-person) unless gender is specifically implied or mentioned in a glossary.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
+                "- Keep original Japanese quotation marks (「」 and 『』) as-is without converting to English quotes.\n"
                 "- Use line breaks for proper formatting as expected of a novel."
             ),
             "chinese_TXT": (
                 "You are a professional Chinese to English novel translator, you must strictly output only English text while following these rules:\n"
                 "- Use an easy to read and grammatically accurate comedy translation style.\n"
+                "- Never guess a character's pronouns; always use gender neutral pronouns like they/them (and keep 'I' neutral in first-person) unless gender is specifically implied or mentioned in a glossary.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
+                "- Keep original Chinese quotation marks (「」 for dialogue, 《》 for titles) as-is without converting to English quotes.\n"
                 "- Use line breaks for proper formatting as expected of a novel."
             ),
             "Manga_JP": (
