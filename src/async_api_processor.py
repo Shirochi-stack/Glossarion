@@ -50,7 +50,7 @@ try:
     from txt_processor import TextFileProcessor
 except ImportError:
     TextFileProcessor = None
-    logger.warning("txt_processor not available - TXT file support disabled")
+    print("txt_processor not available - TXT file support disabled")
 # For provider-specific implementations
 try:
     import google.generativeai as genai
@@ -190,9 +190,9 @@ class AsyncAPIProcessor:
                         try:
                             self.jobs[job_id] = AsyncJobInfo.from_dict(job_data)
                         except Exception as e:
-                            logger.error(f"Failed to load job {job_id}: {e}")
+                            print(f"Failed to load job {job_id}: {e}")
         except Exception as e:
-            logger.error(f"Failed to load async jobs: {e}")
+            print(f"Failed to load async jobs: {e}")
             
     def _save_jobs(self):
         """Save async jobs to file"""
@@ -201,7 +201,7 @@ class AsyncAPIProcessor:
             with open(self.jobs_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
         except Exception as e:
-            logger.error(f"Failed to save async jobs: {e}")
+            print(f"Failed to save async jobs: {e}")
             
     def get_provider_from_model(self, model: str) -> Optional[str]:
         """Determine provider from model name"""
@@ -460,8 +460,8 @@ class AsyncAPIProcessor:
                 break
         
         if not actual_model:
-            logger.error(f"Model '{model}' is not supported for batch processing!")
-            logger.error(f"Supported models: {list(supported_batch_models.values())}")
+            print(f"Model '{model}' is not supported for batch processing!")
+            print(f"Supported models: {list(supported_batch_models.values())}")
             raise ValueError(f"Model '{model}' is not supported for OpenAI Batch API")
         
         logger.info(f"Using batch-supported model: '{actual_model}' (from '{model}')")
@@ -472,20 +472,20 @@ class AsyncAPIProcessor:
             # Validate messages
             messages = chapter.get('messages', [])
             if not messages:
-                logger.error(f"Chapter {chapter['id']} has no messages!")
+                print(f"Chapter {chapter['id']} has no messages!")
                 continue
                 
             # Ensure all messages have required fields
             valid_messages = []
             for msg in messages:
                 if not msg.get('role') or not msg.get('content'):
-                    logger.warning(f"Skipping invalid message: {msg}")
+                    print(f"Skipping invalid message: {msg}")
                     continue
                 
                 # Ensure content is string and not empty
                 content = str(msg['content']).strip()
                 if not content:
-                    logger.warning(f"Skipping message with empty content")
+                    print(f"Skipping message with empty content")
                     continue
                     
                 valid_messages.append({
@@ -494,7 +494,7 @@ class AsyncAPIProcessor:
                 })
             
             if not valid_messages:
-                logger.error(f"No valid messages for chapter {chapter['id']}")
+                print(f"No valid messages for chapter {chapter['id']}")
                 continue
             
             request = {
@@ -510,9 +510,9 @@ class AsyncAPIProcessor:
             }
             # LOG THE FIRST REQUEST COMPLETELY
             if len(requests) == 0:
-                logger.error(f"=== FIRST REQUEST ===")
-                logger.error(json.dumps(request, indent=2))
-                logger.error(f"=== END FIRST REQUEST ===")
+                print(f"=== FIRST REQUEST ===")
+                print(json.dumps(request, indent=2))
+                print(f"=== END FIRST REQUEST ===")
             
             requests.append(request)
             
@@ -715,7 +715,7 @@ class AsyncAPIProcessor:
                     os.unlink(temp_path)
                 
         except Exception as e:
-            logger.error(f"OpenAI batch submission failed: {e}")
+            print(f"OpenAI batch submission failed: {e}")
             raise
             
     def _submit_anthropic_batch_sync(self, batch_data: Dict[str, Any], model: str, api_key: str) -> AsyncJobInfo:
@@ -753,7 +753,7 @@ class AsyncAPIProcessor:
             return job
             
         except Exception as e:
-            logger.error(f"Anthropic batch submission failed: {e}")
+            print(f"Anthropic batch submission failed: {e}")
             raise
             
     def check_job_status(self, job_id: str) -> AsyncJobInfo:
@@ -772,14 +772,14 @@ class AsyncAPIProcessor:
             elif provider == 'anthropic':
                 self._check_anthropic_status(job)
             else:
-                logger.warning(f"Unknown provider: {provider}")
+                print(f"Unknown provider: {provider}")
                 
             # Update timestamp
             job.updated_at = datetime.now()
             self._save_jobs()
             
         except Exception as e:
-            logger.error(f"Error checking job status: {e}")
+            print(f"Error checking job status: {e}")
             job.metadata['last_error'] = str(e)
             
         return job
@@ -838,7 +838,7 @@ class AsyncAPIProcessor:
                     
             except Exception as sdk_error:
                 # Fallback to REST API if SDK fails
-                logger.warning(f"Gemini SDK failed, trying REST API: {sdk_error}")
+                print(f"Gemini SDK failed, trying REST API: {sdk_error}")
                 
                 api_key = self._get_api_key()
                 headers = {'x-goog-api-key': api_key}
@@ -890,10 +890,10 @@ class AsyncAPIProcessor:
                         if 'responsesFile' in data.get('response', {}):
                             job.output_file = data['response']['responsesFile']
                 else:
-                    logger.error(f"Gemini status check failed: {response.status_code} - {response.text}")
+                    print(f"Gemini status check failed: {response.status_code} - {response.text}")
                     
         except Exception as e:
-            logger.error(f"Gemini status check failed: {e}")
+            print(f"Gemini status check failed: {e}")
             if not job.metadata:
                 job.metadata = {}
             job.metadata['last_error'] = str(e)
@@ -910,7 +910,7 @@ class AsyncAPIProcessor:
             )
             
             if response.status_code != 200:
-                logger.error(f"Status check failed: {response.text}")
+                print(f"Status check failed: {response.text}")
                 return
                 
             data = response.json()
@@ -953,7 +953,7 @@ class AsyncAPIProcessor:
             if data['status'] == 'completed':
                 # Check if all requests failed
                 if job.failed_requests > 0 and job.completed_requests == 0:
-                    logger.warning(f"OpenAI job completed but all {job.failed_requests} requests failed")
+                    print(f"OpenAI job completed but all {job.failed_requests} requests failed")
                     job.status = AsyncAPIStatus.FAILED
                     job.metadata['all_failed'] = True
                     
@@ -970,16 +970,16 @@ class AsyncAPIProcessor:
                         # If there were also failures, note that
                         if job.failed_requests > 0:
                             job.metadata['partial_failure'] = True
-                            logger.warning(f"Job completed with {job.failed_requests} failed requests out of {job.total_requests}")
+                            print(f"Job completed with {job.failed_requests} failed requests out of {job.total_requests}")
                     else:
-                        logger.error(f"OpenAI job marked as completed but no output_file_id found: {data}")
+                        print(f"OpenAI job marked as completed but no output_file_id found: {data}")
                         
             # Always store error file if present
             if data.get('error_file_id'):
                 job.metadata['error_file_id'] = data['error_file_id']
                 
         except Exception as e:
-            logger.error(f"OpenAI status check failed: {e}")
+            print(f"OpenAI status check failed: {e}")
             if not job.metadata:
                 job.metadata = {}
             job.metadata['last_error'] = str(e)
@@ -1000,7 +1000,7 @@ class AsyncAPIProcessor:
             )
             
             if response.status_code != 200:
-                logger.error(f"Status check failed: {response.text}")
+                print(f"Status check failed: {response.text}")
                 return
                 
             data = response.json()
@@ -1033,7 +1033,7 @@ class AsyncAPIProcessor:
                 job.output_file = data['results_url']
                 
         except Exception as e:
-            logger.error(f"Anthropic status check failed: {e}")
+            print(f"Anthropic status check failed: {e}")
             if not job.metadata:
                 job.metadata = {}
             job.metadata['last_error'] = str(e)
@@ -1059,13 +1059,13 @@ class AsyncAPIProcessor:
         
         # If output file is missing, try to refresh status first
         if not job.output_file:
-            logger.warning(f"No output file for completed job {job_id}, refreshing status...")
+            print(f"No output file for completed job {job_id}, refreshing status...")
             self.check_job_status(job_id)
             
             # Re-check after status update
             if not job.output_file:
                 # Log the job details for debugging
-                logger.error(f"Job details: {json.dumps(job.to_dict(), indent=2)}")
+                print(f"Job details: {json.dumps(job.to_dict(), indent=2)}")
                 raise ValueError(f"No output file available for job {job_id} even after status refresh")
         
         provider = job.provider
@@ -1161,7 +1161,7 @@ class AsyncAPIProcessor:
                 "Run: pip install google-genai"
             )
         except Exception as e:
-            logger.error(f"Failed to retrieve Gemini results: {e}")
+            print(f"Failed to retrieve Gemini results: {e}")
             raise
  
     def _retrieve_openai_results(self, job: AsyncJobInfo) -> List[Dict[str, Any]]:
@@ -1199,15 +1199,15 @@ class AsyncAPIProcessor:
                                 'finish_reason': result['response']['body']['choices'][0].get('finish_reason', 'stop')
                             })
                         else:
-                            logger.warning(f"Unexpected result format: {result}")
+                            print(f"Unexpected result format: {result}")
                     except json.JSONDecodeError as e:
-                        logger.error(f"Failed to parse result line: {line} - {e}")
+                        print(f"Failed to parse result line: {line} - {e}")
                         
             return results
             
         except Exception as e:
-            logger.error(f"Failed to retrieve OpenAI results: {e}")
-            logger.error(f"Job details: {json.dumps(job.to_dict(), indent=2)}")
+            print(f"Failed to retrieve OpenAI results: {e}")
+            print(f"Job details: {json.dumps(job.to_dict(), indent=2)}")
             raise
         
     def _retrieve_anthropic_results(self, job: AsyncJobInfo) -> List[Dict[str, Any]]:
@@ -1678,7 +1678,7 @@ class AsyncProcessingDialog:
                                 self.progress_label.config(text="0% (Waiting)")
                         
                         # Log selection
-                        self._log(f"Selected job: {job_id[:30]}... - Status: {job.status.value}")
+                        logger.info(f"Selected job: {job_id[:30]}... - Status: {job.status.value}")
                     
                     break
                     
@@ -2045,10 +2045,10 @@ class AsyncProcessingDialog:
                         overhead_tokens += glossary_tokens
                         logger.info(f"Loaded glossary with {glossary_tokens} tokens")
                     else:
-                        logger.warning(f"Glossary file not found: {glossary_path}")
+                        print(f"Glossary file not found: {glossary_path}")
                         
                 except Exception as e:
-                    logger.warning(f"Failed to load glossary: {e}")
+                    print(f"Failed to load glossary: {e}")
             
             logger.info(f"Total overhead per chapter: {overhead_tokens} tokens")
             
@@ -2107,7 +2107,7 @@ class AsyncProcessingDialog:
                         avg_content_tokens_per_chapter = 15000  # Default
                         
                 except Exception as e:
-                    logger.warning(f"Failed to analyze EPUB: {e}")
+                    print(f"Failed to analyze EPUB: {e}")
                     # Fall back to estimates
                     num_chapters = 50
                     avg_content_tokens_per_chapter = 15000
@@ -2151,7 +2151,7 @@ class AsyncProcessingDialog:
                         avg_content_tokens_per_chapter = 15000  # Default
                         
                 except Exception as e:
-                    logger.warning(f"Failed to analyze TXT: {e}")
+                    print(f"Failed to analyze TXT: {e}")
                     # Fall back to estimates
                     num_chapters = 50
                     avg_content_tokens_per_chapter = 15000
@@ -2228,7 +2228,7 @@ class AsyncProcessingDialog:
             self.cost_info_label.config(
                 text=f"Error estimating cost: {str(e)}"
             )
-            logger.error(f"Cost estimation error: {traceback.format_exc()}")
+            print(f"Cost estimation error: {traceback.format_exc()}")
 
     def count_tokens(self, text, model):
         """Count tokens in text (content only - system prompt and glossary are counted separately)"""
@@ -2391,7 +2391,7 @@ class AsyncProcessingDialog:
                 
         except Exception as e:
             self._log(f"❌ Error: {str(e)}")
-            logger.error(f"Async processing error: {traceback.format_exc()}")
+            print(f"Async processing error: {traceback.format_exc()}")
             self._show_error(f"Failed to start async processing: {str(e)}")
         finally:
             # Re-enable button
@@ -2570,11 +2570,11 @@ class AsyncProcessingDialog:
                                     raw_chapters.append((chapter_num, chapter_text, html_file))
                                     
                             except Exception as e:
-                                logger.warning(f"Error reading {html_file}: {e}")
+                                print(f"Error reading {html_file}: {e}")
                                 continue
                                 
                 except Exception as e:
-                    logger.error(f"Failed to read EPUB as ZIP: {e}")
+                    print(f"Failed to read EPUB as ZIP: {e}")
                     raise ValueError(f"Cannot read EPUB file: {str(e)}")
                     
             elif file_path.lower().endswith('.txt'):
@@ -2626,7 +2626,7 @@ class AsyncProcessingDialog:
                 }
                 
         except Exception as e:
-            logger.error(f"Failed to extract chapters: {e}")
+            print(f"Failed to extract chapters: {e}")
             raise
             
         # Return both chapters and mapping
@@ -2750,11 +2750,11 @@ class AsyncProcessingDialog:
                 logger.info(f"Sample glossary entries: {entries}")
                 
             except FileNotFoundError:
-                logger.warning(f"Glossary file not found: {env_vars.get('MANUAL_GLOSSARY')}")
+                print(f"Glossary file not found: {env_vars.get('MANUAL_GLOSSARY')}")
             except json.JSONDecodeError:
-                logger.warning(f"Invalid JSON in glossary file")
+                print(f"Invalid JSON in glossary file")
             except Exception as e:
-                logger.warning(f"Failed to load glossary: {e}")
+                print(f"Failed to load glossary: {e}")
         else:
             # Log why glossary wasn't added
             if not env_vars.get('MANUAL_GLOSSARY'):
@@ -2913,11 +2913,11 @@ class AsyncProcessingDialog:
             return job
             
         except ImportError:
-            logger.error("Google Gen AI SDK not installed. Run: pip install google-genai")
+            print("Google Gen AI SDK not installed. Run: pip install google-genai")
             raise Exception("Google Gen AI SDK not installed. Please run: pip install google-genai")
         except Exception as e:
-            logger.error(f"Gemini batch submission failed: {e}")
-            logger.error(f"Full error: {traceback.format_exc()}")
+            print(f"Gemini batch submission failed: {e}")
+            print(f"Full error: {traceback.format_exc()}")
             raise
 
     def _submit_mistral_batch_sync(self, batch_data, model, api_key):
@@ -2962,7 +2962,7 @@ class AsyncProcessingDialog:
             return job
             
         except Exception as e:
-            logger.error(f"Mistral batch submission failed: {e}")
+            print(f"Mistral batch submission failed: {e}")
             raise
 
     def _submit_groq_batch_sync(self, batch_data, model, api_key):
@@ -3253,7 +3253,7 @@ class AsyncProcessingDialog:
                 )
             
         except Exception as e:
-            logger.error(f"Failed to retrieve error details: {e}")
+            print(f"Failed to retrieve error details: {e}")
  
     def _extract_chapter_number(self, custom_id):
         """Extract chapter number from custom ID"""
@@ -3263,24 +3263,32 @@ class AsyncProcessingDialog:
         return 0
 
     # Helper methods for thread-safe UI updates
-    def _log(self, message):
-        """Thread-safe logging"""
-        self.dialog.after(0, lambda: self._update_info_label(message))
-        logger.info(message)
+    def _log(self, message, level="info"):
+        """Thread-safe logging to GUI"""
+        # Log based on level
+        if level == "error":
+            print(f"❌ {message}")  # This will show in GUI
+        elif level == "warning":
+            print(f"⚠️ {message}")  # This will show in GUI
+        else:
+            logger.info(message)  # This only goes to log file
+            # Also display info messages in GUI
+            if hasattr(self.gui, 'append_log'):
+                self.dialog.after(0, lambda: self.gui.append_log(message))
 
     def _show_error(self, message):
         """Thread-safe error dialog"""
+        self._log(f"Error: {message}", level="error")
         self.dialog.after(0, lambda: messagebox.showerror("Error", message))
 
     def _show_info(self, title, message):
         """Thread-safe info dialog"""
+        self._log(f"{title}: {message}", level="info")
         self.dialog.after(0, lambda: messagebox.showinfo(title, message))
 
-    def _update_info_label(self, message):
-        """Update the info label with status"""
-        # You'd need to add a status label to the dialog for this
-        # For now, just log to console
-        print(f"[Async] {message}")
+    def _show_warning(self, message):
+        """Thread-safe warning display"""
+        self._log(f"Warning: {message}", level="warning")
 
 
 def show_async_processing_dialog(parent, translator_gui):
