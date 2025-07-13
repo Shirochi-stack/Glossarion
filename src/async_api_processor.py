@@ -234,7 +234,7 @@ class AsyncAPIProcessor:
         provider = self.get_provider_from_model(model)
         return provider in self.PROVIDER_CONFIGS
         
-    def estimate_cost(self, num_chapters: int, avg_tokens_per_chapter: int, model: str) -> Tuple[float, float]:
+    def estimate_cost(self, num_chapters: int, avg_tokens_per_chapter: int, model: str, compression_factor: float = 1.0) -> Tuple[float, float]:
         """Estimate costs for async vs regular processing
         
         Returns:
@@ -378,7 +378,7 @@ class AsyncAPIProcessor:
         
         # Calculate total tokens
         # For translation: output is typically 1.2-1.5x input length
-        output_multiplier = 1.3  # Conservative estimate
+        output_multiplier = compression_factor   # Conservative estimate
         total_tokens_per_chapter = avg_tokens_per_chapter * (1 + output_multiplier)
         total_tokens = num_chapters * total_tokens_per_chapter
         
@@ -2176,11 +2176,15 @@ class AsyncProcessingDialog:
             # Add overhead to get total average tokens per chapter
             avg_total_tokens_per_chapter = avg_content_tokens_per_chapter + overhead_tokens
             
+            # Get the translation compression factor from GUI
+            compression_factor = float(self.gui.compression_factor_var.get() or 1.0)
+            
             # Get accurate cost estimate
             async_cost, regular_cost = self.processor.estimate_cost(
                 processable_chapters, 
                 avg_total_tokens_per_chapter,  # Now includes content + system prompt + glossary
-                model
+                model,
+                compression_factor
             )
             
             # Update any existing jobs for this file with the accurate estimate
@@ -2220,7 +2224,8 @@ class AsyncProcessingDialog:
             
             # Add note about token calculation
             cost_text += f"\n\nNote: Costs include input (~{avg_total_tokens_per_chapter:,}) and "
-            cost_text += f"output (~{int(avg_total_tokens_per_chapter * 1.3):,}) tokens per chapter."
+            cost_text += f"output (~{int(avg_content_tokens_per_chapter * compression_factor):,}) tokens per chapter."
+
             
             self.cost_info_label.config(text=cost_text)
             
@@ -3223,7 +3228,7 @@ class AsyncProcessingDialog:
             
             # Download error file
             response = requests.get(
-                f'https://api.openai.com/v1/files/{job.metadata['error_file_id']}/content',
+                f'https://api.openai.com/v1/files/{job.metadata["error_file_id"]}/content',
                 headers=headers
             )
             
