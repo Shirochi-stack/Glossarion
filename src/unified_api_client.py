@@ -476,7 +476,7 @@ class UnifiedClient:
         # Estimate tokens (rough approximation)
         estimated_tokens = total_chars / 4
         if estimated_tokens > max_tokens * 2:
-            logger.warning(f"Request might be too long: ~{estimated_tokens} tokens vs {max_tokens} max")
+            print(f"Request might be too long: ~{estimated_tokens} tokens vs {max_tokens} max")
         
         # Check for valid roles
         valid_roles = {'system', 'user', 'assistant'}
@@ -509,7 +509,7 @@ class UnifiedClient:
             with open(stats_file, 'w') as f:
                 json.dump(self.stats, f, indent=2)
         except Exception as e:
-            logger.error(f"Failed to save stats: {e}")
+            print(f"Failed to save stats: {e}")
     
     def _save_failed_request(self, messages, error, context, response=None):
         """Save failed requests for debugging"""
@@ -537,7 +537,7 @@ class UnifiedClient:
     
     def _handle_empty_result(self, messages, context, error_info):
         """Handle empty results with context-aware fallbacks"""
-        logger.warning(f"Handling empty result for context: {context}, error: {error_info}")
+        print(f"Handling empty result for context: {context}, error: {error_info}")
         
         if context == 'glossary':
             # Return empty but valid JSON
@@ -626,7 +626,7 @@ class UnifiedClient:
             if self.client_type == 'electronhub' and debug_info['system_prompt_present']:
                 logger.info(f"ElectronHub payload saved with system prompt ({debug_info['system_prompt_length']} chars)")
         except Exception as e:
-            logger.error(f"Failed to save payload: {e}")
+            print(f"Failed to save payload: {e}")
     
 
     def _save_response(self, content: str, filename: str):
@@ -669,7 +669,7 @@ class UnifiedClient:
             logger.debug(f"Saved JSON payload to: {filepath}")
             
         except Exception as e:
-            logger.warning(f"Failed to save response to {filename}: {e}")
+            print(f"Failed to save response to {filename}: {e}")
             # Don't raise - this is not critical functionality
 
     def set_output_filename(self, filename: str):
@@ -769,7 +769,7 @@ class UnifiedClient:
             
             # Handle empty responses
             if response.is_error or not response.content or response.content.strip() in ["", "[]"]:
-                logger.warning(f"Empty or error response: {response.finish_reason}")
+                print(f"Empty or error response: {response.finish_reason}")
                 self._save_failed_request(messages, "Empty response", context, response.raw_response)
                 # ALWAYS log these failures too
                 self._log_truncation_failure(
@@ -790,7 +790,7 @@ class UnifiedClient:
             
             # Log important info for retry mechanisms
             if response.is_truncated:
-                logger.warning(f"Response was truncated: {response.finish_reason}")
+                print(f"Response was truncated: {response.finish_reason}")
                 print(f"⚠️ Response truncated (finish_reason: {response.finish_reason})")
                 
                 # ALWAYS log truncation failures
@@ -814,7 +814,7 @@ class UnifiedClient:
                 # Re-raise so send_with_interrupt can handle it
                 raise
             
-            logger.error(f"UnifiedClient error: {e}")
+            print(f"UnifiedClient error: {e}")
             self._save_failed_request(messages, e, context)
             self._track_stats(context, False, type(e).__name__, time.time() - start_time)
             
@@ -823,7 +823,7 @@ class UnifiedClient:
             return fallback_content, 'error'
             
         except Exception as e:
-            logger.error(f"Unexpected error: {e}")
+            print(f"Unexpected error: {e}")
             self._save_failed_request(messages, e, context)
             self._track_stats(context, False, "unexpected_error", time.time() - start_time)
             
@@ -980,7 +980,7 @@ class UnifiedClient:
                     last_word = words[-1]
                     # Check for common incomplete patterns
                     if len(last_word) > 2 and last_word[-1].isalpha():
-                        logger.warning(f"Possible silent truncation detected: incomplete sentence ending")
+                        print(f"Possible silent truncation detected: incomplete sentence ending")
                         return True
         
         # Pattern 2: Check for significantly short responses
@@ -988,7 +988,7 @@ class UnifiedClient:
             # Estimate expected length based on input
             input_length = sum(len(msg.get('content', '')) for msg in messages if msg.get('role') == 'user')
             if input_length > 500 and len(content_stripped) < input_length * 0.3:
-                logger.warning(f"Possible silent truncation: output ({len(content_stripped)} chars) much shorter than input ({input_length} chars)")
+                print(f"Possible silent truncation: output ({len(content_stripped)} chars) much shorter than input ({input_length} chars)")
                 return True
         
         # Pattern 3: Check for incomplete HTML/XML structures
@@ -997,7 +997,7 @@ class UnifiedClient:
             opening_tags = content.count('<') - content.count('</')
             closing_tags = content.count('</')
             if opening_tags > closing_tags + 2:  # Allow small mismatch
-                logger.warning(f"Possible silent truncation: unclosed HTML tags detected")
+                print(f"Possible silent truncation: unclosed HTML tags detected")
                 return True
         
         # Pattern 4: Check for mature content indicators followed by abrupt ending
@@ -1012,20 +1012,20 @@ class UnifiedClient:
                 indicator_pos = content_lower.rfind(indicator)
                 remaining_content = content_stripped[indicator_pos + len(indicator):]
                 if len(remaining_content) < 50:  # Very little content after indicator
-                    logger.warning(f"Possible censorship truncation: content ends shortly after '{indicator}'")
+                    print(f"Possible censorship truncation: content ends shortly after '{indicator}'")
                     return True
         
         # Pattern 5: Check for incomplete code blocks or quotes
         if '```' in content:
             code_block_count = content.count('```')
             if code_block_count % 2 != 0:  # Odd number means unclosed
-                logger.warning(f"Possible silent truncation: unclosed code block")
+                print(f"Possible silent truncation: unclosed code block")
                 return True
         
         # Pattern 6: For glossary context, check for incomplete JSON
         if context == 'glossary' and content_stripped.startswith('['):
             if not content_stripped.endswith(']') and not content_stripped.endswith('],'):
-                logger.warning(f"Possible silent truncation: incomplete JSON array")
+                print(f"Possible silent truncation: incomplete JSON array")
                 return True
         
         return False
@@ -1042,7 +1042,7 @@ class UnifiedClient:
         
         # Check for silent truncation
         if self._detect_silent_truncation(response.content, messages, context):
-            logger.warning(f"Silent truncation detected for {self.model} via ElectronHub")
+            print(f"Silent truncation detected for {self.model} via ElectronHub")
             
             # Check if it's likely censorship vs length limit
             content_lower = response.content.lower()
@@ -1116,7 +1116,7 @@ class UnifiedClient:
                 break
         else:
             # No prefix found - this shouldn't happen if routing worked correctly
-            logger.warning(f"No ElectronHub prefix found in model '{self.model}', using as-is")
+            print(f"No ElectronHub prefix found in model '{self.model}', using as-is")
             print(f"⚠️ ElectronHub: No prefix found in '{self.model}', using as-is")
         
         # Log the API call details
@@ -1129,7 +1129,7 @@ class UnifiedClient:
                 print(f"📝 ElectronHub: Sending system prompt ({len(msg.get('content', ''))} characters)")
                 break
         else:
-            logger.warning("ElectronHub - No system prompt found in messages")
+            print("ElectronHub - No system prompt found in messages")
             print("⚠️ ElectronHub: No system prompt in messages")
         
         # Check if we should warn about potentially problematic models
@@ -1212,7 +1212,7 @@ class UnifiedClient:
                 
             else:
                 # Re-raise original error with context
-                logger.error(f"ElectronHub API error for model '{actual_model}': {e}")
+                print(f"ElectronHub API error for model '{actual_model}': {e}")
                 raise
                 
         finally:
@@ -1301,7 +1301,7 @@ class UnifiedClient:
             )
             
         except Exception as e:
-            logger.error(f"Poe API error details: {str(e)}")
+            print(f"Poe API error details: {str(e)}")
             # Check for specific errors
             error_str = str(e).lower()
             if "rate limit" in error_str:
@@ -1466,8 +1466,8 @@ class UnifiedClient:
                 finish_reason = choice.finish_reason
                 
                 if not content and finish_reason == 'length':
-                    logger.warning(f"OpenAI vision API returned empty content with finish_reason='length'")
-                    logger.warning(f"This usually means the token limit is too low. Current limit: {params.get('max_completion_tokens') or params.get('max_tokens', 'not set')}")
+                    print(f"OpenAI vision API returned empty content with finish_reason='length'")
+                    print(f"This usually means the token limit is too low. Current limit: {params.get('max_completion_tokens') or params.get('max_tokens', 'not set')}")
                     # Return with error details
                     return UnifiedResponse(
                         content="",
@@ -1529,20 +1529,20 @@ class UnifiedClient:
                     # Send message to GUI
                     print(f"🔄 Model {self.model} requires temperature={default_temp}, retrying...")
                     
-                    logger.warning(f"Model {self.model} requires temperature={default_temp}, will retry...")
+                    print(f"Model {self.model} requires temperature={default_temp}, will retry...")
                     fixes_attempted['temperature'] = True
                     fixes_attempted['temperature_override'] = default_temp
                     should_retry = True
                 
                 # Handle system message constraints reactively
                 elif not fixes_attempted['system_message'] and "system" in error_str.lower() and ("not supported" in error_str or "unsupported" in error_str):
-                    logger.warning(f"Model {self.model} doesn't support system messages, will convert and retry...")
+                    print(f"Model {self.model} doesn't support system messages, will convert and retry...")
                     fixes_attempted['system_message'] = True
                     should_retry = True
                 
                 # Handle max_tokens vs max_completion_tokens reactively
                 elif not fixes_attempted['max_tokens_param'] and "max_tokens" in error_str and ("not supported" in error_str or "unsupported" in error_str):
-                    logger.warning(f"Model {self.model} requires max_completion_tokens instead of max_tokens, will retry...")
+                    print(f"Model {self.model} requires max_completion_tokens instead of max_tokens, will retry...")
                     fixes_attempted['max_tokens_param'] = True
                     should_retry = True
                 
@@ -1550,7 +1550,7 @@ class UnifiedClient:
                 elif "rate limit" in error_str.lower() or "429" in error_str:
                     if attempt < max_retries - 1:
                         wait_time = api_delay * 10
-                        logger.warning(f"Rate limit hit, waiting {wait_time}s before retry")
+                        print(f"Rate limit hit, waiting {wait_time}s before retry")
                         time.sleep(wait_time)
                         continue
                 
@@ -1561,16 +1561,16 @@ class UnifiedClient:
                 
                 # Other errors or no retries left
                 if attempt < max_retries - 1:
-                    logger.warning(f"OpenAI error (attempt {attempt + 1}/{max_retries}): {e}")
+                    print(f"OpenAI error (attempt {attempt + 1}/{max_retries}): {e}")
                     time.sleep(api_delay)
                     continue
                     
-                logger.error(f"OpenAI error after all retries: {e}")
+                print(f"OpenAI error after all retries: {e}")
                 raise UnifiedClientError(f"OpenAI error: {e}", error_type="api_error")
                 
             except Exception as e:
                 if attempt < max_retries - 1:
-                    logger.warning(f"Unexpected error (attempt {attempt + 1}/{max_retries}): {e}")
+                    print(f"Unexpected error (attempt {attempt + 1}/{max_retries}): {e}")
                     time.sleep(api_delay)
                     continue
                 raise UnifiedClientError(f"OpenAI error: {e}", error_type="unknown")
@@ -1674,7 +1674,7 @@ class UnifiedClient:
             with open(config_path, 'w', encoding='utf-8') as f:
                 json.dump(config_data, f, indent=2)
         except Exception as e:
-            logger.warning(f"Could not save safety config: {e}")
+            print(f"Could not save safety config: {e}")
                
         while attempt < attempts:
             try:
@@ -1702,9 +1702,9 @@ class UnifiedClient:
                     if hasattr(feedback, 'block_reason') and feedback.block_reason:
                         error_details['block_reason'] = str(feedback.block_reason)
                         if disable_safety:
-                            logger.warning(f"Content blocked despite safety disabled: {feedback.block_reason}")
+                            print(f"Content blocked despite safety disabled: {feedback.block_reason}")
                         else:
-                            logger.warning(f"Content blocked: {feedback.block_reason}")
+                            print(f"Content blocked: {feedback.block_reason}")
                         raise Exception(f"Content blocked: {feedback.block_reason}")
                 
                 # Extract text
@@ -1714,7 +1714,7 @@ class UnifiedClient:
                         raise Exception("Empty text in response")
                     finish_reason = 'stop'
                 except Exception as text_error:
-                    logger.warning(f"Failed to extract text: {text_error}")
+                    print(f"Failed to extract text: {text_error}")
                     
                     # Try to extract from candidates
                     if hasattr(response, 'candidates') and response.candidates:
@@ -1733,7 +1733,7 @@ class UnifiedClient:
                     break
                     
             except Exception as e:
-                logger.warning(f"Gemini attempt {attempt+1} failed: {e}")
+                print(f"Gemini attempt {attempt+1} failed: {e}")
                 error_details[f'attempt_{attempt+1}'] = str(e)
             
             # Reduce tokens and retry
@@ -1744,7 +1744,7 @@ class UnifiedClient:
                 print(f"🔄 Retrying Gemini with reduced tokens: {current_tokens}")
 
         if not result:
-            logger.error("All Gemini retries failed")
+            print("All Gemini retries failed")
             self._log_truncation_failure(
                 messages=messages,
                 response_content="",
@@ -1832,13 +1832,13 @@ class UnifiedClient:
                 if resp.status_code == 429:  # Rate limit
                     if attempt < max_retries - 1:
                         wait_time = api_delay * 10
-                        logger.warning(f"Anthropic rate limit hit, waiting {wait_time}s")
+                        print(f"Anthropic rate limit hit, waiting {wait_time}s")
                         time.sleep(wait_time)
                         continue
                 elif resp.status_code != 200:
                     error_msg = f"HTTP {resp.status_code}: {resp.text}"
                     if attempt < max_retries - 1:
-                        logger.warning(f"Anthropic API error (attempt {attempt + 1}): {error_msg}")
+                        print(f"Anthropic API error (attempt {attempt + 1}): {error_msg}")
                         time.sleep(api_delay)
                         continue
                     raise UnifiedClientError(error_msg, http_status=resp.status_code)
@@ -1880,10 +1880,10 @@ class UnifiedClient:
                 
             except requests.RequestException as e:
                 if attempt < max_retries - 1:
-                    logger.warning(f"Anthropic API error (attempt {attempt + 1}): {e}")
+                    print(f"Anthropic API error (attempt {attempt + 1}): {e}")
                     time.sleep(api_delay)
                     continue
-                logger.error(f"Anthropic API error after all retries: {e}")
+                print(f"Anthropic API error after all retries: {e}")
                 raise UnifiedClientError(f"Anthropic API error: {e}")
     
     def _send_mistral(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
@@ -1922,10 +1922,10 @@ class UnifiedClient:
                     
                 except Exception as e:
                     if attempt < max_retries - 1:
-                        logger.warning(f"Mistral SDK error (attempt {attempt + 1}): {e}")
+                        print(f"Mistral SDK error (attempt {attempt + 1}): {e}")
                         time.sleep(api_delay)
                         continue
-                    logger.error(f"Mistral SDK error after all retries: {e}")
+                    print(f"Mistral SDK error after all retries: {e}")
                     raise UnifiedClientError(f"Mistral SDK error: {e}")
         else:
             # Use HTTP API
@@ -1982,10 +1982,10 @@ class UnifiedClient:
                     
                 except Exception as e:
                     if attempt < max_retries - 1:
-                        logger.warning(f"Cohere SDK error (attempt {attempt + 1}): {e}")
+                        print(f"Cohere SDK error (attempt {attempt + 1}): {e}")
                         time.sleep(api_delay)
                         continue
-                    logger.error(f"Cohere SDK error after all retries: {e}")
+                    print(f"Cohere SDK error after all retries: {e}")
                     raise UnifiedClientError(f"Cohere SDK error: {e}")
         else:
             # Use HTTP API with retry logic
@@ -2039,10 +2039,10 @@ class UnifiedClient:
                     
                 except Exception as e:
                     if attempt < max_retries - 1:
-                        logger.warning(f"Cohere API error (attempt {attempt + 1}): {e}")
+                        print(f"Cohere API error (attempt {attempt + 1}): {e}")
                         time.sleep(api_delay)
                         continue
-                    logger.error(f"Cohere API error after all retries: {e}")
+                    print(f"Cohere API error after all retries: {e}")
                     raise UnifiedClientError(f"Cohere API error: {e}")
     
     def _send_ai21(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
@@ -2090,7 +2090,7 @@ class UnifiedClient:
                     if resp.status_code == 429:  # Rate limit
                         if attempt < max_retries - 1:
                             wait_time = api_delay * 10
-                            logger.warning(f"AI21 rate limit hit, waiting {wait_time}s")
+                            print(f"AI21 rate limit hit, waiting {wait_time}s")
                             time.sleep(wait_time)
                             continue
                     raise UnifiedClientError(error_msg)
@@ -2113,10 +2113,10 @@ class UnifiedClient:
                 
             except requests.RequestException as e:
                 if attempt < max_retries - 1:
-                    logger.warning(f"AI21 API error (attempt {attempt + 1}): {e}")
+                    print(f"AI21 API error (attempt {attempt + 1}): {e}")
                     time.sleep(api_delay)
                     continue
-                logger.error(f"AI21 API error after all retries: {e}")
+                print(f"AI21 API error after all retries: {e}")
                 raise UnifiedClientError(f"AI21 API error: {e}")
     
     def _send_together(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
@@ -2176,13 +2176,13 @@ class UnifiedClient:
                 if resp.status_code == 429:  # Rate limit
                     if attempt < max_retries - 1:
                         wait_time = api_delay * 10
-                        logger.warning(f"Perplexity rate limit hit, waiting {wait_time}s")
+                        print(f"Perplexity rate limit hit, waiting {wait_time}s")
                         time.sleep(wait_time)
                         continue
                 elif resp.status_code != 200:
                     error_msg = f"Perplexity API error: {resp.status_code} - {resp.text}"
                     if attempt < max_retries - 1:
-                        logger.warning(f"{error_msg} (attempt {attempt + 1})")
+                        print(f"{error_msg} (attempt {attempt + 1})")
                         time.sleep(api_delay)
                         continue
                     raise UnifiedClientError(error_msg, http_status=resp.status_code)
@@ -2210,10 +2210,10 @@ class UnifiedClient:
                 
             except requests.RequestException as e:
                 if attempt < max_retries - 1:
-                    logger.warning(f"Perplexity API error (attempt {attempt + 1}): {e}")
+                    print(f"Perplexity API error (attempt {attempt + 1}): {e}")
                     time.sleep(api_delay)
                     continue
-                logger.error(f"Perplexity API error after all retries: {e}")
+                print(f"Perplexity API error after all retries: {e}")
                 raise UnifiedClientError(f"Perplexity API error: {e}")
     
     def _send_replicate(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
@@ -2262,13 +2262,13 @@ class UnifiedClient:
                 if resp.status_code == 429:  # Rate limit
                     if attempt < max_retries - 1:
                         wait_time = api_delay * 10
-                        logger.warning(f"Replicate rate limit hit, waiting {wait_time}s")
+                        print(f"Replicate rate limit hit, waiting {wait_time}s")
                         time.sleep(wait_time)
                         continue
                 elif resp.status_code != 201:
                     error_msg = f"Replicate API error: {resp.status_code} - {resp.text}"
                     if attempt < max_retries - 1:
-                        logger.warning(f"{error_msg} (attempt {attempt + 1})")
+                        print(f"{error_msg} (attempt {attempt + 1})")
                         time.sleep(api_delay)
                         continue
                     raise UnifiedClientError(error_msg)
@@ -2320,10 +2320,10 @@ class UnifiedClient:
                 
             except requests.RequestException as e:
                 if attempt < max_retries - 1:
-                    logger.warning(f"Replicate API error (attempt {attempt + 1}): {e}")
+                    print(f"Replicate API error (attempt {attempt + 1}): {e}")
                     time.sleep(api_delay)
                     continue
-                logger.error(f"Replicate API error after all retries: {e}")
+                print(f"Replicate API error after all retries: {e}")
                 raise UnifiedClientError(f"Replicate API error: {e}")
     
     def _send_deepseek(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
@@ -2396,7 +2396,7 @@ class UnifiedClient:
                         if len(content) < 50 and "cannot" in content.lower():
                             # Very short response with "cannot" - likely refused
                             finish_reason = "content_filter"
-                            logger.warning(f"ElectronHub likely refused content: {content[:100]}")
+                            print(f"ElectronHub likely refused content: {content[:100]}")
                             self._log_truncation_failure(
                                 messages=messages,
                                 response_content=content,
@@ -2408,7 +2408,7 @@ class UnifiedClient:
                             # Check if content looks truncated despite "stop" status
                             if self._detect_silent_truncation(content, messages, self.context):
                                 finish_reason = "length"
-                                logger.warning("ElectronHub reported 'stop' but content appears truncated")
+                                print("ElectronHub reported 'stop' but content appears truncated")
                                 print(f"🔍 ElectronHub: Detected silent truncation despite 'stop' status")
                                 self._log_truncation_failure(
                                     messages=messages,
@@ -2443,14 +2443,14 @@ class UnifiedClient:
                     if "rate limit" in str(e).lower() or "429" in str(e):
                         if attempt < max_retries - 1:
                             wait_time = api_delay * 10
-                            logger.warning(f"{provider} rate limit hit, waiting {wait_time}s")
+                            print(f"{provider} rate limit hit, waiting {wait_time}s")
                             time.sleep(wait_time)
                             continue
                     elif attempt < max_retries - 1:
-                        logger.warning(f"{provider} SDK error (attempt {attempt + 1}): {e}")
+                        print(f"{provider} SDK error (attempt {attempt + 1}): {e}")
                         time.sleep(api_delay)
                         continue
-                    logger.error(f"{provider} SDK error after all retries: {e}")
+                    print(f"{provider} SDK error after all retries: {e}")
                     raise UnifiedClientError(f"{provider} SDK error: {e}")
         else:
             # Use HTTP API with retry logic
@@ -2510,13 +2510,13 @@ class UnifiedClient:
                     if resp.status_code == 429:  # Rate limit
                         if attempt < max_retries - 1:
                             wait_time = api_delay * 10
-                            logger.warning(f"{provider} rate limit hit, waiting {wait_time}s")
+                            print(f"{provider} rate limit hit, waiting {wait_time}s")
                             time.sleep(wait_time)
                             continue
                     elif resp.status_code != 200:
                         error_msg = f"{provider} API error: {resp.status_code} - {resp.text}"
                         if attempt < max_retries - 1:
-                            logger.warning(f"{error_msg} (attempt {attempt + 1})")
+                            print(f"{error_msg} (attempt {attempt + 1})")
                             time.sleep(api_delay)
                             continue
                         raise UnifiedClientError(error_msg, http_status=resp.status_code)
@@ -2536,12 +2536,12 @@ class UnifiedClient:
                         if len(content) < 50 and "cannot" in content.lower():
                             # Very short response with "cannot" - likely refused
                             finish_reason = "content_filter"
-                            logger.warning(f"ElectronHub likely refused content: {content[:100]}")
+                            print(f"ElectronHub likely refused content: {content[:100]}")
                         elif finish_reason == "stop":
                             # Check if content looks truncated despite "stop" status
                             if self._detect_silent_truncation(content, messages, self.context):
                                 finish_reason = "length"
-                                logger.warning("ElectronHub reported 'stop' but content appears truncated")
+                                print("ElectronHub reported 'stop' but content appears truncated")
                                 print(f"🔍 ElectronHub: Detected silent truncation despite 'stop' status")                    
                     
                     usage = json_resp.get("usage")
@@ -2563,10 +2563,10 @@ class UnifiedClient:
                     
                 except requests.RequestException as e:
                     if attempt < max_retries - 1:
-                        logger.warning(f"{provider} API error (attempt {attempt + 1}): {e}")
+                        print(f"{provider} API error (attempt {attempt + 1}): {e}")
                         time.sleep(api_delay)
                         continue
-                    logger.error(f"{provider} API error after all retries: {e}")
+                    print(f"{provider} API error after all retries: {e}")
                     raise UnifiedClientError(f"{provider} API error: {e}")
     
     # Provider-specific implementations using generic handler
@@ -2750,7 +2750,7 @@ class UnifiedClient:
             )
             
         except Exception as e:
-            logger.error(f"Azure OpenAI error: {e}")
+            print(f"Azure OpenAI error: {e}")
             raise UnifiedClientError(f"Azure OpenAI error: {e}")
     
     def _send_google_palm(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
@@ -2796,7 +2796,7 @@ class UnifiedClient:
             )
             
         except Exception as e:
-            logger.error(f"Aleph Alpha error: {e}")
+            print(f"Aleph Alpha error: {e}")
             raise UnifiedClientError(f"Aleph Alpha error: {e}")
     
     def _send_databricks(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
@@ -2850,7 +2850,7 @@ class UnifiedClient:
             )
             
         except Exception as e:
-            logger.error(f"HuggingFace error: {e}")
+            print(f"HuggingFace error: {e}")
             raise UnifiedClientError(f"HuggingFace error: {e}")
     
     def _send_salesforce(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
@@ -3012,7 +3012,7 @@ class UnifiedClient:
             
             # Handle empty responses
             if not response.content or response.content.strip() == "":
-                logger.warning(f"Empty response from {self.client_type}")
+                print(f"Empty response from {self.client_type}")
                 
                 # Log empty image responses
                 self._log_truncation_failure(
@@ -3028,7 +3028,7 @@ class UnifiedClient:
             
             # Log truncation for retry mechanism
             if response.is_truncated:
-                logger.warning(f"Image response was truncated: {response.finish_reason}")
+                print(f"Image response was truncated: {response.finish_reason}")
                 print(f"⚠️ Image response truncated (finish_reason: {response.finish_reason})")
                 
                 # Log image truncation failures
@@ -3044,13 +3044,13 @@ class UnifiedClient:
                 
         except UnifiedClientError as e:
             # Re-raise our own errors
-            logger.error(f"Image processing error: {e}")
+            print(f"Image processing error: {e}")
             self._save_failed_request(messages, e, context)
             raise
             
         except Exception as e:
             # Wrap other errors
-            logger.error(f"Unexpected image processing error: {e}", exc_info=True)
+            print(f"Unexpected image processing error: {e}", exc_info=True)
             self._save_failed_request(messages, e, context)
             fallback = self._handle_empty_result(messages, context, str(e))
             return fallback, 'error'
@@ -3149,7 +3149,7 @@ class UnifiedClient:
                 with open(config_path, 'w', encoding='utf-8') as f:
                     json.dump(config_data, f, indent=2)
             except Exception as e:
-                logger.warning(f"Could not save image safety config: {e}")    
+                print(f"Could not save image safety config: {e}")    
                 
             # Decode image
             image_bytes = base64.b64decode(image_base64)
@@ -3178,7 +3178,7 @@ class UnifiedClient:
                 result = response.text
                 finish_reason = 'stop'
             except Exception as e:
-                logger.warning(f"Failed to extract image response text: {e}")
+                print(f"Failed to extract image response text: {e}")
                 result = ""
                 finish_reason = 'error'
                 
@@ -3204,13 +3204,13 @@ class UnifiedClient:
             )
             
         except Exception as e:
-            logger.error(f"Gemini image processing error: {e}")
+            print(f"Gemini image processing error: {e}")
             error_msg = str(e)
             
             # Check for safety blocks
             if "safety" in error_msg.lower() or "blocked" in error_msg.lower():
                 if disable_safety:
-                    logger.warning("Content blocked despite safety settings disabled")
+                    print("Content blocked despite safety settings disabled")
                 return UnifiedResponse(
                     content="",
                     finish_reason='safety',
@@ -3301,7 +3301,7 @@ class UnifiedClient:
             
             # Check for specific o-series model errors
             if "max_tokens" in error_msg and "not supported" in error_msg:
-                logger.error(f"Token parameter error for {self.model}: {error_msg}")
+                print(f"Token parameter error for {self.model}: {error_msg}")
                 logger.info("Retrying without token limits...")
                 
                 # Build new params without token limits
@@ -3327,10 +3327,10 @@ class UnifiedClient:
                         raw_response=response
                     )
                 except Exception as retry_error:
-                    logger.error(f"Retry failed: {retry_error}")
+                    print(f"Retry failed: {retry_error}")
                     raise UnifiedClientError(f"OpenAI Vision API error: {retry_error}")
             
-            logger.error(f"OpenAI Vision API error: {e}")
+            print(f"OpenAI Vision API error: {e}")
             raise UnifiedClientError(f"OpenAI Vision API error: {e}")
     
     def _send_anthropic_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
@@ -3420,7 +3420,7 @@ class UnifiedClient:
             )
             
         except Exception as e:
-            logger.error(f"Anthropic Vision API error: {e}")
+            print(f"Anthropic Vision API error: {e}")
             raise UnifiedClientError(f"Anthropic Vision API error: {e}")
     
     def _send_electronhub_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
@@ -3502,7 +3502,7 @@ class UnifiedClient:
                             error_msg += f" - {response.text}"
                     
                     if attempt < max_retries - 1:
-                        logger.warning(f"{error_msg} (attempt {attempt + 1})")
+                        print(f"{error_msg} (attempt {attempt + 1})")
                         time.sleep(api_delay)
                         continue
                     raise UnifiedClientError(error_msg)
@@ -3529,10 +3529,10 @@ class UnifiedClient:
                 
             except requests.RequestException as e:
                 if attempt < max_retries - 1:
-                    logger.warning(f"ElectronHub Vision API error (attempt {attempt + 1}): {e}")
+                    print(f"ElectronHub Vision API error (attempt {attempt + 1}): {e}")
                     time.sleep(api_delay)
                     continue
-                logger.error(f"ElectronHub Vision API error after all retries: {e}")
+                print(f"ElectronHub Vision API error after all retries: {e}")
                 raise UnifiedClientError(f"ElectronHub Vision API error: {e}")
     
     def _send_poe_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
@@ -3613,7 +3613,7 @@ class UnifiedClient:
                             full_response = chunk['response']
                 except TypeError:
                     # If file_path not supported, try alternative method
-                    logger.warning("file_path parameter not supported, trying without image")
+                    print("file_path parameter not supported, trying without image")
                     # Fall back to text-only
                     for chunk in poe_client.send_message(bot_name, prompt):
                         if 'response' in chunk:
@@ -3627,9 +3627,9 @@ class UnifiedClient:
                     pass
                     
             except Exception as img_error:
-                logger.error(f"Image handling error: {img_error}")
+                print(f"Image handling error: {img_error}")
                 # Fall back to text-only message
-                logger.warning("Falling back to text-only message due to image error")
+                print("Falling back to text-only message due to image error")
                 for chunk in poe_client.send_message(bot_name, prompt):
                     if 'response' in chunk:
                         full_response = chunk['response']
@@ -3650,7 +3650,7 @@ class UnifiedClient:
             )
             
         except Exception as e:
-            logger.error(f"Poe image API error details: {str(e)}")
+            print(f"Poe image API error details: {str(e)}")
             error_str = str(e).lower()
             
             if "rate limit" in error_str:
@@ -3742,7 +3742,7 @@ class UnifiedClient:
             )
             
         except Exception as e:
-            logger.error(f"OpenRouter Vision API error: {e}")
+            print(f"OpenRouter Vision API error: {e}")
             raise UnifiedClientError(f"OpenRouter Vision API error: {e}")
     
     def _send_cohere_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
@@ -3790,7 +3790,7 @@ class UnifiedClient:
             )
             
         except Exception as e:
-            logger.error(f"Cohere Vision API error: {e}")
+            print(f"Cohere Vision API error: {e}")
             raise UnifiedClientError(f"Cohere Vision API error: {e}")
             
     def _log_truncation_failure(self, messages, response_content, finish_reason, context=None, attempts=None, error_details=None):
@@ -4224,7 +4224,7 @@ class UnifiedClient:
             
         except Exception as e:
             # Don't crash the translation just because logging failed
-            logger.error(f"Failed to log truncation failure: {e}")
+            print(f"Failed to log truncation failure: {e}")
 
     def _get_safe_preview(self, messages: List[Dict], max_length: int = 100) -> str:
         """Get a safe preview of the input messages for logging"""
