@@ -95,6 +95,12 @@ class MangaTranslationTab:
         
         # Start update loop
         self._process_updates()
+
+    def _disable_spinbox_mousewheel(self, spinbox):
+        """Disable mousewheel scrolling on a spinbox"""
+        spinbox.bind("<MouseWheel>", lambda e: "break")
+        spinbox.bind("<Button-4>", lambda e: "break")  # Linux scroll up
+        spinbox.bind("<Button-5>", lambda e: "break")  # Linux scroll down
     
     def _build_interface(self):
         """Build the enhanced manga translation interface"""
@@ -621,6 +627,7 @@ class MangaTranslationTab:
         # Also bind to save on manual entry
         font_size_spinbox.bind('<Return>', lambda e: self._save_rendering_settings())
         font_size_spinbox.bind('<FocusOut>', lambda e: self._save_rendering_settings())
+        self._disable_spinbox_mousewheel(font_size_spinbox)
 
         tk.Label(self.fixed_size_frame, text="(0 = Auto)", font=('Arial', 9), fg='gray').pack(side=tk.LEFT)
 
@@ -687,6 +694,8 @@ class MangaTranslationTab:
             command=self._save_rendering_settings
         )
         min_size_spinbox.pack(side=tk.LEFT, padx=10)
+        self._disable_spinbox_mousewheel(min_size_spinbox)
+
 
         tk.Label(
             min_size_frame, 
@@ -712,6 +721,7 @@ class MangaTranslationTab:
             command=self._save_rendering_settings
         )
         max_size_spinbox.pack(side=tk.LEFT, padx=10)
+        self._disable_spinbox_mousewheel(max_size_spinbox)
 
         tk.Label(
             max_size_frame, 
@@ -768,6 +778,11 @@ class MangaTranslationTab:
         )
         self.font_combo.pack(side=tk.LEFT, padx=10)
         self.font_combo.bind('<<ComboboxSelected>>', self._on_font_selected)
+
+        # Disable mousewheel scrolling completely
+        self.font_combo.bind("<MouseWheel>", lambda e: "break")
+        self.font_combo.bind("<Button-4>", lambda e: "break")  # Linux scroll up
+        self.font_combo.bind("<Button-5>", lambda e: "break")  # Linux scroll down
         
 # Font color selection
         color_frame = tk.Frame(render_frame)
@@ -898,6 +913,7 @@ class MangaTranslationTab:
         x_spinbox.pack(side=tk.LEFT)
         x_spinbox.bind('<Return>', lambda e: self._save_rendering_settings())
         x_spinbox.bind('<FocusOut>', lambda e: self._save_rendering_settings())
+        self._disable_spinbox_mousewheel(x_spinbox)
         
         # Y offset
         y_frame = tk.Frame(offset_frame)
@@ -908,6 +924,7 @@ class MangaTranslationTab:
         y_spinbox.pack(side=tk.LEFT)
         y_spinbox.bind('<Return>', lambda e: self._save_rendering_settings())
         y_spinbox.bind('<FocusOut>', lambda e: self._save_rendering_settings())
+        self._disable_spinbox_mousewheel(y_spinbox)
         
         # Shadow blur
         blur_frame = tk.Frame(self.shadow_controls)
@@ -1637,15 +1654,15 @@ class MangaTranslationTab:
         dialog = self.main_gui.wm.create_simple_dialog(
             self.main_gui.master,
             "Replicate API Key",
-            width=400,
-            height=200,
+            width=None,
+            height=None,
             hide_initially=True  # Hide initially so we can position it
         )
         
         # Force the height by overriding after creation
         dialog.update_idletasks()  # Process pending geometry
-        dialog.minsize(400, 200)   # Set minimum size
-        dialog.maxsize(720, 250)   # Set maximum size to lock it
+        dialog.minsize(None, None)   # Set minimum size
+        dialog.maxsize(None, None)   # Set maximum size to lock it
         
         # Get cursor position
         cursor_x = self.main_gui.master.winfo_pointerx()
@@ -1684,7 +1701,7 @@ class MangaTranslationTab:
         entry_frame = tk.Frame(frame)
         entry_frame.pack(fill='x')
         
-        entry = tk.Entry(entry_frame, textvariable=api_key_var, show='*', width=35)
+        entry = tk.Entry(entry_frame, textvariable=api_key_var, show='*', width=20)
         entry.pack(side='left', fill='x', expand=True)
         
         # Toggle show/hide
