@@ -14,7 +14,6 @@ tqdm
 langdetect
 
 # AI/API Clients
-google-generativeai
 openai==1.94.0
 anthropic
 mistralai
