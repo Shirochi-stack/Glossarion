@@ -782,7 +782,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.3.0"
+        __version__ = "3.3.2"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -856,7 +856,14 @@ class TranslatorGUI:
                     json.dump(self.config, f, ensure_ascii=False, indent=2)
             except Exception as e:
                 print(f"Warning: Could not save config.json: {e}")
-        
+
+        # After loading config, check for Google Cloud credentials
+        if self.config.get('google_cloud_credentials'):
+            creds_path = self.config['google_cloud_credentials']
+            if os.path.exists(creds_path):
+                os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = creds_path
+                # Log will be added after GUI is created
+            
         if 'force_ncx_only' not in self.config:
             self.config['force_ncx_only'] = True
             
@@ -872,6 +879,7 @@ class TranslatorGUI:
         self.auto_update_check_var = tk.BooleanVar(value=self.config.get('auto_update_check', True))
         self.force_ncx_only_var = tk.BooleanVar(value=self.config.get('force_ncx_only', True))      
         self.max_output_tokens = self.config.get('max_output_tokens', self.max_output_tokens)
+        self.master.after(500, lambda: self.on_model_change() if hasattr(self, 'model_var') else None)
         
         # Async processing settings
         self.async_wait_for_completion_var = tk.BooleanVar(value=False)
@@ -903,7 +911,7 @@ class TranslatorGUI:
                 "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use an easy to read and grammatically accurate comedy translation style.\n"
                 "- Retain honorifics like -nim, -ssi.\n"
-                "- Never guess a character's pronouns; always use gender neutral pronouns like they/them (and keep 'I' neutral in first-person) unless gender is specifically implied or mentioned in a glossary.\n"
+                "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Korean quotation marks (" ", ' ', 「」, 『』) as-is without converting to English quotes.\n"
@@ -913,7 +921,7 @@ class TranslatorGUI:
                 "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use an easy to read and grammatically accurate comedy translation style.\n"
                 "- Retain honorifics like -san, -sama, -chan, -kun.\n"
-                "- Never guess a character's pronouns; always use gender neutral pronouns like they/them (and keep 'I' neutral in first-person) unless gender is specifically implied or mentioned in a glossary.\n"
+                "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Japanese quotation marks (「」 and 『』) as-is without converting to English quotes.\n"
@@ -922,7 +930,7 @@ class TranslatorGUI:
             "chinese": (
                 "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use an easy to read and grammatically accurate comedy translation style.\n"
-                "- Never guess a character's pronouns; always use gender neutral pronouns like they/them (and keep 'I' neutral in first-person) unless gender is specifically implied or mentioned in a glossary.\n"
+                "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Chinese quotation marks (「」 for dialogue, 《》 for titles) as-is without converting to English quotes.\n"
@@ -932,39 +940,39 @@ class TranslatorGUI:
                 "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use an easy to read and grammatically accurate comedy translation style.\n"
                 "- Retain honorifics like -nim, -ssi.\n"
-                "- Never guess a character's pronouns; always use gender neutral pronouns like they/them (and keep 'I' neutral in first-person) unless gender is specifically implied or mentioned in a glossary.\n"
+                "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Korean quotation marks (" ", ' ', 「」, 『』) as-is without converting to English quotes.\n"
                 "- Add HTML tags for proper formatting as expected of a novel.\n"
-                "- Wrap every paragraph in <p> tags with an inline CSS first‐line indent of 1em (e.g. <p style=\"text-indent:1em;\">…</p>); do not insert any literal tabs or spaces."
+                "- Wrap every paragraph in <p> tags; do not insert any literal tabs or spaces."
             ),
             "japanese_OCR": (
                 "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use an easy to read and grammatically accurate comedy translation style.\n"
                 "- Retain honorifics like -san, -sama, -chan, -kun.\n"
-                "- Never guess a character's pronouns; always use gender neutral pronouns like they/them (and keep 'I' neutral in first-person) unless gender is specifically implied or mentioned in a glossary.\n"
+                "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Japanese quotation marks (「」 and 『』) as-is without converting to English quotes.\n"
                 "- Add HTML tags for proper formatting as expected of a novel.\n"
-                "- Wrap every paragraph in <p> tags with an inline CSS first‐line indent of 1em (e.g. <p style=\"text-indent:1em;\">…</p>); do not insert any literal tabs or spaces."
+                "- Wrap every paragraph in <p> tags; do not insert any literal tabs or spaces."
             ),
             "chinese_OCR": (
                 "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use an easy to read and grammatically accurate comedy translation style.\n"
-                "- Never guess a character's pronouns; always use gender neutral pronouns like they/them (and keep 'I' neutral in first-person) unless gender is specifically implied or mentioned in a glossary.\n"
+                "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Chinese quotation marks (「」 for dialogue, 《》 for titles) as-is without converting to English quotes.\n"
                 "- Add HTML tags for proper formatting as expected of a novel.\n"
-                "- Wrap every paragraph in <p> tags with an inline CSS first‐line indent of 1em (e.g. <p style=\"text-indent:1em;\">…</p>); do not insert any literal tabs or spaces."
+                "- Wrap every paragraph in <p> tags; do not insert any literal tabs or spaces."
             ),
             "korean_TXT": (
                 "You are a professional Korean to English novel translator, you must strictly output only English text while following these rules:\n"
                 "- Use an easy to read and grammatically accurate comedy translation style.\n"
                 "- Retain honorifics like -nim, -ssi.\n"
-                "- Never guess a character's pronouns; always use gender neutral pronouns like they/them (and keep 'I' neutral in first-person) unless gender is specifically implied or mentioned in a glossary.\n"
+                "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Korean quotation marks (" ", ' ', 「」, 『』) as-is without converting to English quotes.\n"
@@ -974,7 +982,7 @@ class TranslatorGUI:
                 "You are a professional Japanese to English novel translator, you must strictly output only English text while following these rules:\n"
                 "- Use an easy to read and grammatically accurate comedy translation style.\n"
                 "- Retain honorifics like -san, -sama, -chan, -kun.\n"
-                "- Never guess a character's pronouns; always use gender neutral pronouns like they/them (and keep 'I' neutral in first-person) unless gender is specifically implied or mentioned in a glossary.\n"
+                "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Japanese quotation marks (「」 and 『』) as-is without converting to English quotes.\n"
@@ -983,7 +991,7 @@ class TranslatorGUI:
             "chinese_TXT": (
                 "You are a professional Chinese to English novel translator, you must strictly output only English text while following these rules:\n"
                 "- Use an easy to read and grammatically accurate comedy translation style.\n"
-                "- Never guess a character's pronouns; always use gender neutral pronouns like they/them (and keep 'I' neutral in first-person) unless gender is specifically implied or mentioned in a glossary.\n"
+                "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Chinese quotation marks (「」 for dialogue, 《》 for titles) as-is without converting to English quotes.\n"
@@ -1287,11 +1295,11 @@ You are a glossary extractor for Korean, Japanese, or Chinese novels.
   • original name in source language  
   • English/romanized name translation  
   • character gender  
-  • title or rank (with romanized suffix)  
+  • title (with untranslated text in brackets)  
   • organization/group affiliation  
   • character traits and descriptions  
   • how they address other characters  
-  • place names mentioned (include original name in brackets) 
+  • place names mentioned (with untranslated text in bracekts) 
 - Romanize all honorifics (e.g., 님 to '-nim', さん to '-san').
 - All output must be in English, unless specified otherwise.
 For each character, provide JSON fields:
@@ -1453,7 +1461,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.3.0 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.3.2 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -1462,7 +1470,120 @@ Recent translations to summarize:
         self.entry_epub = tb.Entry(self.frame, width=50)
         self.entry_epub.grid(row=0, column=1, columnspan=3, sticky=tk.EW, padx=5, pady=5)
         tb.Button(self.frame, text="Browse", command=self.browse_file, width=12).grid(row=0, column=4, sticky=tk.EW, padx=5, pady=5)
-    
+        
+        # Google Cloud Credentials button
+        self.gcloud_button = tb.Button(
+            self.frame, 
+            text="GCloud Creds", 
+            command=self.select_google_credentials, 
+            width=12,
+            state=tk.DISABLED,
+            bootstyle="secondary"
+        )
+        self.gcloud_button.grid(row=2, column=4, sticky=tk.EW, padx=5, pady=5)
+        
+        # Vertex AI Location text entry
+        self.vertex_location_var = tk.StringVar(value=self.config.get('vertex_ai_location', 'us-east5'))
+        self.vertex_location_entry = tb.Entry(
+            self.frame,
+            textvariable=self.vertex_location_var,
+            width=12
+        )
+        self.vertex_location_entry.grid(row=3, column=4, sticky=tk.EW, padx=5, pady=5)
+        
+        # Hide by default
+        self.vertex_location_entry.grid_remove()
+        
+        # Status label for credentials (on next row)
+        self.gcloud_status_label = tb.Label(
+            self.frame,
+            text="",
+            font=('Arial', 9),
+            bootstyle="secondary"
+        )
+        self.gcloud_status_label.grid(row=1, column=1, columnspan=4, sticky=tk.W, padx=5, pady=(0, 5))
+
+    def select_google_credentials(self):
+        """Select Google Cloud credentials JSON file"""
+        filename = filedialog.askopenfilename(
+            title="Select Google Cloud Credentials JSON",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+        
+        if filename:
+            try:
+                # Validate it's a valid Google Cloud credentials file
+                with open(filename, 'r') as f:
+                    creds_data = json.load(f)
+                    if 'type' in creds_data and 'project_id' in creds_data:
+                        # Save to config
+                        self.config['google_cloud_credentials'] = filename
+                        self.save_config()
+                        
+                        # Update UI
+                        self.gcloud_status_label.config(
+                            text=f"✓ Credentials: {os.path.basename(filename)} (Project: {creds_data.get('project_id', 'Unknown')})",
+                            foreground='green'
+                        )
+                        
+                        # Set environment variable for child processes
+                        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = filename
+                        
+                        self.append_log(f"Google Cloud credentials loaded: {os.path.basename(filename)}")
+                    else:
+                        messagebox.showerror(
+                            "Error", 
+                            "Invalid Google Cloud credentials file. Please select a valid service account JSON file."
+                        )
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load credentials: {str(e)}")
+
+    def on_model_change(self, event=None):
+        """Handle model selection change"""
+        model = self.model_var.get()
+        
+        # Show Google Cloud Credentials button for Vertex AI models
+        if '@' in model or model.startswith('vertex/'):
+            self.gcloud_button.config(state=tk.NORMAL)
+            self.vertex_location_entry.grid() 
+            
+            # Update API key label to indicate it's optional for Vertex
+            # Find your api_key_label and update it
+            # self.api_key_label.config(text="Project ID (optional):")
+            
+            # Check if credentials are already loaded
+            if self.config.get('google_cloud_credentials'):
+                creds_path = self.config['google_cloud_credentials']
+                if os.path.exists(creds_path):
+                    try:
+                        with open(creds_path, 'r') as f:
+                            creds_data = json.load(f)
+                            self.gcloud_status_label.config(
+                                text=f"✓ Credentials: {os.path.basename(creds_path)} (Project: {creds_data.get('project_id', 'Unknown')})",
+                                foreground='green'
+                            )
+                    except:
+                        self.gcloud_status_label.config(
+                            text="⚠ Error reading credentials",
+                            foreground='red'
+                        )
+                else:
+                    self.gcloud_status_label.config(
+                        text="⚠ Credentials file not found",
+                        foreground='red'
+                    )
+            else:
+                self.gcloud_status_label.config(
+                    text="⚠ No Google Cloud credentials selected",
+                    foreground='orange'
+                )
+        else:
+            self.gcloud_button.config(state=tk.DISABLED)
+            self.vertex_location_entry.grid_remove()
+            self.gcloud_status_label.config(text="")
+            # Reset API key label if you changed it
+            # self.api_key_label.config(text="API Key:")
+        
     def _create_model_section(self):
         """Create model selection section"""
         tb.Label(self.frame, text="Model:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
@@ -1483,6 +1604,31 @@ Recent translations to summarize:
             "claude-3-5-sonnet-20241022", "claude-3-7-sonnet-20250219",
             "claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307",
             "claude-2.1", "claude-2", "claude-instant-1.2",
+            
+            # Vertex AI Model Garden - Claude models (confirmed)
+            "claude-4-opus@20250514",
+            "claude-4-sonnet@20250514",
+            "claude-opus-4@20250514",
+            "claude-sonnet-4@20250514",
+            "claude-3-7-sonnet@20250219",
+            "claude-3-5-sonnet@20240620",
+            "claude-3-5-sonnet-v2@20241022",
+            "claude-3-opus@20240229",
+            "claude-3-sonnet@20240229",
+            "claude-3-haiku@20240307",
+
+            
+            # Alternative format with vertex_ai prefix
+            "vertex_ai/claude-3-7-sonnet@20250219",
+            "vertex_ai/claude-3-5-sonnet@20240620",
+            "vertex_ai/claude-3-opus@20240229",
+            "vertex_ai/claude-4-opus@20250514",
+            "vertex_ai/claude-4-sonnet@20250514",
+            "vertex_ai/gemini-1.5-pro",
+            "vertex_ai/gemini-1.5-flash",
+            "vertex_ai/gemini-2.0-flash-exp",
+            "vertex_ai/gemini-2.5-pro",
+            "vertex_ai/gemini-2.5-flash",
             
             # DeepSeek Models
             "deepseek-chat", "deepseek-coder", "deepseek-coder-33b-instruct",
@@ -1538,8 +1684,11 @@ Recent translations to summarize:
             "eh/llama-2-70b-chat", "eh/yi-34b-chat-200k", "eh/mistral-large",
             "eh/gemini-pro", "eh/deepseek-coder-33b",
         ]
-        tb.Combobox(self.frame, textvariable=self.model_var, values=models, state="normal").grid(
-            row=1, column=1, columnspan=2, sticky=tk.EW, padx=5, pady=5)
+        self.model_combo = tb.Combobox(self.frame, textvariable=self.model_var, values=models, state="normal")
+        self.model_combo.grid(row=1, column=1, columnspan=2, sticky=tk.EW, padx=5, pady=5)
+        
+        self.model_combo.bind('<<ComboboxSelected>>', self.on_model_change)
+        
         self.model_var.trace('w', self._check_poe_model)
     
     def _create_profile_section(self):
@@ -1589,7 +1738,7 @@ Recent translations to summarize:
         
         tb.Label(self.frame, text="Transl. Hist. Limit:").grid(row=5, column=2, sticky=tk.W, padx=5, pady=5)
         self.trans_history = tb.Entry(self.frame, width=6)
-        self.trans_history.insert(0, str(self.config.get('translation_history_limit', 3)))
+        self.trans_history.insert(0, str(self.config.get('translation_history_limit', 2)))
         self.trans_history.grid(row=5, column=3, sticky=tk.W, padx=5, pady=5)
         
         # Batch Translation
@@ -2893,11 +3042,11 @@ Recent translations to summarize:
        settings_grid.pack()
        
        tk.Label(settings_grid, text="Temperature:").grid(row=0, column=0, sticky=tk.W, padx=5)
-       self.manual_temp_var = tk.StringVar(value=str(self.config.get('manual_glossary_temperature', 0.3)))
+       self.manual_temp_var = tk.StringVar(value=str(self.config.get('manual_glossary_temperature', 0.1)))
        tb.Entry(settings_grid, textvariable=self.manual_temp_var, width=10).grid(row=0, column=1, padx=5)
        
        tk.Label(settings_grid, text="Context Limit:").grid(row=0, column=2, sticky=tk.W, padx=5)
-       self.manual_context_var = tk.StringVar(value=str(self.config.get('manual_context_limit', 3)))
+       self.manual_context_var = tk.StringVar(value=str(self.config.get('manual_context_limit', 2)))
        tb.Entry(settings_grid, textvariable=self.manual_context_var, width=10).grid(row=0, column=3, padx=5)
        
        tk.Label(settings_grid, text="Rolling Window:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=(10, 0))
@@ -4922,9 +5071,36 @@ Recent translations to summarize:
                return
 
             api_key = self.api_key_entry.get()
-            if not api_key:
-               self.append_log("❌ Error: Please enter your API key.")
-               return
+            model = self.model_var.get()
+            
+            # ADD THIS: Validate Vertex AI credentials
+            if '@' in model or model.startswith('vertex/'):
+                google_creds = self.config.get('google_cloud_credentials')
+                if not google_creds or not os.path.exists(google_creds):
+                    self.append_log("❌ Error: Google Cloud credentials required for Vertex AI models.")
+                    messagebox.showerror(
+                        "Error", 
+                        "Google Cloud credentials required for Vertex AI models.\n\n" +
+                        "Please click 'GCloud Creds' to select your service account JSON file."
+                    )
+                    return
+                
+                # Set environment variable
+                os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_creds
+                self.append_log(f"🔑 Using Google Cloud credentials: {os.path.basename(google_creds)}")
+                
+                # If API key is empty, use project ID from credentials
+                if not api_key:
+                    try:
+                        with open(google_creds, 'r') as f:
+                            creds_data = json.load(f)
+                            api_key = creds_data.get('project_id', 'vertex-ai-project')
+                            self.append_log(f"🔑 Using project ID as API key: {api_key}")
+                    except:
+                        api_key = 'vertex-ai-project'
+            elif not api_key:
+                self.append_log("❌ Error: Please enter your API key.")
+                return
 
             old_argv = sys.argv
             old_env = dict(os.environ)
@@ -5049,8 +5225,22 @@ Recent translations to summarize:
            self.master.after(0, self.update_run_button)
 
     def _get_environment_variables(self, epub_path, api_key):
-       """Get all environment variables for translation/glossary"""
-       return {
+        """Get all environment variables for translation/glossary"""
+
+        # Get Google Cloud project ID if using Vertex AI
+        google_cloud_project = ''
+        model = self.model_var.get()
+        if '@' in model or model.startswith('vertex/'):
+            google_creds = self.config.get('google_cloud_credentials')
+            if google_creds and os.path.exists(google_creds):
+                try:
+                    with open(google_creds, 'r') as f:
+                        creds_data = json.load(f)
+                        google_cloud_project = creds_data.get('project_id', '')
+                except:
+                    pass
+                    
+        return {
             'EPUB_PATH': epub_path,
             'MODEL': self.model_var.get(),
             'CONTEXTUAL': '1' if self.contextual_var.get() else '0',
@@ -5133,7 +5323,10 @@ Recent translations to summarize:
             'LOGIT_BIAS_ENABLED': '1' if hasattr(self, 'logit_bias_enabled_var') and self.logit_bias_enabled_var.get() else '0',
             'LOGIT_BIAS_STRENGTH': str(self.logit_bias_strength_var.get()) if hasattr(self, 'logit_bias_strength_var') else '-0.5',
             'BIAS_COMMON_WORDS': '1' if hasattr(self, 'bias_common_words_var') and self.bias_common_words_var.get() else '0',
-            'BIAS_REPETITIVE_PHRASES': '1' if hasattr(self, 'bias_repetitive_phrases_var') and self.bias_repetitive_phrases_var.get() else '0'
+            'BIAS_REPETITIVE_PHRASES': '1' if hasattr(self, 'bias_repetitive_phrases_var') and self.bias_repetitive_phrases_var.get() else '0',
+            'GOOGLE_APPLICATION_CREDENTIALS': os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),
+            'GOOGLE_CLOUD_PROJECT': google_cloud_project,  # Now properly set from credentials
+            'VERTEX_AI_LOCATION': self.vertex_location_var.get() if hasattr(self, 'vertex_location_var') else 'us-east5',
             
            
        }
@@ -5166,105 +5359,145 @@ Recent translations to summarize:
        self.master.after(100, self.update_run_button)
 
     def run_glossary_extraction_direct(self):
-       """Run glossary extraction directly without subprocess"""
-       try:
-           input_path = self.entry_epub.get()
-           if not input_path or not os.path.isfile(input_path):
-               self.append_log("❌ Error: Please select a valid EPUB or text file for glossary extraction.")
-               return
-           
-           api_key = self.api_key_entry.get()
-           if not api_key:
-               self.append_log("❌ Error: Please enter your API key.")
-               return
-           
-           old_argv = sys.argv
-           old_env = dict(os.environ)
-           
-           try:
-               env_updates = {
-                   'GLOSSARY_TEMPERATURE': str(self.config.get('manual_glossary_temperature', 0.3)),
-                   'GLOSSARY_CONTEXT_LIMIT': str(self.config.get('manual_context_limit', 3)),
-                   'MODEL': self.model_var.get(),
-                   'OPENAI_API_KEY': self.api_key_entry.get(),
-                   'OPENAI_OR_Gemini_API_KEY': self.api_key_entry.get(),
-                   'API_KEY': self.api_key_entry.get(),
-                   'MAX_OUTPUT_TOKENS': str(self.max_output_tokens),
-                   'GLOSSARY_SYSTEM_PROMPT': self.manual_glossary_prompt,
-                   'CHAPTER_RANGE': self.chapter_range_entry.get().strip(),
-                   'GLOSSARY_EXTRACT_ORIGINAL_NAME': '1' if self.config.get('manual_extract_original_name', True) else '0',
-                   'GLOSSARY_EXTRACT_NAME': '1' if self.config.get('manual_extract_name', True) else '0',
-                   'GLOSSARY_EXTRACT_GENDER': '1' if self.config.get('manual_extract_gender', True) else '0',
-                   'GLOSSARY_EXTRACT_TITLE': '1' if self.config.get('manual_extract_title', True) else '0',
-                   'GLOSSARY_EXTRACT_GROUP_AFFILIATION': '1' if self.config.get('manual_extract_group_affiliation', True) else '0',
-                   'GLOSSARY_EXTRACT_TRAITS': '1' if self.config.get('manual_extract_traits', True) else '0',
-                   'GLOSSARY_EXTRACT_HOW_THEY_REFER_TO_OTHERS': '1' if self.config.get('manual_extract_how_they_refer_to_others', True) else '0',
-                   'GLOSSARY_EXTRACT_LOCATIONS': '1' if self.config.get('manual_extract_locations', True) else '0',
-                   'GLOSSARY_HISTORY_ROLLING': "1" if self.glossary_history_rolling_var.get() else "0",
-                   'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower(),
-                   'GLOSSARY_DUPLICATE_KEY_MODE': self.config.get('glossary_duplicate_key_mode', 'auto'),
-                   'GLOSSARY_DUPLICATE_CUSTOM_FIELD': self.config.get('glossary_duplicate_custom_field', ''),
-                   'SEND_INTERVAL_SECONDS': str(self.delay_entry.get())
-               }
-               
-               if self.custom_glossary_fields:
-                   env_updates['GLOSSARY_CUSTOM_FIELDS'] = json.dumps(self.custom_glossary_fields)
-               
-               os.environ.update(env_updates)
-               
-               chap_range = self.chapter_range_entry.get().strip()
-               if chap_range:
-                   self.append_log(f"📊 Chapter Range: {chap_range} (glossary extraction will only process these chapters)")
-               
-               if self.token_limit_disabled:
-                   os.environ['MAX_INPUT_TOKENS'] = ''
-                   self.append_log("🎯 Input Token Limit: Unlimited (disabled)")
-               else:
-                   token_val = self.token_limit_entry.get().strip()
-                   if token_val and token_val.isdigit():
-                       os.environ['MAX_INPUT_TOKENS'] = token_val
-                       self.append_log(f"🎯 Input Token Limit: {token_val}")
-                   else:
-                       os.environ['MAX_INPUT_TOKENS'] = '50000'
-                       self.append_log(f"🎯 Input Token Limit: 50000 (default)")
-               
-               epub_base = os.path.splitext(os.path.basename(input_path))[0]
-               output_path = f"{epub_base}_glossary.json"
-               
-               sys.argv = [
-                   'extract_glossary_from_epub.py',
-                   '--epub', input_path,
-                   '--output', output_path,
-                   '--config', CONFIG_FILE
-               ]
-               
-               self.append_log("🚀 Starting glossary extraction...")
-               self.append_log(f"📤 Output Token Limit: {self.max_output_tokens}")
-               os.environ['MAX_OUTPUT_TOKENS'] = str(self.max_output_tokens)
-               
-               glossary_main(
-                   log_callback=self.append_log,
-                   stop_callback=lambda: self.stop_requested
-               )
-               
-               if not self.stop_requested:
-                   self.append_log("✅ Glossary extraction completed successfully!")
-               
-           finally:
-               sys.argv = old_argv
-               os.environ.clear()
-               os.environ.update(old_env)
-       
-       except Exception as e:
-           self.append_log(f"❌ Glossary extraction error: {e}")
-       
-       finally:
-           self.stop_requested = False
-           if glossary_stop_flag:
-               glossary_stop_flag(False)
-           self.glossary_thread = None
-           self.master.after(0, self.update_run_button)
-
+        """Run glossary extraction directly without subprocess"""
+        try:
+            input_path = self.entry_epub.get()
+            if not input_path or not os.path.isfile(input_path):
+                self.append_log("❌ Error: Please select a valid EPUB or text file for glossary extraction.")
+                return
+            
+            api_key = self.api_key_entry.get()
+            model = self.model_var.get()
+            
+            # ADD THIS: Validate Vertex AI credentials
+            if '@' in model or model.startswith('vertex/'):
+                google_creds = self.config.get('google_cloud_credentials')
+                if not google_creds or not os.path.exists(google_creds):
+                    self.append_log("❌ Error: Google Cloud credentials required for Vertex AI models.")
+                    messagebox.showerror(
+                        "Error", 
+                        "Google Cloud credentials required for Vertex AI models.\n\n" +
+                        "Please click 'GCloud Creds' to select your service account JSON file."
+                    )
+                    return
+                
+                os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_creds
+                self.append_log(f"🔑 Using Google Cloud credentials: {os.path.basename(google_creds)}")
+                
+                if not api_key:
+                    try:
+                        with open(google_creds, 'r') as f:
+                            creds_data = json.load(f)
+                            api_key = creds_data.get('project_id', 'vertex-ai-project')
+                            self.append_log(f"🔑 Using project ID as API key: {api_key}")
+                    except:
+                        api_key = 'vertex-ai-project'
+            elif not api_key:
+                self.append_log("❌ Error: Please enter your API key.")
+                return
+            
+            old_argv = sys.argv
+            old_env = dict(os.environ)
+            
+            try:
+                # ADD THIS: Include Google Cloud env vars if using Vertex AI
+                env_updates = {
+                    'GLOSSARY_TEMPERATURE': str(self.config.get('manual_glossary_temperature', 0.1)),
+                    'GLOSSARY_CONTEXT_LIMIT': str(self.config.get('manual_context_limit', 2)),
+                    'MODEL': self.model_var.get(),
+                    'OPENAI_API_KEY': api_key,  # Changed to use the api_key variable
+                    'OPENAI_OR_Gemini_API_KEY': api_key,
+                    'API_KEY': api_key,
+                    'MAX_OUTPUT_TOKENS': str(self.max_output_tokens),
+                    'GLOSSARY_SYSTEM_PROMPT': self.manual_glossary_prompt,
+                    'CHAPTER_RANGE': self.chapter_range_entry.get().strip(),
+                    'GLOSSARY_EXTRACT_ORIGINAL_NAME': '1' if self.config.get('manual_extract_original_name', True) else '0',
+                    'GLOSSARY_EXTRACT_NAME': '1' if self.config.get('manual_extract_name', True) else '0',
+                    'GLOSSARY_EXTRACT_GENDER': '1' if self.config.get('manual_extract_gender', True) else '0',
+                    'GLOSSARY_EXTRACT_TITLE': '1' if self.config.get('manual_extract_title', True) else '0',
+                    'GLOSSARY_EXTRACT_GROUP_AFFILIATION': '1' if self.config.get('manual_extract_group_affiliation', True) else '0',
+                    'GLOSSARY_EXTRACT_TRAITS': '1' if self.config.get('manual_extract_traits', True) else '0',
+                    'GLOSSARY_EXTRACT_HOW_THEY_REFER_TO_OTHERS': '1' if self.config.get('manual_extract_how_they_refer_to_others', True) else '0',
+                    'GLOSSARY_EXTRACT_LOCATIONS': '1' if self.config.get('manual_extract_locations', True) else '0',
+                    'GLOSSARY_HISTORY_ROLLING': "1" if self.glossary_history_rolling_var.get() else "0",
+                    'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower(),
+                    'GLOSSARY_DUPLICATE_KEY_MODE': self.config.get('glossary_duplicate_key_mode', 'auto'),
+                    'GLOSSARY_DUPLICATE_CUSTOM_FIELD': self.config.get('glossary_duplicate_custom_field', ''),
+                    'SEND_INTERVAL_SECONDS': str(self.delay_entry.get()),
+                    'CONTEXTUAL': '1' if self.contextual_var.get() else '0',
+                    'GOOGLE_APPLICATION_CREDENTIALS': os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),  # ADD THIS
+                }
+                
+                # ADD THIS: Extract project ID for Vertex AI
+                if '@' in model or model.startswith('vertex/'):
+                    google_creds = self.config.get('google_cloud_credentials')
+                    if google_creds and os.path.exists(google_creds):
+                        try:
+                            with open(google_creds, 'r') as f:
+                                creds_data = json.load(f)
+                                env_updates['GOOGLE_CLOUD_PROJECT'] = creds_data.get('project_id', '')
+                                env_updates['VERTEX_AI_LOCATION'] = 'us-central1'
+                        except:
+                            pass
+                
+                if self.custom_glossary_fields:
+                    env_updates['GLOSSARY_CUSTOM_FIELDS'] = json.dumps(self.custom_glossary_fields)
+                
+                os.environ.update(env_updates)
+                
+                chap_range = self.chapter_range_entry.get().strip()
+                if chap_range:
+                    self.append_log(f"📊 Chapter Range: {chap_range} (glossary extraction will only process these chapters)")
+                
+                if self.token_limit_disabled:
+                    os.environ['MAX_INPUT_TOKENS'] = ''
+                    self.append_log("🎯 Input Token Limit: Unlimited (disabled)")
+                else:
+                    token_val = self.token_limit_entry.get().strip()
+                    if token_val and token_val.isdigit():
+                        os.environ['MAX_INPUT_TOKENS'] = token_val
+                        self.append_log(f"🎯 Input Token Limit: {token_val}")
+                    else:
+                        os.environ['MAX_INPUT_TOKENS'] = '50000'
+                        self.append_log(f"🎯 Input Token Limit: 50000 (default)")
+                
+                epub_base = os.path.splitext(os.path.basename(input_path))[0]
+                output_path = f"{epub_base}_glossary.json"
+                
+                sys.argv = [
+                    'extract_glossary_from_epub.py',
+                    '--epub', input_path,
+                    '--output', output_path,
+                    '--config', CONFIG_FILE
+                ]
+                
+                self.append_log("🚀 Starting glossary extraction...")
+                self.append_log(f"📤 Output Token Limit: {self.max_output_tokens}")
+                os.environ['MAX_OUTPUT_TOKENS'] = str(self.max_output_tokens)
+                
+                glossary_main(
+                    log_callback=self.append_log,
+                    stop_callback=lambda: self.stop_requested
+                )
+                
+                if not self.stop_requested:
+                    self.append_log("✅ Glossary extraction completed successfully!")
+                
+            finally:
+                sys.argv = old_argv
+                os.environ.clear()
+                os.environ.update(old_env)
+        
+        except Exception as e:
+            self.append_log(f"❌ Glossary extraction error: {e}")
+        
+        finally:
+            self.stop_requested = False
+            if glossary_stop_flag:
+                glossary_stop_flag(False)
+            self.glossary_thread = None
+            self.master.after(0, self.update_run_button)
+        
     def epub_converter(self):
        """Start EPUB converter in a separate thread"""
        if not self._lazy_load_modules():
@@ -5440,10 +5673,10 @@ Recent translations to summarize:
             qa_settings = self.config.get('qa_scanner_settings', {
                 'foreign_char_threshold': 10,
                 'excluded_characters': '',
-                'check_encoding_issues': True,
+                'check_encoding_issues': False,
                 'check_repetition': True,
                 'check_translation_artifacts': True,
-                'min_file_length': 100,
+                'min_file_length': 0,
                 'report_format': 'detailed',
                 'auto_save_report': True
             })
@@ -6257,7 +6490,7 @@ Recent translations to summarize:
         detection_section.pack(fill=tk.X, pady=(0, 20))
         
         # Checkboxes for detection options
-        check_encoding_var = tk.BooleanVar(value=qa_settings.get('check_encoding_issues', True))
+        check_encoding_var = tk.BooleanVar(value=qa_settings.get('check_encoding_issues', False))
         check_repetition_var = tk.BooleanVar(value=qa_settings.get('check_repetition', True))
         check_artifacts_var = tk.BooleanVar(value=qa_settings.get('check_translation_artifacts', True))
         
@@ -6302,10 +6535,10 @@ Recent translations to summarize:
             font=('Arial', 10)
         ).pack(side=tk.LEFT)
         
-        min_length_var = tk.IntVar(value=qa_settings.get('min_file_length', 100))
+        min_length_var = tk.IntVar(value=qa_settings.get('min_file_length', 0))
         min_length_spinbox = tb.Spinbox(
             min_length_frame,
-            from_=10,
+            from_=0,
             to=10000,
             textvariable=min_length_var,
             width=10,
@@ -6386,7 +6619,7 @@ Recent translations to summarize:
             command=select_epub_for_qa,
             font=('Arial', 9)
         ).pack(side=tk.LEFT, padx=(10, 0))
- 
+
         # Add option to disable mismatch warning
         warn_mismatch_var = tk.BooleanVar(value=qa_settings.get('warn_name_mismatch', True))
         tb.Checkbutton(
@@ -6395,34 +6628,55 @@ Recent translations to summarize:
             variable=warn_mismatch_var,
             bootstyle="primary"
         ).pack(anchor=tk.W, pady=(10, 5))
-        
-        # Header Detection Section  
-        header_section = tk.LabelFrame(
+
+        # Additional Checks Section
+        additional_section = tk.LabelFrame(
             main_frame,
-            text="Header Detection",
+            text="Additional Checks",
             font=('Arial', 12, 'bold'),
             padx=20,
             pady=15
         )
-        header_section.pack(fill=tk.X, pady=(0, 20))
-        
-        check_multiple_headers_var = tk.BooleanVar(value=qa_settings.get('check_multiple_headers', False))
+        additional_section.pack(fill=tk.X, pady=(20, 0))
+
+        # Multiple headers check
+        check_multiple_headers_var = tk.BooleanVar(value=qa_settings.get('check_multiple_headers', True))
         tb.Checkbutton(
-            header_section,
+            additional_section,
             text="Detect files with 2 or more headers (h1-h6 tags)",
             variable=check_multiple_headers_var,
             bootstyle="primary"
-        ).pack(anchor=tk.W, pady=(0, 5))
-        
+        ).pack(anchor=tk.W, pady=(5, 5))
+
         tk.Label(
-            header_section,
+            additional_section,
             text="Identifies files that may have been incorrectly split or merged.\n" +
                  "Useful for detecting chapters that contain multiple sections.",
             wraplength=700,
             justify=tk.LEFT,
             fg='gray'
         ).pack(anchor=tk.W, padx=(20, 0))
-        
+
+        # Missing HTML tag check
+        html_tag_frame = tk.Frame(additional_section)
+        html_tag_frame.pack(fill=tk.X, pady=(10, 5))
+
+        check_missing_html_tag_var = tk.BooleanVar(value=qa_settings.get('check_missing_html_tag', True))
+        check_missing_html_tag_check = tb.Checkbutton(
+            html_tag_frame,
+            text="Flag HTML files with missing <html> tag",
+            variable=check_missing_html_tag_var,
+            bootstyle="primary"
+        )
+        check_missing_html_tag_check.pack(side=tk.LEFT)
+
+        tk.Label(
+            html_tag_frame,
+            text="(Checks if HTML files have proper structure)",
+            font=('Arial', 9),
+            foreground='gray'
+        ).pack(side=tk.LEFT, padx=(10, 0))
+
         # Report Settings Section
         report_section = tk.LabelFrame(
             main_frame,
@@ -6432,24 +6686,24 @@ Recent translations to summarize:
             pady=15
         )
         report_section.pack(fill=tk.X, pady=(0, 20))
-        
+
         # Report format
         format_frame = tk.Frame(report_section)
         format_frame.pack(fill=tk.X, pady=(0, 10))
-        
+
         tk.Label(
             format_frame,
             text="Report format:",
             font=('Arial', 10)
         ).pack(side=tk.LEFT)
-        
+
         format_var = tk.StringVar(value=qa_settings.get('report_format', 'detailed'))
         format_options = [
             ("Summary only", "summary"),
             ("Detailed (recommended)", "detailed"),
             ("Verbose (all data)", "verbose")
         ]
-        
+
         for idx, (text, value) in enumerate(format_options):
             rb = tb.Radiobutton(
                 format_frame,
@@ -6459,7 +6713,7 @@ Recent translations to summarize:
                 bootstyle="primary"
             )
             rb.pack(side=tk.LEFT, padx=(10 if idx == 0 else 5, 0))
-        
+
         # Auto-save report
         auto_save_var = tk.BooleanVar(value=qa_settings.get('auto_save_report', True))
         tb.Checkbutton(
@@ -6468,7 +6722,7 @@ Recent translations to summarize:
             variable=auto_save_var,
             bootstyle="primary"
         ).pack(anchor=tk.W)
-        
+
         # Buttons
         button_frame = tk.Frame(main_frame)
         button_frame.pack(fill=tk.X, pady=(20, 0))
@@ -6489,6 +6743,8 @@ Recent translations to summarize:
                 qa_settings['check_word_count_ratio'] = check_word_count_var.get()
                 qa_settings['check_multiple_headers'] = check_multiple_headers_var.get()
                 qa_settings['warn_name_mismatch'] = warn_mismatch_var.get()
+                qa_settings['check_missing_html_tag'] = check_missing_html_tag_var.get()
+
                 
                 # Save to main config
                 self.config['qa_scanner_settings'] = qa_settings
@@ -8498,7 +8754,7 @@ Recent translations to summarize:
             if trans_history_val and not trans_history_val.isdigit():
                 messagebox.showerror("Invalid Input", "Please enter a valid number for Translation History Limit")
                 return
-            self.config['translation_history_limit'] = safe_int(trans_history_val, 3)
+            self.config['translation_history_limit'] = safe_int(trans_history_val, 2)
             
             # Save all other settings
             self.config['api_key'] = self.api_key_entry.get()
@@ -8541,9 +8797,7 @@ Recent translations to summarize:
             self.config['translation_chunk_prompt'] = self.translation_chunk_prompt
             self.config['image_chunk_prompt'] = self.image_chunk_prompt
             self.config['force_ncx_only'] = self.force_ncx_only_var.get()
-
-
-            
+            self.config['vertex_ai_location'] = self.vertex_location_var.get()
             
             # Add anti-duplicate parameters
             if hasattr(self, 'enable_anti_duplicate_var'):
@@ -8560,14 +8814,23 @@ Recent translations to summarize:
                 self.config['bias_common_words'] = self.bias_common_words_var.get()
                 self.config['bias_repetitive_phrases'] = self.bias_repetitive_phrases_var.get()
 
-
             _tl = self.token_limit_entry.get().strip()
             if _tl.isdigit():
                 self.config['token_limit'] = int(_tl)
             else:
                 self.config['token_limit'] = None
             
+            # Store Google Cloud credentials path BEFORE encryption
+            # This should NOT be encrypted since it's just a file path
+            google_creds_path = self.config.get('google_cloud_credentials')
+            
+            # Encrypt the config
             encrypted_config = encrypt_config(self.config)
+            
+            # Re-add the Google Cloud credentials path after encryption
+            # This ensures the path is stored unencrypted for easy access
+            if google_creds_path:
+                encrypted_config['google_cloud_credentials'] = google_creds_path
 
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(encrypted_config, f, ensure_ascii=False, indent=2) 
@@ -8586,7 +8849,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.3.0...")
+    print("🚀 Starting Glossarion v3.3.2...")
     
     # Initialize splash screen
     splash_manager = None
