@@ -175,9 +175,43 @@ TRANSLATION_ARTIFACTS = {
 }
 
 def extract_text_from_html(file_path):
+    """Extract text from HTML or TXT file
+    
+    Returns:
+        str OR tuple: 
+            - For backwards compatibility: just the text (if not checking HTML structure)
+            - For new functionality: (text_content, has_html_tag) tuple
+    """
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-        soup = BeautifulSoup(f, "html.parser")
-        return soup.get_text(separator='\n', strip=True)
+        content = f.read()
+        
+    # Check if it's a .txt file
+    if file_path.lower().endswith('.txt'):
+        # For .txt files, just return the content directly
+        return content
+    
+    # For HTML files, parse with BeautifulSoup
+    soup = BeautifulSoup(content, "html.parser")
+    text = soup.get_text(separator='\n', strip=True)
+    
+    # For backwards compatibility, we'll handle the HTML tag check separately
+    # in the scan function rather than always returning a tuple
+    return text
+
+def check_html_structure(file_path):
+    """Check if an HTML file has proper <html> tag
+    
+    Returns:
+        bool: True if file has <html> tag or is not an HTML file
+    """
+    if not file_path.lower().endswith('.html'):
+        return True  # Not an HTML file, so no check needed
+        
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        content = f.read()
+    
+    soup = BeautifulSoup(content, "html.parser")
+    return soup.find('html') is not None
 
 def is_dash_separator_line(line):
     """Check if a line consists only of dash-like punctuation characters"""
@@ -1981,9 +2015,11 @@ def extract_epub_word_counts(epub_path, log=print):
         word_counts = {}
         
         with zipfile.ZipFile(epub_path, 'r') as zf:
-            # Get all HTML/XHTML files
+            # Get all HTML/XHTML files from inside the EPUB (no .txt files in EPUBs)
             html_files = [f for f in zf.namelist() 
-                         if f.endswith(('.html', '.xhtml', '.htm'))]
+                         if f.lower().endswith(('.html', '.xhtml', '.htm'))]
+            
+            log(f"📚 Found {len(html_files)} HTML files in EPUB.")
             
             for file_path in html_files:
                 try:
@@ -2321,6 +2357,14 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         
         # Initialize issues list
         issues = []
+
+        # HTML tag check:
+        check_missing_html_tag = qa_settings.get('check_missing_html_tag', False)
+        if check_missing_html_tag and filename.lower().endswith('.html'):
+            if not check_html_structure(full_path):
+                issues.append("missing_html_tag")
+                if idx < 5:  # Log only for first few files to avoid spam
+                    log(f"   → Found missing <html> tag in {filename}")
         
         # Check for multiple headers
         if check_multiple_headers:
