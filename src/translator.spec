@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion v3.3.0 - PyInstaller Specification File
+Glossarion v3.3.2 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, AI Hunter, and Manga Translation
 """
 
@@ -12,7 +12,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'Glossarion v3.3.0'  # CHANGED: Updated version
+APP_NAME = 'Glossarion v3.3.2'  # CHANGED: Updated version
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -296,6 +296,14 @@ api_modules = [
     'grpcio',
     'grpcio_status',
     'googleapis_common_protos',
+	
+	# Google Vertex AI:
+    'google.cloud.aiplatform',
+    'google.cloud.aiplatform_v1', 
+    'google.cloud.aiplatform_v1beta1',
+    'vertexai',
+    'vertexai.generative_models',
+    'vertexai.language_models',
     
     # OpenAI
     'openai',
