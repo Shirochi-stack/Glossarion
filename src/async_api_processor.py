@@ -2941,9 +2941,15 @@ class AsyncProcessingDialog:
             # Upload the batch file with explicit mime type
             logger.info("Uploading batch file...")
             
-            # The new SDK uses 'path' parameter directly
+            # Use the upload config to specify mime type
+            upload_config = types.UploadFileConfig(
+                mime_type='application/jsonl',  # Explicit JSONL mime type
+                display_name=f"batch_requests_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+            )
+
             uploaded_file = client.files.upload(
-                path=batch_file_path
+                file=batch_file_path,
+                config=upload_config
             )
             
             logger.info(f"File uploaded: {uploaded_file.name}")
