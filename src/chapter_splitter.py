@@ -5,16 +5,18 @@ import tiktoken
 class ChapterSplitter:
     """Split large chapters into smaller chunks while preserving structure"""
     
-    def __init__(self, model_name="gpt-3.5-turbo", target_tokens=80000):
+    def __init__(self, model_name="gpt-3.5-turbo", target_tokens=80000, compression_factor=1.0):
         """
         Initialize splitter with token counter
         target_tokens: Target size for each chunk (leaving room for system prompt & history)
+        compression_factor: Expected compression ratio from source to target language (0.7-1.0)
         """
         try:
             self.enc = tiktoken.encoding_for_model(model_name)
         except:
             self.enc = tiktoken.get_encoding("cl100k_base")
         self.target_tokens = target_tokens
+        self.compression_factor = compression_factor
     
     def count_tokens(self, text):
         """Count tokens in text"""
@@ -31,10 +33,15 @@ class ChapterSplitter:
         """
         if max_tokens is None:
             max_tokens = self.target_tokens
+        
+        # Apply compression factor to output token limit
+        # If compression_factor is 0.7 and max_tokens is 4096,
+        # we expect output to be 4096 * 0.7 = 2867 tokens
+        effective_max_tokens = int(max_tokens * self.compression_factor)
             
         # First check if splitting is needed
         total_tokens = self.count_tokens(chapter_html)
-        if total_tokens <= max_tokens:
+        if total_tokens <= effective_max_tokens:
             return [(chapter_html, 1, 1)]  # No split needed
         
         # Parse HTML
@@ -59,13 +66,13 @@ class ChapterSplitter:
             element_tokens = self.count_tokens(element_html)
             
             # If single element is too large, try to split it
-            if element_tokens > max_tokens:
-                sub_chunks = self._split_large_element(element, max_tokens)
+            if element_tokens > effective_max_tokens:
+                sub_chunks = self._split_large_element(element, effective_max_tokens)
                 for sub_chunk in sub_chunks:
                     chunks.append(sub_chunk)
             else:
                 # Check if adding this element would exceed limit
-                if current_tokens + element_tokens > max_tokens and current_chunk:
+                if current_tokens + element_tokens > effective_max_tokens and current_chunk:
                     # Save current chunk
                     chunks.append(self._create_chunk_html(current_chunk))
                     current_chunk = [element_html]
