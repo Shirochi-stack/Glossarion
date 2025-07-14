@@ -789,11 +789,15 @@ def main(log_callback=None, stop_callback=None):
     api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
     print(f"⏱️  API call delay: {api_delay} seconds")
     
-    # Initialize chapter splitter
-    chapter_splitter = ChapterSplitter(model_name=model)
+    # Get compression factor from environment
+    compression_factor = float(os.getenv("COMPRESSION_FACTOR", "1.0"))
+    print(f"📐 Compression Factor: {compression_factor}")
+
+    # Initialize chapter splitter with compression factor
+    chapter_splitter = ChapterSplitter(model_name=model, compression_factor=compression_factor)
     
     # Get temperature from environment or config
-    temp = float(os.getenv("GLOSSARY_TEMPERATURE") or config.get('temperature', 0.3))
+    temp = float(os.getenv("GLOSSARY_TEMPERATURE") or config.get('temperature', 0.1))
     
     env_max_output = os.getenv("MAX_OUTPUT_TOKENS")
     if env_max_output and env_max_output.isdigit():
@@ -909,15 +913,25 @@ def main(log_callback=None, stop_callback=None):
             continue
                 
         print(f"🔄 Processing Chapter {idx+1}/{total_chapters}")
-        # Check if history will reset on this chapter
-        if len(history) >= ctx_limit and ctx_limit > 0:
-            print(f"  📌 Glossary context will reset after this chapter (current: {len(history)}/{ctx_limit} chapters)")        
-        try:
-            rolling_window = os.getenv('GLOSSARY_HISTORY_ROLLING', '0') == '1'
-            msgs = [{"role":"system","content":sys_prompt}] \
-                 + trim_context_history(history, ctx_limit, rolling_window) \
-                 + [{"role":"user","content":build_prompt(chap)}]
+        # Get both settings
+        contextual_enabled = os.getenv('CONTEXTUAL', '1') == '1'
+        rolling_window = os.getenv('GLOSSARY_HISTORY_ROLLING', '0') == '1'
 
+        # Check if history will reset on this chapter
+        if contextual_enabled and len(history) >= ctx_limit and ctx_limit > 0 and not rolling_window:
+            print(f"  📌 Glossary context will reset after this chapter (current: {len(history)}/{ctx_limit} chapters)")        
+
+        try:
+            if not contextual_enabled:
+                # No context at all
+                msgs = [{"role":"system","content":sys_prompt}] \
+                     + [{"role":"user","content":build_prompt(chap)}]
+            else:
+                # Use context with trim_context_history handling the mode
+                msgs = [{"role":"system","content":sys_prompt}] \
+                     + trim_context_history(history, ctx_limit, rolling_window) \
+                     + [{"role":"user","content":build_prompt(chap)}]
+            
             total_tokens = sum(count_tokens(m["content"]) for m in msgs)
             
             # READ THE TOKEN LIMIT
@@ -1058,7 +1072,17 @@ def main(log_callback=None, stop_callback=None):
             glossary.extend(data)
             glossary[:] = merge_glossary_entries(glossary)
             completed.append(idx)
-            history.append({"user": build_prompt(chap), "assistant": resp})
+
+            # Only add to history if contextual is enabled
+            if contextual_enabled:
+                history.append({"user": build_prompt(chap), "assistant": resp})
+                
+                # Reset history when limit reached without rolling window
+                if not rolling_window and len(history) >= ctx_limit and ctx_limit > 0:
+                    print(f"🔄 Resetting glossary context (reached {ctx_limit} chapter limit)")
+                    history = []
+                    prog['context_history'] = []
+
             save_progress(completed, glossary, history)
             save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
             save_glossary_md(glossary, os.path.join(glossary_dir, os.path.basename(args.output).replace('.json', '.md')))
