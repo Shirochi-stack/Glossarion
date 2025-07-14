@@ -23,6 +23,8 @@ tiktoken
 poe-api-wrapper
 #ballyregan
 google-genai
+google-cloud-aiplatform>=1.60.0
+
 
 # Data processing
 datasketch
