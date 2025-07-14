@@ -255,9 +255,6 @@ image_modules = [
 api_modules = [
     # Google AI
     'google',
-    'google.generativeai',
-    'google.ai',
-    'google.ai.generativelanguage',
 	'google.genai',
 	'google.genai.types',
     'google.auth',
