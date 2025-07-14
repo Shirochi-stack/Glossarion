@@ -245,122 +245,180 @@ class AsyncAPIProcessor:
             return (0.0, 0.0)
             
         # UPDATED PRICING AS OF JULY 2025
-        # Prices are per 1M tokens (average of input + output)
+        # Prices are (input_price, output_price) per 1M tokens
         token_prices = {
             'openai': {
                 # GPT-4.1 Series (Latest - June 2024 knowledge)
-                'gpt-4.1': 5.0,          # Similar to gpt-4o pricing
-                'gpt-4.1-mini': 0.225,   # $0.15 input + $0.60 output per 1M
-                'gpt-4.1-nano': 0.10,    # Even cheaper than mini
+                'gpt-4.1': (2.0, 8.0),
+                'gpt-4.1-mini': (0.4, 1.6),
+                'gpt-4.1-nano': (0.1, 0.4),
+                
+                # GPT-4.5 Preview
+                'gpt-4.5-preview': (75.0, 150.0),
                 
                 # GPT-4o Series
-                'gpt-4o': 5.0,           # $2.50 input + $10 output per 1M
-                'gpt-4o-mini': 0.225,    # $0.15 input + $0.60 output per 1M
-                'gpt-4o-audio': 7.5,     # Audio models cost more
-                'gpt-4o-realtime': 10.0, # Real-time premium
+                'gpt-4o': (2.5, 10.0),
+                'gpt-4o-mini': (0.15, 0.6),
+                'gpt-4o-audio': (2.5, 10.0),
+                'gpt-4o-audio-preview': (2.5, 10.0),
+                'gpt-4o-realtime': (5.0, 20.0),
+                'gpt-4o-realtime-preview': (5.0, 20.0),
+                'gpt-4o-mini-audio': (0.15, 0.6),
+                'gpt-4o-mini-audio-preview': (0.15, 0.6),
+                'gpt-4o-mini-realtime': (0.6, 2.4),
+                'gpt-4o-mini-realtime-preview': (0.6, 2.4),
                 
                 # GPT-4 Legacy
-                'gpt-4': 45.0,           # $30 input + $60 output per 1M
-                'gpt-4-turbo': 15.0,     # $10 input + $30 output per 1M
-                'gpt-4-0613': 45.0,      # Legacy pricing
-                'gpt-4-0314': 45.0,      # Legacy pricing
+                'gpt-4': (30.0, 60.0),
+                'gpt-4-turbo': (10.0, 30.0),
+                'gpt-4-32k': (60.0, 120.0),
+                'gpt-4-0613': (30.0, 60.0),
+                'gpt-4-0314': (30.0, 60.0),
                 
                 # GPT-3.5
-                'gpt-3.5-turbo': 1.0,    # $0.50 input + $1.50 output per 1M
-                'gpt-3.5-turbo-0125': 1.0,
+                'gpt-3.5-turbo': (0.5, 1.5),
+                'gpt-3.5-turbo-instruct': (1.5, 2.0),
+                'gpt-3.5-turbo-16k': (3.0, 4.0),
+                'gpt-3.5-turbo-0125': (0.5, 1.5),
                 
                 # O-series Reasoning Models (NOT batch compatible usually)
-                'o1': 30.0,              # $15 input + $60 output per 1M
-                'o1-preview': 30.0,
-                'o1-mini': 7.5,          # $3 input + $12 output per 1M
-                'o3': 50.0,              # Premium reasoning
-                'o3-mini': 15.0,         # Smaller reasoning
-                'o4-mini': 10.0,         # Latest efficient reasoning
+                'o1': (15.0, 60.0),
+                'o1-pro': (150.0, 600.0),
+                'o1-mini': (1.1, 4.4),
+                'o3': (1.0, 4.0),
+                'o3-pro': (20.0, 80.0),
+                'o3-deep-research': (10.0, 40.0),
+                'o3-mini': (1.1, 4.4),
+                'o4-mini': (1.1, 4.4),
+                'o4-mini-deep-research': (2.0, 8.0),
                 
-                'default': 5.0
+                # Special models
+                'chatgpt-4o-latest': (5.0, 15.0),
+                'computer-use-preview': (3.0, 12.0),
+                'gpt-4o-search-preview': (2.5, 10.0),
+                'gpt-4o-mini-search-preview': (0.15, 0.6),
+                'codex-mini-latest': (1.5, 6.0),
+                
+                # Small models
+                'davinci-002': (2.0, 2.0),
+                'babbage-002': (0.4, 0.4),
+                
+                'default': (2.5, 10.0)
             },
             'anthropic': {
+                # Claude 4 Series (Latest)
+                'claude-4-opus': (3.0, 15.0),
+                'claude-opus-4': (3.0, 15.0),
+                'claude-4-sonnet': (3.0, 15.0),
+                'claude-sonnet-4': (3.0, 15.0),
+                
                 # Claude 3.5 Series
-                'claude-3.5-sonnet': 7.5,    # $3 input + $15 output per 1M
-                'claude-3.5-opus': 37.5,     # $15 input + $75 output per 1M
-                'claude-3.5-haiku': 0.625,   # $0.25 input + $1.25 output per 1M
+                'claude-3.5-sonnet': (3.0, 15.0),
+                'claude-3.5-opus': (15.0, 75.0),
+                'claude-3.5-haiku': (0.25, 1.25),
                 
                 # Claude 3 Series
-                'claude-3-opus': 37.5,       # Premium tier
-                'claude-3-sonnet': 7.5,      # Mid tier
-                'claude-3-haiku': 0.625,     # Budget tier
+                'claude-3-opus': (15.0, 75.0),
+                'claude-3-sonnet': (3.0, 15.0),
+                'claude-3-haiku': (0.25, 1.25),
                 
                 # Legacy
-                'claude-2.1': 16.0,          # $8 input + $24 output per 1M
-                'claude-2': 16.0,
-                'claude-instant': 1.6,       # $0.80 input + $2.40 output per 1M
+                'claude-2.1': (8.0, 24.0),
+                'claude-2': (8.0, 24.0),
+                'claude-instant': (0.8, 2.4),
                 
-                'default': 7.5
+                'default': (3.0, 15.0)
             },
             'gemini': {
                 # Gemini 2.5 Series (Latest)
-                'gemini-2.5-flash': 0.0375,  # $0.0125 input + $0.05 output per 1M
-                'gemini-2.5-pro': 2.50,      # $1.25 input + $5.00 output per 1M
+                'gemini-2.5-pro': (1.25, 10.0),      # ≤200k tokens
+                'gemini-2.5-flash': (0.3, 2.5),
+                'gemini-2.5-flash-lite': (0.1, 0.4),
+                'gemini-2.5-flash-lite-preview': (0.1, 0.4),
+                'gemini-2.5-flash-lite-preview-06-17': (0.1, 0.4),
+                'gemini-2.5-flash-native-audio': (0.5, 12.0),  # Audio output
+                'gemini-2.5-flash-preview-native-audio-dialog': (0.5, 12.0),
+                'gemini-2.5-flash-exp-native-audio-thinking-dialog': (0.5, 12.0),
+                'gemini-2.5-flash-preview-tts': (0.5, 10.0),
+                'gemini-2.5-pro-preview-tts': (1.0, 20.0),
+                
+                # Gemini 2.0 Series
+                'gemini-2.0-flash': (0.1, 0.4),
+                'gemini-2.0-flash-lite': (0.075, 0.3),
+                'gemini-2.0-flash-live': (0.35, 1.5),
+                'gemini-2.0-flash-live-001': (0.35, 1.5),
+                'gemini-live-2.5-flash-preview': (0.35, 1.5),
                 
                 # Gemini 1.5 Series
-                'gemini-1.5-flash': 0.0375,  # Ultra cheap
-                'gemini-1.5-flash-8b': 0.0375,
-                'gemini-1.5-pro': 1.875,     # $1.25 input + $5.00 output per 1M
+                'gemini-1.5-flash': (0.075, 0.3),    # ≤128k tokens
+                'gemini-1.5-flash-8b': (0.0375, 0.15),
+                'gemini-1.5-pro': (1.25, 5.0),
                 
-                # Gemini 1.0 Series
-                'gemini-1.0-pro': 0.50,      # $0.50 input + $1.50 output per 1M
-                'gemini-pro': 0.50,          # Alias
+                # Legacy/Deprecated
+                'gemini-1.0-pro': (0.5, 1.5),
+                'gemini-pro': (0.5, 1.5),
                 
                 # Experimental
-                'gemini-2.0-flash': 0.0375,  # Same as 1.5-flash
-                'gemini-exp': 2.50,          # Experimental pricing
+                'gemini-exp': (1.25, 5.0),
                 
-                'default': 0.50
+                'default': (0.3, 2.5)
             },
             'mistral': {
-                'mistral-large': 6.0,        # $4 input + $12 output per 1M
-                'mistral-medium': 2.7,       # Deprecated but still works
-                'mistral-small': 0.3,        # $0.10 input + $0.30 output per 1M
-                'mixtral-8x7b': 0.7,         # MoE model
-                'mixtral-8x22b': 2.0,        # Larger MoE
-                'codestral': 1.0,            # Code-specific
-                'ministral': 0.2,            # Tiny model
-                'default': 1.0
+                'mistral-large': (3.0, 9.0),
+                'mistral-large-2': (3.0, 9.0),
+                'mistral-medium': (0.4, 2.0),
+                'mistral-medium-3': (0.4, 2.0),
+                'mistral-small': (1.0, 3.0),
+                'mistral-small-v24.09': (1.0, 3.0),
+                'mistral-nemo': (0.3, 0.3),
+                'mixtral-8x7b': (0.24, 0.24),
+                'mixtral-8x22b': (1.0, 3.0),
+                'codestral': (0.1, 0.3),
+                'ministral': (0.1, 0.3),
+                'default': (0.4, 2.0)
             },
             'groq': {
-                'llama-3.1-405b': 2.5,       # Large Llama
-                'llama-3.1-70b': 0.7,        # $0.59 input + $0.79 output per 1M
-                'llama-3.1-8b': 0.05,        # $0.05 input + $0.10 output per 1M
-                'llama-3-70b': 0.7,          # Previous gen
-                'llama-3-8b': 0.05,          
-                'mixtral-8x7b': 0.24,        # $0.24 per 1M tokens
-                'gemma-7b': 0.07,            # Google's open model
-                'gemma2-9b': 0.10,           # Newer Gemma
-                'default': 0.2
+                'llama-4-scout': (0.11, 0.34),      # Official pricing
+                'llama-4-maverick': (0.5, 0.77),    # Official pricing
+                'llama-3.1-405b': (2.5, 2.5),
+                'llama-3.1-70b': (0.59, 0.79),
+                'llama-3.1-8b': (0.05, 0.1),
+                'llama-3-70b': (0.59, 0.79),
+                'llama-3-8b': (0.05, 0.1),
+                'mixtral-8x7b': (0.24, 0.24),
+                'gemma-7b': (0.07, 0.07),
+                'gemma2-9b': (0.1, 0.1),
+                'default': (0.3, 0.3)
             },
             'deepseek': {
-                'deepseek-v3': 1.0,          # Latest model
-                'deepseek-chat': 0.14,       # $0.14 per 1M tokens
-                'deepseek-coder': 0.14,      # Code-specific
-                'default': 0.14
+                'deepseek-v3': (0.27, 1.09),         # Regular price
+                'deepseek-v3-promo': (0.14, 0.27),   # Promo until Feb 8
+                'deepseek-chat': (0.27, 1.09),
+                'deepseek-r1': (0.27, 1.09),
+                'deepseek-reasoner': (0.27, 1.09),
+                'deepseek-coder': (0.14, 0.14),
+                'default': (0.27, 1.09)
             },
             'cohere': {
-                'command-r-plus': 7.5,       # $3 input + $15 output per 1M
-                'command-r': 0.75,           # $0.5 input + $1.5 output per 1M
-                'command': 2.0,              # Legacy
-                'default': 1.0
+                'command-a': (2.5, 10.0),
+                'command-r-plus': (2.5, 10.0),
+                'command-r+': (2.5, 10.0),
+                'command-r': (0.15, 0.6),
+                'command-r7b': (0.0375, 0.15),
+                'command': (1.0, 3.0),
+                'default': (0.5, 2.0)
             }
         }
         
-        provider_prices = token_prices.get(provider, {'default': 5.0})
+        provider_prices = token_prices.get(provider, {'default': (2.5, 10.0)})
         
         # Find the right price for this model
-        price_per_million = provider_prices.get('default', 5.0)
+        price_tuple = provider_prices.get('default', (2.5, 10.0))
         model_lower = model.lower()
         
         # Try exact match first
         if model_lower in provider_prices:
-            price_per_million = provider_prices[model_lower]
+            price_tuple = provider_prices[model_lower]
         else:
             # Try prefix matching
             for model_key, price in provider_prices.items():
@@ -373,8 +431,14 @@ class AsyncAPIProcessor:
                 if (model_lower.startswith(model_key) or 
                     model_lower_clean.startswith(model_key_clean) or
                     model_key in model_lower):
-                    price_per_million = price
+                    price_tuple = price
                     break
+        
+        # Calculate weighted average price based on compression_factor
+        input_price, output_price = price_tuple
+        input_ratio = 1 / (1 + compression_factor)
+        output_ratio = compression_factor / (1 + compression_factor)
+        price_per_million = (input_ratio * input_price) + (output_ratio * output_price)
         
         # Calculate total tokens
         # For translation: output is typically 1.2-1.5x input length
@@ -392,7 +456,10 @@ class AsyncAPIProcessor:
         # Log for debugging
         logger.info(f"Cost calculation for {model}:")
         logger.info(f"  Provider: {provider}")
-        logger.info(f"  Model matched to price: ${price_per_million:.4f}/1M tokens")
+        logger.info(f"  Input price: ${input_price:.4f}/1M tokens")
+        logger.info(f"  Output price: ${output_price:.4f}/1M tokens")
+        logger.info(f"  Compression factor: {compression_factor}")
+        logger.info(f"  Weighted avg price: ${price_per_million:.4f}/1M tokens")
         logger.info(f"  Chapters: {num_chapters}")
         logger.info(f"  Avg input tokens/chapter: {avg_tokens_per_chapter:,}")
         logger.info(f"  Total tokens (input+output): {total_tokens:,}")
