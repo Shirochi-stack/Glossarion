@@ -2521,7 +2521,9 @@ class BatchTranslationProcessor:
                     self.check_stop_fn
                 )
                 if image_translations:
-                        # Create a copy of the processed body
+                    # Create a copy of the processed body
+                    from bs4 import BeautifulSoup 
+                    c = chapter
                     soup_for_text = BeautifulSoup(c["body"], 'html.parser')
                     
                     # Remove all translated content
