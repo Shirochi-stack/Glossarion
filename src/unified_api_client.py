@@ -169,6 +169,16 @@ try:
     from mistralai.models.chat_completion import ChatMessage
 except ImportError:
     MistralClient = None
+    
+# Google Vertex AI API Cloud
+try:
+    from google.cloud import aiplatform
+    from google.oauth2 import service_account
+    import vertexai
+    VERTEX_AI_AVAILABLE = True
+except ImportError:
+    VERTEX_AI_AVAILABLE = False
+    logger.warning("Vertex AI SDK not installed. Install with: pip install google-cloud-aiplatform")
 
 @dataclass
 class UnifiedResponse:
@@ -239,6 +249,8 @@ class UnifiedClient:
     
     # Supported model prefixes and their providers (Updated July 2025)
     MODEL_PROVIDERS = {
+        'vertex/': 'vertex_model_garden',  # For Vertex AI Model Garden
+        '@': 'vertex_model_garden',  # For models with @ symbol (claude-sonnet-4@20250514)
         'gpt': 'openai',
         'o1': 'openai',
         'o3': 'openai',
@@ -358,8 +370,32 @@ class UnifiedClient:
             'response_times': []
         }
         
-        # Determine client type from model name
-        self._setup_client()
+        # Store Google Cloud credentials path if available
+        self.google_creds_path = None
+        
+        # Check for Vertex AI Model Garden models (contain @ symbol)
+        if '@' in self.model or self.model.startswith('vertex/'):
+            # For Vertex AI, we need Google Cloud credentials, not API key
+            self.client_type = 'vertex_model_garden'
+            
+            # Try to find Google Cloud credentials
+            # 1. Check environment variable
+            self.google_creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+            
+            # 2. Check if passed as api_key (for compatibility)
+            if not self.google_creds_path and api_key and os.path.exists(api_key):
+                self.google_creds_path = api_key
+                logger.info("Using API key parameter as Google Cloud credentials path")
+            
+            # 3. Will check GUI config later during send if needed
+            
+            if self.google_creds_path:
+                logger.info(f"Vertex AI Model Garden: Using credentials from {self.google_creds_path}")
+            else:
+                logger.warning("Vertex AI Model Garden: Google Cloud credentials not yet configured")
+        else:
+            # Determine client type from model name (existing logic)
+            self._setup_client()
             
     def _setup_client(self):
         """Setup the appropriate client based on model type"""
@@ -699,8 +735,329 @@ class UnifiedClient:
         IMPORTANT: Called by send_with_interrupt when timeout occurs
         """
         self._cancelled = True
-        logger.info("🛑 Operation cancelled (timeout or user stop)")
+        print("🛑 Operation cancelled (timeout or user stop)")
         print("🛑 API operation cancelled")
+
+    def _send_vertex_model_garden(self, messages, temperature=0.7, max_tokens=None, stop_sequences=None):
+        """Send request to Vertex AI Model Garden models (including Claude)"""
+        try:
+            from google.cloud import aiplatform
+            from google.oauth2 import service_account
+            from google.auth.transport.requests import Request
+            import google.auth.transport.requests
+            import vertexai
+            
+            # Import your global stop check function
+            try:
+                from TranslateKRtoEN import is_stop_requested
+            except ImportError:
+                # Fallback to checking _cancelled flag
+                def is_stop_requested():
+                    return self._cancelled
+            
+            # Use the same credentials as Cloud Vision
+            google_creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+            if not google_creds_path:
+                # Try to get from config
+                if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'config'):
+                    google_creds_path = self.main_gui.config.get('google_vision_credentials', '') or \
+                                      self.main_gui.config.get('google_cloud_credentials', '')
+            
+            if not google_creds_path or not os.path.exists(google_creds_path):
+                raise ValueError("Google Cloud credentials not found. Please set up credentials.")
+            
+            # Load credentials with proper scopes
+            credentials = service_account.Credentials.from_service_account_file(
+                google_creds_path,
+                scopes=['https://www.googleapis.com/auth/cloud-platform']
+            )
+            
+            # Extract project ID from credentials
+            with open(google_creds_path, 'r') as f:
+                creds_data = json.load(f)
+                project_id = creds_data.get('project_id')
+            
+            if not project_id:
+                raise ValueError("Project ID not found in credentials file")
+            
+            logger.info(f"Using project ID: {project_id}")
+            
+            # Parse model name
+            model_name = self.model
+            if model_name.startswith('vertex_ai/'):
+                model_name = model_name[10:]  # Remove "vertex_ai/" prefix
+            elif model_name.startswith('vertex/'):
+                model_name = model_name[7:]  # Remove "vertex/" prefix
+            
+            logger.info(f"Using model: {model_name}")
+            
+            # For Claude models, use the Anthropic SDK with Vertex AI
+            if 'claude' in model_name.lower():
+                # Import Anthropic exceptions
+                try:
+                    from anthropic import AnthropicVertex
+                    import anthropic
+                    import httpx
+                except ImportError:
+                    raise UnifiedClientError("Anthropic SDK not installed. Run: pip install anthropic")
+                
+                # Use the region from environment variable
+                region = os.getenv('VERTEX_AI_LOCATION', 'us-east5')
+                
+                # CHECK STOP FLAG
+                if is_stop_requested():
+                    logger.info("Stop requested, cancelling")
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                
+                print(f"Using Vertex AI region: {region}")
+                
+                # Initialize Anthropic client for Vertex AI
+                client = AnthropicVertex(
+                    project_id=project_id,
+                    region=region
+                )
+                
+                # Convert messages to Anthropic format
+                anthropic_messages = []
+                system_prompt = ""
+                
+                for msg in messages:
+                    if msg['role'] == 'system':
+                        system_prompt = msg['content']
+                    else:
+                        anthropic_messages.append({
+                            "role": msg['role'],
+                            "content": msg['content']
+                        })
+                
+                # Create message with Anthropic client
+                kwargs = {
+                    "model": model_name,
+                    "messages": anthropic_messages,
+                    "max_tokens": max_tokens or 4096,
+                    "temperature": temperature,
+                }
+                
+                if system_prompt:
+                    kwargs["system"] = system_prompt
+                
+                if stop_sequences:
+                    kwargs["stop_sequences"] = stop_sequences
+                
+                # CHECK STOP FLAG BEFORE API CALL
+                if is_stop_requested():
+                    logger.info("Stop requested, cancelling API call")
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                
+                print(f"Sending request to {model_name} in region {region}")
+                
+                try:
+                    message = client.messages.create(**kwargs)
+                    
+                except httpx.HTTPStatusError as e:
+                    # Handle HTTP status errors from the Anthropic SDK
+                    status_code = e.response.status_code if hasattr(e.response, 'status_code') else 0
+                    error_body = e.response.text if hasattr(e.response, 'text') else str(e)
+                    
+                    # Check if it's an HTML error page
+                    if '<!DOCTYPE html>' in error_body or '<html' in error_body:
+                        if '404' in error_body:
+                            # Extract the region from the error
+                            import re
+                            region_match = re.search(r'/locations/([^/]+)/', error_body)
+                            bad_region = region_match.group(1) if region_match else region
+                            
+                            raise UnifiedClientError(
+                                f"Invalid region: {bad_region}\n\n"
+                                f"This region does not exist. Common regions:\n"
+                                f"• us-east5 (for Claude models)\n"
+                                f"• us-central1\n"
+                                f"• europe-west4\n"
+                                f"• asia-southeast1\n\n"
+                                f"Please check the region spelling in the text box."
+                            )
+                        else:
+                            raise UnifiedClientError(
+                                "Connection error to Vertex AI.\n"
+                                "Please check your region and try again."
+                            )
+                    
+                    if status_code == 429:
+                        raise UnifiedClientError(
+                            f"Quota exceeded for Vertex AI model: {model_name}\n\n"
+                            "You need to request quota increase in Google Cloud Console:\n"
+                            "1. Go to IAM & Admin → Quotas\n"
+                            "2. Search for 'online_prediction_requests_per_base_model'\n"
+                            "3. Request increase for your model\n\n"
+                            "Or use the model directly with provider's API key instead of Vertex AI."
+                        )
+                    elif status_code == 404:
+                        raise UnifiedClientError(
+                            f"Model {model_name} not found in region {region}.\n\n"
+                            "Try changing the region in the text box next to Google Cloud Credentials button.\n"
+                            "Claude models are typically available in us-east5."
+                        )
+                    elif status_code == 403:
+                        raise UnifiedClientError(
+                            f"Permission denied for model {model_name}.\n\n"
+                            "Make sure:\n"
+                            "1. The model is enabled in Vertex AI Model Garden\n"
+                            "2. Your service account has the necessary permissions\n"
+                            "3. You have accepted any required terms for Claude models"
+                        )
+                    elif status_code == 500:
+                        raise UnifiedClientError(
+                            f"Vertex AI internal error.\n\n"
+                            "This is a temporary issue with Google's servers.\n"
+                            "Please try again in a few moments."
+                        )
+                    else:
+                        raise UnifiedClientError(f"HTTP {status_code} error")
+                        
+                except anthropic.APIError as e:
+                    # Handle Anthropic-specific API errors
+                    error_str = str(e)
+                    
+                    # Check for HTML in error message
+                    if '<!DOCTYPE html>' in error_str or '<html' in error_str:
+                        if '404' in error_str:
+                            import re
+                            region_match = re.search(r'/locations/([^/]+)/', error_str)
+                            bad_region = region_match.group(1) if region_match else region
+                            
+                            raise UnifiedClientError(
+                                f"Invalid region: {bad_region}\n\n"
+                                f"This region does not exist. Try:\n"
+                                f"• us-east5\n"
+                                f"• us-central1\n"
+                                f"• europe-west4"
+                            )
+                        else:
+                            raise UnifiedClientError("Connection error. Check your region.")
+                    
+                    if hasattr(e, 'status_code'):
+                        status_code = e.status_code
+                        if status_code == 429:
+                            raise UnifiedClientError(
+                                f"Quota exceeded for Vertex AI model: {model_name}\n\n"
+                                "Request quota increase in Google Cloud Console."
+                            )
+                    raise UnifiedClientError(f"API error: {error_str[:200]}")  # Limit error length
+                    
+                except Exception as e:
+                    # Catch any other errors
+                    error_str = str(e)
+                    
+                    # Check if it's an HTML error page
+                    if '<!DOCTYPE html>' in error_str or '<html' in error_str:
+                        if '404' in error_str:
+                            # Extract the region from the error
+                            import re
+                            region_match = re.search(r'/locations/([^/]+)/', error_str)
+                            bad_region = region_match.group(1) if region_match else region
+                            
+                            raise UnifiedClientError(
+                                f"Invalid region: {bad_region}\n\n"
+                                f"This region does not exist. Common regions:\n"
+                                f"• us-east5 (for Claude models)\n"
+                                f"• us-central1\n"
+                                f"• europe-west4\n"
+                                f"• asia-southeast1\n\n"
+                                f"Please check the region spelling in the text box."
+                            )
+                        else:
+                            # Generic HTML error
+                            raise UnifiedClientError(
+                                "Connection error to Vertex AI.\n"
+                                "Please check your region and try again."
+                            )
+                    elif "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                        raise UnifiedClientError(
+                            f"Quota exceeded for Vertex AI model: {model_name}\n\n"
+                            "Request quota increase in Google Cloud Console."
+                        )
+                    elif "404" in error_str or "NOT_FOUND" in error_str:
+                        raise UnifiedClientError(
+                            f"Model {model_name} not found in region {region}.\n\n"
+                            "Try changing the region."
+                        )
+                    else:
+                        # For any other error, show a clean message
+                        if len(error_str) > 200:
+                            raise UnifiedClientError(f"Vertex AI error: Request failed. Check your region and model name.")
+                        else:
+                            raise UnifiedClientError(f"Vertex AI error: {error_str}")
+                
+                # CHECK STOP FLAG AFTER RESPONSE
+                if is_stop_requested():
+                    logger.info("Stop requested after response, discarding result")
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                
+                # Success! Convert response to UnifiedResponse
+                print(f"Successfully got response from {region}")
+                return UnifiedResponse(
+                    content=message.content[0].text if message.content else "",
+                    usage={
+                        "input_tokens": message.usage.input_tokens,
+                        "output_tokens": message.usage.output_tokens,
+                        "total_tokens": message.usage.input_tokens + message.usage.output_tokens
+                    } if hasattr(message, 'usage') else None,
+                    finish_reason=message.stop_reason if hasattr(message, 'stop_reason') else 'stop',
+                    raw_response=message
+                )
+            
+            else:
+                # For Gemini models on Vertex AI, use standard Vertex AI SDK
+                location = os.getenv('VERTEX_AI_LOCATION', 'us-east5')
+                
+                # Check stop flag before Gemini call
+                if is_stop_requested():
+                    logger.info("Stop requested, cancelling Vertex AI Gemini request")
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                
+                vertexai.init(project=project_id, location=location, credentials=credentials)
+                
+                # Use the existing Gemini implementation
+                return self._send_gemini(messages, temperature, max_tokens, stop_sequences)
+                
+        except UnifiedClientError:
+            # Re-raise our own errors without modification
+            raise
+        except Exception as e:
+            # Handle any other unexpected errors
+            error_str = str(e)
+            # Don't print HTML errors
+            if '<!DOCTYPE html>' not in error_str and '<html' not in error_str:
+                print(f"Vertex AI Model Garden error: {str(e)}")
+                print(f"Full traceback: {traceback.format_exc()}")
+            raise UnifiedClientError(f"Vertex AI Model Garden error: {str(e)[:200]}")  # Limit length
+            
+    def _convert_messages_for_vertex(self, messages):
+        """Convert OpenAI-style messages to Vertex AI Model Garden format"""
+        converted = []
+        
+        for msg in messages:
+            role = msg['role']
+            content = msg['content']
+            
+            # Map roles for Claude in Vertex AI
+            if role == 'system':
+                converted.append({
+                    "role": "system",
+                    "content": content
+                })
+            elif role == 'user':
+                converted.append({
+                    "role": "user", 
+                    "content": content
+                })
+            elif role == 'assistant':
+                converted.append({
+                    "role": "assistant",
+                    "content": content
+                })
+        
+        return converted
     
     def send(self, messages, temperature=None, max_tokens=None, max_completion_tokens=None, context=None) -> Tuple[str, Optional[str]]:
         """
@@ -887,6 +1244,7 @@ class UnifiedClient:
             'openrouter': self._send_openrouter,  # OpenRouter aggregator
             'fireworks': self._send_fireworks,  # Fireworks AI
             'xai': self._send_xai,  # xAI Grok models
+            'vertex_model_garden': self._send_vertex_model_garden,
         }
         
         handler = handlers.get(self.client_type)
@@ -900,6 +1258,9 @@ class UnifiedClient:
         # For OpenAI, pass the max_completion_tokens parameter
         if self.client_type == 'openai':
             return handler(messages, temperature, max_tokens, max_completion_tokens, response_name)
+        elif self.client_type == 'vertex_model_garden':  # ADD THIS ELIF BLOCK
+            # Vertex AI doesn't use response_name parameter
+            return handler(messages, temperature, max_tokens or max_completion_tokens)
         else:
             # Other providers don't use max_completion_tokens yet
             return handler(messages, temperature, max_tokens, response_name)
@@ -1616,6 +1977,7 @@ class UnifiedClient:
                 HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
                 HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
                 HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY: HarmBlockThreshold.BLOCK_NONE,
             }
             logger.info("Gemini safety settings disabled - using BLOCK_NONE for all categories")
         else:
@@ -1644,7 +2006,8 @@ class UnifiedClient:
                 "HATE_SPEECH": "BLOCK_NONE",
                 "SEXUALLY_EXPLICIT": "BLOCK_NONE",
                 "HARASSMENT": "BLOCK_NONE",
-                "DANGEROUS_CONTENT": "BLOCK_NONE"
+                "DANGEROUS_CONTENT": "BLOCK_NONE",
+                "CIVIC_INTEGRITY": "BLOCK_NONE"
             }
         else:
             safety_status = "ENABLED - Using default Gemini safety settings"
@@ -2964,6 +3327,8 @@ class UnifiedClient:
                 'tii': ['falcon-2-11b'],  # Falcon 2 with vision support
                 'xai': ['grok-3', 'grok-vision'],  # Grok models with vision
                 'meta': ['llama-4-vision'],  # Meta's Llama 4 with vision
+                'vertex_model_garden': ['gemini', 'imagen', 'claude'],  # Vertex AI Model Garden vision models
+
             }
             
             # Check if provider supports vision
@@ -2999,6 +3364,9 @@ class UnifiedClient:
             elif self.client_type == 'cohere':
                 response = self._send_cohere_image(messages, image_base64, temperature,
                                                  max_tokens or max_completion_tokens, response_name)
+            elif self.client_type == 'vertex_model_garden':
+                response = self._send_vertex_model_garden_image(messages, image_base64, temperature, 
+                                                               max_tokens or max_completion_tokens, response_name)
             else:
                 raise UnifiedClientError(f"Image input not supported for {self.client_type}")
             
@@ -3055,6 +3423,26 @@ class UnifiedClient:
             fallback = self._handle_empty_result(messages, context, str(e))
             return fallback, 'error'
 
+    def _send_vertex_model_garden_image(self, messages, image_base64, temperature, max_tokens, response_name):
+        """Send image request to Vertex AI Model Garden"""
+        # For now, we can just call the regular send method since Vertex AI 
+        # handles images in the message format
+        
+        # Convert image to message format that Vertex AI expects
+        image_message = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": messages[-1]['content'] if messages else ""},
+                {"type": "image", "image": {"base64": image_base64}}
+            ]
+        }
+        
+        # Replace last message with image message
+        messages_with_image = messages[:-1] + [image_message]
+        
+        # Use the regular Vertex AI send method
+        return self._send_vertex_model_garden(messages_with_image, temperature, max_tokens)
+
     def _is_o_series_model(self) -> bool:
         """Check if the current model is an o-series model (o1, o3, o4, etc.)"""
         if not self.model:
@@ -3103,6 +3491,7 @@ class UnifiedClient:
                     HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
                     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
                     HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+                    HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY: HarmBlockThreshold.BLOCK_NONE,
                 }
             else:
                 safety_settings = None
@@ -3119,7 +3508,8 @@ class UnifiedClient:
                     "HATE_SPEECH": "BLOCK_NONE",
                     "SEXUALLY_EXPLICIT": "BLOCK_NONE",
                     "HARASSMENT": "BLOCK_NONE",
-                    "DANGEROUS_CONTENT": "BLOCK_NONE"
+                    "DANGEROUS_CONTENT": "BLOCK_NONE",
+                    "CIVIC_INTEGRITY": "BLOCK_NONE"
                 }
             else:
                 safety_status = "ENABLED - Using default Gemini safety settings"
