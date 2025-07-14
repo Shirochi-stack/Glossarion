@@ -143,13 +143,8 @@ except ImportError:
     class OpenAIError(Exception): pass
 
 # Gemini SDK
-try:
-    import google.generativeai as genai
-    from google.generativeai.types import HarmCategory, HarmBlockThreshold
-except ImportError:
-    genai = None
-    HarmCategory = None
-    HarmBlockThreshold = None 
+from google import genai
+from google.genai import types
 
 # Anthropic SDK (optional - can use requests if not installed)
 try:
@@ -436,7 +431,7 @@ class UnifiedClient:
         elif self.client_type == 'gemini':
             if genai is None:
                 raise ImportError("Google Generative AI library not installed. Install with: pip install google-generativeai")
-            genai.configure(api_key=self.api_key)
+            self.gemini_client = genai.Client(api_key=self.api_key)
             
         elif self.client_type == 'electronhub':
             # ElectronHub uses OpenAI SDK if available
@@ -1972,24 +1967,34 @@ class UnifiedClient:
         # Configure safety settings based on toggle
         if disable_safety:
             # Set all safety categories to BLOCK_NONE (most permissive)
-            safety_settings = {
-                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY: HarmBlockThreshold.BLOCK_NONE,
-            }
+            safety_settings = [
+                types.SafetySetting(
+                    category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                    threshold=types.HarmBlockThreshold.BLOCK_NONE
+                ),
+                types.SafetySetting(
+                    category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                    threshold=types.HarmBlockThreshold.BLOCK_NONE
+                ),
+                types.SafetySetting(
+                    category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                    threshold=types.HarmBlockThreshold.BLOCK_NONE
+                ),
+                types.SafetySetting(
+                    category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                    threshold=types.HarmBlockThreshold.BLOCK_NONE
+                ),
+                types.SafetySetting(
+                    category=types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
+                    threshold=types.HarmBlockThreshold.BLOCK_NONE
+                ),
+            ]
             logger.info("Gemini safety settings disabled - using BLOCK_NONE for all categories")
         else:
             # Use default safety settings (let Gemini decide)
             safety_settings = None
             logger.info("Using default Gemini safety settings")
-        
-        # Create model with safety settings
-        model = genai.GenerativeModel(
-            self.model,
-            safety_settings=safety_settings if safety_settings else None
-        )
+
         # Define BOOST_FACTOR and current_tokens FIRST
         BOOST_FACTOR = 4
         attempts = 4
@@ -2054,9 +2059,10 @@ class UnifiedClient:
                     **anti_dupe_params  # Add user's custom parameters
                 }
 
-                response = model.generate_content(
-                    formatted_prompt,
-                    generation_config=generation_config
+                response = self.gemini_client.models.generate_content(
+                    model=self.model,
+                    contents=formatted_prompt,
+                    config=generation_config
                 )
                 
                 # Check for blocked content
@@ -3486,20 +3492,30 @@ class UnifiedClient:
             
             # Configure safety settings
             if disable_safety:
-                safety_settings = {
-                    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY: HarmBlockThreshold.BLOCK_NONE,
-                }
+                safety_settings = [
+                    types.SafetySetting(
+                        category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                        threshold=types.HarmBlockThreshold.BLOCK_NONE
+                    ),
+                    types.SafetySetting(
+                        category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                        threshold=types.HarmBlockThreshold.BLOCK_NONE
+                    ),
+                    types.SafetySetting(
+                        category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                        threshold=types.HarmBlockThreshold.BLOCK_NONE
+                    ),
+                    types.SafetySetting(
+                        category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                        threshold=types.HarmBlockThreshold.BLOCK_NONE
+                    ),
+                    types.SafetySetting(
+                        category=types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
+                        threshold=types.HarmBlockThreshold.BLOCK_NONE
+                    ),
+                ]
             else:
                 safety_settings = None
-            
-            model = genai.GenerativeModel(
-                self.model,
-                safety_settings=safety_settings if safety_settings else None
-            )
             
             # SAVE SAFETY CONFIGURATION FOR VERIFICATION
             if safety_settings:
@@ -3556,9 +3572,13 @@ class UnifiedClient:
                 **anti_dupe_params  # Add user's custom parameters
             }
 
-            response = model.generate_content(
-                [text_prompt, image],
-                generation_config=generation_config
+            # convert the image to the new SDK format
+            image_part = types.Part.from_image(image)
+
+            response = self.gemini_client.models.generate_content(
+                model=self.model,
+                contents=[text_prompt, image_part],
+                config=generation_config
             )
             elapsed = time.time() - start_time
             logger.info(f"Vision API call took {elapsed:.1f} seconds")
