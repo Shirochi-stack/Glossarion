@@ -74,7 +74,7 @@ class UpdateManager:
                 # Pre-process release notes to improve dialog loading speed
                 if 'body' in release_data and release_data['body']:
                     # Limit release notes length and clean up markdown
-                    max_length = 2000
+                    max_length = 20000
                     body = release_data['body']
                     
                     # Remove excessive newlines
