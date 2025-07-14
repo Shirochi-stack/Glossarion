@@ -642,7 +642,8 @@ class AsyncAPIProcessor:
                 request["generateContentRequest"]["safetySettings"] = [
                     {"category": cat, "threshold": "BLOCK_NONE"}
                     for cat in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
-                               "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]
+                               "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT",
+                               "HARM_CATEGORY_CIVIC_INTEGRITY"]
                 ]
                 
             requests.append(request)
@@ -2940,15 +2941,9 @@ class AsyncProcessingDialog:
             # Upload the batch file with explicit mime type
             logger.info("Uploading batch file...")
             
-            # Use the upload config to specify mime type
-            upload_config = types.UploadFileConfig(
-                mime_type='application/jsonl',  # Explicit JSONL mime type
-                display_name=f"batch_requests_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
-            )
-            
+            # The new SDK uses 'path' parameter directly
             uploaded_file = client.files.upload(
-                file=batch_file_path,
-                config=upload_config
+                path=batch_file_path
             )
             
             logger.info(f"File uploaded: {uploaded_file.name}")
