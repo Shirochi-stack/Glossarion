@@ -6774,12 +6774,16 @@ Recent translations to summarize:
             if result:
                 threshold_var.set(10)
                 excluded_text.delete(1.0, tk.END)
-                check_encoding_var.set(True)
+                check_encoding_var.set(False)
                 check_repetition_var.set(True)
                 check_artifacts_var.set(True)
-                min_length_var.set(100)
+                min_length_var.set(0)
                 format_var.set('detailed')
                 auto_save_var.set(True)
+                check_word_count_var.set(False)
+                check_multiple_headers_var.set(True)
+                warn_mismatch_var.set(False)
+                check_missing_html_tag_var.set(True)
         
         # Create buttons using ttkbootstrap styles
         save_btn = tb.Button(
