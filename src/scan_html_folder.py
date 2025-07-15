@@ -175,31 +175,27 @@ TRANSLATION_ARTIFACTS = {
 }
 
 def extract_text_from_html(file_path):
-    """Extract text from HTML or TXT file"""
+    """Extract text from HTML or TXT file
+    
+    Returns:
+        str OR tuple: 
+            - For backwards compatibility: just the text (if not checking HTML structure)
+            - For new functionality: (text_content, has_html_tag) tuple
+    """
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
         content = f.read()
         
+    # Check if it's a .txt file
     if file_path.lower().endswith('.txt'):
+        # For .txt files, just return the content directly
         return content
     
     # For HTML files, parse with BeautifulSoup
     soup = BeautifulSoup(content, "html.parser")
-    text = soup.get_text(strip=True)  # Try without separator
+    text = soup.get_text(separator='\n', strip=True)
     
-    # Debug the issue
-    if 'response_chapter' in file_path:
-        space_count = text.count(" ")
-        text_length = len(text)
-        space_ratio = space_count / max(1, text_length)
-        word_count = len(text.split())
-        
-        print(f"\nDEBUG {os.path.basename(file_path)}:")
-        print(f"  Text length: {text_length}")
-        print(f"  Space count: {space_count}")
-        print(f"  Space ratio: {space_ratio:.4f}")
-        print(f"  Word count: {word_count}")
-        print(f"  First 100 chars: {repr(text[:100])}")
-    
+    # For backwards compatibility, we'll handle the HTML tag check separately
+    # in the scan function rather than always returning a tuple
     return text
 
 def check_html_structure(file_path):
@@ -267,13 +263,11 @@ def filter_dash_lines(text):
     lines = text.split('\n')
     return '\n'.join(line for line in lines if not is_dash_separator_line(line))
 
-def has_no_spacing_or_linebreaks(text, space_threshold=0.05):  # Changed from 0.01 to 0.05 (5%)
+def has_no_spacing_or_linebreaks(text, space_threshold=0.01):
     filtered_text = filter_dash_lines(text)
     space_ratio = filtered_text.count(" ") / max(1, len(filtered_text))
     newline_count = filtered_text.count("\n")
-    
-    # More reasonable check: both no spaces AND no newlines
-    return space_ratio < space_threshold and newline_count < 5  # Changed from OR to AND
+    return space_ratio < space_threshold or newline_count == 0
 
 def has_repeating_sentences(text, min_repeats=10):
     filtered_text = filter_dash_lines(text)
@@ -2086,28 +2080,19 @@ def extract_epub_word_counts(epub_path, log=print):
                     
                     # Try various patterns to extract chapter number
                     patterns = [
-                        # More specific patterns first
-                        r'chapter[\s_-]*(\d+)',          # chapter0000, chapter_0, chapter-5
-                        r'ch[\s_-]*(\d+)',                # ch0000, ch_0, ch-5
-                        r'c(\d+)',                        # c0000, c1, c99
-                        r'第(\d+)[章话回]',               # Chinese chapter markers
-                        r'제(\d+)[장화회]',               # Korean chapter markers
-                        r'_(\d{3,4})(?:\.|_|$)',         # _0000.html, _0000_
-                        r'[\s_-](\d{3,4})(?:\.|_|$)',    # -0000.html, 0000.html
-                        r'^(\d{3,4})(?:\.|_)',            # 0000.html, 0000_something
+                        r'(\d{3,4})',  # 3-4 digit numbers
+                        r'chapter[\s_-]*(\d+)',
+                        r'ch[\s_-]*(\d+)',
+                        r'c(\d+)',
+                        r'第(\d+)[章话回]',
+                        r'제(\d+)[장화회]'
                     ]
-                                        
+                    
                     for pattern in patterns:
                         match = re.search(pattern, basename, re.IGNORECASE)
                         if match:
                             chapter_num = int(match.group(1))
-                            if chapter_num == 0:  # Debug Chapter 0 specifically
-                                log(f"   📖 Found Chapter 0: {basename} using pattern: {pattern}")
                             break
-
-                    # If no match found, log it
-                    if chapter_num is None and basename:
-                        log(f"   ⚠️ No chapter number found in: {basename}")
                     
                     # Read and parse the file
                     content = zf.read(file_path).decode('utf-8', errors='ignore')
@@ -2141,9 +2126,7 @@ def extract_epub_word_counts(epub_path, log=print):
                 except Exception as e:
                     log(f"⚠️ Error processing {file_path}: {e}")
                     continue
-        log(f"   Chapter numbers found: {sorted(word_counts.keys())}")
-        if 0 not in word_counts:
-            log(f"   ❗ Chapter 0 was not added to word_counts!")        
+        
         return word_counts
         
     except Exception as e:
@@ -2188,9 +2171,7 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
         if match:
             chapter_num = int(match.group(1))
             break
-    if chapter_num == 0 or basename == "response_chapter0000.html":
-        log(f"DEBUG: Extracted chapter_num={chapter_num} from {basename}") 
-        
+    
     if chapter_num is None:
         # Try content-based matching as fallback
         content_patterns = [
@@ -2204,8 +2185,7 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
             if match:
                 chapter_num = int(match.group(1))
                 break
-    if chapter_num == 0:
-        log(f"DEBUG: About to check - chapter_num={chapter_num}, in original_counts: {chapter_num in original_counts}")    
+    
     if chapter_num is not None and chapter_num in original_counts:
         original_wc = original_counts[chapter_num]['word_count']
         is_cjk = original_counts[chapter_num].get('is_cjk', True)  # Get CJK flag if available
