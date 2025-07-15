@@ -1923,16 +1923,21 @@ def update_progress_file(folder_path, results, log):
     
     # Log affected chapters
     affected_chapters = []
+    affected_chapters_for_log = []
     for faulty_row in faulty_chapters:
+        # For internal use (progress file updates, etc.)
         chapter_num = faulty_row.get("file_index", 0) + 1
         if faulty_row.get("filename"):
             match = re.search(r'response_(\d+)', faulty_row["filename"])
             if match:
                 chapter_num = int(match.group(1))
         affected_chapters.append(chapter_num)
-    
-    if affected_chapters:
-        log(f"📝 Chapters marked for re-translation: {', '.join(str(c) for c in sorted(affected_chapters))}")
+        
+        # For the log display (to match HTML report)
+        affected_chapters_for_log.append(faulty_row.get("file_index", 0))
+
+    if affected_chapters_for_log:
+        log(f"📝 Chapters marked for re-translation: {', '.join(str(c) for c in sorted(affected_chapters_for_log))}")
 
 def update_new_format_progress(prog, faulty_chapters, log):
     """Update new format progress file"""
