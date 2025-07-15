@@ -383,7 +383,7 @@ class MangaTranslator:
                     self._log(f"   Found text region ({avg_confidence:.2f}): {block_text[:50]}...")
             
             # Merge nearby regions based on settings
-            merge_threshold = ocr_settings.get('merge_nearby_threshold', 50)
+            merge_threshold = ocr_settings.get('merge_nearby_threshold', 20)
             regions = self._merge_nearby_regions(regions, threshold=merge_threshold)
             
             self._log(f"✅ Detected {len(regions)} text regions")
@@ -2851,12 +2851,13 @@ class MangaTranslator:
                     )
                     continue
                 
-                # Original proximity and merge checks
-                if self._regions_are_nearby(region1, region2, threshold):
+                # FIX: Always check proximity against ORIGINAL regions, not the expanded one
+                # This prevents cascade merging across bubble boundaries
+                if self._regions_are_nearby(regions[i], region2, threshold):  # Use regions[i] not region1
                     #self._log(f"      ✓ Regions are nearby", "info")
                     
-                    # Then check if they should merge
-                    if self._regions_should_merge(region1, region2, threshold):
+                    # Then check if they should merge (also use original region)
+                    if self._regions_should_merge(regions[i], region2, threshold):  # Use regions[i] not region1
                         #self._log(f"      ✓ Regions should merge!", "success")
                         
                         # Actually perform the merge
@@ -2866,30 +2867,7 @@ class MangaTranslator:
                         used.add(j)
                         regions_merged.append(j)
                         
-                        # Update region1's bounding box for subsequent comparisons
-                        # This is important so the next region can merge with the expanded region
-                        all_vertices = merged_vertices if merged_vertices else []
-                        if all_vertices:
-                            xs = [v[0] for v in all_vertices]
-                            ys = [v[1] for v in all_vertices]
-                        else:
-                            # Fallback to bounding box calculation
-                            x1, y1, w1, h1 = region1.bounding_box
-                            x2, y2, w2, h2 = region2.bounding_box
-                            xs = [x1, x1+w1, x2, x2+w2]
-                            ys = [y1, y1+h1, y2, y2+h2]
-                        
-                        new_x, new_y = min(xs), min(ys)
-                        new_w, new_h = max(xs) - new_x, max(ys) - new_y
-                        
-                        # Create updated region for next iteration
-                        region1 = TextRegion(
-                            text=merged_text,
-                            vertices=merged_vertices,
-                            bounding_box=(new_x, new_y, new_w, new_h),
-                            confidence=region1.confidence,
-                            region_type='temp_merge'
-                        )
+                        # DON'T update region1 for proximity checks - keep using original regions
                     else:
                         self._log(f"      ✗ Regions should not merge", "warning")
                 else:
@@ -2901,15 +2879,20 @@ class MangaTranslator:
             else:
                 self._log(f"  ℹ️ Region {i} not merged with any other", "info")
             
-            # Create final merged region
+            # Create final merged region with all the merged vertices
             if merged_vertices:
                 xs = [v[0] for v in merged_vertices]
                 ys = [v[1] for v in merged_vertices]
             else:
-                # Use the final bounding box from region1
-                x, y, w, h = region1.bounding_box
-                xs = [x, x + w]
-                ys = [y, y + h]
+                # Fallback: calculate from all merged regions
+                all_xs = []
+                all_ys = []
+                for idx in regions_merged:
+                    x, y, w, h = regions[idx].bounding_box
+                    all_xs.extend([x, x + w])
+                    all_ys.extend([y, y + h])
+                xs = all_xs
+                ys = all_ys
             
             min_x, max_x = min(xs), max(xs)
             min_y, max_y = min(ys), max(ys)
