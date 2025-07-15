@@ -2219,7 +2219,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         }
         # Get settings for new features (OUTSIDE the if block!)
     check_word_count = qa_settings.get('check_word_count_ratio', False)
-    check_multiple_headers = qa_settings.get('check_multiple_headers', False)
+    check_multiple_headers = qa_settings.get('check_multiple_headers', True)
     
     # Extract word counts from original EPUB if needed
     original_word_counts = {}
@@ -2237,6 +2237,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     log(f"   ✓ Repetition check: {'ENABLED' if qa_settings.get('check_repetition', True) else 'DISABLED'}")
     log(f"   ✓ Translation artifacts check: {'ENABLED' if qa_settings.get('check_translation_artifacts', True) else 'DISABLED'}")
     log(f"   ✓ Foreign char threshold: {qa_settings.get('foreign_char_threshold', 10)}")
+    log(f"   ✓ Missing HTML tag check: {'ENABLED' if qa_settings.get('check_missing_html_tag', False) else 'DISABLED'}")  # ADD THIS LINE
+    log(f"   ✓ Word count ratio check: {'ENABLED' if qa_settings.get('check_word_count_ratio', False) else 'DISABLED'}")  # OPTIONAL
+    log(f"   ✓ Multiple headers check: {'ENABLED' if qa_settings.get('check_multiple_headers', False) else 'DISABLED'}")  
     
     # Initialize configuration
     custom_settings = None
@@ -2364,7 +2367,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         issues = []
 
         # HTML tag check:
-        check_missing_html_tag = qa_settings.get('check_missing_html_tag', False)
+        check_missing_html_tag = qa_settings.get('check_missing_html_tag', True)
         if check_missing_html_tag and filename.lower().endswith('.html'):
             if not check_html_structure(full_path):
                 issues.append("missing_html_tag")
@@ -2518,7 +2521,15 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         if idx < 5:  # Only log for first 5 files
                             log(f"      → Found encoding artifacts in {result['filename']}: {artifact['count']} instances")
                 elif artifact['type'] == 'repeated_watermarks':
-                    issues.append(f"repeated_watermarks_found")
+                    issues.append(f"repeated_watermarks_{artifact['count']}_found")
+                elif artifact['type'] == 'api_response_unavailable':
+                    issues.append(f"api_response_unavailable_{artifact['count']}_found")
+                    if idx < 5:  # Log for debugging
+                        log(f"      → Found AI response unavailable markers in {result['filename']}: {artifact['count']} instances")
+                elif artifact['type'] == 'chapter_continuation':
+                    issues.append(f"chapter_continuation_{artifact['count']}_found")
+                elif artifact['type'] == 'split_indicators':
+                    issues.append(f"split_indicators_{artifact['count']}_found")
 
         
         result['issues'] = issues
