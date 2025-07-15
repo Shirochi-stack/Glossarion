@@ -199,18 +199,13 @@ def extract_text_from_html(file_path):
     return text
 
 def check_html_structure(file_path):
-    """Check if an HTML file has any HTML tags
-    
-    Returns:
-        bool: True if file has HTML tags, False if no HTML tags found
-    """
+    """Check if an HTML file has proper HTML tags"""
     if not file_path.lower().endswith('.html'):
-        return True  # Not an HTML file, so no check needed
+        return True
         
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
         content = f.read()
     
-    # List of common HTML tags to check for
     html_tags = [
         '<html', '<head', '<title', '<body', '<h1', '<h2', '<h3', '<h4', '<h5', '<h6',
         '<p>', '<p ', '<br', '<div', '<span', '<a ', '<img', '<ul', '<ol', '<li',
@@ -220,14 +215,12 @@ def check_html_structure(file_path):
     ]
     
     content_lower = content.lower()
-    
-    # Check if ANY HTML tag exists
     has_html_tags = any(tag in content_lower for tag in html_tags)
     
-    # Debug logging
-    if not has_html_tags:
-        print(f"⚠️ WARNING: {os.path.basename(file_path)} has NO HTML tags!")
-        print(f"   First 200 chars: {content[:200]}")
+    # DEBUG: Print what we found
+    print(f"\nChecking file: {file_path}")
+    print(f"First 100 chars: {content[:100]}")
+    print(f"Has HTML tags: {has_html_tags}")
     
     return has_html_tags
 
@@ -1985,7 +1978,10 @@ def update_new_format_progress(prog, faulty_chapters, log):
             
             updated_count += 1
             
-            chapter_num = chapter_info.get('actual_num', faulty_row.get("file_index", 0) + 1)
+            # Use chapter_num from faulty_row if available, otherwise fall back to actual_num
+            chapter_num = faulty_row.get("chapter_num")
+            if chapter_num is None:
+                chapter_num = chapter_info.get('actual_num', faulty_row.get("file_index", 0) + 1)
             log(f"   └─ Marked chapter {chapter_num} as qa_failed (was: {old_status})")
             
             # Remove from content_hashes
@@ -2231,9 +2227,13 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'check_encoding_issues': False,
             'check_repetition': True,
             'check_translation_artifacts': True,
-            'min_file_length': 100,
+            'min_file_length': 0,
             'report_format': 'detailed',
-            'auto_save_report': True
+            'auto_save_report': True,
+            'check_missing_html_tag': True,      
+            'check_word_count_ratio': False,     
+            'check_multiple_headers': True,   
+            'warn_name_mismatch': True           
         }
         # Get settings for new features (OUTSIDE the if block!)
     check_word_count = qa_settings.get('check_word_count_ratio', False)
@@ -2347,7 +2347,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             return
         
         # Check minimum file length from settings
-        min_length = qa_settings.get('min_file_length', 100)
+        min_length = qa_settings.get('min_file_length', 0)
         if len(raw_text.strip()) < min_length:
             log(f"⚠️ Skipped {filename}: Too short (< {min_length} chars)")
             continue
@@ -2384,13 +2384,27 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         # Initialize issues list
         issues = []
 
+
         # HTML tag check:
         check_missing_html_tag = qa_settings.get('check_missing_html_tag', True)
+        
+        # DEBUG: Print the setting value
+        if idx < 5:  # Only for first few files
+            print(f"[DEBUG] check_missing_html_tag setting: {check_missing_html_tag}")
+        
         if check_missing_html_tag and filename.lower().endswith('.html'):
-            if not check_html_structure(full_path):
+            has_html = check_html_structure(full_path)
+            if not has_html:
                 issues.append("missing_html_tag")
-                if idx < 5:  # Log only for first few files to avoid spam
-                    log(f"   → Found missing <html> tag in {filename}")
+                log(f"   → Found missing HTML tags in {filename}")
+                print(f"[DEBUG] Added 'missing_html_tag' to issues list for {filename}")
+                print(f"[DEBUG] Current issues list: {issues}")
+            else:
+                if idx < 5:
+                    print(f"[DEBUG] File {filename} has HTML tags, not flagging")
+        else:
+            if idx < 5:
+                print(f"[DEBUG] Skipping HTML check: check_missing_html_tag={check_missing_html_tag}, is_html={filename.lower().endswith('.html')}")
         
         # Check for multiple headers
         if check_multiple_headers:
@@ -2471,7 +2485,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     
     # Check each file for all issues
     for result in results:
-        issues = []
+        issues = result.get('issues', []) 
         
         # Check duplicates
         if result['filename'] in duplicate_groups:
