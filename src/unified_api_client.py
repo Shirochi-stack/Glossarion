@@ -1155,6 +1155,12 @@ class UnifiedClient:
                 )
                 # The calling code will check finish_reason=='length' for retry
             
+            # Apply API delay after successful call (even if truncated)
+            api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+            if api_delay > 0:
+                print(f"⏳ Waiting {api_delay}s before next API call...")
+                time.sleep(api_delay)
+            
             # Return the response with accurate finish_reason
             # This is CRITICAL for retry mechanisms to work
             return response.content, response.finish_reason
@@ -3413,7 +3419,13 @@ class UnifiedClient:
                     context=context or 'image_translation',
                     error_details=response.error_details
                 )               
-                
+ 
+            # Apply API delay after successful image call
+            api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+            if api_delay > 0:
+                print(f"⏳ Waiting {api_delay}s before next API call...")
+                time.sleep(api_delay)
+ 
             return response.content, response.finish_reason
                 
         except UnifiedClientError as e:
