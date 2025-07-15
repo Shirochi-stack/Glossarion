@@ -32,7 +32,7 @@ class MangaSettingsDialog:
         # Enhanced default settings structure with all options
         self.default_settings = {
             'preprocessing': {
-                'enabled': True,
+                'enabled': False,
                 'auto_detect_quality': True,
                 'contrast_threshold': 0.4,
                 'sharpness_threshold': 0.3,
@@ -47,7 +47,7 @@ class MangaSettingsDialog:
             'ocr': {
                 'language_hints': ['ja', 'ko', 'zh'],
                 'confidence_threshold': 0.8,
-                'merge_nearby_threshold': 50,
+                'merge_nearby_threshold': 20,
                 'text_detection_mode': 'document',
                 'enable_rotation_correction': True
             },
@@ -1039,7 +1039,7 @@ class MangaSettingsDialog:
         detect_frame = tk.LabelFrame(content_frame, text="Format Detection", padx=15, pady=10)
         detect_frame.pack(fill='x', padx=20, pady=20)
         
-        self.format_detection = tk.BooleanVar(value=self.settings['advanced']['format_detection'])
+        self.format_detection = tk.IntVar(value=1 if self.settings['advanced']['format_detection'] else 0)
         tb.Checkbutton(
             detect_frame,
             text="Enable automatic manga format detection (reading direction)",
@@ -1065,7 +1065,7 @@ class MangaSettingsDialog:
         debug_frame = tk.LabelFrame(content_frame, text="Debug Options", padx=15, pady=10)
         debug_frame.pack(fill='x', padx=20, pady=(0, 20))
         
-        self.debug_mode = tk.BooleanVar(value=self.settings['advanced']['debug_mode'])
+        self.debug_mode = tk.IntVar(value=1 if self.settings['advanced']['debug_mode'] else 0)
         tb.Checkbutton(
             debug_frame,
             text="Enable debug mode (verbose logging)",
@@ -1073,7 +1073,7 @@ class MangaSettingsDialog:
             bootstyle="round-toggle"
         ).pack(anchor='w')
         
-        self.save_intermediate = tk.BooleanVar(value=self.settings['advanced']['save_intermediate'])
+        self.save_intermediate = tk.IntVar(value=1 if self.settings['advanced']['save_intermediate'] else 0)
         tb.Checkbutton(
             debug_frame,
             text="Save intermediate images (preprocessed, detection overlays)",
@@ -1085,7 +1085,7 @@ class MangaSettingsDialog:
         perf_frame = tk.LabelFrame(content_frame, text="Performance", padx=15, pady=10)
         perf_frame.pack(fill='x', padx=20)
         
-        self.parallel_processing = tk.BooleanVar(value=self.settings['advanced']['parallel_processing'])
+        self.parallel_processing = tk.IntVar(value=1 if self.settings['advanced']['parallel_processing'] else 0)
         parallel_cb = tb.Checkbutton(
             perf_frame,
             text="Enable parallel processing (experimental)",
@@ -1119,7 +1119,7 @@ class MangaSettingsDialog:
     
     def _toggle_workers(self):
         """Enable/disable worker settings based on parallel processing toggle"""
-        enabled = self.parallel_processing.get()
+        enabled = bool(self.parallel_processing.get())
         self.workers_spinbox.config(state='normal' if enabled else 'disabled')
         self.workers_label.config(fg='white' if enabled else 'gray')
     
@@ -1144,11 +1144,11 @@ class MangaSettingsDialog:
         self.settings['ocr']['enable_rotation_correction'] = self.enable_rotation.get()
         
         # Advanced settings
-        self.settings['advanced']['format_detection'] = self.format_detection.get()
+        self.settings['advanced']['format_detection'] = bool(self.format_detection.get())
         self.settings['advanced']['webtoon_mode'] = self.webtoon_mode.get()
-        self.settings['advanced']['debug_mode'] = self.debug_mode.get()
-        self.settings['advanced']['save_intermediate'] = self.save_intermediate.get()
-        self.settings['advanced']['parallel_processing'] = self.parallel_processing.get()
+        self.settings['advanced']['debug_mode'] = bool(self.debug_mode.get())
+        self.settings['advanced']['save_intermediate'] = bool(self.save_intermediate.get())
+        self.settings['advanced']['parallel_processing'] = bool(self.parallel_processing.get())
         self.settings['advanced']['max_workers'] = self.max_workers.get()
         
         # Cloud API settings (only save if the tab was created)
