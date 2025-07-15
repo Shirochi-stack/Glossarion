@@ -2030,6 +2030,38 @@ def update_legacy_format_progress(prog, faulty_chapters, log):
 
 def extract_epub_word_counts(epub_path, log=print):
     """Extract word counts for each chapter from the original EPUB"""
+    
+    def count_cjk_words(text):
+        """Count actual words in CJK text with better segmentation"""
+        word_count = 0
+        
+        # Chinese word counting (considering multi-character words)
+        # Most Chinese words are 2-4 characters
+        chinese_chars = re.findall(r'[\u4e00-\u9fff]+', text)
+        for segment in chinese_chars:
+            # Estimate words based on character count
+            # Average Chinese word length is ~1.7 characters
+            word_count += max(1, len(segment) / 1.7)
+        
+        # Japanese word counting
+        # Hiragana particles/endings (usually 1-3 chars each)
+        hiragana_segments = re.findall(r'[\u3040-\u309f]+', text)
+        word_count += len(hiragana_segments)
+        
+        # Katakana words (foreign words, usually one word per segment)
+        katakana_segments = re.findall(r'[\u30a0-\u30ff]+', text)
+        word_count += len(katakana_segments)
+        
+        # Korean word counting (words are typically space-separated)
+        korean_words = re.findall(r'[\uac00-\ud7af]+', text)
+        word_count += len(korean_words)
+        
+        # Also count non-CJK words (English mixed in)
+        non_cjk = re.sub(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]+', ' ', text)
+        word_count += len(non_cjk.split())
+        
+        return int(word_count)
+    
     try:
         word_counts = {}
         
@@ -2068,14 +2100,17 @@ def extract_epub_word_counts(epub_path, log=print):
                     
                     # Get text and count words
                     text = soup.get_text(strip=True)
-                    # Count words for CJK languages differently
-                    if any('\u4e00' <= char <= '\u9fff' or  # Chinese
-                          '\u3040' <= char <= '\u309f' or  # Hiragana
-                          '\u30a0' <= char <= '\u30ff' or  # Katakana
-                          '\uac00' <= char <= '\ud7af'     # Korean
-                          for char in text):
-                        # For CJK, count characters as words
-                        word_count = len(re.findall(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]', text))
+                    
+                    # Check if text contains CJK characters
+                    has_cjk = any('\u4e00' <= char <= '\u9fff' or  # Chinese
+                                  '\u3040' <= char <= '\u309f' or  # Hiragana
+                                  '\u30a0' <= char <= '\u30ff' or  # Katakana
+                                  '\uac00' <= char <= '\ud7af'     # Korean
+                                  for char in text)
+                    
+                    if has_cjk:
+                        # Use proper CJK word counting
+                        word_count = count_cjk_words(text)
                     else:
                         # For other languages, count space-separated words
                         word_count = len(text.split())
@@ -2084,7 +2119,8 @@ def extract_epub_word_counts(epub_path, log=print):
                         word_counts[chapter_num] = {
                             'word_count': word_count,
                             'filename': basename,
-                            'full_path': file_path
+                            'full_path': file_path,
+                            'is_cjk': has_cjk  # Track if source was CJK
                         }
                     
                 except Exception as e:
@@ -2152,29 +2188,73 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
     
     if chapter_num and chapter_num in original_counts:
         original_wc = original_counts[chapter_num]['word_count']
+        is_cjk = original_counts[chapter_num].get('is_cjk', True)  # Get CJK flag if available
         
         # Count words in translated text
         translated_wc = len(translated_text.split())
         
-        # Calculate ratio (accounting for language differences)
-        # Korean/Japanese/Chinese typically expand 1.2-2.5x when translated to English
+        # Calculate ratio (translated words / original words)
         ratio = translated_wc / max(1, original_wc)
         
-        # Define reasonable ratio ranges
-        min_ratio = 0.8  # Some compression is possible
-        max_ratio = 3.0  # Maximum reasonable expansion
+        # Define VERY PERMISSIVE ratio ranges for novel translation
+        # These are much looser to accommodate extreme translation cases
+        if is_cjk:
+            # CJK to English novel translation - reasonable bounds
+            min_ratio = 0.6   # 60% - catches significant omissions
+            max_ratio = 2.5   # 250% - catches excessive padding
+            
+            # Typical healthy range
+            typical_min = 0.8   # 80%
+            typical_max = 1.8   # 180%
+        else:
+            # Non-CJK source
+            min_ratio = 0.7
+            max_ratio = 1.5
+            typical_min = 0.8
+            typical_max = 1.2
         
         is_reasonable = min_ratio <= ratio <= max_ratio
+        is_typical = typical_min <= ratio <= typical_max
         
-        return {
+        # Calculate percentage difference for logging
+        percentage = (ratio * 100)
+        
+        result = {
             'found_match': True,
             'chapter_num': chapter_num,
             'original_wc': original_wc,
             'translated_wc': translated_wc,
             'ratio': ratio,
+            'percentage': percentage,  # e.g., 150 = 150% of original
             'is_reasonable': is_reasonable,
+            'is_typical': is_typical,
             'original_file': original_counts[chapter_num]['filename']
         }
+        
+        # Add descriptive warnings for extreme but acceptable ratios
+        if ratio < 0.5:
+            result['warning'] = 'very_concise_translation'
+            result['warning_desc'] = 'Translation is less than 50% of original - possible summary style'
+        elif ratio < typical_min:
+            result['warning'] = 'concise_translation'
+            result['warning_desc'] = f'Translation is {percentage:.0f}% of original - somewhat concise'
+        elif ratio > 4.0:
+            result['warning'] = 'very_expansive_translation'
+            result['warning_desc'] = 'Translation is over 400% of original - extensive additions'
+        elif ratio > typical_max:
+            result['warning'] = 'expansive_translation'
+            result['warning_desc'] = f'Translation is {percentage:.0f}% of original - somewhat expansive'
+        
+        # Only flag as unreasonable if REALLY extreme
+        if not is_reasonable:
+            if ratio < min_ratio:
+                result['error'] = 'possibly_missing_content'
+                result['error_desc'] = f'Translation is only {percentage:.0f}% of original'
+            else:
+                result['error'] = 'possibly_excessive_content'
+                result['error_desc'] = f'Translation is {percentage:.0f}% of original'
+        
+        return result
     
     return {
         'found_match': False,
@@ -2418,7 +2498,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             wc_result = cross_reference_word_counts(
                 original_word_counts, 
                 filename, 
-                preview,  # Use the preview text
+                raw_text,  # Use the preview text
                 log
             )
             
