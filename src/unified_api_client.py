@@ -3573,11 +3573,22 @@ class UnifiedClient:
             }
 
             # convert the image to the new SDK format
-            image_part = types.Part.from_image(image)
+            contents = [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": text_prompt},
+                        {"inline_data": {
+                            "mime_type": "image/jpeg",
+                            "data": image_base64  # The base64 string directly
+                        }}
+                    ]
+                }
+            ]
 
             response = self.gemini_client.models.generate_content(
                 model=self.model,
-                contents=[text_prompt, image_part],
+                contents=contents,
                 config=generation_config
             )
             elapsed = time.time() - start_time
