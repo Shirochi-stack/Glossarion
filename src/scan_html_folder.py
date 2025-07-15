@@ -199,10 +199,10 @@ def extract_text_from_html(file_path):
     return text
 
 def check_html_structure(file_path):
-    """Check if an HTML file has proper <html> tag
+    """Check if an HTML file has any HTML tags
     
     Returns:
-        bool: True if file has <html> tag or is not an HTML file
+        bool: True if file has HTML tags, False if no HTML tags found
     """
     if not file_path.lower().endswith('.html'):
         return True  # Not an HTML file, so no check needed
@@ -210,8 +210,26 @@ def check_html_structure(file_path):
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
         content = f.read()
     
-    soup = BeautifulSoup(content, "html.parser")
-    return soup.find('html') is not None
+    # List of common HTML tags to check for
+    html_tags = [
+        '<html', '<head', '<title', '<body', '<h1', '<h2', '<h3', '<h4', '<h5', '<h6',
+        '<p>', '<p ', '<br', '<div', '<span', '<a ', '<img', '<ul', '<ol', '<li',
+        '<table', '<tr', '<td', '<th', '<form', '<input', '<button', '<meta',
+        '<link', '<script', '<style', '<nav', '<header', '<footer', '<main',
+        '<article', '<section', '<aside'
+    ]
+    
+    content_lower = content.lower()
+    
+    # Check if ANY HTML tag exists
+    has_html_tags = any(tag in content_lower for tag in html_tags)
+    
+    # Debug logging
+    if not has_html_tags:
+        print(f"⚠️ WARNING: {os.path.basename(file_path)} has NO HTML tags!")
+        print(f"   First 200 chars: {content[:200]}")
+    
+    return has_html_tags
 
 def is_dash_separator_line(line):
     """Check if a line consists only of dash-like punctuation characters"""
