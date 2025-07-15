@@ -2874,14 +2874,14 @@ class AsyncProcessingDialog:
         if isinstance(glossary_data, list):
             # List format
             lines = []
-            for entry in glossary_data[:50]:  # Limit to prevent prompt bloat
+            for entry in glossary_data:
                 if 'original_name' in entry and 'name' in entry:
                     lines.append(f"{entry['original_name']} = {entry['name']}")
             return '\n'.join(lines)
         else:
             # Dictionary format
             lines = []
-            for orig, trans in list(glossary_data.items())[:50]:
+            for orig, trans in list(glossary_data.items()):
                 lines.append(f"{orig} = {trans}")
             return '\n'.join(lines)
 
