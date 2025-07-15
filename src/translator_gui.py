@@ -782,7 +782,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.3.4"
+        __version__ = "3.3.5"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1461,7 +1461,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.3.4 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.3.5 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -5678,7 +5678,11 @@ Recent translations to summarize:
                 'check_translation_artifacts': True,
                 'min_file_length': 0,
                 'report_format': 'detailed',
-                'auto_save_report': True
+                'auto_save_report': True,
+                'check_missing_html_tag': True,     
+                'check_word_count_ratio': False,     
+                'check_multiple_headers': True,     
+                'warn_name_mismatch': True         
             })
             # Debug: Print current settings
             print(f"[DEBUG] QA Settings: {qa_settings}")
@@ -8849,7 +8853,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.3.4...")
+    print("🚀 Starting Glossarion v3.3.5...")
     
     # Initialize splash screen
     splash_manager = None
