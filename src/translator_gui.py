@@ -1371,7 +1371,7 @@ Recent translations to summarize:
             ('enable_auto_glossary_var', 'enable_auto_glossary', False),
             ('append_glossary_var', 'append_glossary', False),
             ('reset_failed_chapters_var', 'reset_failed_chapters', True),
-            ('retry_truncated_var', 'retry_truncated', True),
+            ('retry_truncated_var', 'retry_truncated', False),
             ('retry_duplicate_var', 'retry_duplicate_bodies', True),
             ('enable_image_translation_var', 'enable_image_translation', False),
             ('process_webnovel_images_var', 'process_webnovel_images', True),
@@ -8677,40 +8677,102 @@ Recent translations to summarize:
             with open(path, 'r', encoding='utf-8') as f:
                 content = f.read()
             
+            # Store original content for comparison
+            original_content = content
+            
             # Try normal JSON load first
             try:
                 json.loads(content)
             except json.JSONDecodeError as e:
-                self.append_log(f"⚠️ JSON error detected, attempting auto-fix: {str(e)}")
+                self.append_log(f"⚠️ JSON error detected: {str(e)}")
+                self.append_log("🔧 Attempting comprehensive auto-fix...")
                 
-                # Auto-fix common JSON errors
-                import re
+                # Apply comprehensive auto-fixes
+                fixed_content = self._comprehensive_json_fix(content)
                 
-                # Fix trailing commas in objects: ,}
-                content = re.sub(r',\s*}', '}', content)
-                
-                # Fix trailing commas in arrays: ,]
-                content = re.sub(r',\s*]', ']', content)
-                
-                # Fix multiple commas: ,,
-                content = re.sub(r',\s*,+', ',', content)
-                
-                # Try to parse again
+                # Try to parse the fixed content
                 try:
-                    json.loads(content)
+                    json.loads(fixed_content)
                     
-                    # If successful, save the fixed version
-                    backup_path = path.replace('.json', '_backup.json')
-                    shutil.copy2(path, backup_path)
+                    # If successful, ask user if they want to save the fixed version
+                    response = messagebox.askyesno(
+                        "JSON Auto-Fix Successful",
+                        f"The JSON file had errors that were automatically fixed.\n\n"
+                        f"Original error: {str(e)}\n\n"
+                        f"Do you want to save the fixed version?\n"
+                        f"(A backup of the original will be created)"
+                    )
                     
-                    with open(path, 'w', encoding='utf-8') as f:
-                        f.write(content)
-                    
-                    self.append_log(f"✅ Auto-fixed JSON and saved. Backup created: {os.path.basename(backup_path)}")
+                    if response:
+                        # Save the fixed version
+                        backup_path = path.replace('.json', '_backup.json')
+                        shutil.copy2(path, backup_path)
+                        
+                        with open(path, 'w', encoding='utf-8') as f:
+                            f.write(fixed_content)
+                        
+                        self.append_log(f"✅ Auto-fixed JSON and saved. Backup created: {os.path.basename(backup_path)}")
+                        content = fixed_content
+                    else:
+                        self.append_log("⚠️ Using original JSON with errors (may cause issues)")
                     
                 except json.JSONDecodeError as e2:
-                    messagebox.showerror("JSON Error", f"Could not auto-fix JSON file:\n{str(e2)}")
-                    return
+                    # Auto-fix failed, show error and options
+                    self.append_log(f"❌ Auto-fix failed: {str(e2)}")
+                    
+                    # Build detailed error message
+                    error_details = self._analyze_json_errors(content, fixed_content, e, e2)
+                    
+                    response = messagebox.askyesnocancel(
+                        "JSON Fix Failed",
+                        f"The JSON file has errors that couldn't be automatically fixed.\n\n"
+                        f"Original error: {str(e)}\n"
+                        f"After auto-fix attempt: {str(e2)}\n\n"
+                        f"{error_details}\n\n"
+                        f"Options:\n"
+                        f"• YES: Open the file in your default editor to fix manually\n"
+                        f"• NO: Try to use the file anyway (may fail)\n"
+                        f"• CANCEL: Cancel loading this glossary"
+                    )
+                    
+                    if response is True:  # YES - open in editor
+                        try:
+                            # Open file in default editor
+                            import subprocess
+                            import sys
+                            
+                            if sys.platform.startswith('win'):
+                                os.startfile(path)
+                            elif sys.platform.startswith('darwin'):
+                                subprocess.run(['open', path])
+                            else:  # linux
+                                subprocess.run(['xdg-open', path])
+                            
+                            messagebox.showinfo(
+                                "Manual Edit",
+                                "Please fix the JSON errors in your editor and save the file.\n"
+                                "Then click OK to retry loading the glossary."
+                            )
+                            
+                            # Recursively call load_glossary to retry
+                            self.load_glossary()
+                            return
+                            
+                        except Exception as editor_error:
+                            messagebox.showerror(
+                                "Error",
+                                f"Failed to open file in editor: {str(editor_error)}\n\n"
+                                f"Please manually edit the file:\n{path}"
+                            )
+                            return
+                    
+                    elif response is False:  # NO - try to use anyway
+                        self.append_log("⚠️ Attempting to use JSON with errors (may cause issues)")
+                        # Continue with the original content
+                        
+                    else:  # CANCEL
+                        self.append_log("❌ Glossary loading cancelled")
+                        return
         
         except Exception as e:
             messagebox.showerror("Error", f"Failed to read glossary file: {str(e)}")
@@ -8725,6 +8787,134 @@ Recent translations to summarize:
         
         self.append_glossary_var.set(True)
         self.append_log("✅ Automatically enabled 'Append Glossary to System Prompt'")
+
+    def _comprehensive_json_fix(self, content):
+        """Apply comprehensive JSON fixes."""
+        import re
+        
+        # Store original for comparison
+        fixed = content
+        
+        # 1. Remove BOM if present
+        if fixed.startswith('\ufeff'):
+            fixed = fixed[1:]
+        
+        # 2. Fix common Unicode issues first
+        replacements = {
+            '"': '"',  # Left smart quote
+            '"': '"',  # Right smart quote
+            ''': "'",  # Left smart apostrophe
+            ''': "'",  # Right smart apostrophe
+            '–': '-',  # En dash
+            '—': '-',  # Em dash
+            '…': '...',  # Ellipsis
+            '\u200b': '',  # Zero-width space
+            '\u00a0': ' ',  # Non-breaking space
+        }
+        for old, new in replacements.items():
+            fixed = fixed.replace(old, new)
+        
+        # 3. Fix trailing commas in objects and arrays
+        fixed = re.sub(r',\s*}', '}', fixed)
+        fixed = re.sub(r',\s*]', ']', fixed)
+        
+        # 4. Fix multiple commas
+        fixed = re.sub(r',\s*,+', ',', fixed)
+        
+        # 5. Fix missing commas between array/object elements
+        # Between closing and opening braces/brackets
+        fixed = re.sub(r'}\s*{', '},{', fixed)
+        fixed = re.sub(r']\s*\[', '],[', fixed)
+        fixed = re.sub(r'}\s*\[', '},[', fixed)
+        fixed = re.sub(r']\s*{', '],{', fixed)
+        
+        # Between string values (but not inside strings)
+        # This is tricky, so we'll be conservative
+        fixed = re.sub(r'"\s+"(?=[^:]*":)', '","', fixed)
+        
+        # 6. Fix unquoted keys (simple cases)
+        # Match unquoted keys that are followed by a colon
+        fixed = re.sub(r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', fixed)
+        
+        # 7. Fix single quotes to double quotes for keys and simple string values
+        # Keys
+        fixed = re.sub(r"([{,]\s*)'([^']+)'(\s*:)", r'\1"\2"\3', fixed)
+        # Simple string values (be conservative)
+        fixed = re.sub(r"(:\s*)'([^'\"]*)'(\s*[,}])", r'\1"\2"\3', fixed)
+        
+        # 8. Fix common escape issues
+        # Replace single backslashes with double backslashes (except for valid escapes)
+        # This is complex, so we'll only fix obvious cases
+        fixed = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', fixed)
+        
+        # 9. Ensure proper brackets/braces balance
+        # Count opening and closing brackets
+        open_braces = fixed.count('{')
+        close_braces = fixed.count('}')
+        open_brackets = fixed.count('[')
+        close_brackets = fixed.count(']')
+        
+        # Add missing closing braces/brackets at the end
+        if open_braces > close_braces:
+            fixed += '}' * (open_braces - close_braces)
+        if open_brackets > close_brackets:
+            fixed += ']' * (open_brackets - close_brackets)
+        
+        # 10. Remove trailing comma before EOF
+        fixed = re.sub(r',\s*$', '', fixed.strip())
+        
+        # 11. Fix unescaped newlines in strings (conservative approach)
+        # This is very tricky to do with regex without a proper parser
+        # We'll skip this for safety
+        
+        # 12. Remove comments (JSON doesn't support comments)
+        # Remove // style comments
+        fixed = re.sub(r'//.*$', '', fixed, flags=re.MULTILINE)
+        # Remove /* */ style comments
+        fixed = re.sub(r'/\*.*?\*/', '', fixed, flags=re.DOTALL)
+        
+        return fixed
+
+    def _analyze_json_errors(self, original, fixed, original_error, fixed_error):
+        """Analyze JSON errors and provide helpful information."""
+        analysis = []
+        
+        # Check for common issues
+        if '{' in original and original.count('{') != original.count('}'):
+            analysis.append(f"• Mismatched braces: {original.count('{')} opening, {original.count('}')} closing")
+        
+        if '[' in original and original.count('[') != original.count(']'):
+            analysis.append(f"• Mismatched brackets: {original.count('[')} opening, {original.count(']')} closing")
+        
+        if original.count('"') % 2 != 0:
+            analysis.append("• Odd number of quotes (possible unclosed string)")
+        
+        # Check for BOM
+        if original.startswith('\ufeff'):
+            analysis.append("• File starts with BOM (Byte Order Mark)")
+        
+        # Check for common problematic patterns
+        if re.search(r'[''""…]', original):
+            analysis.append("• Contains smart quotes or special Unicode characters")
+        
+        if re.search(r':\s*[a-zA-Z_][a-zA-Z0-9_]*\s*[,}]', original):
+            analysis.append("• Possible unquoted string values")
+        
+        if re.search(r'[{,]\s*[a-zA-Z_][a-zA-Z0-9_]*\s*:', original):
+            analysis.append("• Possible unquoted keys")
+        
+        if '//' in original or '/*' in original:
+            analysis.append("• Contains comments (not valid in JSON)")
+        
+        # Try to find the approximate error location
+        if hasattr(original_error, 'lineno'):
+            lines = original.split('\n')
+            if 0 < original_error.lineno <= len(lines):
+                error_line = lines[original_error.lineno - 1]
+                analysis.append(f"\nError near line {original_error.lineno}:")
+                analysis.append(f"  {error_line.strip()}")
+        
+        return "\n".join(analysis) if analysis else "Unable to determine specific issues."
 
     def save_config(self, show_message=True):
         """Persist all settings to config.json."""
