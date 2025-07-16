@@ -345,6 +345,7 @@ class UnifiedClient:
         self._cancelled = False
         self.output_dir = output_dir
         self._actual_output_filename = None
+        self._in_cleanup = False  # Flag to indicate cleanup/cancellation mode
         
         # Get timeout configuration from GUI
         # IMPORTANT: This respects the "Auto-retry Slow Chunks" timeout setting
@@ -730,8 +731,14 @@ class UnifiedClient:
         IMPORTANT: Called by send_with_interrupt when timeout occurs
         """
         self._cancelled = True
+        self._in_cleanup = True  # Set cleanup flag
         print("🛑 Operation cancelled (timeout or user stop)")
         print("🛑 API operation cancelled")
+
+    def reset_cleanup_state(self):
+            """Reset cleanup state for new operations"""
+            self._in_cleanup = False
+            self._cancelled = False
 
     def _send_vertex_model_garden(self, messages, temperature=0.7, max_tokens=None, stop_sequences=None):
         """Send request to Vertex AI Model Garden models (including Claude)"""
@@ -1156,10 +1163,14 @@ class UnifiedClient:
                 # The calling code will check finish_reason=='length' for retry
             
             # Apply API delay after successful call (even if truncated)
-            api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
-            if api_delay > 0:
-                print(f"⏳ Waiting {api_delay}s before next API call...")
-                time.sleep(api_delay)
+            # SKIP DELAY DURING CLEANUP
+            if not self._in_cleanup:
+                api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+                if api_delay > 0:
+                    print(f"⏳ Waiting {api_delay}s before next API call...")
+                    time.sleep(api_delay)
+            else:
+                print("⚡ Skipping API delay (cleanup mode)")
             
             # Return the response with accurate finish_reason
             # This is CRITICAL for retry mechanisms to work
@@ -1168,6 +1179,7 @@ class UnifiedClient:
         except UnifiedClientError as e:
             # Handle cancellation specially for timeout support
             if e.error_type == "cancelled" or "cancelled" in str(e):
+                self._in_cleanup = True  # Ensure cleanup flag is set
                 logger.info("Propagating cancellation to caller")
                 # Re-raise so send_with_interrupt can handle it
                 raise
@@ -3421,18 +3433,24 @@ class UnifiedClient:
                 )               
  
             # Apply API delay after successful image call
-            api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
-            if api_delay > 0:
-                print(f"⏳ Waiting {api_delay}s before next API call...")
-                time.sleep(api_delay)
+            # SKIP DELAY DURING CLEANUP
+            if not self._in_cleanup:
+                api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+                if api_delay > 0:
+                    print(f"⏳ Waiting {api_delay}s before next API call...")
+                    time.sleep(api_delay)
+            else:
+                print("⚡ Skipping API delay (cleanup mode)")
  
             return response.content, response.finish_reason
                 
         except UnifiedClientError as e:
-            # Re-raise our own errors
-            print(f"Image processing error: {e}")
-            self._save_failed_request(messages, e, context)
-            raise
+                    # Re-raise our own errors
+                    if e.error_type == "cancelled" or "cancelled" in str(e):
+                        self._in_cleanup = True  # Ensure cleanup flag is set
+                    print(f"Image processing error: {e}")
+                    self._save_failed_request(messages, e, context)
+                    raise
             
         except Exception as e:
             # Wrap other errors
