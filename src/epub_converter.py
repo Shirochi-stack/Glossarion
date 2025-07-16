@@ -290,7 +290,7 @@ class ContentProcessor:
         
         # NEW: Fix mismatched tags using BeautifulSoup
         try:
-            soup = BeautifulSoup(html_content, 'html.parser')
+            soup = BeautifulSoup(html_content, 'html.parser', from_encoding='utf-8')
             
             # Fix nested paragraphs (not allowed in XHTML)
             for p in soup.find_all('p'):
@@ -387,7 +387,7 @@ class TitleExtractor:
             # Decode entities first - PRESERVES UNICODE
             html_content = HTMLEntityDecoder.decode(html_content)
             
-            soup = BeautifulSoup(html_content, 'html.parser')
+            soup = BeautifulSoup(html_content, 'html.parser', from_encoding='utf-8')
             candidates = []
             
             # Strategy 1: <title> tag
@@ -566,7 +566,7 @@ class XHTMLConverter:
             html_content = ContentProcessor.clean_chapter_content(html_content)
             
             # Parse with BeautifulSoup
-            soup = BeautifulSoup(html_content, 'html.parser')
+            soup = BeautifulSoup(html_content, 'html.parser', from_encoding='utf-8')
             
             # Extract title if available
             if soup.title and soup.title.string:
@@ -940,7 +940,7 @@ class EPUBCompiler:
             self.log_callback(message)
         else:
             print(message)
-    
+
     def compile(self):
         """Main compilation method"""
         try:
@@ -1019,6 +1019,27 @@ class EPUBCompiler:
         except Exception as e:
             self.log(f"❌ EPUB compilation failed: {e}")
             raise
+
+    def _fix_encoding_issues(self, content: str) -> str:
+        """Convert smart quotes and other Unicode punctuation to ASCII."""
+        # Convert smart quotes to regular quotes and other punctuation
+        fixes = {
+            '’': "'",   # Right single quotation mark
+            '‘': "'",   # Left single quotation mark
+            '“': '"',   # Left double quotation mark
+            '”': '"',   # Right double quotation mark
+            '—': '-',   # Em dash to hyphen
+            '–': '-',   # En dash to hyphen
+            '…': '...', # Ellipsis to three dots
+        }
+
+        for bad, good in fixes.items():
+            if bad in content:
+                content = content.replace(bad, good)
+                #self.log(f"[DEBUG] Replaced {bad!r} with {good!r}")
+
+        return content
+
 
     def _preflight_check(self) -> bool:
         """Pre-flight check before compilation with progressive fallback"""
@@ -1219,7 +1240,7 @@ class EPUBCompiler:
                     # Read content
                     with open(file_path, 'r', encoding='utf-8') as f:
                         html_content = f.read()
-                    
+
                     # Extract title
                     title, confidence = TitleExtractor.extract_from_html(
                         html_content, chapter_num, filename
@@ -1375,7 +1396,10 @@ class EPUBCompiler:
             with open(path, 'r', encoding='utf-8') as f:
                 raw_content = f.read()
             
-            # Decode entities
+            # Force fix the encoding issues FIRST
+            raw_content = self._fix_encoding_issues(raw_content)
+
+            # Then do the normal decode (for other entities)
             raw_content = HTMLEntityDecoder.decode(raw_content)
             
             if not raw_content.strip():
