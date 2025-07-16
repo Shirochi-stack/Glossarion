@@ -2759,6 +2759,9 @@ class GlossaryManager:
                 
                 from unified_api_client import UnifiedClient
                 client = UnifiedClient(model=MODEL, api_key=API_KEY, output_dir=output_dir)
+                # Reset cleanup state when starting new translation
+                if hasattr(client, 'reset_cleanup_state'):
+                    client.reset_cleanup_state()            
                 
                 text_sample = all_text[:50000] if len(all_text) > 50000 else all_text
                 
@@ -3271,6 +3274,9 @@ class GlossaryManager:
             
             from unified_api_client import UnifiedClient
             client = UnifiedClient(model=MODEL, api_key=API_KEY, output_dir=output_dir)
+            # Reset cleanup state when starting new translation
+            if hasattr(client, 'reset_cleanup_state'):
+                client.reset_cleanup_state()
             
             all_translations = {}
             
@@ -4112,14 +4118,29 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             if isinstance(result, tuple):
                 api_result, api_time = result
                 if chunk_timeout and api_time > chunk_timeout:
+                    # Set cleanup flag when chunk timeout occurs
+                    if hasattr(client, '_in_cleanup'):
+                        client._in_cleanup = True
+                    if hasattr(client, 'cancel_current_operation'):
+                        client.cancel_current_operation()
                     raise UnifiedClientError(f"API call took {api_time:.1f}s (timeout: {chunk_timeout}s)")
                 return api_result
             return result
         except queue.Empty:
             if stop_check_fn():
+                # Set cleanup flag when user stops
+                if hasattr(client, '_in_cleanup'):
+                    client._in_cleanup = True
+                if hasattr(client, 'cancel_current_operation'):
+                    client.cancel_current_operation()
                 raise UnifiedClientError("Translation stopped by user")
             elapsed += check_interval
     
+    # Set cleanup flag when timeout occurs
+    if hasattr(client, '_in_cleanup'):
+        client._in_cleanup = True
+    if hasattr(client, 'cancel_current_operation'):
+        client.cancel_current_operation()
     raise UnifiedClientError(f"API call timed out after {timeout} seconds")
 
 def parse_token_limit(env_value):
@@ -4403,7 +4424,10 @@ def main(log_callback=None, stop_callback=None):
     print(f"[DEBUG] Max output tokens = {config.MAX_OUTPUT_TOKENS}")
 
     client = UnifiedClient(model=config.MODEL, api_key=config.API_KEY, output_dir=out)
-    
+    # Reset cleanup state when starting new translation
+    if hasattr(client, 'reset_cleanup_state'):
+        client.reset_cleanup_state()    
+        
     if is_text_file:
         print("📄 Processing text file...")
         try:
@@ -4454,7 +4478,10 @@ def main(log_callback=None, stop_callback=None):
 
     print(f"[DEBUG] Initializing client with model = {config.MODEL}")
     client = UnifiedClient(api_key=config.API_KEY, model=config.MODEL, output_dir=out)
-    
+    # Reset cleanup state when starting new translation
+    if hasattr(client, 'reset_cleanup_state'):
+        client.reset_cleanup_state()
+        
     if "title" in metadata and config.TRANSLATE_BOOK_TITLE and not metadata.get("title_translated", False):
         original_title = metadata["title"]
         print(f"📚 Original title: {original_title}")
