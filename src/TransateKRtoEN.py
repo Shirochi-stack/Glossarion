@@ -42,7 +42,7 @@ class TranslationConfig:
         self.input_path = os.getenv("input_path", "default.epub")
         self.PROFILE_NAME = os.getenv("PROFILE_NAME", "korean").lower()
         self.CONTEXTUAL = os.getenv("CONTEXTUAL", "1") == "1"
-        self.DELAY = int(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+        self.DELAY = float(os.getenv("SEND_INTERVAL_SECONDS", "1"))
         self.SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "").strip()
         self.REMOVE_AI_ARTIFACTS = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
         self.TEMP = float(os.getenv("TRANSLATION_TEMPERATURE", "0.3"))
