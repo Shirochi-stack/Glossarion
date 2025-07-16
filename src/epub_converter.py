@@ -57,7 +57,7 @@ def log(message: str):
 
 
 class HTMLEntityDecoder:
-    """Handles comprehensive HTML entity decoding"""
+    """Handles comprehensive HTML entity decoding with full Unicode support"""
     
     # Comprehensive entity replacement dictionary
     ENTITY_MAP = {
@@ -137,7 +137,7 @@ class HTMLEntityDecoder:
     
     @classmethod
     def decode(cls, text: str) -> str:
-        """Comprehensive HTML entity decoding"""
+        """Comprehensive HTML entity decoding - PRESERVES UNICODE"""
         if not text:
             return text
         
@@ -229,7 +229,7 @@ class XMLValidator:
 
 
 class ContentProcessor:
-    """Handles content cleaning and processing"""
+    """Handles content cleaning and processing - UPDATED WITH UNICODE PRESERVATION"""
     
     @staticmethod
     def safe_escape(text: str) -> str:
@@ -249,11 +249,23 @@ class ContentProcessor:
     
     @staticmethod
     def fix_malformed_tags(html_content: str) -> str:
-        """Fix various types of malformed tags"""
+        """Fix various types of malformed tags - ENHANCED WITH BEAUTIFULSOUP"""
         # Fix common entity issues
         html_content = html_content.replace('&&', '&amp;&amp;')
         html_content = html_content.replace('& ', '&amp; ')
         html_content = html_content.replace(' & ', ' &amp; ')
+        
+        # Fix unescaped ampersands more thoroughly
+        html_content = re.sub(
+            r'&(?!(?:'
+            r'amp|lt|gt|quot|apos|'
+            r'[a-zA-Z][a-zA-Z0-9]{0,30}|'
+            r'#[0-9]{1,7}|'
+            r'#x[0-9a-fA-F]{1,6}'
+            r');)',
+            '&amp;',
+            html_content
+        )
         
         # Remove completely broken tags with ="" patterns
         html_content = re.sub(r'<[^>]*?=\s*""\s*[^>]*?=\s*""[^>]*?>', '', html_content)
@@ -276,6 +288,25 @@ class ContentProcessor:
         if html_content.rstrip().endswith('<'):
             html_content = html_content.rstrip()[:-1]
         
+        # NEW: Fix mismatched tags using BeautifulSoup
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Fix nested paragraphs (not allowed in XHTML)
+            for p in soup.find_all('p'):
+                nested_ps = p.find_all('p')
+                for nested_p in nested_ps:
+                    nested_p.unwrap()
+            
+            # Remove empty tags that might cause issues
+            for tag in soup.find_all():
+                if not tag.get_text(strip=True) and not tag.find_all() and tag.name not in ['br', 'hr', 'img', 'meta', 'link']:
+                    tag.decompose()
+            
+            html_content = str(soup)
+        except:
+            pass
+        
         return html_content
     
     @staticmethod
@@ -288,21 +319,17 @@ class ContentProcessor:
             # Fix simple tags
             content = re.sub(f'<{tag}>', f'<{tag} />', content)
             
-            # Fix tags with attributes
-            def replacer(match):
-                full_match = match.group(0)
-                if full_match.rstrip().endswith('/>'):
-                    return full_match
-                return full_match[:-1] + ' />'
+            # Fix tags with attributes - IMPROVED REGEX
+            content = re.sub(f'<{tag}(\\s+[^/>]*?)(?<!/)>', f'<{tag}\\1 />', content)
             
-            pattern = f'<{tag}(\\s+[^>]*)?>'
-            content = re.sub(pattern, replacer, content)
+            # Remove any closing tags for void elements
+            content = re.sub(f'</{tag}>', '', content)
         
         return content
     
     @staticmethod
     def clean_chapter_content(html_content: str) -> str:
-        """Clean and prepare chapter content for XHTML conversion"""
+        """Clean and prepare chapter content for XHTML conversion - PRESERVES UNICODE"""
         # First, remove any [tag] patterns that might have been created
         html_content = re.sub(r'\[(title|skill|ability|spell|detect|status|class|level|stat|buff|debuff|item|quest)[^\]]*?\]', '', html_content)
         
@@ -311,7 +338,7 @@ class ContentProcessor:
         html_content = re.sub(r'[\u201c\u201d\u2018\u2019\u201a\u201e]', '"', html_content)
         html_content = re.sub(r'[\u2018\u2019\u0027]', "'", html_content)
         
-        # Decode entities first
+        # Decode entities first - NOW PRESERVES UNICODE
         html_content = HTMLEntityDecoder.decode(html_content)
         
         # Remove XML declarations and DOCTYPE (we'll add clean ones later)
@@ -337,24 +364,27 @@ class ContentProcessor:
         if html_content.startswith('\ufeff'):
             html_content = html_content[1:]
         
-        # Clean for XML
+        # Clean for XML - PRESERVES VALID UNICODE
         html_content = XMLValidator.clean_for_xml(html_content)
         
         # Normalize line endings
         html_content = html_content.replace('\r\n', '\n').replace('\r', '\n')
         
+        # DO NOT convert Unicode to XML character references
+        # Keep characters like "同期 (dōki)" as-is
+        
         return html_content
 
 
 class TitleExtractor:
-    """Handles extraction of titles from HTML content"""
+    """Handles extraction of titles from HTML content - UPDATED WITH UNICODE PRESERVATION"""
     
     @staticmethod
     def extract_from_html(html_content: str, chapter_num: Optional[int] = None, 
                          filename: Optional[str] = None) -> Tuple[str, float]:
         """Extract title from HTML content with confidence score"""
         try:
-            # Decode entities first
+            # Decode entities first - PRESERVES UNICODE
             html_content = HTMLEntityDecoder.decode(html_content)
             
             soup = BeautifulSoup(html_content, 'html.parser')
@@ -438,14 +468,14 @@ class TitleExtractor:
     
     @staticmethod
     def clean_title(title: str) -> str:
-        """Clean and normalize extracted title"""
+        """Clean and normalize extracted title - PRESERVES UNICODE"""
         if not title:
             return ""
         
         # Remove any [tag] patterns first
         title = re.sub(r'\[(title|skill|ability|spell|detect|status|class|level|stat|buff|debuff|item|quest)[^\]]*?\]', '', title)
         
-        # Decode entities
+        # Decode entities - PRESERVES UNICODE
         title = HTMLEntityDecoder.decode(title)
         
         # Remove HTML tags
@@ -475,8 +505,8 @@ class TitleExtractor:
                 title = title[len(open_q):-len(close_q)].strip()
                 break
         
-        # Normalize Unicode
-        title = unicodedata.normalize('NFKC', title)
+        # Normalize Unicode - PRESERVES READABILITY
+        title = unicodedata.normalize('NFC', title)
         
         # Remove zero-width characters
         title = re.sub(r'[\u200b\u200c\u200d\u200e\u200f\ufeff]', '', title)
@@ -525,7 +555,7 @@ class TitleExtractor:
 
 
 class XHTMLConverter:
-    """Handles XHTML conversion and compliance"""
+    """Handles XHTML conversion and compliance - UPDATED WITH UNICODE PRESERVATION"""
     
     @staticmethod
     def ensure_compliance(html_content: str, title: str = "Chapter", 
@@ -563,11 +593,7 @@ class XHTMLConverter:
         except Exception as e:
             log(f"[WARNING] Failed to ensure XHTML compliance: {e}")
             # Return a minimal valid XHTML
-            return XHTMLConverter._build_xhtml(
-                title,
-                "<p>Error processing content.</p>",
-                css_links
-            )
+            return XHTMLConverter._build_fallback_xhtml(title)
     
     @staticmethod
     def _extract_body_content(soup) -> str:
@@ -615,9 +641,15 @@ class XHTMLConverter:
     
     @staticmethod
     def _build_xhtml(title: str, body_content: str, css_links: Optional[List[str]] = None) -> str:
-        """Build XHTML document"""
+        """Build XHTML document - PRESERVES UNICODE"""
         if not body_content.strip():
             body_content = '<p>Empty chapter</p>'
+        
+        # Ensure title is XML-safe (but preserves Unicode)
+        title = ContentProcessor.safe_escape(title)
+        
+        # Ensure body content is XML-safe - PRESERVES UNICODE
+        body_content = XHTMLConverter._ensure_xml_safe_readable(body_content)
         
         # Ensure we use standard ASCII quotes and no hidden characters
         xml_declaration = '<?xml version="1.0" encoding="utf-8"?>'
@@ -629,7 +661,7 @@ class XHTMLConverter:
             '<html xmlns="http://www.w3.org/1999/xhtml">',
             '<head>',
             '<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />',
-            f'<title>{ContentProcessor.safe_escape(title)}</title>'
+            f'<title>{title}</title>'
         ]
         
         # Add CSS links
@@ -652,6 +684,51 @@ class XHTMLConverter:
         ])
         
         return '\n'.join(xhtml_parts)
+    
+    @staticmethod
+    def _ensure_xml_safe_readable(content: str) -> str:
+        """Ensure content is XML-safe while keeping full readability"""
+        try:
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            # BeautifulSoup automatically handles XML escaping in text nodes
+            # while preserving Unicode characters
+            result = str(soup)
+            
+            # Ensure self-closing tags are properly formatted
+            result = ContentProcessor.fix_self_closing_tags(result)
+            
+            return result
+        except:
+            # Fallback: basic XML escaping
+            return XHTMLConverter._basic_xml_escape(content)
+    
+    @staticmethod
+    def _basic_xml_escape(content: str) -> str:
+        """Basic XML escaping as fallback - PRESERVES UNICODE"""
+        # Protect existing entities
+        entities = []
+        placeholder = "###ENTITY###"
+        
+        def protect_entity(match):
+            entities.append(match.group(0))
+            return f"{placeholder}{len(entities)-1}###"
+        
+        # Protect valid entities
+        content = re.sub(
+            r'&(?:[a-zA-Z][a-zA-Z0-9]*|#[0-9]+|#x[0-9a-fA-F]+);',
+            protect_entity,
+            content
+        )
+        
+        # Escape unescaped special characters
+        content = content.replace('&', '&amp;')
+        
+        # Restore entities
+        for i, entity in enumerate(entities):
+            content = content.replace(f"{placeholder}{i}###", entity)
+        
+        return content
     
     @staticmethod
     def _build_fallback_xhtml(title: str) -> str:
@@ -677,7 +754,7 @@ class XHTMLConverter:
     
     @staticmethod
     def validate(content: str) -> str:
-        """Validate and fix XHTML content"""
+        """Validate and fix XHTML content - PRESERVES UNICODE"""
         # Ensure XML declaration
         if not content.strip().startswith('<?xml'):
             content = '<?xml version="1.0" encoding="utf-8"?>\n' + content
@@ -709,15 +786,79 @@ class XHTMLConverter:
         # Clean for XML
         content = XMLValidator.clean_for_xml(content)
         
+        # DO NOT convert Unicode to character references
+        # Keep "同期 (dōki)" as readable text
+        
         # Try to parse for validation
         try:
             ET.fromstring(content.encode('utf-8'))
         except ET.ParseError as e:
             log(f"[WARNING] XHTML validation failed: {e}")
-            # Don't try to rebuild - just return the content as-is
-            # The chapter processing will handle fallback
+            # Try to recover
+            content = XHTMLConverter._attempt_recovery(content, e)
         
         return content
+    
+    @staticmethod
+    def _attempt_recovery(content: str, error: ET.ParseError) -> str:
+        """Attempt to recover from XML parse errors - ENHANCED"""
+        try:
+            # Use BeautifulSoup to fix structure
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            # Ensure we have proper XHTML structure
+            if not soup.find('html'):
+                new_soup = BeautifulSoup('<html xmlns="http://www.w3.org/1999/xhtml"></html>', 'html.parser')
+                html_tag = new_soup.html
+                for child in list(soup.children):
+                    html_tag.append(child)
+                soup = new_soup
+            
+            # Ensure we have head and body
+            if not soup.find('head'):
+                head = soup.new_tag('head')
+                meta = soup.new_tag('meta')
+                meta['http-equiv'] = 'Content-Type'
+                meta['content'] = 'text/html; charset=utf-8'
+                head.append(meta)
+                
+                title_tag = soup.new_tag('title')
+                title_tag.string = 'Chapter'
+                head.append(title_tag)
+                
+                if soup.html:
+                    soup.html.insert(0, head)
+            
+            if not soup.find('body'):
+                body = soup.new_tag('body')
+                if soup.html:
+                    for child in list(soup.html.children):
+                        if child.name not in ['head', 'body']:
+                            body.append(child.extract())
+                    soup.html.append(body)
+            
+            # Convert back to string
+            recovered = str(soup)
+            
+            # Ensure proper XML declaration
+            if not recovered.strip().startswith('<?xml'):
+                recovered = '<?xml version="1.0" encoding="utf-8"?>\n' + recovered
+            
+            # Add DOCTYPE if missing
+            if '<!DOCTYPE' not in recovered:
+                lines = recovered.split('\n')
+                lines.insert(1, '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">')
+                recovered = '\n'.join(lines)
+            
+            # Final validation
+            ET.fromstring(recovered.encode('utf-8'))
+            log(f"[INFO] Successfully recovered XHTML")
+            return recovered
+            
+        except Exception as recovery_error:
+            log(f"[WARNING] Recovery attempt failed: {recovery_error}")
+            # Last resort: use fallback
+            return XHTMLConverter._build_fallback_xhtml("Chapter")
 
 
 class FileUtils:
