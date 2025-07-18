@@ -1609,7 +1609,7 @@ class ChapterExtractor:
             print(f"   • Empty/placeholder: {empty_chapters}")
     
     def _extract_epub_metadata(self, zf):
-        """Extract comprehensive metadata from EPUB file"""
+        """Extract comprehensive metadata from EPUB file including all custom fields"""
         meta = {}
         try:
             for name in zf.namelist():
@@ -1617,27 +1617,100 @@ class ChapterExtractor:
                     opf_content = zf.read(name)
                     soup = BeautifulSoup(opf_content, 'xml')
                     
-                    for tag in ['title', 'creator', 'language', 'publisher', 'date', 'subject']:
-                        element = soup.find(tag)
-                        if element:
-                            meta[tag] = element.get_text(strip=True)
+                    # Extract ALL Dublin Core elements (expanded list)
+                    dc_elements = ['title', 'creator', 'subject', 'description', 
+                                  'publisher', 'contributor', 'date', 'type', 
+                                  'format', 'identifier', 'source', 'language', 
+                                  'relation', 'coverage', 'rights']
                     
-                    description = soup.find('description')
-                    if description:
-                        meta['description'] = description.get_text(strip=True)
+                    for element in dc_elements:
+                        tag = soup.find(element)
+                        if tag and tag.get_text(strip=True):
+                            meta[element] = tag.get_text(strip=True)
                     
+                    # Extract ALL meta tags (not just series)
                     meta_tags = soup.find_all('meta')
                     for meta_tag in meta_tags:
-                        name = meta_tag.get('name', '').lower()
+                        # Try different attribute names for the metadata name
+                        name = meta_tag.get('name') or meta_tag.get('property', '')
                         content = meta_tag.get('content', '')
-                        if 'series' in name and content:
-                            meta['series'] = content
-                        elif 'calibre:series' in name and content:
-                            meta['series'] = content
+                        
+                        if name and content:
+                            # Store original name for debugging
+                            original_name = name
+                            
+                            # Clean up common prefixes
+                            if name.startswith('calibre:'):
+                                name = name[8:]  # Remove 'calibre:' prefix
+                            elif name.startswith('dc:'):
+                                name = name[3:]  # Remove 'dc:' prefix
+                            elif name.startswith('opf:'):
+                                name = name[4:]  # Remove 'opf:' prefix
+                            
+                            # Normalize the field name - replace hyphens with underscores
+                            name = name.replace('-', '_')
+                            
+                            # Don't overwrite if already exists (prefer direct tags over meta tags)
+                            if name not in meta:
+                                meta[name] = content
+                                
+                                # Debug output for custom fields
+                                if original_name != name:
+                                    print(f"   • Found custom field: {original_name} → {name}")
+                    
+                    # Special handling for series information (maintain compatibility)
+                    if 'series' not in meta:
+                        series_tags = soup.find_all('meta', attrs={'name': lambda x: x and 'series' in x.lower()})
+                        for series_tag in series_tags:
+                            series_name = series_tag.get('content', '')
+                            if series_name:
+                                meta['series'] = series_name
+                                break
+                    
+                    # Extract refines metadata (used by some EPUB creators)
+                    refines_metas = soup.find_all('meta', attrs={'refines': True})
+                    for refine in refines_metas:
+                        property_name = refine.get('property', '')
+                        content = refine.get_text(strip=True) or refine.get('content', '')
+                        
+                        if property_name and content:
+                            # Clean property name
+                            if ':' in property_name:
+                                property_name = property_name.split(':')[-1]
+                            property_name = property_name.replace('-', '_')
+                            
+                            if property_name not in meta:
+                                meta[property_name] = content
+                    
+                    # Log extraction summary
+                    print(f"📋 Extracted {len(meta)} metadata fields")
+                    
+                    # Show standard vs custom fields
+                    standard_keys = {'title', 'creator', 'language', 'subject', 'description', 
+                                   'publisher', 'date', 'identifier', 'source', 'rights', 
+                                   'contributor', 'type', 'format', 'relation', 'coverage'}
+                    custom_keys = set(meta.keys()) - standard_keys
+                    
+                    if custom_keys:
+                        print(f"📋 Standard fields: {len(standard_keys & set(meta.keys()))}")
+                        print(f"📋 Custom fields found: {sorted(custom_keys)}")
+                        
+                        # Show sample values for custom fields (truncated)
+                        for key in sorted(custom_keys)[:5]:  # Show first 5 custom fields
+                            value = str(meta[key])
+                            if len(value) > 50:
+                                value = value[:47] + "..."
+                            print(f"   • {key}: {value}")
+                        
+                        if len(custom_keys) > 5:
+                            print(f"   • ... and {len(custom_keys) - 5} more custom fields")
                     
                     break
+                    
         except Exception as e:
             print(f"[WARNING] Failed to extract metadata: {e}")
+            import traceback
+            traceback.print_exc()
         
         return meta
     
@@ -4419,7 +4492,7 @@ def main(log_callback=None, stop_callback=None):
         print("❌ Error: Set API_KEY, OPENAI_API_KEY, or OPENAI_OR_Gemini_API_KEY in your environment.")
         return
 
-    print(f"[DEBUG] Found API key: {config.API_KEY[:10]}...")
+    #print(f"[DEBUG] Found API key: {config.API_KEY[:10]}...")
     print(f"[DEBUG] Using model = {config.MODEL}")
     print(f"[DEBUG] Max output tokens = {config.MAX_OUTPUT_TOKENS}")
 
@@ -4502,6 +4575,131 @@ def main(log_callback=None, stop_callback=None):
             print(f"📚 Translated title: {translated_title}")
         else:
             print("❌ Title translation skipped due to stop request")
+            
+    # Translate other metadata fields if configured
+    translate_metadata_fields_str = os.getenv('TRANSLATE_METADATA_FIELDS', '{}')
+    metadata_translation_mode = os.getenv('METADATA_TRANSLATION_MODE', 'together')
+
+    try:
+        translate_metadata_fields = json.loads(translate_metadata_fields_str)
+        
+        if translate_metadata_fields and any(translate_metadata_fields.values()):
+            # Filter out fields that should be translated (excluding already translated fields)
+            fields_to_translate = {}
+            skipped_fields = []
+            
+            for field_name, should_translate in translate_metadata_fields.items():
+                if should_translate and field_name != 'title' and field_name in metadata:
+                    # Check if already translated
+                    if metadata.get(f"{field_name}_translated", False):
+                        skipped_fields.append(field_name)
+                        print(f"✓ Skipping {field_name} - already translated")
+                    else:
+                        fields_to_translate[field_name] = should_translate
+            
+            if fields_to_translate:
+                print("\n" + "="*50)
+                print("📋 METADATA TRANSLATION PHASE")
+                print("="*50)
+                print(f"🌐 Translating {len(fields_to_translate)} metadata fields...")
+                
+                # Get ALL configuration from environment - NO DEFAULTS
+                system_prompt = os.getenv('BOOK_TITLE_SYSTEM_PROMPT', '')
+                if not system_prompt:
+                    print("❌ No system prompt configured, skipping metadata translation")
+                else:
+                    # Get field-specific prompts
+                    field_prompts_str = os.getenv('METADATA_FIELD_PROMPTS', '{}')
+                    try:
+                        field_prompts = json.loads(field_prompts_str)
+                    except:
+                        field_prompts = {}
+                    
+                    if not field_prompts and not field_prompts.get('_default'):
+                        print("❌ No field prompts configured, skipping metadata translation")
+                    else:
+                        # Get language configuration
+                        lang_behavior = os.getenv('LANG_PROMPT_BEHAVIOR', 'auto')
+                        forced_source_lang = os.getenv('FORCED_SOURCE_LANG', 'Korean')
+                        output_language = os.getenv('OUTPUT_LANGUAGE', 'English')
+                        
+                        # Determine source language
+                        source_lang = metadata.get('language', '').lower()
+                        if lang_behavior == 'never':
+                            lang_str = ""
+                        elif lang_behavior == 'always':
+                            lang_str = forced_source_lang
+                        else:  # auto
+                            if 'zh' in source_lang or 'chinese' in source_lang:
+                                lang_str = 'Chinese'
+                            elif 'ja' in source_lang or 'japanese' in source_lang:
+                                lang_str = 'Japanese'
+                            elif 'ko' in source_lang or 'korean' in source_lang:
+                                lang_str = 'Korean'
+                            else:
+                                lang_str = ''
+                        
+                        # Individual translation mode (simpler for metadata)
+                        print("📝 Using individual translation mode...")
+                        
+                        for field_name in fields_to_translate:
+                            if not check_stop() and field_name in metadata:
+                                original_value = metadata[field_name]
+                                print(f"\n📋 Translating {field_name}: {original_value[:100]}..." 
+                                      if len(str(original_value)) > 100 else f"\n📋 Translating {field_name}: {original_value}")
+                                
+                                # Get field-specific prompt
+                                prompt_template = field_prompts.get(field_name, field_prompts.get('_default', ''))
+                                
+                                if not prompt_template:
+                                    print(f"⚠️ No prompt configured for field '{field_name}', skipping")
+                                    continue
+                                
+                                # Replace variables in prompt
+                                field_prompt = prompt_template.replace('{source_lang}', lang_str)
+                                field_prompt = field_prompt.replace('{output_lang}', output_language)
+                                field_prompt = field_prompt.replace('English', output_language)
+                                field_prompt = field_prompt.replace('{field_value}', str(original_value))
+                                
+                                messages = [
+                                    {"role": "system", "content": system_prompt},
+                                    {"role": "user", "content": f"{field_prompt}\n\n{original_value}"}
+                                ]
+                                
+                                try:
+                                    # Add delay using the config instance from main()
+                                    if config.DELAY > 0:  # ✅ FIXED - use config.DELAY instead of config.SEND_INTERVAL
+                                        time.sleep(config.DELAY)
+                                    
+                                    # Use the same client instance from main()
+                                    # ✅ FIXED - Properly unpack tuple response and provide max_tokens
+                                    content, finish_reason = client.send(
+                                        messages, 
+                                        temperature=config.TEMP,
+                                        max_tokens=config.MAX_OUTPUT_TOKENS  # ✅ FIXED - provide max_tokens to avoid NoneType error
+                                    )
+                                    translated_value = content.strip()  # ✅ FIXED - use content from unpacked tuple
+                                    
+                                    metadata[f"original_{field_name}"] = original_value
+                                    metadata[field_name] = translated_value
+                                    metadata[f"{field_name}_translated"] = True
+                                    
+                                    print(f"✅ Translated {field_name}: {translated_value}")
+                                    
+                                except Exception as e:
+                                    print(f"❌ Failed to translate {field_name}: {e}")
+
+                            else:
+                                if check_stop():
+                                    print("❌ Metadata translation stopped by user")
+                                    break
+            else:
+                print("📋 No additional metadata fields to translate")
+                
+    except Exception as e:
+        print(f"⚠️ Error processing metadata translation settings: {e}")
+        import traceback
+        traceback.print_exc()
     
     with open(metadata_path, 'w', encoding='utf-8') as mf:
         json.dump(metadata, mf, ensure_ascii=False, indent=2)
