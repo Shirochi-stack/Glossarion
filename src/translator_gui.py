@@ -882,6 +882,13 @@ class TranslatorGUI:
 
         # Initialize metadata/batch variables the same way
         self.translate_metadata_fields = self.config.get('translate_metadata_fields', {})
+        # Initialize metadata translation UI and prompts
+        try:
+            from metadata_batch_translator import MetadataBatchTranslatorUI
+            self.metadata_ui = MetadataBatchTranslatorUI(self)
+            # This ensures default prompts are in config
+        except ImportError:
+            print("Metadata translation UI not available")
         self.batch_translate_headers_var = tk.BooleanVar(value=self.config.get('batch_translate_headers', False))
         self.headers_per_batch_var = tk.StringVar(value=self.config.get('headers_per_batch', '400'))
         self.update_html_headers_var = tk.BooleanVar(value=self.config.get('update_html_headers', True))
@@ -913,6 +920,13 @@ class TranslatorGUI:
         except ImportError as e:
             self.update_manager = None
             print(f"[DEBUG] Update manager not available: {e}")
+        
+        try:
+            from metadata_batch_translator import MetadataBatchTranslatorUI
+            self.metadata_ui = MetadataBatchTranslatorUI(self)
+            # This ensures default prompts are in config
+        except ImportError:
+            print("Metadata translation UI not available")
         
         # Default prompts
         self.default_translation_chunk_prompt = "[PART {chunk_idx}/{total_chunks}]\n{chunk_html}"
@@ -5363,6 +5377,11 @@ Recent translations to summarize:
             'HEADERS_PER_BATCH': self.headers_per_batch_var.get(),
             'UPDATE_HTML_HEADERS': "1" if self.update_html_headers_var.get() else "0",
             'SAVE_HEADER_TRANSLATIONS': "1" if self.save_header_translations_var.get() else "0",
+            'METADATA_FIELD_PROMPTS': json.dumps(self.config.get('metadata_field_prompts', {})),
+            'LANG_PROMPT_BEHAVIOR': self.config.get('lang_prompt_behavior', 'auto'),
+            'FORCED_SOURCE_LANG': self.config.get('forced_source_lang', 'Korean'),
+            'OUTPUT_LANGUAGE': self.config.get('output_language', 'English'),
+            'METADATA_BATCH_PROMPT': self.config.get('metadata_batch_prompt', ''),
 
             # Anti-duplicate parameters
             'ENABLE_ANTI_DUPLICATE': '1' if hasattr(self, 'enable_anti_duplicate_var') and self.enable_anti_duplicate_var.get() else '0',
@@ -5587,69 +5606,75 @@ Recent translations to summarize:
        self.master.after(100, self.update_run_button)
  
     def run_epub_converter_direct(self):
-            """Run EPUB converter directly without blocking GUI"""
-            try:
-                folder = self.epub_folder
-                self.append_log("📦 Starting EPUB Converter...")
+        """Run EPUB converter directly without blocking GUI"""
+        try:
+            folder = self.epub_folder
+            self.append_log("📦 Starting EPUB Converter...")
+            
+            # Set environment variables for EPUB converter
+            os.environ['DISABLE_EPUB_GALLERY'] = "1" if self.disable_epub_gallery_var.get() else "0"
+            
+            # Set API credentials and model
+            api_key = self.api_key_entry.get()
+            if api_key:
+                os.environ['API_KEY'] = api_key
+                os.environ['OPENAI_API_KEY'] = api_key
+                os.environ['OPENAI_OR_Gemini_API_KEY'] = api_key
+            
+            model = self.model_var.get()
+            if model:
+                os.environ['MODEL'] = model
+            
+            # Set translation parameters from GUI
+            # FIX: Use correct environment variable names
+            os.environ['TRANSLATION_TEMPERATURE'] = str(self.trans_temp.get())  # Changed from TEMPERATURE
+            os.environ['MAX_OUTPUT_TOKENS'] = str(self.max_output_tokens)
+            
+            # Set batch translation settings
+            os.environ['BATCH_TRANSLATE_HEADERS'] = "1" if self.batch_translate_headers_var.get() else "0"
+            os.environ['HEADERS_PER_BATCH'] = str(self.headers_per_batch_var.get())
+            os.environ['UPDATE_HTML_HEADERS'] = "1" if self.update_html_headers_var.get() else "0"
+            os.environ['SAVE_HEADER_TRANSLATIONS'] = "1" if self.save_header_translations_var.get() else "0"
+            
+            # Set metadata translation settings
+            os.environ['TRANSLATE_METADATA_FIELDS'] = json.dumps(self.translate_metadata_fields)
+            os.environ['METADATA_TRANSLATION_MODE'] = self.config.get('metadata_translation_mode', 'together')
+            print(f"[DEBUG] METADATA_FIELD_PROMPTS from env: {os.getenv('METADATA_FIELD_PROMPTS', 'NOT SET')[:100]}...")
+
+            # Debug: Log what we're setting
+            self.append_log(f"[DEBUG] Setting TRANSLATE_METADATA_FIELDS: {self.translate_metadata_fields}")
+            self.append_log(f"[DEBUG] Enabled fields: {[k for k, v in self.translate_metadata_fields.items() if v]}")
+            
+            # Set book title translation settings
+            os.environ['TRANSLATE_BOOK_TITLE'] = "1" if self.translate_book_title_var.get() else "0"
+            os.environ['BOOK_TITLE_PROMPT'] = self.book_title_prompt
+            os.environ['BOOK_TITLE_SYSTEM_PROMPT'] = self.config.get('book_title_system_prompt', 
+                "You are a translator. Respond with only the translated text, nothing else.")
+            
+            # Set prompts
+            os.environ['SYSTEM_PROMPT'] = self.prompt_text.get("1.0", "end").strip()
+            
+            fallback_compile_epub(folder, log_callback=self.append_log)
+            
+            if not self.stop_requested:
+                self.append_log("✅ EPUB Converter completed successfully!")
                 
-                # Set environment variables for EPUB converter
-                os.environ['DISABLE_EPUB_GALLERY'] = "1" if self.disable_epub_gallery_var.get() else "0"
-                
-                # Set API credentials and model
-                api_key = self.api_key_entry.get()
-                if api_key:
-                    os.environ['API_KEY'] = api_key
-                    os.environ['OPENAI_API_KEY'] = api_key
-                    os.environ['OPENAI_OR_Gemini_API_KEY'] = api_key
-                
-                model = self.model_var.get()
-                if model:
-                    os.environ['MODEL'] = model
-                
-                # Set translation parameters from GUI
-                os.environ['TEMPERATURE'] = str(self.trans_temp.get())
-                os.environ['MAX_OUTPUT_TOKENS'] = str(self.max_output_tokens)
-                
-                # Set batch translation settings
-                os.environ['BATCH_TRANSLATE_HEADERS'] = "1" if self.batch_translate_headers_var.get() else "0"
-                os.environ['HEADERS_PER_BATCH'] = str(self.headers_per_batch_var.get())
-                os.environ['UPDATE_HTML_HEADERS'] = "1" if self.update_html_headers_var.get() else "0"
-                os.environ['SAVE_HEADER_TRANSLATIONS'] = "1" if self.save_header_translations_var.get() else "0"
-                
-                # Set metadata translation settings
-                os.environ['TRANSLATE_METADATA_FIELDS'] = json.dumps(self.translate_metadata_fields)
-                os.environ['METADATA_TRANSLATION_MODE'] = self.config.get('metadata_translation_mode', 'together')
-                
-                # Set book title translation settings
-                os.environ['TRANSLATE_BOOK_TITLE'] = "1" if self.translate_book_title_var.get() else "0"
-                os.environ['BOOK_TITLE_PROMPT'] = self.book_title_prompt
-                os.environ['BOOK_TITLE_SYSTEM_PROMPT'] = self.config.get('book_title_system_prompt', 
-                    "You are a translator. Respond with only the translated text, nothing else.")
-                
-                # Set prompts
-                os.environ['SYSTEM_PROMPT'] = self.prompt_text.get("1.0", "end").strip()
-                
-                fallback_compile_epub(folder, log_callback=self.append_log)
-                
-                if not self.stop_requested:
-                    self.append_log("✅ EPUB Converter completed successfully!")
-                    
-                    epub_files = [f for f in os.listdir(folder) if f.endswith('.epub')]
-                    if epub_files:
-                        epub_files.sort(key=lambda x: os.path.getmtime(os.path.join(folder, x)), reverse=True)
-                        out_file = os.path.join(folder, epub_files[0])
-                        self.master.after(0, lambda: messagebox.showinfo("EPUB Compilation Success", f"Created: {out_file}"))
-                    else:
-                        self.append_log("⚠️ EPUB file was not created. Check the logs for details.")
-                
-            except Exception as e:
-                error_str = str(e)
-                self.append_log(f"❌ EPUB Converter error: {error_str}")
-                
-                if "Document is empty" not in error_str:
-                    self.master.after(0, lambda: messagebox.showerror("EPUB Converter Failed", f"Error: {error_str}"))
+                epub_files = [f for f in os.listdir(folder) if f.endswith('.epub')]
+                if epub_files:
+                    epub_files.sort(key=lambda x: os.path.getmtime(os.path.join(folder, x)), reverse=True)
+                    out_file = os.path.join(folder, epub_files[0])
+                    self.master.after(0, lambda: messagebox.showinfo("EPUB Compilation Success", f"Created: {out_file}"))
                 else:
-                    self.append_log("📋 Check the log above for details about what went wrong.")
+                    self.append_log("⚠️ EPUB file was not created. Check the logs for details.")
+            
+        except Exception as e:
+            error_str = str(e)
+            self.append_log(f"❌ EPUB Converter error: {error_str}")
+            
+            if "Document is empty" not in error_str:
+                self.master.after(0, lambda: messagebox.showerror("EPUB Converter Failed", f"Error: {error_str}"))
+            else:
+                self.append_log("📋 Check the log above for details about what went wrong.")
                 
     def run_qa_scan(self):
             """Run QA scan with mode selection and settings"""
