@@ -883,7 +883,7 @@ class TranslatorGUI:
         # Initialize metadata/batch variables the same way
         self.translate_metadata_fields = self.config.get('translate_metadata_fields', {})
         self.batch_translate_headers_var = tk.BooleanVar(value=self.config.get('batch_translate_headers', False))
-        self.headers_per_batch_var = tk.StringVar(value=self.config.get('headers_per_batch', '1100'))
+        self.headers_per_batch_var = tk.StringVar(value=self.config.get('headers_per_batch', '500'))
         self.update_html_headers_var = tk.BooleanVar(value=self.config.get('update_html_headers', True))
         self.save_header_translations_var = tk.BooleanVar(value=self.config.get('save_header_translations', True))
         
@@ -1385,6 +1385,7 @@ Recent translations to summarize:
         
         self.custom_glossary_fields = self.config.get('custom_glossary_fields', [])
         self.token_limit_disabled = self.config.get('token_limit_disabled', False)
+        self.api_key_visible = False  # Default to hidden
         
         if 'glossary_duplicate_key_mode' not in self.config:
             self.config['glossary_duplicate_key_mode'] = 'auto'
@@ -5142,7 +5143,18 @@ Recent translations to summarize:
                 self.append_log(f"🔧 Setting up environment variables...")
                 self.append_log(f"📖 EPUB: {os.path.basename(epub_path)}")
                 self.append_log(f"🤖 Model: {self.model_var.get()}")
-                self.append_log(f"🔑 API Key: {api_key[:10]}...")
+                if hasattr(self, 'api_key_visible') and self.api_key_visible:
+                    # User has clicked "Show", so we can show partial key
+                    if api_key and api_key.strip():
+                        self.append_log(f"🔑 API Key: {api_key[:10]}...")
+                    else:
+                        self.append_log("❌ API Key: Not configured")
+                else:
+                    # API key is hidden, don't expose any part
+                    if api_key and api_key.strip():
+                        self.append_log("🔑 API Key: ******** (configured)")
+                    else:
+                        self.append_log("❌ API Key: Not configured")
                 self.append_log(f"📤 Output Token Limit: {self.max_output_tokens}")
                
                # Log key settings
@@ -7261,9 +7273,11 @@ Recent translations to summarize:
                     self.append_log("📑 Cleared auto-loaded glossary (non-EPUB file selected)")
 
     def toggle_api_visibility(self):
-       show = self.api_key_entry.cget('show')
-       self.api_key_entry.config(show='' if show == '*' else '*')
-       
+        show = self.api_key_entry.cget('show')
+        self.api_key_entry.config(show='' if show == '*' else '*')
+        # Track the visibility state
+        self.api_key_visible = (show == '*')  # Will be True when showing, False when hiding
+           
     def configure_translation_chunk_prompt(self):
         """Configure the prompt template for translation chunks"""
         dialog = self.wm.create_simple_dialog(
@@ -8617,7 +8631,7 @@ Recent translations to summarize:
                     'TRANSLATE_METADATA_FIELDS': json.dumps(self.translate_metadata_fields),
                     'METADATA_TRANSLATION_MODE': self.config.get('metadata_translation_mode', 'together'),
                     'BATCH_TRANSLATE_HEADERS': "1" if self.batch_translate_headers_var.get() else "0",
-                    'HEADERS_PER_BATCH': str(self.config.get('headers_per_batch', 500)),
+                    'HEADERS_PER_BATCH': str(self.config.get('headers_per_batch', 400)),
                     'UPDATE_HTML_HEADERS': "1" if self.update_html_headers_var.get() else "0",
                     'SAVE_HEADER_TRANSLATIONS': "1" if self.save_header_translations_var.get() else "0",
                     
