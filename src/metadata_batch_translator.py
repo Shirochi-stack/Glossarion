@@ -634,6 +634,29 @@ class BatchHeaderTranslator:
         if not headers_dict:
             return {}
         
+        # Import tiktoken for token counting
+        try:
+            import tiktoken
+            # Try to use model-specific encoding
+            try:
+                model_name = self.client.model if hasattr(self.client, 'model') else 'gpt-3.5-turbo'
+                enc = tiktoken.encoding_for_model(model_name)
+            except:
+                # Fallback to cl100k_base encoding
+                enc = tiktoken.get_encoding("cl100k_base")
+            has_tiktoken = True
+        except ImportError:
+            has_tiktoken = False
+            print("[DEBUG] tiktoken not available, using character-based estimation")
+        
+        def count_tokens(text: str) -> int:
+            """Count tokens in text"""
+            if has_tiktoken and enc:
+                return len(enc.encode(text))
+            else:
+                # Fallback: estimate ~4 characters per token
+                return max(1, len(text) // 4)
+        
         # Get configured prompt template
         prompt_template = self.config.get('batch_header_prompt',
             "Translate these chapter titles to English.\n"
@@ -671,6 +694,10 @@ class BatchHeaderTranslator:
         
         print(f"[DEBUG] Using temperature: {temperature}, max_tokens: {max_tokens} (from GUI/env)")
         
+        # Count system prompt tokens once
+        system_tokens = count_tokens(self.system_prompt)
+        print(f"[DEBUG] System prompt tokens: {system_tokens}")
+        
         for batch_num in range(total_batches):
             if self.stop_flag:
                 print("Translation interrupted by user")
@@ -685,6 +712,25 @@ class BatchHeaderTranslator:
             try:
                 titles_json = json.dumps(batch_headers, ensure_ascii=False, indent=2)
                 user_prompt = user_prompt_template + titles_json
+                
+                # Count tokens in the user prompt
+                user_tokens = count_tokens(user_prompt)
+                total_input_tokens = system_tokens + user_tokens
+                
+                # Debug output showing input tokens
+                print(f"[DEBUG] Batch {batch_num + 1} input tokens:")
+                print(f"  - User prompt: {user_tokens} tokens")
+                print(f"  - Total input: {total_input_tokens} tokens (including system prompt)")
+                print(f"  - Headers in batch: {len(batch_headers)}")
+                
+                # Show a sample of the headers being translated (first 3)
+                sample_headers = list(batch_headers.items())[:3]
+                if sample_headers:
+                    print(f"[DEBUG] Sample headers being sent:")
+                    for ch_num, title in sample_headers:
+                        print(f"    Chapter {ch_num}: {title}")
+                    if len(batch_headers) > 3:
+                        print(f"    ... and {len(batch_headers) - 3} more")
                 
                 messages = [
                     {"role": "system", "content": self.system_prompt},
@@ -714,22 +760,27 @@ class BatchHeaderTranslator:
                     translations = self._parse_json_response(response_content, batch_headers)
                     all_translations.update(translations)
                     
+                    # Count output tokens for debug
+                    output_tokens = count_tokens(response_content)
+                    print(f"[DEBUG] Response tokens: {output_tokens}")
+                    
                     for num, translated in translations.items():
                         if num in batch_headers:
                             print(f"  ✓ Ch{num}: {batch_headers[num]} → {translated}")
                 else:
                     print(f"  ⚠️ Empty response from API")
                     
-            except AttributeError as e:
-                print(f"  ❌ Response format error: {e}")
-                print(f"  Response type: {type(response)}")
-                # Keep original titles for this batch
-                all_translations.update(batch_headers)
+            except json.JSONDecodeError as e:
+                print(f"  ❌ Failed to parse JSON response: {e}")
+                # Try to extract translations manually from the response
+                if response_content:
+                    translations = self._fallback_parse(response_content, batch_headers)
+                    all_translations.update(translations)
             except Exception as e:
-                print(f"  ❌ Translation error: {e}")
-                # Keep original titles for this batch
-                all_translations.update(batch_headers)
+                print(f"  ❌ Error in batch {batch_num + 1}: {e}")
+                continue
         
+        print(f"\n✅ Translated {len(all_translations)} headers total")
         return all_translations
     
     def _parse_json_response(self, response: str, original_headers: Dict[int, str]) -> Dict[int, str]:
@@ -1217,7 +1268,7 @@ def enhance_epub_compiler(compiler_instance):
         pass
     
     batch_translate = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
-    headers_per_batch = int(os.getenv('HEADERS_PER_BATCH', '500'))
+    headers_per_batch = int(os.getenv('HEADERS_PER_BATCH', '400'))
     update_html = os.getenv('UPDATE_HTML_HEADERS', '1') == '1'
     save_translations = os.getenv('SAVE_HEADER_TRANSLATIONS', '1') == '1'
     
@@ -1486,99 +1537,12 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
             
             log(f"📚 Found {len(epub_html_files)} content files in source EPUB")
             
-            # Map source chapters to output chapters using translation_progress.json
-            source_to_output = {}
+            # FIRST: Extract ALL titles from source EPUB files
+            source_titles_by_index = {}
             
-            if progress_data and 'chapters' in progress_data:
-                # FIXED: Extract mapping from chapter_info values, not from hash keys!
-                log(f"  Processing {len(progress_data.get('chapters', {}))} chapter entries...")
-                
-                entries_processed = 0
-                entries_skipped = 0
-                missing_chapter_idx = 0
-                missing_actual_num = 0
-                missing_output = 0
-                
-                for chapter_hash, chapter_info in progress_data.get('chapters', {}).items():
-                    entries_processed += 1
-                    
-                    if not isinstance(chapter_info, dict):
-                        entries_skipped += 1
-                        log(f"    ⚠️ Entry {chapter_hash[:8]}... is not a dict: {type(chapter_info)}")
-                        continue
-                    
-                    # Check if either has 'completed' status OR just has output_file (for compatibility)
-                    has_output = chapter_info.get('output_file')
-                    is_completed = chapter_info.get('status') == 'completed' or has_output
-                    
-                    if not is_completed:
-                        entries_skipped += 1
-                        if entries_skipped <= 3:  # Only log first few
-                            log(f"    ⚠️ Entry {chapter_hash[:8]}... not completed: status={chapter_info.get('status')}, has_output={bool(has_output)}")
-                        continue
-                    
-                    # Get the SOURCE chapter index (which file in the EPUB)
-                    chapter_idx = chapter_info.get('chapter_idx')
-                    # Get the OUTPUT chapter number (what it should be numbered as)
-                    actual_num = chapter_info.get('actual_num')
-                    
-                    # Debug what's missing
-                    if chapter_idx is None:
-                        missing_chapter_idx += 1
-                        if missing_chapter_idx <= 3:  # Only log first few
-                            log(f"    ⚠️ Entry {chapter_hash[:8]}... missing chapter_idx")
-                    if actual_num is None:
-                        missing_actual_num += 1
-                        if missing_actual_num <= 3:  # Only log first few
-                            log(f"    ⚠️ Entry {chapter_hash[:8]}... missing actual_num")
-                    
-                    # Both must be valid numbers
-                    if chapter_idx is not None and actual_num is not None:
-                        source_to_output[chapter_idx] = actual_num
-                        if len(source_to_output) <= 5:  # Log first few mappings
-                            log(f"    ✓ Mapped: Source file {chapter_idx} → Output chapter {actual_num}")
-                
-                log(f"  Processing summary:")
-                log(f"    Total entries: {entries_processed}")
-                log(f"    Skipped (not dict or not completed): {entries_skipped}")
-                log(f"    Missing chapter_idx: {missing_chapter_idx}")
-                log(f"    Missing actual_num: {missing_actual_num}")
-                log(f"    Successfully mapped: {len(source_to_output)}")
-                
-                log(f"  Source mapping: {len(source_to_output)} chapters mapped")
-                
-                # Debug: show first few mappings
-                if source_to_output:
-                    sample_mappings = sorted(source_to_output.items())[:5]
-                    for src, out in sample_mappings:
-                        log(f"    Mapping: Source file index {src} → Output ch {out}")
-            
-            # If no mapping, create default
-            if not source_to_output:
-                log("  ⚠️ No mapping found, creating default")
-                # If we have chapter 0 in output, assume source also starts at 0
-                if has_chapter_zero or uses_zero_based:
-                    # 0-based: source indices 0,1,2... map to output chapters 0,1,2...
-                    for i in range(len(epub_html_files)):
-                        source_to_output[i] = i
-                else:
-                    # 1-based: source indices 0,1,2... map to output chapters 1,2,3...
-                    for i in range(len(epub_html_files)):
-                        source_to_output[i] = i + 1
-            
-            # Extract titles from source EPUB
-            for idx, file_path in enumerate(epub_html_files):
+            for idx, content_file in enumerate(epub_html_files):
                 try:
-                    content = zf.read(file_path)
-                    
-                    # Try multiple encodings
-                    html_content = None
-                    for encoding in ['utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr', 'gbk', 'big5']:
-                        try:
-                            html_content = content.decode(encoding)
-                            break
-                        except UnicodeDecodeError:
-                            continue
+                    html_content = zf.read(content_file).decode('utf-8', errors='ignore')
                     
                     if not html_content:
                         continue
@@ -1587,6 +1551,7 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                     
                     # Extract title
                     title = None
+                    
                     for tag_name in ['h1', 'h2', 'h3', 'title']:
                         tag = soup.find(tag_name)
                         if tag:
@@ -1603,35 +1568,92 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                             if text and len(text) < 100:
                                 title = text
                     
-                    if not title:
-                        # Use the mapped chapter number for the default title
-                        if idx in source_to_output:
-                            title = f"Chapter {source_to_output[idx]}"
-                        else:
-                            title = f"Chapter {idx}"
-                    
-                    # Map to output chapter
-                    if idx in source_to_output:
-                        output_num = source_to_output[idx]
-                        source_headers[output_num] = title
-                        log(f"  Source Ch.{idx} → Output Ch.{output_num}: {title}")
+                    if title:
+                        source_titles_by_index[idx] = title
+                        log(f"  Extracted from source idx {idx}: {title}")
                     
                 except Exception as e:
                     log(f"  ⚠️ Error reading source chapter {idx}: {e}")
                     continue
-        
-        log(f"📊 Extracted {len(source_headers)} source headers")
+            
+            log(f"📚 Extracted {len(source_titles_by_index)} titles from source EPUB")
+            
+            # SECOND: Try to build mapping using content_hashes
+            source_to_output = {}
+            
+            if progress_data and 'content_hashes' in progress_data:
+                content_hashes = progress_data.get('content_hashes', {})
+                chapters_data = progress_data.get('chapters', {})
+                
+                log(f"  Building mapping from {len(content_hashes)} content hash entries...")
+                
+                for chapter_hash, hash_info in content_hashes.items():
+                    if not isinstance(hash_info, dict):
+                        continue
+                    
+                    # Get chapter_idx from content_hashes section
+                    chapter_idx = hash_info.get('chapter_idx')
+                    actual_num = hash_info.get('actual_num')
+                    
+                    # Check if this chapter is completed in the chapters section
+                    chapter_info = chapters_data.get(chapter_hash, {})
+                    has_output = chapter_info.get('output_file')
+                    is_completed = chapter_info.get('status') == 'completed' or has_output
+                    
+                    if is_completed and chapter_idx is not None and actual_num is not None:
+                        source_to_output[chapter_idx] = actual_num
+            
+            log(f"  Mapping from content_hashes: {len(source_to_output)} chapters mapped")
+            
+            # THIRD: Fill in any missing mappings with direct mapping
+            # This ensures we don't lose chapters like 64
+            expected_chapters = set(current_titles.keys())
+            mapped_chapters = set(source_to_output.values())
+            missing_chapters = expected_chapters - mapped_chapters
+            
+            if missing_chapters:
+                log(f"⚠️ Missing mappings for chapters: {sorted(missing_chapters)}")
+                log(f"  Will attempt direct index mapping for missing chapters")
+                
+                # For missing chapters, try direct index mapping
+                for missing_ch in sorted(missing_chapters):
+                    # Try to find source index for this chapter
+                    # First, check if the chapter number matches a source index
+                    if has_chapter_zero or uses_zero_based:
+                        # For 0-based: chapter N maps to source index N
+                        source_idx = missing_ch
+                    else:
+                        # For 1-based: chapter N maps to source index N-1
+                        source_idx = missing_ch - 1
+                    
+                    # Check if this source index exists and isn't already mapped
+                    if source_idx in source_titles_by_index and source_idx not in source_to_output:
+                        source_to_output[source_idx] = missing_ch
+                        log(f"    Mapped missing chapter: source idx {source_idx} → chapter {missing_ch}")
+            
+            # FOURTH: Apply the mapping to create source_headers
+            for source_idx, output_num in source_to_output.items():
+                if source_idx in source_titles_by_index:
+                    source_headers[output_num] = source_titles_by_index[source_idx]
+                    log(f"  Final mapping: Source Ch.{source_idx} → Output Ch.{output_num}: {source_titles_by_index[source_idx]}")
+            
+            log(f"📊 Final result: {len(source_headers)} source headers mapped to output chapters")
+            
+            # Debug: Show what we have vs what we expect
+            missing_final = []
+            for chapter_num in current_titles:
+                if chapter_num not in source_headers:
+                    missing_final.append(chapter_num)
+            
+            if missing_final:
+                log(f"❌ Still missing source headers for chapters: {sorted(missing_final)}")
+                # Try to debug why
+                for m in missing_final[:3]:  # Show first 3
+                    log(f"  Chapter {m}: current title = {current_titles[m]['title']}")
         
     except Exception as e:
         log(f"❌ Error extracting source headers: {e}")
         import traceback
         log(traceback.format_exc())
-    
-    # Ensure we have source headers for all current titles
-    for chapter_num in current_titles:
-        if chapter_num not in source_headers:
-            # If missing, use the current title as source (it's probably already in English)
-            source_headers[chapter_num] = current_titles[chapter_num]['title']
-            log(f"  ⚠️ No source header for chapter {chapter_num}, using current title")
     
     return source_headers, current_titles
