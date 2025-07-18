@@ -55,158 +55,180 @@ class MetadataBatchTranslatorUI:
                 'series': "Translate this series name to English:",
                 '_default': "Translate this text to English:"
             }
-    
+            
     def configure_metadata_fields(self):
-        """Configure which metadata fields to translate"""
-        # Use scrollable dialog with proper ratios
-        dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
-            self.gui.master,
-            "Configure Metadata Translation",
-            width=950,
-            height=None,
-            max_width_ratio=0.9,
-            max_height_ratio=0.6
-        )
-        
-        # Main content
-        tk.Label(scrollable_frame, text="Select Metadata Fields to Translate", 
-                font=('TkDefaultFont', 14, 'bold')).pack(pady=(20, 10))
-        
-        tk.Label(scrollable_frame, text="These fields will be translated along with or separately from the book title:",
-                font=('TkDefaultFont', 10), fg='gray').pack(pady=(0, 20), padx=20)
-        
-        # Create content frame for fields
-        fields_container = tk.Frame(scrollable_frame)
-        fields_container.pack(fill=tk.BOTH, expand=True, padx=20)
-        
-        # Load metadata fields from EPUB
-        all_fields = self._detect_all_metadata_fields()
-        
-        # Standard fields
-        standard_fields = {
-            'title': ('Title', 'The book title'),
-            'creator': ('Author/Creator', 'The author or creator'),
-            'publisher': ('Publisher', 'The publishing company'),
-            'subject': ('Subject/Genre', 'Subject categories or genres'),
-            'description': ('Description', 'Book synopsis'),
-            'series': ('Series Name', 'Name of the book series'),
-            'language': ('Language', 'Original language'),
-            'date': ('Publication Date', 'When published'),
-            'rights': ('Rights', 'Copyright information')
-        }
-        
-        field_vars = {}
-        
-        # Section for standard fields
-        tk.Label(fields_container, text="Standard Metadata Fields:", 
-                font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W, pady=(10, 5))
-        
-        # Get saved settings
-        translate_fields = self.gui.config.get('translate_metadata_fields', {})
-        
-        for field, (label, description) in standard_fields.items():
-            if field in all_fields:
-                frame = tk.Frame(fields_container)
-                frame.pack(fill=tk.X, pady=5)
-                
-                # Default 'title' to True, others to False
-                default_value = True if field == 'title' else False
-                var = tk.BooleanVar(value=translate_fields.get(field, default_value))
-                field_vars[field] = var
-                
-                cb = tb.Checkbutton(frame, text=f"{label}:", variable=var,
-                                   bootstyle="round-toggle", width=25)
-                cb.pack(side=tk.LEFT)
-                
-                # Show current value
-                current_value = str(all_fields[field])
-                if len(current_value) > 50:
-                    current_value = current_value[:47] + "..."
-                tk.Label(frame, text=current_value, font=('TkDefaultFont', 9), 
-                        fg='gray').pack(side=tk.LEFT, padx=(10, 0))
-        
-        # Custom fields section
-        custom_fields = {k: v for k, v in all_fields.items() if k not in standard_fields}
-        
-        if custom_fields:
-            tk.Label(fields_container, text="Custom Metadata Fields:", 
-                    font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W, pady=(20, 5))
+            """Configure which metadata fields to translate"""
+            # Use scrollable dialog with proper ratios
+            dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
+                self.gui.master,
+                "Configure Metadata Translation",
+                width=950,
+                height=None,
+                max_width_ratio=0.9,
+                max_height_ratio=0.7
+            )
             
-            tk.Label(fields_container, text="(Non-standard fields found in your EPUB)", 
-                    font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, pady=(0, 10))
+            # Main content
+            tk.Label(scrollable_frame, text="Select Metadata Fields to Translate", 
+                    font=('TkDefaultFont', 14, 'bold')).pack(pady=(20, 10))
             
-            for field, value in custom_fields.items():
-                frame = tk.Frame(fields_container)
-                frame.pack(fill=tk.X, pady=5)
-                
-                var = tk.BooleanVar(value=translate_fields.get(field, False))
-                field_vars[field] = var
-                
-                cb = tb.Checkbutton(frame, text=f"{field}:", variable=var,
-                                   bootstyle="round-toggle", width=25)
-                cb.pack(side=tk.LEFT)
-                
-                display_value = str(value)
-                if len(display_value) > 50:
-                    display_value = display_value[:47] + "..."
-                tk.Label(frame, text=display_value, font=('TkDefaultFont', 9), 
-                        fg='gray').pack(side=tk.LEFT, padx=(10, 0))
-        
-        # Translation mode
-        mode_frame = tk.LabelFrame(scrollable_frame, text="Translation Mode", padx=10, pady=10)
-        mode_frame.pack(fill=tk.X, pady=(20, 10), padx=20)
-        
-        translation_mode_var = tk.StringVar(value=self.gui.config.get('metadata_translation_mode', 'together'))
-        
-        rb1 = tk.Radiobutton(mode_frame, text="Translate together (single API call)",
-                            variable=translation_mode_var, value='together')
-        rb1.pack(anchor=tk.W, pady=5)
-        
-        rb2 = tk.Radiobutton(mode_frame, text="Translate separately (parallel API calls)",
-                            variable=translation_mode_var, value='parallel')
-        rb2.pack(anchor=tk.W, pady=5)
-        
-        # Buttons
-        button_frame = tk.Frame(scrollable_frame)
-        button_frame.pack(fill=tk.X, pady=(20, 20), padx=20)
-        
-        def save_metadata_config():
-            # Update configuration
-            self.gui.translate_metadata_fields = {}
-            for field, var in field_vars.items():
-                if var.get():
-                    self.gui.translate_metadata_fields[field] = True
+            tk.Label(scrollable_frame, text="These fields will be translated along with or separately from the book title:",
+                    font=('TkDefaultFont', 10), fg='gray').pack(pady=(0, 20), padx=20)
             
-            self.gui.config['translate_metadata_fields'] = self.gui.translate_metadata_fields
-            self.gui.config['metadata_translation_mode'] = translation_mode_var.get()
-            self.gui.save_config()
+            # Create content frame for fields
+            fields_container = tk.Frame(scrollable_frame)
+            fields_container.pack(fill=tk.BOTH, expand=True, padx=20)
             
-            messagebox.showinfo("Success", 
-                               f"Saved {len(self.gui.translate_metadata_fields)} fields for translation!")
-            dialog.destroy()
-        
-        def reset_metadata_config():
-            if messagebox.askyesno("Reset Settings", "Reset all metadata fields to default (disabled)?"):
-                for var in field_vars.values():
-                    var.set(False)
-        
-        tb.Button(button_frame, text="Save", command=save_metadata_config,
-                 bootstyle="success", width=20).pack(side=tk.LEFT, padx=(0, 10))
-        
-        tb.Button(button_frame, text="Reset", command=reset_metadata_config,
-                 bootstyle="warning-outline", width=20).pack(side=tk.LEFT, padx=(0, 10))
-        
-        tb.Button(button_frame, text="Cancel", command=dialog.destroy,
-                 bootstyle="secondary-outline", width=20).pack(side=tk.LEFT)
-        
-        # Auto-resize dialog
-        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=0.6)
-        
-        # Handle window close
-        dialog.protocol("WM_DELETE_WINDOW", lambda: [
-            dialog._cleanup_scrolling() if hasattr(dialog, '_cleanup_scrolling') else None,
-            dialog.destroy()
-        ])
+            # Load metadata fields from EPUB
+            all_fields = self._detect_all_metadata_fields()
+            
+            # Standard fields
+            standard_fields = {
+                'title': ('Title', 'The book title'),
+                'creator': ('Author/Creator', 'The author or creator'),
+                'publisher': ('Publisher', 'The publishing company'),
+                'subject': ('Subject/Genre', 'Subject categories or genres'),
+                'description': ('Description', 'Book synopsis'),
+                'series': ('Series Name', 'Name of the book series'),
+                'language': ('Language', 'Original language'),
+                'date': ('Publication Date', 'When published'),
+                'rights': ('Rights', 'Copyright information')
+            }
+            
+            field_vars = {}
+            
+            # Section for standard fields
+            tk.Label(fields_container, text="Standard Metadata Fields:", 
+                    font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W, pady=(10, 5))
+            
+            # Get saved settings
+            translate_fields = self.gui.config.get('translate_metadata_fields', {})
+            
+            for field, (label, description) in standard_fields.items():
+                if field in all_fields:
+                    frame = tk.Frame(fields_container)
+                    frame.pack(fill=tk.X, pady=5)
+                    
+                    # Special handling for title field - show note instead of checkbox
+                    if field == 'title':
+                        # Show the title field info but with a note instead of checkbox
+                        tk.Label(frame, text=f"{label}:", width=25, anchor='w',
+                                font=('TkDefaultFont', 10, 'bold')).pack(side=tk.LEFT)
+                        
+                        # Show current value
+                        current_value = str(all_fields[field])
+                        if len(current_value) > 50:
+                            current_value = current_value[:47] + "..."
+                        tk.Label(frame, text=current_value, font=('TkDefaultFont', 9), 
+                                fg='gray').pack(side=tk.LEFT, padx=(10, 0))
+                        
+                        # Add note explaining title is controlled elsewhere
+                        note_frame = tk.Frame(fields_container)
+                        note_frame.pack(fill=tk.X, pady=(0, 10))
+                        tk.Label(note_frame, 
+                                text="ℹ️ Title translation is controlled by the 'Translate Book Title' setting in the main interface",
+                                font=('TkDefaultFont', 9), fg='blue', wraplength=600).pack(anchor=tk.W, padx=(25, 0))
+                        continue  # Skip to next field
+                    
+                    # Normal handling for other fields
+                    default_value = False  # All other fields default to False
+                    var = tk.BooleanVar(value=translate_fields.get(field, default_value))
+                    field_vars[field] = var
+                    
+                    cb = tb.Checkbutton(frame, text=f"{label}:", variable=var,
+                                       bootstyle="round-toggle", width=25)
+                    cb.pack(side=tk.LEFT)
+                    
+                    # Show current value
+                    current_value = str(all_fields[field])
+                    if len(current_value) > 50:
+                        current_value = current_value[:47] + "..."
+                    tk.Label(frame, text=current_value, font=('TkDefaultFont', 9), 
+                            fg='gray').pack(side=tk.LEFT, padx=(10, 0))
+            
+            # Custom fields section
+            custom_fields = {k: v for k, v in all_fields.items() if k not in standard_fields}
+            
+            if custom_fields:
+                tk.Label(fields_container, text="Custom Metadata Fields:", 
+                        font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W, pady=(20, 5))
+                
+                tk.Label(fields_container, text="(Non-standard fields found in your EPUB)", 
+                        font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, pady=(0, 10))
+                
+                for field, value in custom_fields.items():
+                    frame = tk.Frame(fields_container)
+                    frame.pack(fill=tk.X, pady=5)
+                    
+                    var = tk.BooleanVar(value=translate_fields.get(field, False))
+                    field_vars[field] = var
+                    
+                    cb = tb.Checkbutton(frame, text=f"{field}:", variable=var,
+                                       bootstyle="round-toggle", width=25)
+                    cb.pack(side=tk.LEFT)
+                    
+                    display_value = str(value)
+                    if len(display_value) > 50:
+                        display_value = display_value[:47] + "..."
+                    tk.Label(frame, text=display_value, font=('TkDefaultFont', 9), 
+                            fg='gray').pack(side=tk.LEFT, padx=(10, 0))
+            
+            # Translation mode
+            mode_frame = tk.LabelFrame(scrollable_frame, text="Translation Mode", padx=10, pady=10)
+            mode_frame.pack(fill=tk.X, pady=(20, 10), padx=20)
+            
+            translation_mode_var = tk.StringVar(value=self.gui.config.get('metadata_translation_mode', 'together'))
+            
+            rb1 = tk.Radiobutton(mode_frame, text="Translate together (single API call)",
+                                variable=translation_mode_var, value='together')
+            rb1.pack(anchor=tk.W, pady=5)
+            
+            rb2 = tk.Radiobutton(mode_frame, text="Translate separately (parallel API calls)",
+                                variable=translation_mode_var, value='parallel')
+            rb2.pack(anchor=tk.W, pady=5)
+            
+            # Buttons
+            button_frame = tk.Frame(scrollable_frame)
+            button_frame.pack(fill=tk.X, pady=(20, 20), padx=20)
+            
+            def save_metadata_config():
+                # Update configuration
+                self.gui.translate_metadata_fields = {}
+                for field, var in field_vars.items():
+                    if var.get():
+                        self.gui.translate_metadata_fields[field] = True
+                
+                self.gui.config['translate_metadata_fields'] = self.gui.translate_metadata_fields
+                self.gui.config['metadata_translation_mode'] = translation_mode_var.get()
+                self.gui.save_config()
+                
+                messagebox.showinfo("Success", 
+                                   f"Saved {len(self.gui.translate_metadata_fields)} fields for translation!")
+                dialog.destroy()
+            
+            def reset_metadata_config():
+                if messagebox.askyesno("Reset Settings", "Reset all metadata fields to their defaults?"):
+                    for field, var in field_vars.items():
+                        # Since title is no longer in field_vars, all fields default to False
+                        var.set(False)
+            
+            tb.Button(button_frame, text="Save", command=save_metadata_config,
+                     bootstyle="success", width=20).pack(side=tk.LEFT, padx=(0, 10))
+            
+            tb.Button(button_frame, text="Reset", command=reset_metadata_config,
+                     bootstyle="warning-outline", width=20).pack(side=tk.LEFT, padx=(0, 10))
+            
+            tb.Button(button_frame, text="Cancel", command=dialog.destroy,
+                     bootstyle="secondary-outline", width=20).pack(side=tk.LEFT)
+            
+            # Auto-resize dialog
+            self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=0.7)
+            
+            # Handle window close
+            dialog.protocol("WM_DELETE_WINDOW", lambda: [
+                dialog._cleanup_scrolling() if hasattr(dialog, '_cleanup_scrolling') else None,
+                dialog.destroy()
+            ])
     
     def configure_translation_prompts(self):
         """Configure all translation prompts in one place"""
@@ -1249,8 +1271,13 @@ def enhance_epub_compiler(compiler_instance):
     try:
         fields_str = os.getenv('TRANSLATE_METADATA_FIELDS', '{}')
         translate_metadata_fields = json.loads(fields_str)
-    except:
-        pass
+        if translate_metadata_fields:
+            print(f"[DEBUG] Metadata fields to translate: {translate_metadata_fields}")
+        else:
+            print("[DEBUG] No metadata fields configured for translation")
+    except Exception as e:
+        print(f"[ERROR] Failed to parse TRANSLATE_METADATA_FIELDS: {e}")
+        translate_metadata_fields = {}
     
     batch_translate = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
     headers_per_batch = int(os.getenv('HEADERS_PER_BATCH', '400'))
@@ -1265,6 +1292,12 @@ def enhance_epub_compiler(compiler_instance):
     compiler_instance.update_html_headers = update_html
     compiler_instance.save_header_translations = save_translations
     
+    # Log what we're setting
+    print(f"[DEBUG] Compiler settings:")
+    print(f"  - translate_metadata_fields: {compiler_instance.translate_metadata_fields}")
+    print(f"  - metadata_translation_mode: {compiler_instance.metadata_translation_mode}")
+    print(f"  - batch_translate_headers: {compiler_instance.batch_translate_headers}")
+    
     # extraction method with mapping support
     compiler_instance._extract_source_headers_and_current_titles = lambda: extract_source_headers_and_current_titles(
         os.getenv('EPUB_PATH', ''), 
@@ -1272,9 +1305,11 @@ def enhance_epub_compiler(compiler_instance):
         compiler_instance.log
     )
     
-    
     # Create translators if needed
-    if compiler_instance.api_client and (batch_translate or any(translate_metadata_fields.values())):
+    needs_translators = batch_translate or any(translate_metadata_fields.values())
+    print(f"[DEBUG] Needs translators: {needs_translators} (batch={batch_translate}, metadata={any(translate_metadata_fields.values())})")
+    
+    if compiler_instance.api_client and needs_translators:
         # Try to get config from multiple locations
         config_paths = [
             os.path.join(compiler_instance.base_dir, '..', 'config.json'),
@@ -1299,8 +1334,12 @@ def enhance_epub_compiler(compiler_instance):
         # Get temperature - GUI passes this via TRANSLATION_TEMPERATURE env var
         env_temp = os.getenv('TRANSLATION_TEMPERATURE')
         if env_temp:
-            config['temperature'] = float(env_temp)
-            print(f"[DEBUG] Using temperature from GUI (env): {config['temperature']}")
+            try:
+                config['temperature'] = float(env_temp)
+                print(f"[DEBUG] Using temperature from GUI (env): {config['temperature']}")
+            except ValueError:
+                print(f"[WARNING] Invalid temperature value: {env_temp}")
+                config['temperature'] = 0.3
         elif 'translation_temperature' in config:
             config['temperature'] = config['translation_temperature']
             print(f"[DEBUG] Using temperature from config: {config['temperature']}")
@@ -1330,19 +1369,40 @@ def enhance_epub_compiler(compiler_instance):
         compression_factor = float(os.getenv('COMPRESSION_FACTOR', '1.0'))
         if hasattr(compiler_instance.api_client, 'compression_factor'):
             compiler_instance.api_client.compression_factor = compression_factor
+            print(f"[DEBUG] Set compression factor: {compression_factor}")
         
         try:
-            compiler_instance.header_translator = BatchHeaderTranslator(
-                compiler_instance.api_client, config
-            )
-            compiler_instance.metadata_translator = MetadataTranslator(
-                compiler_instance.api_client, config
-            )
-            print(f"[DEBUG] Translators initialized with config: temperature={config.get('temperature')}, max_tokens={config.get('max_tokens')}")
+            # Create batch header translator if needed
+            if batch_translate:
+                compiler_instance.header_translator = BatchHeaderTranslator(
+                    compiler_instance.api_client, config
+                )
+                print(f"[DEBUG] Created BatchHeaderTranslator")
+            
+            # Create metadata translator if needed
+            if any(translate_metadata_fields.values()):
+                compiler_instance.metadata_translator = MetadataTranslator(
+                    compiler_instance.api_client, config
+                )
+                print(f"[DEBUG] Created MetadataTranslator for fields: {[k for k, v in translate_metadata_fields.items() if v]}")
+                
+                # Verify the translator was created
+                if hasattr(compiler_instance, 'metadata_translator'):
+                    print("[DEBUG] MetadataTranslator successfully attached to compiler")
+                else:
+                    print("[ERROR] MetadataTranslator not attached to compiler!")
+            else:
+                print("[DEBUG] No metadata fields selected for translation")
+                
         except Exception as e:
             print(f"[ERROR] Failed to initialize translators: {e}")
             import traceback
             traceback.print_exc()
+    else:
+        if not compiler_instance.api_client:
+            print("[WARNING] No API client available for translation")
+        if not needs_translators:
+            print("[DEBUG] No translation features requested")
     
     return compiler_instance
     
