@@ -65,7 +65,7 @@ class MetadataBatchTranslatorUI:
             width=950,
             height=None,
             max_width_ratio=0.9,
-            max_height_ratio=0.85
+            max_height_ratio=0.6
         )
         
         # Main content
@@ -200,7 +200,7 @@ class MetadataBatchTranslatorUI:
                  bootstyle="secondary-outline", width=20).pack(side=tk.LEFT)
         
         # Auto-resize dialog
-        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=0.85)
+        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=0.6)
         
         # Handle window close
         dialog.protocol("WM_DELETE_WINDOW", lambda: [
@@ -216,7 +216,7 @@ class MetadataBatchTranslatorUI:
             width=1000,
             height=None,
             max_width_ratio=0.9,
-            max_height_ratio=0.85
+            max_height_ratio=1.3
         )
         
         # Title
@@ -279,7 +279,7 @@ class MetadataBatchTranslatorUI:
                  bootstyle="secondary-outline", width=20).pack(side=tk.LEFT)
         
         # Auto-resize
-        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=0.85)
+        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.3)
         
         # Handle close
         dialog.protocol("WM_DELETE_WINDOW", lambda: [
@@ -338,7 +338,7 @@ class MetadataBatchTranslatorUI:
                 font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, padx=20, pady=(0, 10))
         
         self.metadata_batch_text = self.ui.setup_scrollable_text(parent, height=4, wrap=tk.WORD)
-        self.metadata_batch_text.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 20))
+        self.metadata_batch_text.pack(fill=tk.X, padx=20, pady=(0, 20))
         self.metadata_batch_text.insert('1.0', self.gui.config.get('metadata_batch_prompt',
             "Translate the following metadata fields to English.\n"
             "Return ONLY a JSON object with the same field names as keys."))
@@ -352,23 +352,8 @@ class MetadataBatchTranslatorUI:
         tk.Label(parent, text="Customize prompts for each metadata field type:",
                 font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, padx=20, pady=(0, 10))
         
-        # Create scrollable area for field prompts
-        field_canvas = tk.Canvas(parent, height=300)
-        field_scrollbar = ttk.Scrollbar(parent, orient="vertical", command=field_canvas.yview)
-        field_frame = tk.Frame(field_canvas)
-        
-        field_frame.bind(
-            "<Configure>",
-            lambda e: field_canvas.configure(scrollregion=field_canvas.bbox("all"))
-        )
-        
-        field_canvas.create_window((0, 0), window=field_frame, anchor="nw")
-        field_canvas.configure(yscrollcommand=field_scrollbar.set)
-        
-        field_canvas.pack(side="left", fill="both", expand=True, padx=(20, 0))
-        field_scrollbar.pack(side="right", fill="y", padx=(0, 20))
-        
-        # Field prompts
+        # NO NESTED SCROLLING - just put fields directly in parent
+        # The main dialog already handles scrolling
         field_prompts = self.gui.config.get('metadata_field_prompts', {})
         self.field_prompt_widgets = {}
         
@@ -382,8 +367,8 @@ class MetadataBatchTranslatorUI:
         ]
         
         for field_key, field_label in fields:
-            frame = tk.Frame(field_frame)
-            frame.pack(fill=tk.X, pady=10, padx=10)
+            frame = tk.Frame(parent)
+            frame.pack(fill=tk.X, pady=10, padx=20)
             
             tk.Label(frame, text=f"{field_label}:", width=20, anchor='w',
                     font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W)
@@ -398,7 +383,7 @@ class MetadataBatchTranslatorUI:
         
         tk.Label(parent, text="Variables: {source_lang} - detected language, {field_value} - the text to translate",
                 font=('TkDefaultFont', 10), fg='blue').pack(anchor=tk.W, padx=20, pady=(10, 0))
-    
+            
     def _create_advanced_prompts_tab(self, parent):
         """Create tab for advanced prompt settings"""
         tk.Label(parent, text="Advanced Prompt Settings", 
