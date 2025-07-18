@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion v3.3.8 - PyInstaller Specification File
+Glossarion v3.4.0 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, AI Hunter, and Manga Translation
 """
 
@@ -12,7 +12,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'Glossarion v3.3.8'  # CHANGED: Updated version
+APP_NAME = 'Glossarion v3.4.0'  # CHANGED: Updated version
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = False  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -84,11 +84,14 @@ app_files = [
     ('manga_integration.py', '.'),
     ('manga_settings_dialog.py', '.'), 
     
-    # Update Manager - ADDED
+    # Update Manager
     ('update_manager.py', '.'),
 	
-	# Async Processing - ADDED
+	# Async Processing
     ('async_api_processor.py', '.'),
+	
+	# Metadata and header batch translation
+    ('metadata_batch_translator.py', '.'),
     
     # Resources
     ('Halgakos.ico', '.'),
@@ -122,6 +125,8 @@ app_modules = [
     'update_manager',     
 	'api_key_encryption',
 	'async_api_processor',
+	'metadata_batch_translator',
+	
 ]
 
 # GUI Framework
