@@ -18,7 +18,11 @@ from typing import Dict, List, Tuple, Optional, Callable
 
 from ebooklib import epub, ITEM_DOCUMENT
 from bs4 import BeautifulSoup
-
+from metadata_batch_translator import enhance_epub_compiler
+try:
+    from unified_api_client import UnifiedClient
+except ImportError:
+    UnifiedClient = None
 
 # Configure stdout for UTF-8
 def configure_utf8_output():
@@ -933,6 +937,23 @@ class EPUBCompiler:
         
         # Set global log callback
         set_global_log_callback(log_callback)
+        
+        # translation features
+        self.html_dir = self.output_dir  # For compatibility
+        self.translate_titles = os.getenv('TRANSLATE_BOOK_TITLE', '1') == '1'
+        
+        # Initialize API client if needed
+        self.api_client = None
+        if self.translate_titles or os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1':
+            model = os.getenv('MODEL')
+            api_key = os.getenv('API_KEY')
+            if model and api_key and UnifiedClient:
+                self.api_client = UnifiedClient(api_key=api_key, model=model, output_dir=self.output_dir)
+            elif model and api_key and not UnifiedClient:
+                self.log("Warning: UnifiedClient module not available, translation features disabled")
+        
+        # Enhance with translation features
+        enhance_epub_compiler(self)
     
     def log(self, message: str):
         """Log a message"""
@@ -940,7 +961,7 @@ class EPUBCompiler:
             self.log_callback(message)
         else:
             print(message)
-
+            
     def compile(self):
         """Main compilation method"""
         try:
@@ -948,9 +969,83 @@ class EPUBCompiler:
             if not self._preflight_check():
                 return
             
-            # Analyze chapters for titles
+            # Analyze chapters FIRST to get the structure
             chapter_titles_info = self._analyze_chapters()
             
+            # Debug: Check if batch translation is enabled
+            self.log(f"[DEBUG] Batch translation enabled: {getattr(self, 'batch_translate_headers', False)}")
+            self.log(f"[DEBUG] Has header translator: {hasattr(self, 'header_translator')}")
+            self.log(f"[DEBUG] EPUB_PATH env: {os.getenv('EPUB_PATH', 'NOT SET')}")
+            self.log(f"[DEBUG] HTML dir: {self.html_dir}")
+            
+            # Extract source headers AND current titles if batch translation is enabled
+            source_headers = {}
+            current_titles = {}
+            if (hasattr(self, 'batch_translate_headers') and self.batch_translate_headers and 
+                hasattr(self, 'header_translator') and self.header_translator):
+                
+                # Check if the extraction method exists
+                if hasattr(self, '_extract_source_headers_and_current_titles'):
+                    # Use the new extraction method
+                    source_headers, current_titles = self._extract_source_headers_and_current_titles()
+                    self.log(f"[DEBUG] Extraction complete: {len(source_headers)} source, {len(current_titles)} current")
+                else:
+                    self.log("⚠️ Missing _extract_source_headers_and_current_titles method!")
+            
+            # Batch translate headers if we have source headers
+            translated_headers = {}
+            if source_headers and hasattr(self, 'header_translator') and self.header_translator:
+                self.log("🌐 Batch translating chapter headers...")
+                
+                try:
+                    # Check if the translator has been initialized properly
+                    if not hasattr(self.header_translator, 'client') or not self.header_translator.client:
+                        self.log("⚠️ Header translator not properly initialized, skipping batch translation")
+                    else:
+                        self.log(f"📚 Found {len(source_headers)} headers to translate")
+                        self.log(f"📚 Found {len(current_titles)} current titles in HTML files")
+                        
+                        # Debug: Show a few examples
+                        for num in list(source_headers.keys())[:3]:
+                            self.log(f"  Example - Chapter {num}: {source_headers[num]}")
+                        
+                        # Translate headers with current titles info
+                        translated_headers = self.header_translator.translate_and_save_headers(
+                            html_dir=self.html_dir,
+                            headers_dict=source_headers,
+                            batch_size=getattr(self, 'headers_per_batch', 500),
+                            output_dir=self.output_dir,
+                            update_html=getattr(self, 'update_html_headers', True),
+                            save_to_file=getattr(self, 'save_header_translations', True),
+                            current_titles=current_titles  # Pass current titles for exact replacement
+                        )
+                        
+                        # Update chapter_titles_info with translations
+                        if translated_headers:
+                            self.log("\n📝 Updating chapter titles in EPUB structure...")
+                            for chapter_num, translated_title in translated_headers.items():
+                                if chapter_num in chapter_titles_info:
+                                    # Keep the original confidence and method, just update the title
+                                    orig_title, confidence, method = chapter_titles_info[chapter_num]
+                                    chapter_titles_info[chapter_num] = (translated_title, confidence, method)
+                                    self.log(f"✓ Chapter {chapter_num}: {source_headers.get(chapter_num, 'Unknown')} → {translated_title}")
+                                else:
+                                    # Add new entry if not in chapter_titles_info
+                                    chapter_titles_info[chapter_num] = (translated_title, 1.0, 'batch_translation')
+                                    self.log(f"✓ Added Chapter {chapter_num}: {translated_title}")
+                                    
+                except Exception as e:
+                    self.log(f"⚠️ Batch translation failed: {e}")
+                    import traceback
+                    self.log(traceback.format_exc())
+                    # Continue with compilation even if translation fails
+            else:
+                if not source_headers:
+                    self.log("⚠️ No source headers found, skipping batch translation")
+                elif not hasattr(self, 'header_translator'):
+                    self.log("⚠️ No header translator available")
+            
+            # Rest of the compile method continues as before...
             # Find HTML files
             html_files = self._find_html_files()
             if not html_files:
@@ -958,6 +1053,29 @@ class EPUBCompiler:
             
             # Load metadata
             metadata = self._load_metadata()
+
+            # Translate metadata if configured
+            if hasattr(self, 'metadata_translator') and self.metadata_translator:
+                if hasattr(self, 'translate_metadata_fields') and any(self.translate_metadata_fields.values()):
+                    self.log("🌐 Translating metadata fields...")
+                    
+                    try:
+                        translated_metadata = self.metadata_translator.translate_metadata(
+                            metadata,
+                            self.translate_metadata_fields,
+                            mode=getattr(self, 'metadata_translation_mode', 'together')
+                        )
+                        
+                        # Preserve original values
+                        for field in self.translate_metadata_fields:
+                            if field in metadata and field in translated_metadata:
+                                if metadata[field] != translated_metadata[field]:
+                                    translated_metadata[f'original_{field}'] = metadata[field]
+                        
+                        metadata = translated_metadata
+                    except Exception as e:
+                        self.log(f"⚠️ Metadata translation failed: {e}")
+                        # Continue with original metadata
             
             # Create EPUB book
             book = self._create_book(metadata)
@@ -984,7 +1102,7 @@ class EPUBCompiler:
                 if cover_page:
                     spine.insert(0, cover_page)
             
-            # Process chapters
+            # Process chapters with updated titles
             chapters_added = self._process_chapters(
                 book, html_files, chapter_titles_info, 
                 css_items, processed_images, spine, toc, metadata
