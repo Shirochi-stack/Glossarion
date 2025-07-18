@@ -883,7 +883,7 @@ class TranslatorGUI:
         # Initialize metadata/batch variables the same way
         self.translate_metadata_fields = self.config.get('translate_metadata_fields', {})
         self.batch_translate_headers_var = tk.BooleanVar(value=self.config.get('batch_translate_headers', False))
-        self.headers_per_batch_var = tk.StringVar(value=self.config.get('headers_per_batch', '500'))
+        self.headers_per_batch_var = tk.StringVar(value=self.config.get('headers_per_batch', '400'))
         self.update_html_headers_var = tk.BooleanVar(value=self.config.get('update_html_headers', True))
         self.save_header_translations_var = tk.BooleanVar(value=self.config.get('save_header_translations', True))
         
@@ -7907,12 +7907,12 @@ Recent translations to summarize:
         # CHANGED: New button text and command
         tb.Button(title_frame, text="Configure All", 
                  command=self.metadata_batch_ui.configure_translation_prompts,
-                 bootstyle="info-outline", width=15).pack(side=tk.LEFT, padx=(10, 5))
+                 bootstyle="info-outline", width=12).pack(side=tk.LEFT, padx=(10, 5))
         
         # NEW: Custom Metadata Fields button
         tb.Button(title_frame, text="Custom Metadata", 
                  command=self.metadata_batch_ui.configure_metadata_fields,
-                 bootstyle="info-outline", width=20).pack(side=tk.LEFT, padx=(5, 0))
+                 bootstyle="info-outline", width=15).pack(side=tk.LEFT, padx=(5, 0))
         
         tk.Label(section_frame, text="When enabled: Book titles and selected metadata will be translated",
                     font=('TkDefaultFont', 11), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
