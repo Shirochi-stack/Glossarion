@@ -9,6 +9,7 @@ import ttkbootstrap as tb
 from ttkbootstrap.constants import *
 from splash_utils import SplashManager
 from api_key_encryption import encrypt_config, decrypt_config
+from metadata_batch_translator import MetadataBatchTranslatorUI
 
 if getattr(sys, 'frozen', False):
     try:
@@ -782,7 +783,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.3.8"
+        __version__ = "3.4.0"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -877,13 +878,23 @@ class TranslatorGUI:
     
         # Initialize auto-update check variable
         self.auto_update_check_var = tk.BooleanVar(value=self.config.get('auto_update_check', True))
-        self.force_ncx_only_var = tk.BooleanVar(value=self.config.get('force_ncx_only', True))      
+        self.force_ncx_only_var = tk.BooleanVar(value=self.config.get('force_ncx_only', True)) 
+
+        # Initialize metadata/batch variables the same way
+        self.translate_metadata_fields = self.config.get('translate_metadata_fields', {})
+        self.batch_translate_headers_var = tk.BooleanVar(value=self.config.get('batch_translate_headers', False))
+        self.headers_per_batch_var = tk.StringVar(value=self.config.get('headers_per_batch', '1100'))
+        self.update_html_headers_var = tk.BooleanVar(value=self.config.get('update_html_headers', True))
+        self.save_header_translations_var = tk.BooleanVar(value=self.config.get('save_header_translations', True))
+        
         self.max_output_tokens = self.config.get('max_output_tokens', self.max_output_tokens)
         self.master.after(500, lambda: self.on_model_change() if hasattr(self, 'model_var') else None)
+        
         
         # Async processing settings
         self.async_wait_for_completion_var = tk.BooleanVar(value=False)
         self.async_poll_interval_var = tk.IntVar(value=60)
+        
         
         # Initialize update manager AFTER config is loaded
         try:
@@ -911,6 +922,7 @@ class TranslatorGUI:
                 "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use an easy to read comedy translation style.\n"
                 "- Retain Korean honorifics and respectful speech markers in romanized form, including but not limited to: -nim, -ssi, -yang, -gun, -isiyeo, -hasoseo. For archaic/classical Korean honorific forms (like 이시여/isiyeo, 하소서/hasoseo), preserve them as-is rather than converting to modern equivalents.\n"
+                "- Always localize Korean terminology to proper English equivalents instead of literal translations (examples: 마왕 = Demon King; 마술 = magic).\n"
                 "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
                 "- All Korean profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
@@ -922,6 +934,7 @@ class TranslatorGUI:
                 "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use an easy to read comedy translation style.\n"
                 "- Retain Japanese honorifics and respectful speech markers in romanized form, including but not limited to: -san, -sama, -chan, -kun, -dono, -sensei, -senpai, -kouhai. For archaic/classical Japanese honorific forms, preserve them as-is rather than converting to modern equivalents.\n"
+                "- Always localize Japanese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 魔術 = magic).\n"
                 "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
                 "- All Japanese profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
@@ -933,6 +946,7 @@ class TranslatorGUI:
                 "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use an easy to read comedy translation style.\n"
                 "- Retain Chinese titles and respectful forms of address in romanized form, including but not limited to: laoban, laoshi, shifu, xiaojie, xiansheng, taitai, daren, qianbei. For archaic/classical Chinese respectful forms, preserve them as-is rather than converting to modern equivalents.\n"
+                "- Always localize Chinese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 法术 = magic).\n"
                 "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
                 "- All Chinese profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
@@ -944,6 +958,7 @@ class TranslatorGUI:
                 "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use an easy to read comedy translation style.\n"
                 "- Retain Korean honorifics and respectful speech markers in romanized form, including but not limited to: -nim, -ssi, -yang, -gun, -isiyeo, -hasoseo. For archaic/classical Korean honorific forms (like 이시여/isiyeo, 하소서/hasoseo), preserve them as-is rather than converting to modern equivalents.\n"
+                "- Always localize Korean terminology to proper English equivalents instead of literal translations (examples: 마왕 = Demon King; 마술 = magic).\n"
                 "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
                 "- All Korean profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
@@ -956,6 +971,7 @@ class TranslatorGUI:
                 "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use an easy to read comedy translation style.\n"
                 "- Retain Japanese honorifics and respectful speech markers in romanized form, including but not limited to: -san, -sama, -chan, -kun, -dono, -sensei, -senpai, -kouhai. For archaic/classical Japanese honorific forms, preserve them as-is rather than converting to modern equivalents.\n"
+                "- Always localize Japanese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 魔術 = magic).\n"
                 "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
                 "- All Japanese profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
@@ -968,6 +984,7 @@ class TranslatorGUI:
                 "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use an easy to read comedy translation style.\n"
                 "- Retain Chinese titles and respectful forms of address in romanized form, including but not limited to: laoban, laoshi, shifu, xiaojie, xiansheng, taitai, daren, qianbei. For archaic/classical Chinese respectful forms, preserve them as-is rather than converting to modern equivalents.\n"
+                "- Always localize Chinese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 法术 = magic).\n"
                 "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
                 "- All Chinese profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
@@ -980,6 +997,7 @@ class TranslatorGUI:
                 "You are a professional Korean to English novel translator, you must strictly output only English text while following these rules:\n"
                 "- Use an easy to read comedy translation style.\n"
                 "- Retain Korean honorifics and respectful speech markers in romanized form, including but not limited to: -nim, -ssi, -yang, -gun, -isiyeo, -hasoseo. For archaic/classical Korean honorific forms (like 이시여/isiyeo, 하소서/hasoseo), preserve them as-is rather than converting to modern equivalents.\n"
+                "- Always localize Korean terminology to proper English equivalents instead of literal translations (examples: 마왕 = Demon King; 마술 = magic).\n"
                 "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
                 "- All Korean profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
@@ -991,6 +1009,7 @@ class TranslatorGUI:
                 "You are a professional Japanese to English novel translator, you must strictly output only English text while following these rules:\n"
                 "- Use an easy to read comedy translation style.\n"
                 "- Retain Japanese honorifics and respectful speech markers in romanized form, including but not limited to: -san, -sama, -chan, -kun, -dono, -sensei, -senpai, -kouhai. For archaic/classical Japanese honorific forms, preserve them as-is rather than converting to modern equivalents.\n"
+                "- Always localize Japanese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 魔術 = magic).\n"
                 "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
                 "- All Japanese profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
@@ -1002,6 +1021,7 @@ class TranslatorGUI:
                 "You are a professional Chinese to English novel translator, you must strictly output only English text while following these rules:\n"
                 "- Use an easy to read comedy translation style.\n"
                 "- Retain Chinese titles and respectful forms of address in romanized form, including but not limited to: laoban, laoshi, shifu, xiaojie, xiansheng, taitai, daren, qianbei. For archaic/classical Chinese respectful forms, preserve them as-is rather than converting to modern equivalents.\n"
+                "- Always localize Chinese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 法术 = magic).\n"
                 "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
                 "- All Chinese profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
@@ -1078,6 +1098,7 @@ class TranslatorGUI:
         self._init_default_prompts()
         self._init_variables()
         self._setup_gui()
+        self.metadata_batch_ui = MetadataBatchTranslatorUI(self)
         
         try:
             needs_encryption = False
@@ -1473,7 +1494,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.3.8 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.4.0 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -5323,6 +5344,14 @@ Recent translations to summarize:
             'MANUAL_GLOSSARY': self.manual_glossary_path if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path else '',
             'FORCE_NCX_ONLY': '1' if self.force_ncx_only_var.get() else '0',
 
+            # Metadata and batch header translation settings
+            'TRANSLATE_METADATA_FIELDS': json.dumps(self.translate_metadata_fields),
+            'METADATA_TRANSLATION_MODE': self.config.get('metadata_translation_mode', 'together'),
+            'BATCH_TRANSLATE_HEADERS': "1" if self.batch_translate_headers_var.get() else "0",
+            'HEADERS_PER_BATCH': self.headers_per_batch_var.get(),
+            'UPDATE_HTML_HEADERS': "1" if self.update_html_headers_var.get() else "0",
+            'SAVE_HEADER_TRANSLATIONS': "1" if self.save_header_translations_var.get() else "0",
+
             # Anti-duplicate parameters
             'ENABLE_ANTI_DUPLICATE': '1' if hasattr(self, 'enable_anti_duplicate_var') and self.enable_anti_duplicate_var.get() else '0',
             'TOP_P': str(self.top_p_var.get()) if hasattr(self, 'top_p_var') else '1.0',
@@ -5546,47 +5575,70 @@ Recent translations to summarize:
        self.master.after(100, self.update_run_button)
  
     def run_epub_converter_direct(self):
-       """Run EPUB converter directly without blocking GUI"""
-       try:
-           folder = self.epub_folder
-           self.append_log("📦 Starting EPUB Converter...")
-           os.environ['DISABLE_EPUB_GALLERY'] = "1" if self.disable_epub_gallery_var.get() else "0"
-           
-           fallback_compile_epub(folder, log_callback=self.append_log)
-           
-           if not self.stop_requested:
-               self.append_log("✅ EPUB Converter completed successfully!")
-               
-               epub_files = [f for f in os.listdir(folder) if f.endswith('.epub')]
-               if epub_files:
-                   epub_files.sort(key=lambda x: os.path.getmtime(os.path.join(folder, x)), reverse=True)
-                   out_file = os.path.join(folder, epub_files[0])
-                   self.master.after(0, lambda: messagebox.showinfo("EPUB Compilation Success", f"Created: {out_file}"))
-               else:
-                   self.append_log("⚠️ EPUB file was not created. Check the logs for details.")
-           
-       except Exception as e:
-           error_str = str(e)
-           self.append_log(f"❌ EPUB Converter error: {error_str}")
-           
-           if "Document is empty" not in error_str:
-               self.master.after(0, lambda: messagebox.showerror("EPUB Converter Failed", f"Error: {error_str}"))
-           else:
-               self.append_log("📋 Check the log above for details about what went wrong.")
-       
-       finally:
-           self.epub_thread = None
-           self.stop_requested = False
-           self.master.after(0, self.update_run_button)
-           
-           if hasattr(self, 'epub_button'):
-               self.master.after(0, lambda: self.epub_button.config(
-                   text="EPUB Converter",
-                   command=self.epub_converter,
-                   bootstyle="info",
-                   state=tk.NORMAL if fallback_compile_epub else tk.DISABLED
-               ))
-
+            """Run EPUB converter directly without blocking GUI"""
+            try:
+                folder = self.epub_folder
+                self.append_log("📦 Starting EPUB Converter...")
+                
+                # Set environment variables for EPUB converter
+                os.environ['DISABLE_EPUB_GALLERY'] = "1" if self.disable_epub_gallery_var.get() else "0"
+                
+                # Set API credentials and model
+                api_key = self.api_key_entry.get()
+                if api_key:
+                    os.environ['API_KEY'] = api_key
+                    os.environ['OPENAI_API_KEY'] = api_key
+                    os.environ['OPENAI_OR_Gemini_API_KEY'] = api_key
+                
+                model = self.model_var.get()
+                if model:
+                    os.environ['MODEL'] = model
+                
+                # Set translation parameters from GUI
+                os.environ['TEMPERATURE'] = str(self.trans_temp.get())
+                os.environ['MAX_OUTPUT_TOKENS'] = str(self.max_output_tokens)
+                
+                # Set batch translation settings
+                os.environ['BATCH_TRANSLATE_HEADERS'] = "1" if self.batch_translate_headers_var.get() else "0"
+                os.environ['HEADERS_PER_BATCH'] = str(self.headers_per_batch_var.get())
+                os.environ['UPDATE_HTML_HEADERS'] = "1" if self.update_html_headers_var.get() else "0"
+                os.environ['SAVE_HEADER_TRANSLATIONS'] = "1" if self.save_header_translations_var.get() else "0"
+                
+                # Set metadata translation settings
+                os.environ['TRANSLATE_METADATA_FIELDS'] = json.dumps(self.translate_metadata_fields)
+                os.environ['METADATA_TRANSLATION_MODE'] = self.config.get('metadata_translation_mode', 'together')
+                
+                # Set book title translation settings
+                os.environ['TRANSLATE_BOOK_TITLE'] = "1" if self.translate_book_title_var.get() else "0"
+                os.environ['BOOK_TITLE_PROMPT'] = self.book_title_prompt
+                os.environ['BOOK_TITLE_SYSTEM_PROMPT'] = self.config.get('book_title_system_prompt', 
+                    "You are a translator. Respond with only the translated text, nothing else.")
+                
+                # Set prompts
+                os.environ['SYSTEM_PROMPT'] = self.prompt_text.get("1.0", "end").strip()
+                
+                fallback_compile_epub(folder, log_callback=self.append_log)
+                
+                if not self.stop_requested:
+                    self.append_log("✅ EPUB Converter completed successfully!")
+                    
+                    epub_files = [f for f in os.listdir(folder) if f.endswith('.epub')]
+                    if epub_files:
+                        epub_files.sort(key=lambda x: os.path.getmtime(os.path.join(folder, x)), reverse=True)
+                        out_file = os.path.join(folder, epub_files[0])
+                        self.master.after(0, lambda: messagebox.showinfo("EPUB Compilation Success", f"Created: {out_file}"))
+                    else:
+                        self.append_log("⚠️ EPUB file was not created. Check the logs for details.")
+                
+            except Exception as e:
+                error_str = str(e)
+                self.append_log(f"❌ EPUB Converter error: {error_str}")
+                
+                if "Document is empty" not in error_str:
+                    self.master.after(0, lambda: messagebox.showerror("EPUB Converter Failed", f"Error: {error_str}"))
+                else:
+                    self.append_log("📋 Check the log above for details about what went wrong.")
+                
     def run_qa_scan(self):
             """Run QA scan with mode selection and settings"""
             # Create a small loading window with icon
@@ -7523,51 +7575,76 @@ Recent translations to summarize:
        dialog.protocol("WM_DELETE_WINDOW", lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
 
     def _create_context_management_section(self, parent):
-       """Create context management section"""
-       section_frame = tk.LabelFrame(parent, text="Context Management & Memory", padx=10, pady=10)
-       section_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 10), pady=(10, 5))
+        """Create context management section"""
+        section_frame = tk.LabelFrame(parent, text="Context Management & Memory", padx=10, pady=10)
+        section_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 10), pady=(10, 5))
            
-       content_frame = tk.Frame(section_frame)
-       content_frame.pack(anchor=tk.NW, fill=tk.BOTH, expand=True)
-       
-       tb.Checkbutton(content_frame, text="Use Rolling Summary (Memory)", 
+        content_frame = tk.Frame(section_frame)
+        content_frame.pack(anchor=tk.NW, fill=tk.BOTH, expand=True)
+
+        tb.Checkbutton(content_frame, text="Use Rolling Summary (Memory)", 
                      variable=self.rolling_summary_var,
                      bootstyle="round-toggle").pack(anchor=tk.W)
-       
-       tk.Label(content_frame, text="AI-powered memory system that maintains story context",
+
+        tk.Label(content_frame, text="AI-powered memory system that maintains story context",
                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
-       
-       settings_frame = tk.Frame(content_frame)
-       settings_frame.pack(anchor=tk.W, padx=20, fill=tk.X, pady=(5, 10))
-       
-       row1 = tk.Frame(settings_frame)
-       row1.pack(fill=tk.X, pady=(0, 10))
-       
-       tk.Label(row1, text="Role:").pack(side=tk.LEFT, padx=(0, 5))
-       ttk.Combobox(row1, textvariable=self.summary_role_var,
+
+        settings_frame = tk.Frame(content_frame)
+        settings_frame.pack(anchor=tk.W, padx=20, fill=tk.X, pady=(5, 10))
+
+        row1 = tk.Frame(settings_frame)
+        row1.pack(fill=tk.X, pady=(0, 10))
+
+        tk.Label(row1, text="Role:").pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Combobox(row1, textvariable=self.summary_role_var,
                    values=["user", "system"], state="readonly", width=10).pack(side=tk.LEFT, padx=(0, 30))
-       
-       tk.Label(row1, text="Mode:").pack(side=tk.LEFT, padx=(0, 5))
-       ttk.Combobox(row1, textvariable=self.rolling_summary_mode_var,
+
+        tk.Label(row1, text="Mode:").pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Combobox(row1, textvariable=self.rolling_summary_mode_var,
                    values=["append", "replace"], state="readonly", width=10).pack(side=tk.LEFT, padx=(0, 10))
-       
-       row2 = tk.Frame(settings_frame)
-       row2.pack(fill=tk.X, pady=(0, 10))
-       
-       tk.Label(row2, text="Summarize last").pack(side=tk.LEFT, padx=(0, 5))
-       tb.Entry(row2, width=5, textvariable=self.rolling_summary_exchanges_var).pack(side=tk.LEFT, padx=(0, 5))
-       tk.Label(row2, text="exchanges").pack(side=tk.LEFT)
-       
-       tb.Button(content_frame, text="⚙️ Configure Memory Prompts", 
+
+        row2 = tk.Frame(settings_frame)
+        row2.pack(fill=tk.X, pady=(0, 10))
+
+        tk.Label(row2, text="Summarize last").pack(side=tk.LEFT, padx=(0, 5))
+        tb.Entry(row2, width=5, textvariable=self.rolling_summary_exchanges_var).pack(side=tk.LEFT, padx=(0, 5))
+        tk.Label(row2, text="exchanges").pack(side=tk.LEFT)
+
+        tb.Button(content_frame, text="⚙️ Configure Memory Prompts", 
                 command=self.configure_rolling_summary_prompts,
                 bootstyle="info-outline", width=30).pack(anchor=tk.W, padx=20, pady=(10, 10))
-       
-       ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
-       
-       tk.Label(section_frame, text="💡 Memory Mode:\n"
+
+        ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
+        
+        tk.Label(section_frame, text="💡 Memory Mode:\n"
                "• Append: Keeps adding summaries (longer context)\n"
                "• Replace: Only keeps latest summary (concise)",
-               font=('TkDefaultFont', 11), fg='#666', justify=tk.LEFT).pack(anchor=tk.W, padx=5, pady=(0, 5))
+               font=('TkDefaultFont', 11), fg='#666', justify=tk.LEFT).pack(anchor=tk.W, padx=5, pady=(0, 5))       
+
+        ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
+               
+        
+        tk.Label(section_frame, text="Application Updates:", font=('TkDefaultFont', 11, 'bold')).pack(anchor=tk.W, pady=(5, 5))
+        
+        # Create a frame for update-related controls
+        update_frame = tk.Frame(section_frame)
+        update_frame.pack(anchor=tk.W, fill=tk.X)
+
+        tb.Button(update_frame, text="🔄 Check for Updates", 
+                 command=lambda: self.check_for_updates_manual(), 
+                 bootstyle="info-outline",
+                 width=25).pack(side=tk.LEFT, pady=2)
+
+        # Add auto-update checkbox
+        tb.Checkbutton(update_frame, text="Check on startup", 
+                      variable=self.auto_update_check_var,
+                      bootstyle="round-toggle").pack(side=tk.LEFT, padx=(10, 0))
+
+        tk.Label(section_frame, text="Check GitHub for new Glossarion releases\nand download updates",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 5))
+
+
+
 
     def _create_response_handling_section(self, parent):
         """Create response handling section with AI Hunter additions"""
@@ -7813,14 +7890,55 @@ Recent translations to summarize:
                       variable=self.translate_book_title_var,
                       bootstyle="round-toggle").pack(side=tk.LEFT)
         
-        tb.Button(title_frame, text="Configure Title Prompt", 
-                 command=self.configure_title_prompt,
-                 bootstyle="info-outline", width=20).pack(side=tk.LEFT, padx=(10, 0))
+        # CHANGED: New button text and command
+        tb.Button(title_frame, text="Configure All", 
+                 command=self.metadata_batch_ui.configure_translation_prompts,
+                 bootstyle="info-outline", width=15).pack(side=tk.LEFT, padx=(10, 5))
         
-        tk.Label(section_frame, text="When enabled: Book titles will be translated to English",
+        # NEW: Custom Metadata Fields button
+        tb.Button(title_frame, text="Custom Metadata", 
+                 command=self.metadata_batch_ui.configure_metadata_fields,
+                 bootstyle="info-outline", width=20).pack(side=tk.LEFT, padx=(5, 0))
+        
+        tk.Label(section_frame, text="When enabled: Book titles and selected metadata will be translated",
                     font=('TkDefaultFont', 11), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
-            
-        # EPUB Validation
+        
+        # NEW: Batch Header Translation Section
+        ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(5, 10))
+        
+        tk.Label(section_frame, text="Chapter Header Translation:", 
+                font=('TkDefaultFont', 11, 'bold')).pack(anchor=tk.W, pady=(5, 5))
+        
+        header_frame = tk.Frame(section_frame)
+        header_frame.pack(anchor=tk.W, fill=tk.X, pady=(5, 10))
+        
+        tb.Checkbutton(header_frame, text="Batch Translate Headers", 
+                      variable=self.batch_translate_headers_var,
+                      bootstyle="round-toggle").pack(side=tk.LEFT)
+        
+        tk.Label(header_frame, text="Headers per batch:").pack(side=tk.LEFT, padx=(20, 5))
+        
+        batch_entry = tk.Entry(header_frame, textvariable=self.headers_per_batch_var, width=10)
+        batch_entry.pack(side=tk.LEFT)
+        
+        # Options for header translation
+        update_frame = tk.Frame(section_frame)
+        update_frame.pack(anchor=tk.W, fill=tk.X, padx=20)
+        
+        tb.Checkbutton(update_frame, text="Update headers in HTML files", 
+                      variable=self.update_html_headers_var,
+                      bootstyle="round-toggle").pack(side=tk.LEFT)
+        
+        tb.Checkbutton(update_frame, text="Save translations to .txt file", 
+                      variable=self.save_header_translations_var,
+                      bootstyle="round-toggle").pack(side=tk.LEFT, padx=(20, 0))
+        
+        tk.Label(section_frame, 
+                text="• OFF: Use existing headers from translated chapters\n"
+                     "• ON: Extract all headers → Translate in batch → Update files",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(5, 10))
+        
+        # EPUB Validation (keep existing)
         ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
         
         tk.Label(section_frame, text="EPUB Utilities:", font=('TkDefaultFont', 11, 'bold')).pack(anchor=tk.W, pady=(5, 5))
@@ -7834,31 +7952,9 @@ Recent translations to summarize:
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 5))
         
         # NCX-only navigation toggle
-        
         tb.Checkbutton(section_frame, text="Use NCX-only Navigation (Compatibility Mode)", 
                       variable=self.force_ncx_only_var,
                       bootstyle="round-toggle").pack(anchor=tk.W, pady=(5, 5))
-                
-        ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
-        
-        tk.Label(section_frame, text="Application Updates:", font=('TkDefaultFont', 11, 'bold')).pack(anchor=tk.W, pady=(5, 5))
-        
-        # Create a frame for update-related controls
-        update_frame = tk.Frame(section_frame)
-        update_frame.pack(anchor=tk.W, fill=tk.X)
-        
-        tb.Button(update_frame, text="🔄 Check for Updates", 
-                 command=lambda: self.check_for_updates_manual(), 
-                 bootstyle="info-outline",
-                 width=25).pack(side=tk.LEFT, pady=2)
-        
-        # Add auto-update checkbox
-        tb.Checkbutton(update_frame, text="Check on startup", 
-                      variable=self.auto_update_check_var,
-                      bootstyle="round-toggle").pack(side=tk.LEFT, padx=(10, 0))
-        
-        tk.Label(section_frame, text="Check GitHub for new Glossarion releases\nand download updates",
-                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 5))
 
     def _create_processing_options_section(self, parent):
         """Create processing options section"""
@@ -8454,6 +8550,12 @@ Recent translations to summarize:
                     'bias_common_words': getattr(self, 'bias_common_words_var', type('', (), {'get': lambda: False})).get(),
                     'bias_repetitive_phrases': getattr(self, 'bias_repetitive_phrases_var', type('', (), {'get': lambda: False})).get(),
                     
+                    # Batch header translation settings
+                    'batch_translate_headers': self.batch_translate_headers_var.get(),
+                    'headers_per_batch': safe_int(self.headers_per_batch_var.get(), 500),
+                    'update_html_headers': self.update_html_headers_var.get(),
+                    'save_header_translations': self.save_header_translations_var.get(),
+                    
                 })
                 
                 # Validate numeric fields
@@ -8510,6 +8612,14 @@ Recent translations to summarize:
                     "DISABLE_GEMINI_SAFETY": str(self.config.get('disable_gemini_safety', False)).lower(),
                     'auto_update_check': str(self.auto_update_check_var.get()),
                     'FORCE_NCX_ONLY': '1' if self.force_ncx_only_var.get() else '0',
+                    
+                    # Metadata and batch header settings
+                    'TRANSLATE_METADATA_FIELDS': json.dumps(self.translate_metadata_fields),
+                    'METADATA_TRANSLATION_MODE': self.config.get('metadata_translation_mode', 'together'),
+                    'BATCH_TRANSLATE_HEADERS': "1" if self.batch_translate_headers_var.get() else "0",
+                    'HEADERS_PER_BATCH': str(self.config.get('headers_per_batch', 500)),
+                    'UPDATE_HTML_HEADERS': "1" if self.update_html_headers_var.get() else "0",
+                    'SAVE_HEADER_TRANSLATIONS': "1" if self.save_header_translations_var.get() else "0",
                     
                     # ALL Anti-duplicate environment variables (moved below other settings)
                     'ENABLE_ANTI_DUPLICATE': '1' if hasattr(self, 'enable_anti_duplicate_var') and self.enable_anti_duplicate_var.get() else '0',
@@ -9008,6 +9118,10 @@ Recent translations to summarize:
             self.config['image_chunk_prompt'] = self.image_chunk_prompt
             self.config['force_ncx_only'] = self.force_ncx_only_var.get()
             self.config['vertex_ai_location'] = self.vertex_location_var.get()
+            self.config['batch_translate_headers'] = self.batch_translate_headers_var.get()
+            self.config['headers_per_batch'] = self.headers_per_batch_var.get()
+            self.config['update_html_headers'] = self.update_html_headers_var.get() 
+            self.config['save_header_translations'] = self.save_header_translations_var.get()
             
             # Add anti-duplicate parameters
             if hasattr(self, 'enable_anti_duplicate_var'):
@@ -9059,7 +9173,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.3.8...")
+    print("🚀 Starting Glossarion v3.4.0...")
     
     # Initialize splash screen
     splash_manager = None
