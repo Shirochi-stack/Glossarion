@@ -964,7 +964,18 @@ class EPUBCompiler:
             
     def compile(self):
         """Main compilation method"""
-        try:
+        try:    
+            # Debug: Check what metadata enhancement was done
+            self.log("[DEBUG] Checking metadata translation setup...")
+            self.log(f"[DEBUG] Has api_client: {hasattr(self, 'api_client') and self.api_client is not None}")
+            self.log(f"[DEBUG] Has metadata_translator: {hasattr(self, 'metadata_translator')}")
+            self.log(f"[DEBUG] Has translate_metadata_fields: {hasattr(self, 'translate_metadata_fields')}")
+            
+            if hasattr(self, 'translate_metadata_fields'):
+                self.log(f"[DEBUG] translate_metadata_fields content: {self.translate_metadata_fields}")
+                enabled_fields = [k for k, v in self.translate_metadata_fields.items() if v]
+                self.log(f"[DEBUG] Enabled metadata fields: {enabled_fields}")
+                
             # Pre-flight check
             if not self._preflight_check():
                 return
@@ -1022,7 +1033,7 @@ class EPUBCompiler:
                             translated_headers = self.header_translator.translate_and_save_headers(
                                 html_dir=self.html_dir,
                                 headers_dict=source_headers,
-                                batch_size=getattr(self, 'headers_per_batch', 500),
+                                batch_size=getattr(self, 'headers_per_batch', 400),
                                 output_dir=self.output_dir,
                                 update_html=getattr(self, 'update_html_headers', True),
                                 save_to_file=getattr(self, 'save_header_translations', True),
