@@ -995,50 +995,59 @@ class EPUBCompiler:
             # Batch translate headers if we have source headers
             translated_headers = {}
             if source_headers and hasattr(self, 'header_translator') and self.header_translator:
-                self.log("🌐 Batch translating chapter headers...")
+                # Check if translated_headers.txt already exists
+                translations_file = os.path.join(self.output_dir, "translated_headers.txt")
                 
-                try:
-                    # Check if the translator has been initialized properly
-                    if not hasattr(self.header_translator, 'client') or not self.header_translator.client:
-                        self.log("⚠️ Header translator not properly initialized, skipping batch translation")
-                    else:
-                        self.log(f"📚 Found {len(source_headers)} headers to translate")
-                        self.log(f"📚 Found {len(current_titles)} current titles in HTML files")
-                        
-                        # Debug: Show a few examples
-                        for num in list(source_headers.keys())[:3]:
-                            self.log(f"  Example - Chapter {num}: {source_headers[num]}")
-                        
-                        # Translate headers with current titles info
-                        translated_headers = self.header_translator.translate_and_save_headers(
-                            html_dir=self.html_dir,
-                            headers_dict=source_headers,
-                            batch_size=getattr(self, 'headers_per_batch', 500),
-                            output_dir=self.output_dir,
-                            update_html=getattr(self, 'update_html_headers', True),
-                            save_to_file=getattr(self, 'save_header_translations', True),
-                            current_titles=current_titles  # Pass current titles for exact replacement
-                        )
-                        
-                        # Update chapter_titles_info with translations
-                        if translated_headers:
-                            self.log("\n📝 Updating chapter titles in EPUB structure...")
-                            for chapter_num, translated_title in translated_headers.items():
-                                if chapter_num in chapter_titles_info:
-                                    # Keep the original confidence and method, just update the title
-                                    orig_title, confidence, method = chapter_titles_info[chapter_num]
-                                    chapter_titles_info[chapter_num] = (translated_title, confidence, method)
-                                    self.log(f"✓ Chapter {chapter_num}: {source_headers.get(chapter_num, 'Unknown')} → {translated_title}")
-                                else:
-                                    # Add new entry if not in chapter_titles_info
-                                    chapter_titles_info[chapter_num] = (translated_title, 1.0, 'batch_translation')
-                                    self.log(f"✓ Added Chapter {chapter_num}: {translated_title}")
-                                    
-                except Exception as e:
-                    self.log(f"⚠️ Batch translation failed: {e}")
-                    import traceback
-                    self.log(traceback.format_exc())
-                    # Continue with compilation even if translation fails
+                if os.path.exists(translations_file):
+                    # File exists - skip translation entirely
+                    self.log("📁 Found existing translated_headers.txt - skipping header translation")
+                    # No need to parse or do anything else
+                else:
+                    # No existing file - proceed with translation
+                    self.log("🌐 Batch translating chapter headers...")
+                    
+                    try:
+                        # Check if the translator has been initialized properly
+                        if not hasattr(self.header_translator, 'client') or not self.header_translator.client:
+                            self.log("⚠️ Header translator not properly initialized, skipping batch translation")
+                        else:
+                            self.log(f"📚 Found {len(source_headers)} headers to translate")
+                            self.log(f"📚 Found {len(current_titles)} current titles in HTML files")
+                            
+                            # Debug: Show a few examples
+                            for num in list(source_headers.keys())[:3]:
+                                self.log(f"  Example - Chapter {num}: {source_headers[num]}")
+                            
+                            # Translate headers with current titles info
+                            translated_headers = self.header_translator.translate_and_save_headers(
+                                html_dir=self.html_dir,
+                                headers_dict=source_headers,
+                                batch_size=getattr(self, 'headers_per_batch', 500),
+                                output_dir=self.output_dir,
+                                update_html=getattr(self, 'update_html_headers', True),
+                                save_to_file=getattr(self, 'save_header_translations', True),
+                                current_titles=current_titles  # Pass current titles for exact replacement
+                            )
+                            
+                            # Update chapter_titles_info with translations
+                            if translated_headers:
+                                self.log("\n📝 Updating chapter titles in EPUB structure...")
+                                for chapter_num, translated_title in translated_headers.items():
+                                    if chapter_num in chapter_titles_info:
+                                        # Keep the original confidence and method, just update the title
+                                        orig_title, confidence, method = chapter_titles_info[chapter_num]
+                                        chapter_titles_info[chapter_num] = (translated_title, confidence, method)
+                                        self.log(f"✓ Chapter {chapter_num}: {source_headers.get(chapter_num, 'Unknown')} → {translated_title}")
+                                    else:
+                                        # Add new entry if not in chapter_titles_info
+                                        chapter_titles_info[chapter_num] = (translated_title, 1.0, 'batch_translation')
+                                        self.log(f"✓ Added Chapter {chapter_num}: {translated_title}")
+                            
+                    except Exception as e:
+                        self.log(f"⚠️ Batch translation failed: {e}")
+                        import traceback
+                        self.log(traceback.format_exc())
+                        # Continue with compilation even if translation fails
             else:
                 if not source_headers:
                     self.log("⚠️ No source headers found, skipping batch translation")
