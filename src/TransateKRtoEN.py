@@ -5723,11 +5723,23 @@ def main(log_callback=None, stop_callback=None):
                 )
 
                 if chunk_idx < total_chunks:
-                    for i in range(config.DELAY):
+                    # Handle float delays while checking for stop
+                    full_seconds = int(config.DELAY)
+                    fractional_second = config.DELAY - full_seconds
+                    
+                    # Check stop signal every second for full seconds
+                    for i in range(full_seconds):
                         if check_stop():
                             print("❌ Translation stopped during delay")
                             return
                         time.sleep(1)
+                    
+                    # Handle the fractional part if any
+                    if fractional_second > 0:
+                        if check_stop():
+                            print("❌ Translation stopped during delay")
+                            return
+                        time.sleep(fractional_second)
 
             if check_stop():
                 print(f"❌ Translation stopped before saving chapter {actual_num}")
