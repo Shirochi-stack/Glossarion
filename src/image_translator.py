@@ -679,11 +679,6 @@ class ImageTranslator:
                         uncompressed_size = os.path.getsize(chunk_path)
                         total_uncompressed_size += uncompressed_size
                     
-                    # Get original chunk size before any compression
-                    original_buffer = BytesIO()
-                    chunk.save(original_buffer, format='PNG')
-                    original_chunk_size = len(original_buffer.getvalue())
-
                     # Convert chunk to bytes with compression if enabled
                     if compression_enabled:
                         print(f"   🗜️ Compressing chunk {i+1}/{num_chunks}...")
@@ -711,9 +706,12 @@ class ImageTranslator:
                         # Calculate compression stats
                         compressed_size = len(chunk_bytes)
                         if save_cleaned:
-                            # Use the original chunk size we calculated earlier, not the debug file size
-                            compression_ratio = (1 - compressed_size / original_chunk_size) * 100
-                            print(f"   📊 Chunk {i+1}: {original_chunk_size:,} → {compressed_size:,} bytes ({compression_ratio:.1f}% reduction, format: {format_used.upper()})")
+                            # Get the actual original size of the chunk before compression
+                            original_chunk_buffer = io.BytesIO()
+                            chunk.save(original_chunk_buffer, format='PNG')
+                            actual_original_size = len(original_chunk_buffer.getvalue())
+                            compression_ratio = (1 - compressed_size / actual_original_size) * 100
+                            print(f"   📊 Chunk {i+1}: {uncompressed_size:,} → {compressed_size:,} bytes ({compression_ratio:.1f}% reduction, format: {format_used.upper()})")
                             total_compressed_size += compressed_size
                             
                             # Save compressed chunk for debugging
@@ -1876,15 +1874,9 @@ class ImageTranslator:
             # Crop and process the chunk
             chunk = img.crop((0, start_y, width, end_y))
             
-            # Get original chunk size first (before compression)
-            original_buffer = BytesIO()
-            chunk.save(original_buffer, format='PNG')
-            original_chunk_bytes = original_buffer.getvalue()
-            original_size = len(original_chunk_bytes) / 1024  # KB
-
             # Convert chunk to bytes with compression
             chunk_bytes = self._image_to_bytes_with_compression(chunk)
-
+            
             # Save debug chunks if enabled
             if save_debug_chunks or save_compressed_chunks:
                 # Save original chunk
@@ -1931,12 +1923,17 @@ class ImageTranslator:
                     with open(compressed_chunk_path, 'wb') as f:
                         f.write(compressed_buffer.getvalue())
                     
+                    # Get actual original chunk size before compression
+                    chunk_buffer = BytesIO()
+                    chunk.save(chunk_buffer, format='PNG')
+                    actual_original_size = len(chunk_buffer.getvalue()) / 1024  # KB
+
                     # Log compression info
                     compressed_size = len(compressed_buffer.getvalue()) / 1024  # KB
-                    compression_ratio = (1 - compressed_size / original_size) * 100 if original_size > 0 else 0
+                    compression_ratio = (1 - compressed_size / actual_original_size) * 100 if actual_original_size > 0 else 0
                     
                     print(f"   💾 Saved compressed chunk: {compressed_chunk_path}")
-                    print(f"   📊 Chunk compression: {original_size:.1f}KB → {compressed_size:.1f}KB ({compression_ratio:.1f}% reduction)")
+                    print(f"   📊 Chunk compression: {actual_original_size:.1f}KB → {compressed_size:.1f}KB ({compression_ratio:.1f}% reduction)")
             
             # Get custom image chunk prompt template from environment
             image_chunk_prompt_template = os.getenv("IMAGE_CHUNK_PROMPT", "This is part {chunk_idx} of {total_chunks} of a longer image. You must maintain the narrative flow with the previous chunks while translating it and following all system prompt guidelines previously mentioned. {context}")
