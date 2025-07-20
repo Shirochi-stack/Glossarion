@@ -2017,10 +2017,39 @@ class UnifiedClient:
                 
         return params
     
+    def _supports_thinking(self) -> bool:
+        """Check if the current Gemini model supports thinking parameter"""
+        if not self.model:
+            return False
+        
+        model_lower = self.model.lower()
+        
+        # According to Google documentation, thinking is supported on:
+        # 1. All Gemini 2.5 series models (Pro, Flash, Flash-Lite)
+        # 2. Gemini 2.0 Flash Thinking Experimental model
+        
+        # Check for Gemini 2.5 series
+        if 'gemini-2.5' in model_lower:
+            return True
+        
+        # Check for Gemini 2.0 Flash Thinking model variants
+        thinking_models = [
+            'gemini-2.0-flash-thinking-exp',
+            'gemini-2.0-flash-thinking-experimental',
+            'gemini-2.0-flash-thinking-exp-1219',
+            'gemini-2.0-flash-thinking-exp-01-21',
+        ]
+        
+        for thinking_model in thinking_models:
+            if thinking_model in model_lower:
+                return True
+        
+        return False
+
     def _send_gemini(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to Gemini API with support for both text and multi-image messages"""
         
-        # Import ThinkingConfig at the top
+        # Import types at the top
         from google.genai import types
         
         # Check if this contains images
@@ -2044,8 +2073,11 @@ class UnifiedClient:
         # Check if safety settings are disabled via config
         disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
         
-        # Get thinking budget from environment (NEW)
+        # Get thinking budget from environment
         thinking_budget = int(os.getenv("THINKING_BUDGET", "0"))  
+        
+        # Check if this model supports thinking
+        supports_thinking = self._supports_thinking()
         
         # Configure safety settings based on toggle
         if disable_safety:
@@ -2083,7 +2115,7 @@ class UnifiedClient:
         attempts = 4
         attempt = 0
         result = None
-        current_tokens = max_tokens * BOOST_FACTOR  # <-- Define current_tokens HERE
+        current_tokens = max_tokens * BOOST_FACTOR
         finish_reason = None
         error_details = {}
         
@@ -2101,18 +2133,21 @@ class UnifiedClient:
             safety_status = "ENABLED - Using default Gemini safety settings"
             readable_safety = "DEFAULT"
         
-        # Log to console with thinking status (UPDATED)
+        # Log to console with thinking status
         thinking_status = ""
-        if thinking_budget == 0:
-            thinking_status = " (thinking disabled)"
-        elif thinking_budget == -1:
-            thinking_status = " (dynamic thinking)"
-        elif thinking_budget > 0:
-            thinking_status = f" (thinking budget: {thinking_budget})"
+        if supports_thinking:
+            if thinking_budget == 0:
+                thinking_status = " (thinking disabled)"
+            elif thinking_budget == -1:
+                thinking_status = " (dynamic thinking)"
+            elif thinking_budget > 0:
+                thinking_status = f" (thinking budget: {thinking_budget})"
+        else:
+            thinking_status = " (thinking not supported)"
             
         print(f"🔒 Gemini Safety Status: {safety_status}{thinking_status}")
         
-        # Save configuration to file (UPDATED)
+        # Save configuration to file
         config_data = {
             "type": "TEXT_REQUEST",
             "model": self.model,
@@ -2120,7 +2155,8 @@ class UnifiedClient:
             "safety_settings": readable_safety,
             "temperature": temperature,
             "max_output_tokens": current_tokens,
-            "thinking_budget": thinking_budget,  # Added
+            "thinking_supported": supports_thinking,
+            "thinking_budget": thinking_budget if supports_thinking else None,
             "timestamp": datetime.now().isoformat(),
         }
         
@@ -2150,31 +2186,41 @@ class UnifiedClient:
                     **anti_dupe_params  # Add user's custom parameters
                 }
                 
-                # Create thinking config separately
-                thinking_config = types.ThinkingConfig(
-                    thinking_budget=thinking_budget
-                )
-                
-                # Create generation config with thinking_config as a parameter
-                generation_config = types.GenerateContentConfig(
-                    thinking_config=thinking_config,
-                    **generation_config_params
-                )
+                # Only add thinking_config if the model supports it
+                if supports_thinking:
+                    # Create thinking config separately
+                    thinking_config = types.ThinkingConfig(
+                        thinking_budget=thinking_budget
+                    )
+                    
+                    # Create generation config with thinking_config as a parameter
+                    generation_config = types.GenerateContentConfig(
+                        thinking_config=thinking_config,
+                        **generation_config_params
+                    )
+                else:
+                    # Create generation config without thinking_config
+                    generation_config = types.GenerateContentConfig(
+                        **generation_config_params
+                    )
                 
                 # Add safety settings to config if they exist
                 if safety_settings:
                     generation_config.safety_settings = safety_settings
                 
-                # Log the request with thinking info (UPDATED)
+                # Log the request with thinking info
                 print(f"   📤 Sending text request to Gemini{thinking_status}")
                 print(f"   📊 Temperature: {temperature}, Max tokens: {current_tokens}")
                 
-                if thinking_budget == 0:
-                    print(f"   🧠 Thinking: DISABLED")
-                elif thinking_budget == -1:
-                    print(f"   🧠 Thinking: DYNAMIC (model decides)")
+                if supports_thinking:
+                    if thinking_budget == 0:
+                        print(f"   🧠 Thinking: DISABLED")
+                    elif thinking_budget == -1:
+                        print(f"   🧠 Thinking: DYNAMIC (model decides)")
+                    else:
+                        print(f"   🧠 Thinking Budget: {thinking_budget} tokens")
                 else:
-                    print(f"   🧠 Thinking Budget: {thinking_budget} tokens")
+                    print(f"   🧠 Model does not support thinking parameter")
 
                 response = self.gemini_client.models.generate_content(
                     model=self.model,
@@ -2215,13 +2261,12 @@ class UnifiedClient:
                             if 'MAX_TOKENS' in finish_reason:
                                 finish_reason = 'length'
                 
-                # Check usage metadata for thinking tokens (NEW)
+                # Check usage metadata for thinking tokens
                 if hasattr(response, 'usage_metadata'):
                     usage = response.usage_metadata
-                    #print(f"   🔍 Usage metadata: {usage}")
                     
-                    # Check if thinking tokens were actually disabled
-                    if hasattr(usage, 'thoughts_token_count'):
+                    # Check if thinking tokens were actually disabled (only if model supports thinking)
+                    if supports_thinking and hasattr(usage, 'thoughts_token_count'):
                         if usage.thoughts_token_count and usage.thoughts_token_count > 0:
                             print(f"   Thinking tokens used: {usage.thoughts_token_count}")
                         else:
@@ -3618,14 +3663,17 @@ class UnifiedClient:
     def _send_gemini_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send image request to Gemini API - supports both single and multiple images"""
         try:
-            # Import ThinkingConfig at the top of your imports
+            # Import types at the top
             from google.genai import types
             
             # Check if safety settings are disabled
             disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
            
-            # Get thinking budget from environment (NEW)
+            # Get thinking budget from environment
             thinking_budget = int(os.getenv("THINKING_BUDGET", "0"))  
+            
+            # Check if this model supports thinking
+            supports_thinking = self._supports_thinking()
             
             # Configure safety settings
             safety_settings = None
@@ -3744,16 +3792,23 @@ class UnifiedClient:
                 **anti_dupe_params
             }
             
-            # Create thinking config separately
-            thinking_config = types.ThinkingConfig(
-                thinking_budget=thinking_budget
-            )
-            
-            # Create generation config with all parameters INCLUDING thinking_config
-            generation_config = types.GenerateContentConfig(
-                thinking_config=thinking_config,
-                **generation_config_params
-            )
+            # Only add thinking_config if the model supports it
+            if supports_thinking:
+                # Create thinking config separately
+                thinking_config = types.ThinkingConfig(
+                    thinking_budget=thinking_budget
+                )
+                
+                # Create generation config with all parameters INCLUDING thinking_config
+                generation_config = types.GenerateContentConfig(
+                    thinking_config=thinking_config,
+                    **generation_config_params
+                )
+            else:
+                # Create generation config without thinking_config
+                generation_config = types.GenerateContentConfig(
+                    **generation_config_params
+                )
             
             # Add safety settings to config if they exist
             if safety_settings:
@@ -3761,12 +3816,15 @@ class UnifiedClient:
             
             # Log the request
             thinking_status = ""
-            if thinking_budget == 0:
-                thinking_status = " (thinking disabled)"
-            elif thinking_budget == -1:
-                thinking_status = " (dynamic thinking)"
-            elif thinking_budget > 0:
-                thinking_status = f" (thinking budget: {thinking_budget})"
+            if supports_thinking:
+                if thinking_budget == 0:
+                    thinking_status = " (thinking disabled)"
+                elif thinking_budget == -1:
+                    thinking_status = " (dynamic thinking)"
+                elif thinking_budget > 0:
+                    thinking_status = f" (thinking budget: {thinking_budget})"
+            else:
+                thinking_status = " (thinking not supported)"
                 
             if is_multi_image:
                 print(f"   📤 Sending multi-image request to Gemini{thinking_status}")
@@ -3774,12 +3832,15 @@ class UnifiedClient:
                 print(f"   📤 Sending single image request to Gemini{thinking_status}")
             print(f"   📊 Temperature: {temperature}, Max tokens: {max_tokens}")
             
-            if thinking_budget == 0:
-                print(f"   🧠 Thinking: DISABLED")
-            elif thinking_budget == -1:
-                print(f"   🧠 Thinking: DYNAMIC (model decides)")
+            if supports_thinking:
+                if thinking_budget == 0:
+                    print(f"   🧠 Thinking: DISABLED")
+                elif thinking_budget == -1:
+                    print(f"   🧠 Thinking: DYNAMIC (model decides)")
+                else:
+                    print(f"   🧠 Thinking Budget: {thinking_budget} tokens")
             else:
-                print(f"   🧠 Thinking Budget: {thinking_budget} tokens")
+                print(f"   🧠 Model does not support thinking parameter")
             
             # Make the API call
             response = self.gemini_client.models.generate_content(
@@ -3864,10 +3925,9 @@ class UnifiedClient:
             # Check usage metadata for debugging
             if hasattr(response, 'usage_metadata'):
                 usage = response.usage_metadata
-                #print(f"   🔍 Usage metadata: {usage}")
                 
-                # Check if thinking tokens were actually disabled/limited
-                if hasattr(usage, 'thoughts_token_count'):
+                # Check if thinking tokens were actually disabled/limited (only if model supports thinking)
+                if supports_thinking and hasattr(usage, 'thoughts_token_count'):
                     if usage.thoughts_token_count and usage.thoughts_token_count > 0:
                         if thinking_budget > 0 and usage.thoughts_token_count > thinking_budget:
                             print(f"   ⚠️ WARNING: Thinking tokens exceeded budget: {usage.thoughts_token_count} > {thinking_budget}")
@@ -3903,6 +3963,7 @@ class UnifiedClient:
                 finish_reason='error',
                 error_details={'error': str(e)}
             )
+
         
     def _send_openai_image(self, messages, image_base64, temperature, 
                           max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
