@@ -346,7 +346,11 @@ class UnifiedClient:
         self.output_dir = output_dir
         self._actual_output_filename = None
         self._in_cleanup = False  # Flag to indicate cleanup/cancellation mode
-        
+        self.openai_client = None
+        self.gemini_client = None
+        self.mistral_client = None
+        self.cohere_client = None
+        print(f"[DEBUG] Initializing UnifiedClient with model: {model}")
         # Get timeout configuration from GUI
         # IMPORTANT: This respects the "Auto-retry Slow Chunks" timeout setting
         # If enabled, chunks can run up to CHUNK_TIMEOUT seconds before being cancelled
@@ -392,16 +396,43 @@ class UnifiedClient:
         else:
             # Determine client type from model name (existing logic)
             self._setup_client()
+            print(f"[DEBUG] After setup - client_type: {self.client_type}, openai_client: {self.openai_client}")
+            
+            # FORCE OPENAI CLIENT IF CUSTOM BASE URL IS SET
+            custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
+            if custom_base_url and self.openai_client is None:
+                print(f"[DEBUG] Custom base URL detected, forcing OpenAI client for model: {self.model}")
+                self.client_type = 'openai'
+                
+                if openai is None:
+                    raise ImportError("OpenAI library not installed. Install with: pip install openai")
+                
+                self.openai_client = openai.OpenAI(
+                    api_key=self.api_key,
+                    base_url=custom_base_url
+                )
+                print(f"[DEBUG] OpenAI client created with custom base URL: {custom_base_url}")
+
             
     def _setup_client(self):
         """Setup the appropriate client based on model type"""
         model_lower = self.model.lower()
+        print(f"[DEBUG] _setup_client called with model: {self.model}")
         
-        # Check model prefixes
+        # Check if we're using a custom OpenAI base URL
+        custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', os.getenv('OPENAI_API_BASE', ''))
+        if custom_base_url and custom_base_url != 'https://api.openai.com/v1':
+            # Force OpenAI client type for custom endpoints
+            self.client_type = 'openai'
+            logger.info(f"Using OpenAI client for custom endpoint with model: {self.model}")
+            return
+        
+        # Check model prefixes (existing code)
         self.client_type = None
         for prefix, provider in self.MODEL_PROVIDERS.items():
             if model_lower.startswith(prefix):
                 self.client_type = provider
+                print(f"[DEBUG] Matched prefix '{prefix}' -> provider '{provider}'")
                 break
         
         if not self.client_type:
@@ -425,9 +456,20 @@ class UnifiedClient:
         
         # Initialize provider-specific settings
         if self.client_type == 'openai':
+            print(f"[DEBUG] Setting up OpenAI client")
             if openai is None:
                 raise ImportError("OpenAI library not installed. Install with: pip install openai")
-            openai.api_key = self.api_key
+            
+            # Check for custom base URL
+            base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', os.getenv('OPENAI_API_BASE', 'https://api.openai.com/v1'))
+            print(f"[DEBUG] Using base URL: {base_url}")
+            
+            # Create OpenAI client with custom base URL support
+            self.openai_client = openai.OpenAI(
+                api_key=self.api_key,
+                base_url=base_url
+            )
+            print(f"[DEBUG] OpenAI client created: {self.openai_client}")
             
         elif self.client_type == 'gemini':
             if genai is None:
@@ -1823,9 +1865,9 @@ class UnifiedClient:
                     raise UnifiedClientError("Operation cancelled")
                 
                 # Make the API call
-                resp = openai.chat.completions.create(
+                resp = self.openai_client.chat.completions.create(
                     **params,
-                    timeout=self.request_timeout  # Use configured timeout
+                    timeout=self.request_timeout
                 )
                 
                 # Validate response
@@ -3914,7 +3956,7 @@ class UnifiedClient:
             
             logger.info(f"Calling OpenAI vision API with model: {self.model}")
             
-            response = openai.chat.completions.create(**api_params)
+            response = self.openai_client.chat.completions.create(**api_params)
             
             content = response.choices[0].message.content
             finish_reason = response.choices[0].finish_reason
@@ -3955,7 +3997,7 @@ class UnifiedClient:
                 retry_params.update(anti_dupe_params)  # Add user's custom parameters
 
                 try:
-                    response = openai.chat.completions.create(**retry_params)
+                    response = self.openai_client.chat.completions.create(**retry_params)
                     content = response.choices[0].message.content
                     finish_reason = response.choices[0].finish_reason
                     
