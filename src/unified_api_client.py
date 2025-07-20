@@ -2176,7 +2176,7 @@ class UnifiedClient:
                 # Check usage metadata for thinking tokens (NEW)
                 if hasattr(response, 'usage_metadata'):
                     usage = response.usage_metadata
-                    print(f"   🔍 Usage metadata: {usage}")
+                    #print(f"   🔍 Usage metadata: {usage}")
                     
                     # Check if thinking tokens were actually disabled
                     if hasattr(usage, 'thoughts_token_count'):
@@ -3822,7 +3822,7 @@ class UnifiedClient:
             # Check usage metadata for debugging
             if hasattr(response, 'usage_metadata'):
                 usage = response.usage_metadata
-                print(f"   🔍 Usage metadata: {usage}")
+                #print(f"   🔍 Usage metadata: {usage}")
                 
                 # Check if thinking tokens were actually disabled/limited
                 if hasattr(usage, 'thoughts_token_count'):
