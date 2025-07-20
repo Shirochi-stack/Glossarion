@@ -2074,7 +2074,7 @@ class UnifiedClient:
         disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
         
         # Get thinking budget from environment
-        thinking_budget = int(os.getenv("THINKING_BUDGET", "0"))  
+        thinking_budget = int(os.getenv("THINKING_BUDGET", "-1"))  
         
         # Check if this model supports thinking
         supports_thinking = self._supports_thinking()
@@ -2145,7 +2145,7 @@ class UnifiedClient:
         else:
             thinking_status = " (thinking not supported)"
             
-        print(f"🔒 Gemini Safety Status: {safety_status}{thinking_status}")
+        #print(f"🔒 Gemini Safety Status: {safety_status}")
         
         # Save configuration to file
         config_data = {
@@ -2220,7 +2220,8 @@ class UnifiedClient:
                     else:
                         print(f"   🧠 Thinking Budget: {thinking_budget} tokens")
                 else:
-                    print(f"   🧠 Model does not support thinking parameter")
+                    #print(f"   🧠 Model does not support thinking parameter")
+                    pass
 
                 response = self.gemini_client.models.generate_content(
                     model=self.model,
@@ -3670,7 +3671,7 @@ class UnifiedClient:
             disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
            
             # Get thinking budget from environment
-            thinking_budget = int(os.getenv("THINKING_BUDGET", "0"))  
+            thinking_budget = int(os.getenv("THINKING_BUDGET", "-1"))  
             
             # Check if this model supports thinking
             supports_thinking = self._supports_thinking()
