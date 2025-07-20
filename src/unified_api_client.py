@@ -1976,249 +1976,248 @@ class UnifiedClient:
         return params
     
     def _send_gemini(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to Gemini API with support for both text and multi-image messages"""
-        
-        # Import ThinkingConfig at the top
-        from google.genai import types
-        
-        # Check if this contains images
-        has_images = False
-        for msg in messages:
-            if isinstance(msg.get('content'), list):
-                for part in msg['content']:
-                    if part.get('type') == 'image_url':
-                        has_images = True
+            """Send request to Gemini API with support for both text and multi-image messages"""
+            
+            # Import ThinkingConfig at the top
+            from google.genai import types
+            
+            # Check if this contains images
+            has_images = False
+            for msg in messages:
+                if isinstance(msg.get('content'), list):
+                    for part in msg['content']:
+                        if part.get('type') == 'image_url':
+                            has_images = True
+                            break
+                    if has_images:
                         break
-                if has_images:
-                    break
-        
-        if has_images:
-            # Handle as image request - the method now handles both single and multi
-            return self._send_gemini_image(messages, None, temperature, max_tokens, response_name)
-        
-        # text-only logic
-        formatted_prompt = self._format_gemini_prompt_simple(messages)
-        
-        # Check if safety settings are disabled via config
-        disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
-        
-        # Get thinking budget from environment (NEW)
-        thinking_budget = int(os.getenv("THINKING_BUDGET", "0"))  
-        
-        # Configure safety settings based on toggle
-        if disable_safety:
-            # Set all safety categories to BLOCK_NONE (most permissive)
-            safety_settings = [
-                types.SafetySetting(
-                    category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                    threshold=types.HarmBlockThreshold.BLOCK_NONE
-                ),
-                types.SafetySetting(
-                    category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                    threshold=types.HarmBlockThreshold.BLOCK_NONE
-                ),
-                types.SafetySetting(
-                    category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
-                    threshold=types.HarmBlockThreshold.BLOCK_NONE
-                ),
-                types.SafetySetting(
-                    category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                    threshold=types.HarmBlockThreshold.BLOCK_NONE
-                ),
-                types.SafetySetting(
-                    category=types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
-                    threshold=types.HarmBlockThreshold.BLOCK_NONE
-                ),
-            ]
-            logger.info("Gemini safety settings disabled - using BLOCK_NONE for all categories")
-        else:
-            # Use default safety settings (let Gemini decide)
-            safety_settings = None
-            logger.info("Using default Gemini safety settings")
-
-        # Define BOOST_FACTOR and current_tokens FIRST
-        BOOST_FACTOR = 4
-        attempts = 4
-        attempt = 0
-        result = None
-        current_tokens = max_tokens * BOOST_FACTOR  # <-- Define current_tokens HERE
-        finish_reason = None
-        error_details = {}
-        
-        # SAVE SAFETY CONFIGURATION FOR VERIFICATION
-        if safety_settings:
-            safety_status = "DISABLED - All categories set to BLOCK_NONE"
-            readable_safety = {
-                "HATE_SPEECH": "BLOCK_NONE",
-                "SEXUALLY_EXPLICIT": "BLOCK_NONE",
-                "HARASSMENT": "BLOCK_NONE",
-                "DANGEROUS_CONTENT": "BLOCK_NONE",
-                "CIVIC_INTEGRITY": "BLOCK_NONE"
-            }
-        else:
-            safety_status = "ENABLED - Using default Gemini safety settings"
-            readable_safety = "DEFAULT"
-        
-        # Log to console with thinking status (UPDATED)
-        thinking_status = ""
-        if thinking_budget == 0:
-            thinking_status = " (thinking disabled)"
-        elif thinking_budget == -1:
-            thinking_status = " (dynamic thinking)"
-        elif thinking_budget > 0:
-            thinking_status = f" (thinking budget: {thinking_budget})"
             
-        print(f"🔒 Gemini Safety Status: {safety_status}{thinking_status}")
-        
-        # Save configuration to file (UPDATED)
-        config_data = {
-            "type": "TEXT_REQUEST",
-            "model": self.model,
-            "safety_enabled": not disable_safety,
-            "safety_settings": readable_safety,
-            "temperature": temperature,
-            "max_output_tokens": current_tokens,
-            "thinking_budget": thinking_budget,  # Added
-            "timestamp": datetime.now().isoformat(),
-        }
-        
-        # Save to Payloads folder
-        os.makedirs("Payloads", exist_ok=True)
-        config_filename = f"gemini_safety_{response_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        config_path = os.path.join("Payloads", config_filename)
-        
-        try:
-            with open(config_path, 'w', encoding='utf-8') as f:
-                json.dump(config_data, f, indent=2)
-        except Exception as e:
-            print(f"Could not save safety config: {e}")
-               
-        while attempt < attempts:
-            try:
-                if self._cancelled:
-                    raise UnifiedClientError("Operation cancelled")
-                
-                # Get user-configured anti-duplicate parameters
-                anti_dupe_params = self._get_anti_duplicate_params(temperature)
+            if has_images:
+                # Handle as image request - the method now handles both single and multi
+                return self._send_gemini_image(messages, None, temperature, max_tokens, response_name)
+            
+            # text-only logic
+            formatted_prompt = self._format_gemini_prompt_simple(messages)
+            
+            # Check if safety settings are disabled via config
+            disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
+            
+            # Get thinking budget from environment (NEW)
+            thinking_budget = int(os.getenv("THINKING_BUDGET", "0"))  
+            
+            # Configure safety settings based on toggle
+            if disable_safety:
+                # Set all safety categories to BLOCK_NONE (most permissive)
+                safety_settings = [
+                    types.SafetySetting(
+                        category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                        threshold=types.HarmBlockThreshold.BLOCK_NONE
+                    ),
+                    types.SafetySetting(
+                        category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                        threshold=types.HarmBlockThreshold.BLOCK_NONE
+                    ),
+                    types.SafetySetting(
+                        category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                        threshold=types.HarmBlockThreshold.BLOCK_NONE
+                    ),
+                    types.SafetySetting(
+                        category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                        threshold=types.HarmBlockThreshold.BLOCK_NONE
+                    ),
+                    types.SafetySetting(
+                        category=types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
+                        threshold=types.HarmBlockThreshold.BLOCK_NONE
+                    ),
+                ]
+                logger.info("Gemini safety settings disabled - using BLOCK_NONE for all categories")
+            else:
+                # Use default safety settings (let Gemini decide)
+                safety_settings = None
+                logger.info("Using default Gemini safety settings")
 
-                # Build generation config with anti-duplicate parameters
-                generation_config_params = {
-                    "temperature": temperature,
-                    "max_output_tokens": current_tokens,
-                    **anti_dupe_params  # Add user's custom parameters
+            # Initialize variables for retry logic
+            attempts = 4
+            attempt = 0
+            result = None
+            current_tokens = max_tokens  # Use max_tokens directly, no boost factor
+            finish_reason = None
+            error_details = {}
+            
+            # SAVE SAFETY CONFIGURATION FOR VERIFICATION
+            if safety_settings:
+                safety_status = "DISABLED - All categories set to BLOCK_NONE"
+                readable_safety = {
+                    "HATE_SPEECH": "BLOCK_NONE",
+                    "SEXUALLY_EXPLICIT": "BLOCK_NONE",
+                    "HARASSMENT": "BLOCK_NONE",
+                    "DANGEROUS_CONTENT": "BLOCK_NONE",
+                    "CIVIC_INTEGRITY": "BLOCK_NONE"
                 }
-                
-                # Create thinking config separately
-                thinking_config = types.ThinkingConfig(
-                    thinking_budget=thinking_budget
-                )
-                
-                # Create generation config with thinking_config as a parameter
-                generation_config = types.GenerateContentConfig(
-                    thinking_config=thinking_config,
-                    **generation_config_params
-                )
-                
-                # Add safety settings to config if they exist
-                if safety_settings:
-                    generation_config.safety_settings = safety_settings
-                
-                # Log the request with thinking info (UPDATED)
-                print(f"   📤 Sending text request to Gemini{thinking_status}")
-                print(f"   📊 Temperature: {temperature}, Max tokens: {current_tokens}")
-                
-                if thinking_budget == 0:
-                    print(f"   🧠 Thinking: DISABLED")
-                elif thinking_budget == -1:
-                    print(f"   🧠 Thinking: DYNAMIC (model decides)")
-                else:
-                    print(f"   🧠 Thinking Budget: {thinking_budget} tokens")
-
-                response = self.gemini_client.models.generate_content(
-                    model=self.model,
-                    contents=formatted_prompt,
-                    config=generation_config
-                )
-                
-                # Check for blocked content
-                if hasattr(response, 'prompt_feedback'):
-                    feedback = response.prompt_feedback
-                    if hasattr(feedback, 'block_reason') and feedback.block_reason:
-                        error_details['block_reason'] = str(feedback.block_reason)
-                        if disable_safety:
-                            print(f"Content blocked despite safety disabled: {feedback.block_reason}")
-                        else:
-                            print(f"Content blocked: {feedback.block_reason}")
-                        raise Exception(f"Content blocked: {feedback.block_reason}")
-                
-                # Extract text
-                try:
-                    result = response.text
-                    if not result or result.strip() == "":
-                        raise Exception("Empty text in response")
-                    finish_reason = 'stop'
-                except Exception as text_error:
-                    print(f"Failed to extract text: {text_error}")
-                    
-                    # Try to extract from candidates
-                    if hasattr(response, 'candidates') and response.candidates:
-                        candidate = response.candidates[0]
-                        if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
-                            parts = candidate.content.parts
-                            result = ''.join(part.text for part in parts if hasattr(part, 'text'))
-                        
-                        # Check finish reason
-                        if hasattr(candidate, 'finish_reason'):
-                            finish_reason = str(candidate.finish_reason)
-                            if 'MAX_TOKENS' in finish_reason:
-                                finish_reason = 'length'
-                
-                # Check usage metadata for thinking tokens (NEW)
-                if hasattr(response, 'usage_metadata'):
-                    usage = response.usage_metadata
-                    #print(f"   🔍 Usage metadata: {usage}")
-                    
-                    # Check if thinking tokens were actually disabled
-                    if hasattr(usage, 'thoughts_token_count'):
-                        if usage.thoughts_token_count and usage.thoughts_token_count > 0:
-                            print(f"   Thinking tokens used: {usage.thoughts_token_count}")
-                        else:
-                            print(f"   ✅ Thinking successfully disabled (0 thinking tokens)")
-                
-                if result:
-                    break
-                    
-            except Exception as e:
-                print(f"Gemini attempt {attempt+1} failed: {e}")
-                error_details[f'attempt_{attempt+1}'] = str(e)
+            else:
+                safety_status = "ENABLED - Using default Gemini safety settings"
+                readable_safety = "DEFAULT"
             
-            # Reduce tokens and retry
-            current_tokens = max(256, current_tokens // 2)
-            attempt += 1
-            if attempt < attempts:
-                logger.info(f"Retrying with max_output_tokens={current_tokens}")
-                print(f"🔄 Retrying Gemini with reduced tokens: {current_tokens}")
+            # Log to console with thinking status (UPDATED)
+            thinking_status = ""
+            if thinking_budget == 0:
+                thinking_status = " (thinking disabled)"
+            elif thinking_budget == -1:
+                thinking_status = " (dynamic thinking)"
+            elif thinking_budget > 0:
+                thinking_status = f" (thinking budget: {thinking_budget})"
+                
+            print(f"🔒 Gemini Safety Status: {safety_status}{thinking_status}")
+            
+            # Save configuration to file (UPDATED)
+            config_data = {
+                "type": "TEXT_REQUEST",
+                "model": self.model,
+                "safety_enabled": not disable_safety,
+                "safety_settings": readable_safety,
+                "temperature": temperature,
+                "max_output_tokens": current_tokens,
+                "thinking_budget": thinking_budget,  # Added
+                "timestamp": datetime.now().isoformat(),
+            }
+            
+            # Save to Payloads folder
+            os.makedirs("Payloads", exist_ok=True)
+            config_filename = f"gemini_safety_{response_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            config_path = os.path.join("Payloads", config_filename)
+            
+            try:
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    json.dump(config_data, f, indent=2)
+            except Exception as e:
+                print(f"Could not save safety config: {e}")
+                   
+            while attempt < attempts:
+                try:
+                    if self._cancelled:
+                        raise UnifiedClientError("Operation cancelled")
+                    
+                    # Get user-configured anti-duplicate parameters
+                    anti_dupe_params = self._get_anti_duplicate_params(temperature)
 
-        if not result:
-            print("All Gemini retries failed")
-            self._log_truncation_failure(
-                messages=messages,
-                response_content="",
-                finish_reason='error',
-                context=self.context,
-                error_details={'error': 'all_retries_failed', 'provider': 'gemini', 'attempts': attempt}
+                    # Build generation config with anti-duplicate parameters
+                    generation_config_params = {
+                        "temperature": temperature,
+                        "max_output_tokens": current_tokens,
+                        **anti_dupe_params  # Add user's custom parameters
+                    }
+                    
+                    # Create thinking config separately
+                    thinking_config = types.ThinkingConfig(
+                        thinking_budget=thinking_budget
+                    )
+                    
+                    # Create generation config with thinking_config as a parameter
+                    generation_config = types.GenerateContentConfig(
+                        thinking_config=thinking_config,
+                        **generation_config_params
+                    )
+                    
+                    # Add safety settings to config if they exist
+                    if safety_settings:
+                        generation_config.safety_settings = safety_settings
+                    
+                    # Log the request with thinking info (UPDATED)
+                    print(f"   📤 Sending text request to Gemini{thinking_status}")
+                    print(f"   📊 Temperature: {temperature}, Max tokens: {current_tokens}")
+                    
+                    if thinking_budget == 0:
+                        print(f"   🧠 Thinking: DISABLED")
+                    elif thinking_budget == -1:
+                        print(f"   🧠 Thinking: DYNAMIC (model decides)")
+                    else:
+                        print(f"   🧠 Thinking Budget: {thinking_budget} tokens")
+
+                    response = self.gemini_client.models.generate_content(
+                        model=self.model,
+                        contents=formatted_prompt,
+                        config=generation_config
+                    )
+                    
+                    # Check for blocked content
+                    if hasattr(response, 'prompt_feedback'):
+                        feedback = response.prompt_feedback
+                        if hasattr(feedback, 'block_reason') and feedback.block_reason:
+                            error_details['block_reason'] = str(feedback.block_reason)
+                            if disable_safety:
+                                print(f"Content blocked despite safety disabled: {feedback.block_reason}")
+                            else:
+                                print(f"Content blocked: {feedback.block_reason}")
+                            raise Exception(f"Content blocked: {feedback.block_reason}")
+                    
+                    # Extract text
+                    try:
+                        result = response.text
+                        if not result or result.strip() == "":
+                            raise Exception("Empty text in response")
+                        finish_reason = 'stop'
+                    except Exception as text_error:
+                        print(f"Failed to extract text: {text_error}")
+                        
+                        # Try to extract from candidates
+                        if hasattr(response, 'candidates') and response.candidates:
+                            candidate = response.candidates[0]
+                            if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                                parts = candidate.content.parts
+                                result = ''.join(part.text for part in parts if hasattr(part, 'text'))
+                            
+                            # Check finish reason
+                            if hasattr(candidate, 'finish_reason'):
+                                finish_reason = str(candidate.finish_reason)
+                                if 'MAX_TOKENS' in finish_reason:
+                                    finish_reason = 'length'
+                    
+                    # Check usage metadata for thinking tokens (NEW)
+                    if hasattr(response, 'usage_metadata'):
+                        usage = response.usage_metadata
+                        #print(f"   🔍 Usage metadata: {usage}")
+                        
+                        # Check if thinking tokens were actually disabled
+                        if hasattr(usage, 'thoughts_token_count'):
+                            if usage.thoughts_token_count and usage.thoughts_token_count > 0:
+                                print(f"   Thinking tokens used: {usage.thoughts_token_count}")
+                            else:
+                                print(f"   ✅ Thinking successfully disabled (0 thinking tokens)")
+                    
+                    if result:
+                        break
+                        
+                except Exception as e:
+                    print(f"Gemini attempt {attempt+1} failed: {e}")
+                    error_details[f'attempt_{attempt+1}'] = str(e)
+                
+                # Reduce tokens and retry
+                current_tokens = max(256, current_tokens // 2)
+                attempt += 1
+                if attempt < attempts:
+                    logger.info(f"Retrying with max_output_tokens={current_tokens}")
+                    print(f"🔄 Retrying Gemini with reduced tokens: {current_tokens}")
+
+            if not result:
+                print("All Gemini retries failed")
+                self._log_truncation_failure(
+                    messages=messages,
+                    response_content="",
+                    finish_reason='error',
+                    context=self.context,
+                    error_details={'error': 'all_retries_failed', 'provider': 'gemini', 'attempts': attempt}
+                )
+                result = "[]" if self.context == 'glossary' else ""
+                finish_reason = 'error'
+
+            # Don't save here - the main send() method handles saving
+            
+            return UnifiedResponse(
+                content=result,
+                finish_reason=finish_reason,
+                raw_response=response if 'response' in locals() else None,
+                error_details=error_details if error_details else None
             )
-            result = "[]" if self.context == 'glossary' else ""
-            finish_reason = 'error'
-
-        # Don't save here - the main send() method handles saving
-        
-        return UnifiedResponse(
-            content=result,
-            finish_reason=finish_reason,
-            raw_response=response if 'response' in locals() else None,
-            error_details=error_details if error_details else None
-        )
     
     def _format_gemini_prompt_simple(self, messages) -> str:
         """Format messages for Gemini"""
