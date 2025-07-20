@@ -783,7 +783,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.4.0"
+        __version__ = "3.4.4"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -876,10 +876,30 @@ class TranslatorGUI:
                 if hasattr(self, 'safe_ratios_btn') else None
             ))
     
-        # Initialize auto-update check variable
+        # Initialize auto-update check and other variables
         self.auto_update_check_var = tk.BooleanVar(value=self.config.get('auto_update_check', True))
-        self.force_ncx_only_var = tk.BooleanVar(value=self.config.get('force_ncx_only', True)) 
+        self.force_ncx_only_var = tk.BooleanVar(value=self.config.get('force_ncx_only', True))
+        self.single_api_image_chunks_var = tk.BooleanVar(value=False)
+        self.enable_gemini_thinking_var = tk.BooleanVar(value=self.config.get('enable_gemini_thinking', True))
+        self.thinking_budget_var = tk.StringVar(value=str(self.config.get('thinking_budget', '-1')))
+        self.remove_ai_artifacts = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
+        print(f"   🎨 Remove AI Artifacts: {'ENABLED' if self.remove_ai_artifacts else 'DISABLED'}")
 
+        # Initialize compression-related variables
+        self.enable_image_compression_var = tk.BooleanVar(value=self.config.get('enable_image_compression', False))
+        self.auto_compress_enabled_var = tk.BooleanVar(value=self.config.get('auto_compress_enabled', True))
+        self.target_image_tokens_var = tk.StringVar(value=str(self.config.get('target_image_tokens', 1000)))
+        self.image_format_var = tk.StringVar(value=self.config.get('image_compression_format', 'auto'))
+        self.webp_quality_var = tk.IntVar(value=self.config.get('webp_quality', 85))
+        self.jpeg_quality_var = tk.IntVar(value=self.config.get('jpeg_quality', 85))
+        self.png_compression_var = tk.IntVar(value=self.config.get('png_compression', 6))
+        self.max_image_dimension_var = tk.StringVar(value=str(self.config.get('max_image_dimension', 2048)))
+        self.max_image_size_mb_var = tk.StringVar(value=str(self.config.get('max_image_size_mb', 10)))
+        self.preserve_transparency_var = tk.BooleanVar(value=self.config.get('preserve_transparency', False)) 
+        self.preserve_original_format_var = tk.BooleanVar(value=self.config.get('preserve_original_format', False)) 
+        self.optimize_for_ocr_var = tk.BooleanVar(value=self.config.get('optimize_for_ocr', True))
+        self.progressive_encoding_var = tk.BooleanVar(value=self.config.get('progressive_encoding', True))
+        self.save_compressed_images_var = tk.BooleanVar(value=self.config.get('save_compressed_images', False))
         # Initialize metadata/batch variables the same way
         self.translate_metadata_fields = self.config.get('translate_metadata_fields', {})
         # Initialize metadata translation UI and prompts
@@ -1437,7 +1457,9 @@ Recent translations to summarize:
             ('save_cleaned_images_var', 'save_cleaned_images', False),
             ('advanced_watermark_removal_var', 'advanced_watermark_removal', False),
             ('enable_decimal_chapters_var', 'enable_decimal_chapters', False),
-            ('disable_gemini_safety_var', 'disable_gemini_safety', False)
+            ('disable_gemini_safety_var', 'disable_gemini_safety', False),
+            ('single_api_image_chunks_var', 'single_api_image_chunks', False),
+
         ]
         
         for var_name, key, default in bool_vars:
@@ -1509,7 +1531,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.4.0 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.4.4 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -5215,16 +5237,60 @@ Recent translations to summarize:
                 # Log image translation status
                 if self.enable_image_translation_var.get():
                     self.append_log("🖼️ Image translation ENABLED")
-                    vision_models = ['gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash', 
-                                  'gemini-2.0-flash-exp', 'gpt-4-turbo', 'gpt-4o']
+                    vision_models = [
+                        # Anthropic Claude
+                        'claude-opus-4-20250514',        # Claude 4 Opus with vision capabilities
+                        'claude-sonnet-4-20250514',      # Claude 4 Sonnet with vision capabilities
+                        
+                        # OpenAI GPT
+                        'gpt-4-turbo',                   # Still available with vision
+                        'gpt-4o',                        # GPT-4 Omni with native multimodal support
+                        'gpt-4o-mini',                   # Smaller, faster GPT-4o variant
+                        'gpt-4.1',                       # Latest GPT-4.1 with vision support
+                        'gpt-4.1-mini',                  # Efficient GPT-4.1 variant
+                        'gpt-4-vision-preview',          # GPT-4 with vision (legacy)
+                        
+                        # Google Gemini
+                        'gemini-1.5-pro',                # Still available
+                        'gemini-1.5-flash',              # Still available
+                        'gemini-2.0-flash',              # Gemini 2.0 with multimodal capabilities
+                        'gemini-2.0-flash-exp',          # Experimental version
+                        'gemini-2.5-pro',                # Latest thinking model with vision
+                        'gemini-2.5-flash',              # Efficient Gemini 2.5 variant
+                        
+                        # Meta Llama
+                        'llama-3.2-11b-vision',          # Llama 3.2 Vision 11B model
+                        'llama-3.2-90b-vision',          # Llama 3.2 Vision 90B model
+                        
+                        # Alibaba Qwen
+                        'qwen-2.5-vl-72b',               # Qwen 2.5 Vision Language 72B
+                        
+                        # Microsoft
+                        'florence-2-base',               # Microsoft Florence 2 base model
+                        'florence-2-large',              # Microsoft Florence 2 large model
+                        'phi-4-multimodal',              # Microsoft Phi 4 with multimodal support
+                        
+                        # Mistral AI
+                        'pixtral-12b-2409',              # Pixtral 12B multimodal model
+                        'pixtral-large-latest',          # Pixtral Large (124B parameters)
+                        
+                        # Other Notable Models
+                        'moondream-2',                   # Tiny vision language model
+                        'smolvlm',                       # Lightweight efficient VLM
+                        'gemma-3-27b',                   # Google's Gemma 3 with vision
+                        'deepseek-janus-pro',            # Deepseek's vision model
+                        'yi-vl-34b',                     # Yi Vision Language model
+                        'bakllava-7b',                   # BakLLaVA multimodal model
+                        'cogvlm',                        # CogVLM for visual reasoning
+                    ]
                     if self.model_var.get().lower() in vision_models:
                         self.append_log(f"   ✅ Using vision-capable model: {self.model_var.get()}")
                         self.append_log(f"   • Max images per chapter: {self.max_images_per_chapter_var.get()}")
                         if self.process_webnovel_images_var.get():
                             self.append_log(f"   • Web novel images: Enabled (min height: {self.webnovel_min_height_var.get()}px)")
                     else:
-                        self.append_log(f"   ⚠️ Model {self.model_var.get()} does not support vision")
-                        self.append_log("   ⚠️ Image translation will be skipped")
+                        self.append_log(f"   ⚠️ Model {self.model_var.get()} may not support vision")
+                        self.append_log("   ⚠️ Image translation may be skipped")
                 else:
                     self.append_log("🖼️ Image translation disabled")
                
@@ -5369,6 +5435,26 @@ Recent translations to summarize:
             'GLOSSARY_DUPLICATE_CUSTOM_FIELD': self.config.get('glossary_duplicate_custom_field', ''),
             'MANUAL_GLOSSARY': self.manual_glossary_path if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path else '',
             'FORCE_NCX_ONLY': '1' if self.force_ncx_only_var.get() else '0',
+            'SINGLE_API_IMAGE_CHUNKS': "1" if self.single_api_image_chunks_var.get() else "0",
+            'ENABLE_GEMINI_THINKING': "1" if self.enable_gemini_thinking_var.get() else "0",
+            'THINKING_BUDGET': self.thinking_budget_var.get() if self.enable_gemini_thinking_var.get() else '0',
+
+            # Image compression settings
+            'ENABLE_IMAGE_COMPRESSION': "1" if self.config.get('enable_image_compression', False) else "0",
+            'AUTO_COMPRESS_ENABLED': "1" if self.config.get('auto_compress_enabled', True) else "0",
+            'TARGET_IMAGE_TOKENS': str(self.config.get('target_image_tokens', 1000)),
+            'IMAGE_COMPRESSION_FORMAT': self.config.get('image_compression_format', 'auto'),
+            'WEBP_QUALITY': str(self.config.get('webp_quality', 85)),
+            'JPEG_QUALITY': str(self.config.get('jpeg_quality', 85)),
+            'PNG_COMPRESSION': str(self.config.get('png_compression', 6)),
+            'MAX_IMAGE_DIMENSION': str(self.config.get('max_image_dimension', 2048)),
+            'MAX_IMAGE_SIZE_MB': str(self.config.get('max_image_size_mb', 10)),
+            'PRESERVE_TRANSPARENCY': "1" if self.config.get('preserve_transparency', False) else "0",
+            'PRESERVE_ORIGINAL_FORMAT': "1" if self.config.get('preserve_original_format', False) else "0", 
+            'OPTIMIZE_FOR_OCR': "1" if self.config.get('optimize_for_ocr', True) else "0",
+            'PROGRESSIVE_ENCODING': "1" if self.config.get('progressive_encoding', True) else "0",
+            'SAVE_COMPRESSED_IMAGES': "1" if self.config.get('save_compressed_images', False) else "0",
+
 
             # Metadata and batch header translation settings
             'TRANSLATE_METADATA_FIELDS': json.dumps(self.translate_metadata_fields),
@@ -7450,6 +7536,7 @@ Recent translations to summarize:
                                            font=('Courier', 9), fg='blue', 
                                            wraplength=650, justify=tk.LEFT)
         self.image_example_label.pack(anchor=tk.W, pady=(5, 0))
+              
         
         def update_image_example(*args):
             try:
@@ -7486,6 +7573,291 @@ Recent translations to summarize:
                  bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
         
         dialog.deiconify()
+
+    def configure_image_compression(self):
+        """Open the image compression configuration dialog"""
+        dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
+            self.master,
+            "Image Compression Settings",
+            width=None,
+            height=None,
+            max_width_ratio=0.6,
+            max_height_ratio=1.2
+        )
+        
+        # Main container with padding
+        main_frame = tk.Frame(scrollable_frame)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Title
+        title_label = tk.Label(main_frame, text="🗜️ Image Compression Settings", 
+                              font=('TkDefaultFont', 14, 'bold'))
+        title_label.pack(anchor=tk.W, pady=(0, 15))
+        
+        # Enable compression toggle
+        enable_frame = tk.Frame(main_frame)
+        enable_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        self.enable_image_compression_var = tk.BooleanVar(
+            value=self.config.get('enable_image_compression', False)
+        )
+        tb.Checkbutton(enable_frame, text="Enable Image Compression", 
+                      variable=self.enable_image_compression_var,
+                      bootstyle="round-toggle",
+                      command=lambda: self._toggle_compression_options()).pack(anchor=tk.W)
+        
+        # Create container for all compression options
+        self.compression_options_frame = tk.Frame(main_frame)
+        self.compression_options_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Auto Compression Section
+        auto_section = tk.LabelFrame(self.compression_options_frame, text="Automatic Compression", 
+                                    padx=15, pady=10)
+        auto_section.pack(fill=tk.X, pady=(0, 15))
+        
+        self.auto_compress_enabled_var = tk.BooleanVar(
+            value=self.config.get('auto_compress_enabled', True)
+        )
+        tb.Checkbutton(auto_section, text="Auto-compress to fit token limits", 
+                      variable=self.auto_compress_enabled_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W)
+        
+        # Token limit setting
+        token_frame = tk.Frame(auto_section)
+        token_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        tk.Label(token_frame, text="Target tokens per image:").pack(side=tk.LEFT)
+        
+        self.target_image_tokens_var = tk.StringVar(
+            value=str(self.config.get('target_image_tokens', '1000'))
+        )
+        tb.Entry(token_frame, width=10, textvariable=self.target_image_tokens_var).pack(side=tk.LEFT, padx=(10, 0))
+        
+        tk.Label(token_frame, text="(Gemini uses ~258 tokens per image)", 
+                font=('TkDefaultFont', 9), fg='gray').pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Format Selection Section
+        format_section = tk.LabelFrame(self.compression_options_frame, text="Output Format", 
+                                      padx=15, pady=10)
+        format_section.pack(fill=tk.X, pady=(0, 15))
+        
+        self.image_format_var = tk.StringVar(
+            value=self.config.get('image_compression_format', 'auto')
+        )
+        
+        formats = [
+            ("Auto (Best quality/size ratio)", "auto"),
+            ("WebP (Best compression)", "webp"),
+            ("JPEG (Wide compatibility)", "jpeg"),
+            ("PNG (Lossless)", "png")
+        ]
+        
+        for text, value in formats:
+            tb.Radiobutton(format_section, text=text, variable=self.image_format_var, 
+                          value=value).pack(anchor=tk.W, pady=2)
+        
+        # Quality Settings Section
+        quality_section = tk.LabelFrame(self.compression_options_frame, text="Quality Settings", 
+                                       padx=15, pady=10)
+        quality_section.pack(fill=tk.X, pady=(0, 15))
+        
+        # WebP Quality
+        webp_frame = tk.Frame(quality_section)
+        webp_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(webp_frame, text="WebP Quality:", width=15, anchor=tk.W).pack(side=tk.LEFT)
+        
+        self.webp_quality_var = tk.IntVar(value=self.config.get('webp_quality', 85))
+        webp_scale = tk.Scale(webp_frame, from_=1, to=100, orient=tk.HORIZONTAL, 
+                             variable=self.webp_quality_var, length=200)
+        webp_scale.pack(side=tk.LEFT, padx=(10, 10))
+        
+        self.webp_quality_label = tk.Label(webp_frame, text=f"{self.webp_quality_var.get()}%")
+        self.webp_quality_label.pack(side=tk.LEFT)
+        
+        webp_scale.config(command=lambda v: self.webp_quality_label.config(text=f"{int(float(v))}%"))
+        
+        # JPEG Quality
+        jpeg_frame = tk.Frame(quality_section)
+        jpeg_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(jpeg_frame, text="JPEG Quality:", width=15, anchor=tk.W).pack(side=tk.LEFT)
+        
+        self.jpeg_quality_var = tk.IntVar(value=self.config.get('jpeg_quality', 85))
+        jpeg_scale = tk.Scale(jpeg_frame, from_=1, to=100, orient=tk.HORIZONTAL, 
+                             variable=self.jpeg_quality_var, length=200)
+        jpeg_scale.pack(side=tk.LEFT, padx=(10, 10))
+        
+        self.jpeg_quality_label = tk.Label(jpeg_frame, text=f"{self.jpeg_quality_var.get()}%")
+        self.jpeg_quality_label.pack(side=tk.LEFT)
+        
+        jpeg_scale.config(command=lambda v: self.jpeg_quality_label.config(text=f"{int(float(v))}%"))
+        
+        # PNG Compression
+        png_frame = tk.Frame(quality_section)
+        png_frame.pack(fill=tk.X)
+        
+        tk.Label(png_frame, text="PNG Compression:", width=15, anchor=tk.W).pack(side=tk.LEFT)
+        
+        self.png_compression_var = tk.IntVar(value=self.config.get('png_compression', 6))
+        png_scale = tk.Scale(png_frame, from_=0, to=9, orient=tk.HORIZONTAL, 
+                            variable=self.png_compression_var, length=200)
+        png_scale.pack(side=tk.LEFT, padx=(10, 10))
+        
+        self.png_compression_label = tk.Label(png_frame, text=f"Level {self.png_compression_var.get()}")
+        self.png_compression_label.pack(side=tk.LEFT)
+        
+        png_scale.config(command=lambda v: self.png_compression_label.config(text=f"Level {int(float(v))}"))
+        
+        # Resolution Limits Section
+        resolution_section = tk.LabelFrame(self.compression_options_frame, text="Resolution Limits", 
+                                          padx=15, pady=10)
+        resolution_section.pack(fill=tk.X, pady=(0, 15))
+        
+        # Max dimension
+        max_dim_frame = tk.Frame(resolution_section)
+        max_dim_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(max_dim_frame, text="Max dimension (px):").pack(side=tk.LEFT)
+        
+        self.max_image_dimension_var = tk.StringVar(
+            value=str(self.config.get('max_image_dimension', '2048'))
+        )
+        tb.Entry(max_dim_frame, width=10, textvariable=self.max_image_dimension_var).pack(side=tk.LEFT, padx=(10, 0))
+        
+        tk.Label(max_dim_frame, text="(Images larger than this will be resized)", 
+                font=('TkDefaultFont', 9), fg='gray').pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Max file size
+        max_size_frame = tk.Frame(resolution_section)
+        max_size_frame.pack(fill=tk.X)
+        
+        tk.Label(max_size_frame, text="Max file size (MB):").pack(side=tk.LEFT)
+        
+        self.max_image_size_mb_var = tk.StringVar(
+            value=str(self.config.get('max_image_size_mb', '10'))
+        )
+        tb.Entry(max_size_frame, width=10, textvariable=self.max_image_size_mb_var).pack(side=tk.LEFT, padx=(10, 0))
+        
+        tk.Label(max_size_frame, text="(Larger files will be compressed)", 
+                font=('TkDefaultFont', 9), fg='gray').pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Advanced Options Section
+        advanced_section = tk.LabelFrame(self.compression_options_frame, text="Advanced Options", 
+                                        padx=15, pady=10)
+        advanced_section.pack(fill=tk.X, pady=(0, 15))
+        
+        self.preserve_transparency_var = tk.BooleanVar(
+            value=self.config.get('preserve_transparency', False)  # Changed default to False
+        )
+        tb.Checkbutton(advanced_section, text="Preserve transparency (PNG/WebP only)", 
+                      variable=self.preserve_transparency_var).pack(anchor=tk.W, pady=2)
+        
+        self.preserve_original_format_var = tk.BooleanVar(
+            value=self.config.get('preserve_original_format', False)
+        )
+        tb.Checkbutton(advanced_section, text="Preserve original image format", 
+                      variable=self.preserve_original_format_var).pack(anchor=tk.W, pady=2)
+        
+        self.optimize_for_ocr_var = tk.BooleanVar(
+            value=self.config.get('optimize_for_ocr', True)
+        )
+        tb.Checkbutton(advanced_section, text="Optimize for OCR (maintain text clarity)", 
+                      variable=self.optimize_for_ocr_var).pack(anchor=tk.W, pady=2)
+        
+        self.progressive_encoding_var = tk.BooleanVar(
+            value=self.config.get('progressive_encoding', True)
+        )
+        tb.Checkbutton(advanced_section, text="Progressive encoding (JPEG)", 
+                      variable=self.progressive_encoding_var).pack(anchor=tk.W, pady=2)
+        
+        self.save_compressed_images_var = tk.BooleanVar(
+            value=self.config.get('save_compressed_images', False)
+        )
+        tb.Checkbutton(advanced_section, text="Save compressed images to disk", 
+                      variable=self.save_compressed_images_var).pack(anchor=tk.W, pady=2)
+        
+        # Info Section
+        info_frame = tk.Frame(self.compression_options_frame)
+        info_frame.pack(fill=tk.X)
+        
+        info_text = ("💡 Tips:\n"
+                    "• WebP offers the best compression with good quality\n"
+                    "• Use 'Auto' format for intelligent format selection\n"
+                    "• Higher quality = larger file size\n"
+                    "• OCR optimization maintains text readability")
+        
+        tk.Label(info_frame, text=info_text, justify=tk.LEFT, 
+                font=('TkDefaultFont', 9), fg='#666').pack(anchor=tk.W)
+        
+        # Buttons
+        button_frame = tk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(20, 0))
+        
+        def save_image_compression():
+            try:
+                # Validate numeric inputs
+                try:
+                    int(self.target_image_tokens_var.get())
+                    int(self.max_image_dimension_var.get())
+                    float(self.max_image_size_mb_var.get())
+                except ValueError:
+                    messagebox.showerror("Invalid Input", "Please enter valid numbers for numeric fields")
+                    return
+                
+                # Save all settings
+                self.config['enable_image_compression'] = self.enable_image_compression_var.get()
+                self.config['auto_compress_enabled'] = self.auto_compress_enabled_var.get()
+                self.config['target_image_tokens'] = int(self.target_image_tokens_var.get())
+                self.config['image_compression_format'] = self.image_format_var.get()
+                self.config['webp_quality'] = self.webp_quality_var.get()
+                self.config['jpeg_quality'] = self.jpeg_quality_var.get()
+                self.config['png_compression'] = self.png_compression_var.get()
+                self.config['max_image_dimension'] = int(self.max_image_dimension_var.get())
+                self.config['max_image_size_mb'] = float(self.max_image_size_mb_var.get())
+                self.config['preserve_transparency'] = self.preserve_transparency_var.get()
+                self.config['preserve_original_format'] = self.preserve_original_format_var.get()
+                self.config['optimize_for_ocr'] = self.optimize_for_ocr_var.get()
+                self.config['progressive_encoding'] = self.progressive_encoding_var.get()
+                self.config['save_compressed_images'] = self.save_compressed_images_var.get()
+                
+                self.append_log("✅ Image compression settings saved")
+                dialog._cleanup_scrolling()
+                dialog.destroy()
+                
+            except Exception as e:
+                print(f"❌ Failed to save compression settings: {e}")
+                messagebox.showerror("Error", f"Failed to save settings: {e}")
+        
+        tb.Button(button_frame, text="💾 Save Settings", command=save_image_compression, 
+                 bootstyle="success", width=20).pack(side=tk.LEFT, padx=5)
+        
+        tb.Button(button_frame, text="❌ Cancel", 
+                 command=lambda: [dialog._cleanup_scrolling(), dialog.destroy()], 
+                 bootstyle="secondary", width=20).pack(side=tk.LEFT, padx=5)
+        
+        # Toggle function for enable/disable
+        def _toggle_compression_options():
+            state = tk.NORMAL if self.enable_image_compression_var.get() else tk.DISABLED
+            for widget in self.compression_options_frame.winfo_children():
+                if isinstance(widget, (tk.LabelFrame, tk.Frame)):
+                    for child in widget.winfo_children():
+                        if isinstance(child, (tb.Checkbutton, tb.Entry, tb.Radiobutton, tk.Scale)):
+                            child.config(state=state)
+                        elif isinstance(child, tk.Frame):
+                            for subchild in child.winfo_children():
+                                if isinstance(subchild, (tb.Checkbutton, tb.Entry, tb.Radiobutton, tk.Scale)):
+                                    subchild.config(state=state)
+        
+        self._toggle_compression_options = _toggle_compression_options
+        
+        # Set initial state
+        _toggle_compression_options()
+        
+        # Auto-resize and show
+        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.6, max_height_ratio=1.2)
+        
+        dialog.protocol("WM_DELETE_WINDOW", lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
     
     def prompt_custom_token_limit(self):
        val = simpledialog.askinteger(
@@ -7572,6 +7944,18 @@ Recent translations to summarize:
                 bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
        
        dialog.deiconify()
+
+    def toggle_thinking_budget(self):
+        """Enable/disable thinking budget entry based on checkbox state"""
+        if hasattr(self, 'thinking_budget_entry'):
+            if self.enable_gemini_thinking_var.get():
+                self.thinking_budget_entry.config(state='normal')
+                # If enabling and budget is 0, set to default 1024
+                if self.thinking_budget_var.get() == '0':
+                    self.thinking_budget_var.set('1024')
+            else:
+                self.thinking_budget_entry.config(state='disabled')
+                self.thinking_budget_var.set('0')
 
     def open_other_settings(self):
        """Open the Other Settings dialog"""
@@ -7682,34 +8066,51 @@ Recent translations to summarize:
         tk.Label(section_frame, text="Check GitHub for new Glossarion releases\nand download updates",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 5))
 
-
-
-
-    def _create_response_handling_section(self, parent):
+    def _create_response_handling_section(self, parent):  # ← ADD self HERE
         """Create response handling section with AI Hunter additions"""
         section_frame = tk.LabelFrame(parent, text="Response Handling & Retry Logic", padx=10, pady=10)
         section_frame.grid(row=1, column=0, sticky="nsew", padx=(10, 5), pady=5)
         
+        # Add Thinking Tokens Toggle with Budget Control (NEW)
+        tk.Label(section_frame, text="Gemini Thinking Mode", 
+                font=('TkDefaultFont', 11, 'bold')).pack(anchor=tk.W)
+        
+        thinking_frame = tk.Frame(section_frame)
+        thinking_frame.pack(anchor=tk.W, padx=20, pady=(5, 0))
+        
+        tb.Checkbutton(thinking_frame, text="Enable Gemini Thinking", 
+                      variable=self.enable_gemini_thinking_var,
+                      bootstyle="round-toggle",
+                      command=self.toggle_thinking_budget).pack(side=tk.LEFT)
+        
+        tk.Label(thinking_frame, text="Budget:").pack(side=tk.LEFT, padx=(20, 5))
+        self.thinking_budget_entry = tb.Entry(thinking_frame, width=8, textvariable=self.thinking_budget_var)
+        self.thinking_budget_entry.pack(side=tk.LEFT, padx=5)
+        tk.Label(thinking_frame, text="tokens").pack(side=tk.LEFT)
+        
+        tk.Label(section_frame, text="Control Gemini's thinking process. 0 = disabled,\n1-8192 = limited thinking, -1 = dynamic (auto)",
+               font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+        
+        # Add separator after thinking toggle
+        ttk.Separator(section_frame, orient='horizontal').pack(fill='x', pady=10)
+        
         # Retry Truncated
         tb.Checkbutton(section_frame, text="Auto-retry Truncated Responses", 
-                      variable=self.retry_truncated_var,
-                      bootstyle="round-toggle").pack(anchor=tk.W)
-
+                          variable=self.retry_truncated_var,
+                          bootstyle="round-toggle").pack(anchor=tk.W)
         retry_frame = tk.Frame(section_frame)
         retry_frame.pack(anchor=tk.W, padx=20, pady=(5, 5))
         tk.Label(retry_frame, text="Max retry tokens:").pack(side=tk.LEFT)
         tb.Entry(retry_frame, width=8, textvariable=self.max_retry_tokens_var).pack(side=tk.LEFT, padx=5)
-
         tk.Label(section_frame, text="Automatically retry when API response\nis cut off due to token limits",
-               font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
-
+                   font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
         # Compression Factor
         # Add separator line for clarity
         ttk.Separator(section_frame, orient='horizontal').pack(fill='x', pady=10)
         
         # Compression Factor
         tk.Label(section_frame, text="Translation Compression Factor", 
-                font=('TkDefaultFont', 11, 'bold')).pack(anchor=tk.W)
+                    font=('TkDefaultFont', 11, 'bold')).pack(anchor=tk.W)
         
         compression_frame = tk.Frame(section_frame)
         compression_frame.pack(anchor=tk.W, padx=20, pady=(5, 0))
@@ -7718,31 +8119,30 @@ Recent translations to summarize:
         tk.Label(compression_frame, text="(0.7-1.0)", font=('TkDefaultFont', 11)).pack(side=tk.LEFT)
         
         tb.Button(compression_frame, text=" Chunk Prompt", 
-                 command=self.configure_translation_chunk_prompt,
-                 bootstyle="info-outline", width=15).pack(side=tk.LEFT, padx=(15, 0))
-
+                     command=self.configure_translation_chunk_prompt,
+                     bootstyle="info-outline", width=15).pack(side=tk.LEFT, padx=(15, 0))
         tk.Label(section_frame, text="Ratio for chunk sizing based on output limits\n",
-               font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+                   font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
        
         # Add separator after compression factor
         ttk.Separator(section_frame, orient='horizontal').pack(fill='x', pady=10)
         
         # Retry Duplicate
         tb.Checkbutton(section_frame, text="Auto-retry Duplicate Content", 
-                     variable=self.retry_duplicate_var,
-                     bootstyle="round-toggle").pack(anchor=tk.W)
-
+                         variable=self.retry_duplicate_var,
+                         bootstyle="round-toggle").pack(anchor=tk.W)
         duplicate_frame = tk.Frame(section_frame)
         duplicate_frame.pack(anchor=tk.W, padx=20, pady=(5, 0))
         tk.Label(duplicate_frame, text="Check last").pack(side=tk.LEFT)
         tb.Entry(duplicate_frame, width=4, textvariable=self.duplicate_lookback_var).pack(side=tk.LEFT, padx=3)
         tk.Label(duplicate_frame, text="chapters").pack(side=tk.LEFT)
-
         tk.Label(section_frame, text="Detects when AI returns same content\nfor different chapters",
-               font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(5, 10))
-
+                   font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(5, 10))
         # Container for detection-related options (to show/hide based on toggle)
         self.detection_options_container = tk.Frame(section_frame)
+        
+        # Update thinking budget entry state based on initial toggle state
+        self.toggle_thinking_budget()
 
         # Function to show/hide detection options based on auto-retry toggle
         def update_detection_visibility():
@@ -8186,28 +8586,44 @@ Recent translations to summarize:
         # Right column - existing settings
         settings_frame = tk.Frame(right_column)
         settings_frame.pack(fill=tk.X)
-        
+
         settings_frame.grid_columnconfigure(1, minsize=80)
-        
+
         settings = [
             ("Min Image height (px):", self.webnovel_min_height_var),
             ("Max Images per chapter:", self.max_images_per_chapter_var),
             ("Chunk height:", self.image_chunk_height_var)
         ]
-        
+
         for row, (label, var) in enumerate(settings):
             tk.Label(settings_frame, text=label).grid(row=row, column=0, sticky=tk.W, pady=3)
             tb.Entry(settings_frame, width=10, textvariable=var).grid(row=row, column=1, sticky=tk.W, pady=3)
-        
+
+        # Buttons for prompts and compression
         tb.Button(settings_frame, text="Image Chunk Prompt", 
                  command=self.configure_image_chunk_prompt,
                  bootstyle="info-outline", width=20).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(10, 0))
-         
+        
+        # Add Image Compression button
+        tb.Button(settings_frame, text="🗜️ Image Compression", 
+                 command=self.configure_image_compression,
+                 bootstyle="info-outline", width=25).grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+
+        # Add the toggle here in the right column with some spacing
+        tk.Frame(right_column, height=15).pack()  # Add some spacing
+
+        tb.Checkbutton(right_column, text="Send tall image chunks in single API call (NOT RECOMMENDED)", 
+                      variable=self.single_api_image_chunks_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W)
+
+        tk.Label(right_column, text="All image chunks sent to 1 API call (Most AI models don't like this)",
+                font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, padx=20, pady=(0, 10))
+
         tk.Label(right_column, text="💡 Supported models:\n"
                 "• Gemini 1.5 Pro/Flash, 2.0 Flash\n"
                 "• GPT-4V, GPT-4o, o4-mini",
                 font=('TkDefaultFont', 10), fg='#666', justify=tk.LEFT).pack(anchor=tk.W, pady=(10, 0))
-
+                
         # Set up the dependency logic
         def toggle_watermark_options(*args):
             if self.enable_watermark_removal_var.get():
@@ -8574,6 +8990,9 @@ Recent translations to summarize:
                     'disable_gemini_safety': self.disable_gemini_safety_var.get(),
                     'auto_update_check': self.auto_update_check_var.get(),
                     'force_ncx_only': self.force_ncx_only_var.get(),
+                    'single_api_image_chunks': self.single_api_image_chunks_var.get(),
+                    'enable_gemini_thinking': self.enable_gemini_thinking_var.get(),
+                    'thinking_budget': int(self.thinking_budget_var.get()) if self.thinking_budget_var.get().lstrip('-').isdigit() else 0,
                     
                     # ALL Anti-duplicate parameters (moved below other settings)
                     'enable_anti_duplicate': getattr(self, 'enable_anti_duplicate_var', type('', (), {'get': lambda: False})).get(),
@@ -8651,6 +9070,24 @@ Recent translations to summarize:
                     "DISABLE_GEMINI_SAFETY": str(self.config.get('disable_gemini_safety', False)).lower(),
                     'auto_update_check': str(self.auto_update_check_var.get()),
                     'FORCE_NCX_ONLY': '1' if self.force_ncx_only_var.get() else '0',
+                    'SINGLE_API_IMAGE_CHUNKS': "1" if self.single_api_image_chunks_var.get() else "0",
+                    'ENABLE_GEMINI_THINKING': "1" if self.enable_gemini_thinking_var.get() else "0",
+                    'THINKING_BUDGET': self.thinking_budget_var.get() if self.enable_gemini_thinking_var.get() else '0',
+                    
+                    # Image compression settings
+                    'ENABLE_IMAGE_COMPRESSION': "1" if self.config.get('enable_image_compression', False) else "0",
+                    'AUTO_COMPRESS_ENABLED': "1" if self.config.get('auto_compress_enabled', True) else "0",
+                    'TARGET_IMAGE_TOKENS': str(self.config.get('target_image_tokens', 1000)),
+                    'IMAGE_COMPRESSION_FORMAT': self.config.get('image_compression_format', 'auto'),
+                    'WEBP_QUALITY': str(self.config.get('webp_quality', 85)),
+                    'JPEG_QUALITY': str(self.config.get('jpeg_quality', 85)),
+                    'PNG_COMPRESSION': str(self.config.get('png_compression', 6)),
+                    'MAX_IMAGE_DIMENSION': str(self.config.get('max_image_dimension', 2048)),
+                    'MAX_IMAGE_SIZE_MB': str(self.config.get('max_image_size_mb', 10)),
+                    'PRESERVE_TRANSPARENCY': "1" if self.config.get('preserve_transparency', True) else "0",
+                    'OPTIMIZE_FOR_OCR': "1" if self.config.get('optimize_for_ocr', True) else "0",
+                    'PROGRESSIVE_ENCODING': "1" if self.config.get('progressive_encoding', True) else "0",
+                    'SAVE_COMPRESSED_IMAGES': "1" if self.config.get('save_compressed_images', False) else "0",
                     
                     # Metadata and batch header settings
                     'TRANSLATE_METADATA_FIELDS': json.dumps(self.translate_metadata_fields),
@@ -9161,6 +9598,41 @@ Recent translations to summarize:
             self.config['headers_per_batch'] = self.headers_per_batch_var.get()
             self.config['update_html_headers'] = self.update_html_headers_var.get() 
             self.config['save_header_translations'] = self.save_header_translations_var.get()
+            self.config['single_api_image_chunks'] = self.single_api_image_chunks_var.get()
+            self.config['enable_gemini_thinking'] = self.enable_gemini_thinking_var.get()
+            self.config['thinking_budget'] = int(self.thinking_budget_var.get()) if self.thinking_budget_var.get().lstrip('-').isdigit() else 0
+
+            # Save image compression settings if they exist
+            # These are saved from the compression dialog, but we ensure defaults here
+            if 'enable_image_compression' not in self.config:
+                self.config['enable_image_compression'] = False
+            if 'auto_compress_enabled' not in self.config:
+                self.config['auto_compress_enabled'] = True
+            if 'target_image_tokens' not in self.config:
+                self.config['target_image_tokens'] = 1000
+            if 'image_compression_format' not in self.config:
+                self.config['image_compression_format'] = 'auto'
+            if 'webp_quality' not in self.config:
+                self.config['webp_quality'] = 85
+            if 'jpeg_quality' not in self.config:
+                self.config['jpeg_quality'] = 85
+            if 'png_compression' not in self.config:
+                self.config['png_compression'] = 6
+            if 'max_image_dimension' not in self.config:
+                self.config['max_image_dimension'] = 2048
+            if 'max_image_size_mb' not in self.config:
+                self.config['max_image_size_mb'] = 10
+            if 'preserve_transparency' not in self.config:
+                self.config['preserve_transparency'] = False  
+            if 'preserve_original_format' not in self.config:
+                self.config['preserve_original_format'] = False 
+            if 'optimize_for_ocr' not in self.config:
+                self.config['optimize_for_ocr'] = True
+            if 'progressive_encoding' not in self.config:
+                self.config['progressive_encoding'] = True
+            if 'save_compressed_images' not in self.config:
+                self.config['save_compressed_images'] = False
+        
             
             # Add anti-duplicate parameters
             if hasattr(self, 'enable_anti_duplicate_var'):
@@ -9212,7 +9684,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.4.0...")
+    print("🚀 Starting Glossarion v3.4.4...")
     
     # Initialize splash screen
     splash_manager = None
