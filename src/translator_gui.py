@@ -950,8 +950,7 @@ class TranslatorGUI:
         
         # Default prompts
         self.default_translation_chunk_prompt = "[PART {chunk_idx}/{total_chunks}]\n{chunk_html}"
-        self.default_image_chunk_prompt = "This is part {chunk_idx} of {total_chunks} of a longer image. {context}"
-        self.default_prompts = {
+        self.default_image_chunk_prompt = "This is part {chunk_idx} of {total_chunks} of a longer image. You must maintain the narrative flow with the previous chunks while translating it and following all system prompt guidelines previously mentioned. {context}"        self.default_prompts = {
             "korean": (
                 "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use an easy to read comedy translation style.\n"
