@@ -1881,7 +1881,7 @@ class ImageTranslator:
                     print(f"   📊 Chunk compression: {original_size:.1f}KB → {compressed_size:.1f}KB ({compression_ratio:.1f}% reduction)")
             
             # Get custom image chunk prompt template from environment
-            image_chunk_prompt_template = os.getenv("IMAGE_CHUNK_PROMPT", "This is part {chunk_idx} of {total_chunks} of a longer image. {context}")
+            image_chunk_prompt_template = os.getenv("IMAGE_CHUNK_PROMPT", "This is part {chunk_idx} of {total_chunks} of a longer image. You must maintain the narrative flow with the previous chunks while translating it and following all system prompt guidelines previously mentioned. {context}")
             
             # Build context for this chunk
             chunk_context = image_chunk_prompt_template.format(
