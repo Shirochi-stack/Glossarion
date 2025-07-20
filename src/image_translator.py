@@ -139,293 +139,325 @@ class ImageTranslator:
         return images
 
     def compress_image(self, image_path):
-            """
-            Compress an image based on settings from environment variables
+        """
+        Compress an image based on settings from environment variables
+        
+        Args:
+            image_path: Path to the input image
             
-            Args:
-                image_path: Path to the input image
+        Returns:
+            Path to compressed image (temporary or saved)
+        """
+        try:
+            # Check if compression is enabled
+            if os.getenv("ENABLE_IMAGE_COMPRESSION", "0") != "1":
+                return image_path  # Return original if compression disabled
+            
+            print(f"   🗜️ Compressing image: {os.path.basename(image_path)}")
+            
+            # Load compression settings from environment
+            target_format = os.getenv("IMAGE_COMPRESSION_FORMAT", "auto")
+            max_dimension = int(os.getenv("MAX_IMAGE_DIMENSION", "2048"))
+            max_size_mb = float(os.getenv("MAX_IMAGE_SIZE_MB", "10"))
+            
+            quality_settings = {
+                'webp': int(os.getenv("WEBP_QUALITY", "85")),
+                'jpeg': int(os.getenv("JPEG_QUALITY", "85")),
+                'png': int(os.getenv("PNG_COMPRESSION", "6"))
+            }
+            
+            auto_compress = os.getenv("AUTO_COMPRESS_ENABLED", "1") == "1"
+            preserve_transparency = os.getenv("PRESERVE_TRANSPARENCY", "0") == "1"  # Default is now False
+            preserve_original_format = os.getenv("PRESERVE_ORIGINAL_FORMAT", "0") == "1"  # New option
+            optimize_for_ocr = os.getenv("OPTIMIZE_FOR_OCR", "1") == "1"
+            progressive = os.getenv("PROGRESSIVE_ENCODING", "1") == "1"
+            save_compressed = os.getenv("SAVE_COMPRESSED_IMAGES", "0") == "1"
+            
+            # Open image
+            with Image.open(image_path) as img:
+                original_format = img.format.lower() if img.format else 'png'
+                has_transparency = img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info)
                 
-            Returns:
-                Path to compressed image (temporary or saved)
-            """
-            try:
-                # Check if compression is enabled
-                if os.getenv("ENABLE_IMAGE_COMPRESSION", "0") != "1":
-                    return image_path  # Return original if compression disabled
+                # Special handling for GIF files
+                is_gif = original_format == 'gif'
+                if is_gif and not preserve_original_format:
+                    print(f"   🎞️ GIF detected - converting to static image for better compression")
+                    # For animated GIFs, we'll take the first frame
+                    # Convert to RGBA to preserve any transparency
+                    if img.mode == 'P' and 'transparency' in img.info:
+                        img = img.convert('RGBA')
+                    elif img.mode not in ('RGB', 'RGBA'):
+                        img = img.convert('RGB')
+                elif is_gif and preserve_original_format:
+                    print(f"   🎞️ GIF detected - preserving original format as requested")
                 
-                print(f"   🗜️ Compressing image: {os.path.basename(image_path)}")
+                # Calculate original size
+                original_size_mb = os.path.getsize(image_path) / (1024 * 1024)
+                print(f"   📊 Original: {img.width}x{img.height}, {original_size_mb:.2f}MB, format: {original_format}")
                 
-                # Load compression settings from environment
-                target_format = os.getenv("IMAGE_COMPRESSION_FORMAT", "auto")
-                max_dimension = int(os.getenv("MAX_IMAGE_DIMENSION", "2048"))
-                max_size_mb = float(os.getenv("MAX_IMAGE_SIZE_MB", "10"))
+                # Get chunk height from environment - this comes from the GUI setting
+                chunk_height = int(os.getenv("IMAGE_CHUNK_HEIGHT", "1500"))
+                print(f"   📏 Using chunk height from settings: {chunk_height}px")
                 
-                quality_settings = {
-                    'webp': int(os.getenv("WEBP_QUALITY", "85")),
-                    'jpeg': int(os.getenv("JPEG_QUALITY", "85")),
-                    'png': int(os.getenv("PNG_COMPRESSION", "6"))
-                }
+                # Check if resizing is needed - BUT NOT FOR TALL IMAGES THAT WILL BE CHUNKED!
+                needs_resize = img.width > max_dimension or img.height > max_dimension
                 
-                auto_compress = os.getenv("AUTO_COMPRESS_ENABLED", "1") == "1"
-                preserve_transparency = os.getenv("PRESERVE_TRANSPARENCY", "0") == "1"  # Default is now False
-                preserve_original_format = os.getenv("PRESERVE_ORIGINAL_FORMAT", "0") == "1"  # New option
-                optimize_for_ocr = os.getenv("OPTIMIZE_FOR_OCR", "1") == "1"
-                progressive = os.getenv("PROGRESSIVE_ENCODING", "1") == "1"
-                save_compressed = os.getenv("SAVE_COMPRESSED_IMAGES", "0") == "1"
+                # CRITICAL: Check if this is a tall image that will be chunked
+                # If so, DO NOT resize the height!
+                is_tall_text_image = img.height > chunk_height
                 
-                # Open image
-                with Image.open(image_path) as img:
-                    original_format = img.format.lower() if img.format else 'png'
-                    has_transparency = img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info)
-                    
-                    # Special handling for GIF files
-                    is_gif = original_format == 'gif'
-                    if is_gif and not preserve_original_format:
-                        print(f"   🎞️ GIF detected - converting to static image for better compression")
-                        # For animated GIFs, we'll take the first frame
-                        # Convert to RGBA to preserve any transparency
-                        if img.mode == 'P' and 'transparency' in img.info:
-                            img = img.convert('RGBA')
-                        elif img.mode not in ('RGB', 'RGBA'):
-                            img = img.convert('RGB')
-                    elif is_gif and preserve_original_format:
-                        print(f"   🎞️ GIF detected - preserving original format as requested")
-                    
-                    # Calculate original size
-                    original_size_mb = os.path.getsize(image_path) / (1024 * 1024)
-                    print(f"   📊 Original: {img.width}x{img.height}, {original_size_mb:.2f}MB, format: {original_format}")
-                    
-                    # Get chunk height from environment - this comes from the GUI setting
-                    chunk_height = int(os.getenv("IMAGE_CHUNK_HEIGHT", "1500"))
-                    print(f"   📏 Using chunk height from settings: {chunk_height}px")
-                    
-                    # Check if resizing is needed - BUT NOT FOR TALL IMAGES THAT WILL BE CHUNKED!
-                    needs_resize = img.width > max_dimension or img.height > max_dimension
-                    
-                    # CRITICAL: Check if this is a tall image that will be chunked
-                    # If so, DO NOT resize the height!
-                    is_tall_text_image = img.height > chunk_height
-                    
-                    if needs_resize:
-                        if is_tall_text_image:
-                            # Only resize width if needed, NEVER touch the height for tall images
-                            if img.width > max_dimension:
-                                # Keep aspect ratio but don't exceed max width
-                                ratio = max_dimension / img.width
-                                new_width = max_dimension
-                                new_height = int(img.height * ratio)
-                                print(f"   ⚠️ Tall image ({img.height}px > chunk height {chunk_height}px)")
-                                print(f"   📐 Resizing width only: {img.width} → {new_width} (height: {img.height} → {new_height})")
-                                img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-                            else:
-                                print(f"   ✅ Tall image ({img.height}px) - keeping dimensions (will be chunked into {(img.height + chunk_height - 1) // chunk_height} chunks)")
+                if needs_resize:
+                    if is_tall_text_image:
+                        # Only resize width if needed, NEVER touch the height for tall images
+                        if img.width > max_dimension:
+                            # Keep aspect ratio but don't exceed max width
+                            ratio = max_dimension / img.width
+                            new_width = max_dimension
+                            new_height = int(img.height * ratio)
+                            print(f"   ⚠️ Tall image ({img.height}px > chunk height {chunk_height}px)")
+                            print(f"   📐 Resizing width only: {img.width} → {new_width} (height: {img.height} → {new_height})")
+                            img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
                         else:
-                            # Normal resize for regular images (not tall enough to chunk)
-                            ratio = min(max_dimension / img.width, max_dimension / img.height)
-                            new_size = (int(img.width * ratio), int(img.height * ratio))
-                            img = img.resize(new_size, Image.Resampling.LANCZOS)
-                            print(f"   📐 Regular image resized to: {new_size[0]}x{new_size[1]}")
-                    
-                    # Auto-select format if needed
-                    if preserve_original_format and target_format == 'auto':
-                        # Keep the original format
-                        target_format = original_format
-                        # Special handling for formats that might not be ideal
-                        if original_format == 'bmp':
-                            target_format = 'png'  # Convert BMP to PNG as BMP is uncompressed
-                        print(f"   📸 Preserving original format: {target_format}")
-                    elif target_format == 'auto':
-                        # For GIFs with text (web novel chapters), prefer PNG or WebP
-                        if is_gif:
-                            if has_transparency and preserve_transparency:
-                                target_format = 'png'  # Better for text with transparency
-                            else:
-                                target_format = 'webp'  # Good compression for text
-                        elif has_transparency and preserve_transparency:
-                            target_format = 'webp'
-                        elif optimize_for_ocr and img.width * img.height > 1000000:
-                            target_format = 'webp'
-                        elif original_size_mb > 5:
-                            target_format = 'webp'
-                        else:
-                            target_format = 'jpeg'
-                        print(f"   🎯 Auto-selected format: {target_format}")
-                    
-                    # Handle transparency conversion if needed
-                    if target_format == 'jpeg' and (has_transparency or img.mode == 'RGBA'):
-                        # Convert to RGB with white background
-                        rgb_img = Image.new('RGB', img.size, (255, 255, 255))
-                        if img.mode == 'RGBA':
-                            rgb_img.paste(img, mask=img.split()[3])
-                        else:
-                            rgb_img.paste(img)
-                        img = rgb_img
-                    
-                    # Apply OCR optimization if enabled
-                    if optimize_for_ocr:
-                        # Skip OCR optimization for GIF files in palette mode when preserving format
-                        if target_format == 'gif' and img.mode in ('P', 'L'):
-                            print(f"   ⚠️ Applying OCR optimization to GIF (converting modes temporarily)")
-                            # Convert to RGB temporarily for enhancement, then convert back
-                            original_mode = img.mode
-                            transparency_info = None
-                            
-                            if img.mode == 'P':
-                                # Preserve transparency info if present
-                                transparency_info = img.info.get('transparency', None)
-                                # Convert to RGBA if has transparency, otherwise RGB
-                                if transparency_info is not None:
-                                    img = img.convert('RGBA')
-                                else:
-                                    img = img.convert('RGB')
-                            elif img.mode == 'L':
-                                img = img.convert('RGB')
-                            
-                            # Apply enhancements
-                            from PIL import ImageEnhance
-                            enhancer = ImageEnhance.Contrast(img)
-                            img = enhancer.enhance(1.2)
-                            enhancer = ImageEnhance.Sharpness(img)
-                            img = enhancer.enhance(1.1)
-                            
-                            # Extra sharpening for GIF text
-                            img = enhancer.enhance(1.2)
-                            
-                            # Convert back to original mode for GIF saving
-                            if original_mode == 'P':
-                                # Quantize back to palette mode
-                                img = img.quantize(colors=256, method=2)  # MEDIANCUT
-                                if transparency_info is not None:
-                                    img.info['transparency'] = transparency_info
-                            elif original_mode == 'L':
-                                img = img.convert('L')
-                        else:
-                            # Normal OCR optimization for non-GIF formats or RGB-mode images
-                            from PIL import ImageEnhance
-                            enhancer = ImageEnhance.Contrast(img)
-                            img = enhancer.enhance(1.2)
-                            enhancer = ImageEnhance.Sharpness(img)
-                            img = enhancer.enhance(1.1)
-                            
-                            # Extra sharpening for GIF text which might be lower quality
-                            if is_gif:
-                                img = enhancer.enhance(1.2)
-                    
-                    # Prepare save parameters based on format
-                    save_params = {}
-                    
-                    if target_format == 'webp':
-                        # For WebP, decide whether to keep transparency
+                            print(f"   ✅ Tall image ({img.height}px) - keeping dimensions (will be chunked into {(img.height + chunk_height - 1) // chunk_height} chunks)")
+                    else:
+                        # Normal resize for regular images (not tall enough to chunk)
+                        ratio = min(max_dimension / img.width, max_dimension / img.height)
+                        new_size = (int(img.width * ratio), int(img.height * ratio))
+                        img = img.resize(new_size, Image.Resampling.LANCZOS)
+                        print(f"   📐 Regular image resized to: {new_size[0]}x{new_size[1]}")
+                
+                # Auto-select format if needed
+                if preserve_original_format and target_format == 'auto':
+                    # Keep the original format
+                    target_format = original_format
+                    # Special handling for formats that might not be ideal
+                    if original_format == 'bmp':
+                        target_format = 'png'  # Convert BMP to PNG as BMP is uncompressed
+                    print(f"   📸 Preserving original format: {target_format}")
+                elif target_format == 'auto':
+                    # For GIFs with text (web novel chapters), prefer PNG or WebP
+                    if is_gif:
                         if has_transparency and preserve_transparency:
-                            save_params = {
-                                'format': 'WEBP',
-                                'quality': quality_settings['webp'],
-                                'method': 6,
-                                'lossless': False,
-                                'exact': True  # Preserve transparency
-                            }
+                            target_format = 'png'  # Better for text with transparency
                         else:
-                            # Convert to RGB with white background for WebP without transparency
-                            if img.mode in ('RGBA', 'LA', 'P'):
-                                rgb_img = Image.new('RGB', img.size, (255, 255, 255))
-                                if img.mode == 'RGBA':
+                            target_format = 'webp'  # Good compression for text
+                    elif has_transparency and preserve_transparency:
+                        target_format = 'webp'
+                    elif optimize_for_ocr and img.width * img.height > 1000000:
+                        target_format = 'webp'
+                    elif original_size_mb > 5:
+                        target_format = 'webp'
+                    else:
+                        target_format = 'jpeg'
+                    print(f"   🎯 Auto-selected format: {target_format}")
+                
+                # Handle transparency conversion if needed
+                if target_format == 'jpeg' and (has_transparency or img.mode == 'RGBA'):
+                    # Convert to RGB with white background
+                    rgb_img = Image.new('RGB', img.size, (255, 255, 255))
+                    if img.mode == 'RGBA':
+                        rgb_img.paste(img, mask=img.split()[3])
+                    else:
+                        rgb_img.paste(img)
+                    img = rgb_img
+                
+                # Apply OCR optimization if enabled
+                if optimize_for_ocr:
+                    # Skip OCR optimization for GIF files in palette mode when preserving format
+                    if target_format == 'gif' and img.mode in ('P', 'L'):
+                        print(f"   ⚠️ Applying OCR optimization to GIF (converting modes temporarily)")
+                        # Convert to RGB temporarily for enhancement, then convert back
+                        original_mode = img.mode
+                        transparency_info = None
+                        
+                        if img.mode == 'P':
+                            # Preserve transparency info if present
+                            transparency_info = img.info.get('transparency', None)
+                            # Convert to RGBA if has transparency, otherwise RGB
+                            if transparency_info is not None:
+                                img = img.convert('RGBA')
+                            else:
+                                img = img.convert('RGB')
+                        elif img.mode == 'L':
+                            img = img.convert('RGB')
+                        
+                        # Apply enhancements
+                        from PIL import ImageEnhance
+                        enhancer = ImageEnhance.Contrast(img)
+                        img = enhancer.enhance(1.2)
+                        enhancer = ImageEnhance.Sharpness(img)
+                        img = enhancer.enhance(1.1)
+                        
+                        # Extra sharpening for GIF text
+                        img = enhancer.enhance(1.2)
+                        
+                        # Convert back to original mode for GIF saving
+                        if original_mode == 'P':
+                            # Quantize back to palette mode
+                            img = img.quantize(colors=256, method=2)  # MEDIANCUT
+                            if transparency_info is not None:
+                                img.info['transparency'] = transparency_info
+                        elif original_mode == 'L':
+                            img = img.convert('L')
+                    else:
+                        # Normal OCR optimization for non-GIF formats or RGB-mode images
+                        from PIL import ImageEnhance
+                        enhancer = ImageEnhance.Contrast(img)
+                        img = enhancer.enhance(1.2)
+                        enhancer = ImageEnhance.Sharpness(img)
+                        img = enhancer.enhance(1.1)
+                        
+                        # Extra sharpening for GIF text which might be lower quality
+                        if is_gif:
+                            img = enhancer.enhance(1.2)
+                
+                # Prepare save parameters based on format
+                save_params = {}
+                
+                if target_format == 'webp':
+                    # For WebP, decide whether to keep transparency
+                    if has_transparency and preserve_transparency:
+                        save_params = {
+                            'format': 'WEBP',
+                            'quality': quality_settings['webp'],
+                            'method': 6,
+                            'lossless': False,
+                            'exact': True  # Preserve transparency
+                        }
+                    else:
+                        # Convert to RGB with white background for WebP without transparency
+                        if img.mode in ('RGBA', 'LA', 'P'):
+                            rgb_img = Image.new('RGB', img.size, (255, 255, 255))
+                            if img.mode == 'RGBA':
+                                rgb_img.paste(img, mask=img.split()[3])
+                            elif img.mode == 'LA':
+                                rgb_img.paste(img, mask=img.split()[1])
+                            else:  # P mode
+                                if 'transparency' in img.info:
+                                    img = img.convert('RGBA')
                                     rgb_img.paste(img, mask=img.split()[3])
-                                elif img.mode == 'LA':
-                                    rgb_img.paste(img, mask=img.split()[1])
-                                else:  # P mode
-                                    if 'transparency' in img.info:
-                                        img = img.convert('RGBA')
-                                        rgb_img.paste(img, mask=img.split()[3])
-                                    else:
-                                        rgb_img.paste(img)
-                                img = rgb_img
-                            
-                            save_params = {
-                                'format': 'WEBP',
-                                'quality': quality_settings['webp'],
-                                'method': 6,
-                                'lossless': False
-                            }
-                            
-                    elif target_format == 'jpeg':
+                                else:
+                                    rgb_img.paste(img)
+                            img = rgb_img
+                        
                         save_params = {
-                            'format': 'JPEG',
-                            'quality': quality_settings['jpeg'],
-                            'optimize': True,
-                            'progressive': progressive
+                            'format': 'WEBP',
+                            'quality': quality_settings['webp'],
+                            'method': 6,
+                            'lossless': False
                         }
                         
-                    elif target_format == 'png':
-                        # For PNG, handle transparency properly
-                        if not (has_transparency and preserve_transparency):
-                            # Convert to RGB with white background if not preserving transparency
-                            if img.mode in ('RGBA', 'LA', 'P'):
-                                rgb_img = Image.new('RGB', img.size, (255, 255, 255))
-                                if img.mode == 'RGBA':
+                elif target_format == 'jpeg':
+                    save_params = {
+                        'format': 'JPEG',
+                        'quality': quality_settings['jpeg'],
+                        'optimize': True,
+                        'progressive': progressive
+                    }
+                    
+                elif target_format == 'png':
+                    # For PNG, handle transparency properly
+                    if not (has_transparency and preserve_transparency):
+                        # Convert to RGB with white background if not preserving transparency
+                        if img.mode in ('RGBA', 'LA', 'P'):
+                            rgb_img = Image.new('RGB', img.size, (255, 255, 255))
+                            if img.mode == 'RGBA':
+                                rgb_img.paste(img, mask=img.split()[3])
+                            elif img.mode == 'LA':
+                                rgb_img.paste(img, mask=img.split()[1])
+                            else:  # P mode
+                                if 'transparency' in img.info:
+                                    img = img.convert('RGBA')
                                     rgb_img.paste(img, mask=img.split()[3])
-                                elif img.mode == 'LA':
-                                    rgb_img.paste(img, mask=img.split()[1])
-                                else:  # P mode
-                                    if 'transparency' in img.info:
-                                        img = img.convert('RGBA')
-                                        rgb_img.paste(img, mask=img.split()[3])
-                                    else:
-                                        rgb_img.paste(img)
-                                img = rgb_img
-                        elif img.mode == 'P' and 'transparency' in img.info:
-                            # Convert palette mode with transparency to RGBA
-                            img = img.convert('RGBA')
-                        
-                        save_params = {
-                            'format': 'PNG',
-                            'compress_level': quality_settings['png'],
-                            'optimize': True
-                        }
+                                else:
+                                    rgb_img.paste(img)
+                            img = rgb_img
+                    elif img.mode == 'P' and 'transparency' in img.info:
+                        # Convert palette mode with transparency to RGBA
+                        img = img.convert('RGBA')
                     
-                    elif target_format == 'gif':
-                        # GIF format - limited but preserving original when requested
-                        print(f"   ⚠️ Warning: GIF format has limited colors (256) and may reduce text quality")
-                        if img.mode not in ('P', 'L'):
-                            # Convert to palette mode for GIF
-                            img = img.quantize(colors=256, method=2)  # MEDIANCUT method
-                        
-                        save_params = {
-                            'format': 'GIF',
-                            'optimize': True
-                        }
+                    save_params = {
+                        'format': 'PNG',
+                        'compress_level': quality_settings['png'],
+                        'optimize': True
+                    }
+                
+                elif target_format == 'gif':
+                    # GIF format - limited but preserving original when requested
+                    print(f"   ⚠️ Warning: GIF format has limited colors (256) and may reduce text quality")
+                    if img.mode not in ('P', 'L'):
+                        # Convert to palette mode for GIF
+                        img = img.quantize(colors=256, method=2)  # MEDIANCUT method
                     
-                    # Auto-compress to meet token target if specified
-                    if auto_compress:
-                        target_tokens = int(os.getenv("TARGET_IMAGE_TOKENS", "1000"))
-                        # For text-heavy images (like web novel GIFs), be less aggressive
-                        if is_gif or 'chapter' in os.path.basename(image_path).lower():
-                            target_mb = min(max_size_mb, 3.0)  # Allow up to 3MB for text clarity
-                        else:
-                            target_mb = min(max_size_mb, 2.0)  # Regular images
-                        print(f"   🎯 Auto-compress target: {target_mb:.1f}MB for token efficiency")
-                        max_size_mb = target_mb
+                    save_params = {
+                        'format': 'GIF',
+                        'optimize': True
+                    }
+                
+                # Auto-compress to meet token target if specified
+                if auto_compress:
+                    target_tokens = int(os.getenv("TARGET_IMAGE_TOKENS", "1000"))
+                    # For text-heavy images (like web novel GIFs), be less aggressive
+                    if is_gif or 'chapter' in os.path.basename(image_path).lower():
+                        target_mb = min(max_size_mb, 3.0)  # Allow up to 3MB for text clarity
+                    else:
+                        target_mb = min(max_size_mb, 2.0)  # Regular images
+                    print(f"   🎯 Auto-compress target: {target_mb:.1f}MB for token efficiency")
+                    max_size_mb = target_mb
+                
+                # Save compressed image
+                output_path = None
+                quality = save_params.get('quality', 85)
+                
+                # Try different quality levels to meet size target
+                while quality > 10:
+                    from io import BytesIO
+                    buffer = BytesIO()
                     
-                    # Save compressed image
-                    output_path = None
-                    quality = save_params.get('quality', 85)
+                    if 'quality' in save_params:
+                        save_params['quality'] = quality
                     
-                    # Try different quality levels to meet size target
-                    while quality > 10:
-                        from io import BytesIO
-                        buffer = BytesIO()
-                        
-                        if 'quality' in save_params:
-                            save_params['quality'] = quality
-                        
-                        img.save(buffer, **save_params)
-                        compressed_size_mb = len(buffer.getvalue()) / (1024 * 1024)
-                        
-                        if compressed_size_mb <= max_size_mb or quality <= 10:
-                            # Size is acceptable or we've reached minimum quality
-                            if save_compressed:
-                                # Save to permanent location
-                                compressed_dir = os.path.join(self.output_dir, "translated_images", "compressed")
-                                os.makedirs(compressed_dir, exist_ok=True)
+                    img.save(buffer, **save_params)
+                    compressed_size_mb = len(buffer.getvalue()) / (1024 * 1024)
+                    
+                    if compressed_size_mb <= max_size_mb or quality <= 10:
+                        # Size is acceptable or we've reached minimum quality
+                        if save_compressed:
+                            # FIXED: Handle PyInstaller paths properly
+                            try:
+                                # Try to determine the proper output directory
+                                # First check if self.output_dir is absolute and exists
+                                if hasattr(self, 'output_dir') and self.output_dir and os.path.isabs(self.output_dir):
+                                    base_output_dir = self.output_dir
+                                else:
+                                    # Fall back to using the directory of the source image
+                                    base_output_dir = os.path.dirname(image_path)
+                                    # Look for a typical output structure
+                                    if 'translated_images' not in base_output_dir:
+                                        # Try to find or create the translated_images directory
+                                        parent_dir = base_output_dir
+                                        while parent_dir and not os.path.exists(os.path.join(parent_dir, 'translated_images')):
+                                            new_parent = os.path.dirname(parent_dir)
+                                            if new_parent == parent_dir:  # Reached root
+                                                break
+                                            parent_dir = new_parent
+                                        
+                                        if parent_dir and os.path.exists(os.path.join(parent_dir, 'translated_images')):
+                                            base_output_dir = parent_dir
+                                        else:
+                                            # Create translated_images in the same directory as the source
+                                            base_output_dir = os.path.dirname(image_path)
+                                
+                                compressed_dir = os.path.join(base_output_dir, "translated_images", "compressed")
+                                
+                                # Ensure the directory exists with proper error handling
+                                try:
+                                    os.makedirs(compressed_dir, exist_ok=True)
+                                except OSError as e:
+                                    print(f"   ⚠️ Failed to create compressed directory: {e}")
+                                    # Fall back to source image directory
+                                    compressed_dir = os.path.join(os.path.dirname(image_path), "compressed")
+                                    os.makedirs(compressed_dir, exist_ok=True)
                                 
                                 base_name = os.path.basename(image_path)
                                 name, original_ext = os.path.splitext(base_name)
@@ -437,44 +469,59 @@ class ImageTranslator:
                                 ext = '.webp' if target_format == 'webp' else f'.{target_format}'
                                 output_path = os.path.join(compressed_dir, f"{name}_compressed{ext}")
                                 
-                                with open(output_path, 'wb') as f:
-                                    f.write(buffer.getvalue())
-                                
-                                print(f"   💾 Saved compressed image: {output_path}")
-                            else:
-                                # Save to temporary file
+                                # Write the file with proper error handling
+                                try:
+                                    with open(output_path, 'wb') as f:
+                                        f.write(buffer.getvalue())
+                                    print(f"   💾 Saved compressed image: {output_path}")
+                                except OSError as e:
+                                    print(f"   ❌ Failed to save compressed image: {e}")
+                                    # Fall back to temporary file
+                                    raise  # This will trigger the temporary file fallback below
+                                    
+                            except Exception as e:
+                                print(f"   ⚠️ Failed to save to permanent location: {e}")
+                                # Fall back to temporary file
                                 import tempfile
                                 ext = '.webp' if target_format == 'webp' else f'.{target_format}'
                                 with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
                                     tmp.write(buffer.getvalue())
                                     output_path = tmp.name
-                                
-                                print(f"   📝 Created temp compressed image")
+                                print(f"   📝 Created temp compressed image instead")
+                        else:
+                            # Save to temporary file
+                            import tempfile
+                            ext = '.webp' if target_format == 'webp' else f'.{target_format}'
+                            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                                tmp.write(buffer.getvalue())
+                                output_path = tmp.name
                             
-                            compression_ratio = (1 - compressed_size_mb / original_size_mb) * 100
-                            print(f"   ✅ Compressed: {original_size_mb:.2f}MB → {compressed_size_mb:.2f}MB "
-                                  f"({compression_ratio:.1f}% reduction, quality: {quality})")
-                            
-                            # Special note for GIF conversions
-                            if is_gif:
-                                print(f"   🎞️ GIF converted to {target_format.upper()} for better compression")
-                            
-                            return output_path
+                            print(f"   📝 Created temp compressed image")
                         
-                        # Reduce quality and try again
-                        quality -= 5
-                        print(f"   🔄 Size {compressed_size_mb:.2f}MB > target {max_size_mb:.2f}MB, "
-                              f"reducing quality to {quality}")
+                        compression_ratio = (1 - compressed_size_mb / original_size_mb) * 100
+                        print(f"   ✅ Compressed: {original_size_mb:.2f}MB → {compressed_size_mb:.2f}MB "
+                              f"({compression_ratio:.1f}% reduction, quality: {quality})")
+                        
+                        # Special note for GIF conversions
+                        if is_gif:
+                            print(f"   🎞️ GIF converted to {target_format.upper()} for better compression")
+                        
+                        return output_path
                     
-                    # If we couldn't meet the target, return the best we got
-                    print(f"   ⚠️ Could not meet size target, using minimum quality")
-                    return output_path if output_path else image_path
-                    
-            except Exception as e:
-                print(f"   ❌ Compression failed: {e}")
-                import traceback
-                traceback.print_exc()
-                return image_path  # Return original on error
+                    # Reduce quality and try again
+                    quality -= 5
+                    print(f"   🔄 Size {compressed_size_mb:.2f}MB > target {max_size_mb:.2f}MB, "
+                          f"reducing quality to {quality}")
+                
+                # If we couldn't meet the target, return the best we got
+                print(f"   ⚠️ Could not meet size target, using minimum quality")
+                return output_path if output_path else image_path
+                
+        except Exception as e:
+            print(f"   ❌ Compression failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return image_path  # Return original on error
 
     def _process_image_with_compression(self, image_path, context, check_stop_fn):
         """Process image with optional compression before translation"""
