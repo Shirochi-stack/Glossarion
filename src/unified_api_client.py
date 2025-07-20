@@ -2209,7 +2209,7 @@ class UnifiedClient:
                     generation_config.safety_settings = safety_settings
                 
                 # Log the request with thinking info
-                print(f"   📤 Sending text request to Gemini{thinking_status}")
+                #print(f"   📤 Sending text request to Gemini{thinking_status}")
                 print(f"   📊 Temperature: {temperature}, Max tokens: {current_tokens}")
                 
                 if supports_thinking:
