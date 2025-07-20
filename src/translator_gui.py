@@ -7950,10 +7950,20 @@ Recent translations to summarize:
         if hasattr(self, 'thinking_budget_entry'):
             if self.enable_gemini_thinking_var.get():
                 self.thinking_budget_entry.config(state='normal')
-                # If enabling and budget is 0, set to default 1024
-                if self.thinking_budget_var.get() == '0':
-                    self.thinking_budget_var.set('1024')
+                # Restore previous value or use default
+                if hasattr(self, '_previous_thinking_budget') and self._previous_thinking_budget:
+                    self.thinking_budget_var.set(self._previous_thinking_budget)
+                elif self.thinking_budget_var.get() == '0':
+                    # Only use default if no previous value exists
+                    default_budget = self.config.get('thinking_budget', '8192')
+                    if default_budget == '0':
+                        default_budget = '8192'  # Fallback if config has 0
+                    self.thinking_budget_var.set(default_budget)
             else:
+                # Save current value before disabling
+                current_value = self.thinking_budget_var.get()
+                if current_value != '0':
+                    self._previous_thinking_budget = current_value
                 self.thinking_budget_entry.config(state='disabled')
                 self.thinking_budget_var.set('0')
 
