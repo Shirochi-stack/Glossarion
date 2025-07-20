@@ -1976,11 +1976,34 @@ class UnifiedClient:
         return params
     
     def _send_gemini(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to Gemini API with enhanced error handling and configurable safety settings"""
+        """Send request to Gemini API with support for both text and multi-image messages"""
+        
+        # Import ThinkingConfig at the top
+        from google.genai import types
+        
+        # Check if this contains images
+        has_images = False
+        for msg in messages:
+            if isinstance(msg.get('content'), list):
+                for part in msg['content']:
+                    if part.get('type') == 'image_url':
+                        has_images = True
+                        break
+                if has_images:
+                    break
+        
+        if has_images:
+            # Handle as image request - the method now handles both single and multi
+            return self._send_gemini_image(messages, None, temperature, max_tokens, response_name)
+        
+        # text-only logic
         formatted_prompt = self._format_gemini_prompt_simple(messages)
         
         # Check if safety settings are disabled via config
         disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
+        
+        # Get thinking budget from environment (NEW)
+        thinking_budget = int(os.getenv("THINKING_BUDGET", "0"))  
         
         # Configure safety settings based on toggle
         if disable_safety:
@@ -2036,10 +2059,18 @@ class UnifiedClient:
             safety_status = "ENABLED - Using default Gemini safety settings"
             readable_safety = "DEFAULT"
         
-        # Log to console
-        print(f"🔒 Gemini Safety Status: {safety_status}")
+        # Log to console with thinking status (UPDATED)
+        thinking_status = ""
+        if thinking_budget == 0:
+            thinking_status = " (thinking disabled)"
+        elif thinking_budget == -1:
+            thinking_status = " (dynamic thinking)"
+        elif thinking_budget > 0:
+            thinking_status = f" (thinking budget: {thinking_budget})"
+            
+        print(f"🔒 Gemini Safety Status: {safety_status}{thinking_status}")
         
-        # Save configuration to file
+        # Save configuration to file (UPDATED)
         config_data = {
             "type": "TEXT_REQUEST",
             "model": self.model,
@@ -2047,8 +2078,8 @@ class UnifiedClient:
             "safety_settings": readable_safety,
             "temperature": temperature,
             "max_output_tokens": current_tokens,
+            "thinking_budget": thinking_budget,  # Added
             "timestamp": datetime.now().isoformat(),
-            
         }
         
         # Save to Payloads folder
@@ -2071,11 +2102,37 @@ class UnifiedClient:
                 anti_dupe_params = self._get_anti_duplicate_params(temperature)
 
                 # Build generation config with anti-duplicate parameters
-                generation_config = {
+                generation_config_params = {
                     "temperature": temperature,
                     "max_output_tokens": current_tokens,
                     **anti_dupe_params  # Add user's custom parameters
                 }
+                
+                # Create thinking config separately
+                thinking_config = types.ThinkingConfig(
+                    thinking_budget=thinking_budget
+                )
+                
+                # Create generation config with thinking_config as a parameter
+                generation_config = types.GenerateContentConfig(
+                    thinking_config=thinking_config,
+                    **generation_config_params
+                )
+                
+                # Add safety settings to config if they exist
+                if safety_settings:
+                    generation_config.safety_settings = safety_settings
+                
+                # Log the request with thinking info (UPDATED)
+                print(f"   📤 Sending text request to Gemini{thinking_status}")
+                print(f"   📊 Temperature: {temperature}, Max tokens: {current_tokens}")
+                
+                if thinking_budget == 0:
+                    print(f"   🧠 Thinking: DISABLED")
+                elif thinking_budget == -1:
+                    print(f"   🧠 Thinking: DYNAMIC (model decides)")
+                else:
+                    print(f"   🧠 Thinking Budget: {thinking_budget} tokens")
 
                 response = self.gemini_client.models.generate_content(
                     model=self.model,
@@ -2115,6 +2172,18 @@ class UnifiedClient:
                             finish_reason = str(candidate.finish_reason)
                             if 'MAX_TOKENS' in finish_reason:
                                 finish_reason = 'length'
+                
+                # Check usage metadata for thinking tokens (NEW)
+                if hasattr(response, 'usage_metadata'):
+                    usage = response.usage_metadata
+                    print(f"   🔍 Usage metadata: {usage}")
+                    
+                    # Check if thinking tokens were actually disabled
+                    if hasattr(usage, 'thoughts_token_count'):
+                        if usage.thoughts_token_count and usage.thoughts_token_count > 0:
+                            print(f"   Thinking tokens used: {usage.thoughts_token_count}")
+                        else:
+                            print(f"   ✅ Thinking successfully disabled (0 thinking tokens)")
                 
                 if result:
                     break
@@ -3505,22 +3574,19 @@ class UnifiedClient:
         return False
 
     def _send_gemini_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send image request to Gemini API with configurable safety settings"""
+        """Send image request to Gemini API - supports both single and multiple images"""
         try:
-            # Format prompt
-            formatted_parts = []
-            for msg in messages:
-                if msg.get('role') == 'system':
-                    formatted_parts.append(f"Instructions: {msg['content']}")
-                elif msg.get('role') == 'user':
-                    formatted_parts.append(f"User: {msg['content']}")
-            
-            text_prompt = "\n\n".join(formatted_parts)
+            # Import ThinkingConfig at the top of your imports
+            from google.genai import types
             
             # Check if safety settings are disabled
             disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
+           
+            # Get thinking budget from environment (NEW)
+            thinking_budget = int(os.getenv("THINKING_BUDGET", "0"))  
             
             # Configure safety settings
+            safety_settings = None
             if disable_safety:
                 safety_settings = [
                     types.SafetySetting(
@@ -3544,136 +3610,258 @@ class UnifiedClient:
                         threshold=types.HarmBlockThreshold.BLOCK_NONE
                     ),
                 ]
+                print(f"🔒 Gemini Safety Status: DISABLED - All categories set to BLOCK_NONE")
             else:
-                safety_settings = None
+                print(f"🔒 Gemini Safety Status: ENABLED - Using default settings")
             
-            # SAVE SAFETY CONFIGURATION FOR VERIFICATION
-            if safety_settings:
-                safety_status = "DISABLED - All categories set to BLOCK_NONE"
-                readable_safety = {
-                    "HATE_SPEECH": "BLOCK_NONE",
-                    "SEXUALLY_EXPLICIT": "BLOCK_NONE",
-                    "HARASSMENT": "BLOCK_NONE",
-                    "DANGEROUS_CONTENT": "BLOCK_NONE",
-                    "CIVIC_INTEGRITY": "BLOCK_NONE"
-                }
-            else:
-                safety_status = "ENABLED - Using default Gemini safety settings"
-                readable_safety = "DEFAULT"
+            # Check if this is a multi-image request (messages contain content arrays)
+            is_multi_image = False
+            for msg in messages:
+                if isinstance(msg.get('content'), list):
+                    for part in msg['content']:
+                        if part.get('type') == 'image_url':
+                            is_multi_image = True
+                            break
             
-            # Log to console
-            print(f"\n📷 Gemini Image Safety Status: {safety_status}")
-            
-            # Save configuration to file
-            config_data = {
-                "type": "IMAGE_REQUEST",
-                "model": self.model,
-                "safety_enabled": not disable_safety,
-                "safety_settings": readable_safety,
-                "temperature": temperature,
-                "max_output_tokens": max_tokens,
-                "has_image": True,
-                "timestamp": datetime.now().isoformat()
-            }
-            
-            # Save to Payloads folder
-            os.makedirs("Payloads", exist_ok=True)
-            config_filename = f"gemini_image_safety_{response_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-            config_path = os.path.join("Payloads", config_filename)
-            
-            try:
-                with open(config_path, 'w', encoding='utf-8') as f:
-                    json.dump(config_data, f, indent=2)
-            except Exception as e:
-                print(f"Could not save image safety config: {e}")    
+            if is_multi_image:
+                # Handle multi-image format
+                contents = []
                 
-            # Decode image
-            image_bytes = base64.b64decode(image_base64)
-            image = Image.open(io.BytesIO(image_bytes))
-
-            start_time = time.time()
-            # Get user-configured anti-duplicate parameters
+                for msg in messages:
+                    if msg['role'] == 'system':
+                        contents.append({
+                            "role": "user",
+                            "parts": [{"text": f"Instructions: {msg['content']}"}]
+                        })
+                    elif msg['role'] == 'user':
+                        if isinstance(msg['content'], str):
+                            contents.append({
+                                "role": "user",
+                                "parts": [{"text": msg['content']}]
+                            })
+                        elif isinstance(msg['content'], list):
+                            parts = []
+                            for part in msg['content']:
+                                if part['type'] == 'text':
+                                    parts.append({"text": part['text']})
+                                elif part['type'] == 'image_url':
+                                    image_data = part['image_url']['url']
+                                    if image_data.startswith('data:'):
+                                        base64_data = image_data.split(',')[1]
+                                    else:
+                                        base64_data = image_data
+                                    
+                                    mime_type = "image/png"
+                                    if 'jpeg' in image_data or 'jpg' in image_data:
+                                        mime_type = "image/jpeg"
+                                    elif 'webp' in image_data:
+                                        mime_type = "image/webp"
+                                    
+                                    parts.append({
+                                        "inline_data": {
+                                            "mime_type": mime_type,
+                                            "data": base64_data
+                                        }
+                                    })
+                            
+                            contents.append({
+                                "role": "user",
+                                "parts": parts
+                            })
+            else:
+                # Handle single image format (backward compatibility)
+                formatted_parts = []
+                for msg in messages:
+                    if msg.get('role') == 'system':
+                        formatted_parts.append(f"Instructions: {msg['content']}")
+                    elif msg.get('role') == 'user':
+                        formatted_parts.append(f"User: {msg['content']}")
+                
+                text_prompt = "\n\n".join(formatted_parts)
+                
+                contents = [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {"text": text_prompt},
+                            {"inline_data": {
+                                "mime_type": "image/jpeg",
+                                "data": image_base64
+                            }}
+                        ]
+                    }
+                ]
+            
+            # Get anti-duplicate params
             anti_dupe_params = self._get_anti_duplicate_params(temperature)
-
-            # Build generation config with anti-duplicate parameters
-            generation_config = {
+            
+            # Build generation config params dictionary FIRST
+            generation_config_params = {
                 "temperature": temperature,
                 "max_output_tokens": max_tokens,
-                **anti_dupe_params  # Add user's custom parameters
+                **anti_dupe_params
             }
-
-            # convert the image to the new SDK format
-            contents = [
-                {
-                    "role": "user",
-                    "parts": [
-                        {"text": text_prompt},
-                        {"inline_data": {
-                            "mime_type": "image/jpeg",
-                            "data": image_base64  # The base64 string directly
-                        }}
-                    ]
-                }
-            ]
-
+            
+            # Create thinking config separately
+            thinking_config = types.ThinkingConfig(
+                thinking_budget=thinking_budget
+            )
+            
+            # Create generation config with all parameters INCLUDING thinking_config
+            generation_config = types.GenerateContentConfig(
+                thinking_config=thinking_config,
+                **generation_config_params
+            )
+            
+            # Add safety settings to config if they exist
+            if safety_settings:
+                generation_config.safety_settings = safety_settings
+            
+            # Log the request
+            thinking_status = ""
+            if thinking_budget == 0:
+                thinking_status = " (thinking disabled)"
+            elif thinking_budget == -1:
+                thinking_status = " (dynamic thinking)"
+            elif thinking_budget > 0:
+                thinking_status = f" (thinking budget: {thinking_budget})"
+                
+            if is_multi_image:
+                print(f"   📤 Sending multi-image request to Gemini{thinking_status}")
+            else:
+                print(f"   📤 Sending single image request to Gemini{thinking_status}")
+            print(f"   📊 Temperature: {temperature}, Max tokens: {max_tokens}")
+            
+            if thinking_budget == 0:
+                print(f"   🧠 Thinking: DISABLED")
+            elif thinking_budget == -1:
+                print(f"   🧠 Thinking: DYNAMIC (model decides)")
+            else:
+                print(f"   🧠 Thinking Budget: {thinking_budget} tokens")
+            
+            # Make the API call
             response = self.gemini_client.models.generate_content(
                 model=self.model,
                 contents=contents,
                 config=generation_config
             )
-            elapsed = time.time() - start_time
-            logger.info(f"Vision API call took {elapsed:.1f} seconds")
+            print(f"   🔍 Raw response type: {type(response)}")
             
-            # Extract response with error handling
+            # Check prompt feedback first
+            if hasattr(response, 'prompt_feedback') and response.prompt_feedback:
+                feedback = response.prompt_feedback
+                print(f"   🔍 Prompt feedback: {feedback}")
+                if hasattr(feedback, 'block_reason') and feedback.block_reason:
+                    print(f"   ❌ Content blocked by Gemini: {feedback.block_reason}")
+                    return UnifiedResponse(
+                        content="",
+                        finish_reason='safety',
+                        error_details={'block_reason': str(feedback.block_reason)}
+                    )
+            # Extract response text with error handling
+            result = ""
+            finish_reason = 'stop'
+            
             try:
-                result = response.text
-                finish_reason = 'stop'
+                if hasattr(response, 'text') and response.text:
+                    result = response.text
+                    print(f"   ✅ Got text directly: {len(result)} chars")
+                else:
+                    raise AttributeError("No text attribute or empty text")
             except Exception as e:
-                print(f"Failed to extract image response text: {e}")
+                print(f"   ⚠️ Failed to get text directly: {e}")
+                
+                # Enhanced candidate debugging
+                if hasattr(response, 'candidates'):
+                    print(f"   🔍 Number of candidates: {len(response.candidates) if response.candidates else 0}")
+                    
+                    if response.candidates:
+                        for i, candidate in enumerate(response.candidates):
+                            print(f"   🔍 Checking candidate {i+1}")
+                            
+                            # Check finish reason
+                            if hasattr(candidate, 'finish_reason'):
+                                print(f"   🔍 Finish reason: {candidate.finish_reason}")
+                            
+                            # Check safety ratings
+                            if hasattr(candidate, 'safety_ratings'):
+                                print(f"   🔍 Safety ratings: {candidate.safety_ratings}")
+                            
+                            if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                                parts = candidate.content.parts
+                                print(f"   🔍 Candidate has {len(parts) if parts else 0} parts")
+                                
+                                if parts:
+                                    text_parts = []
+                                    for j, part in enumerate(parts):
+                                        if hasattr(part, 'text') and part.text:
+                                            print(f"   🔍 Part {j+1} has text: {len(part.text)} chars")
+                                            text_parts.append(part.text)
+                                        else:
+                                            print(f"   🔍 Part {j+1} has no text")
+                                    
+                                    if text_parts:
+                                        result = ''.join(text_parts)
+                                        print(f"   ✅ Extracted text from candidate {i+1}: {len(result)} chars")
+                                        break
+                            else:
+                                print(f"   ❌ Candidate {i+1} has no content or parts")
+                            
+                            # Update finish reason
+                            if hasattr(candidate, 'finish_reason'):
+                                finish_reason_str = str(candidate.finish_reason)
+                                if 'MAX_TOKENS' in finish_reason_str:
+                                    finish_reason = 'length'
+                                elif 'SAFETY' in finish_reason_str:
+                                    finish_reason = 'safety'
+                    else:
+                        print("   ❌ No candidates in response")
+                else:
+                    print("   ❌ Response has no candidates attribute")
+            
+            # Check usage metadata for debugging
+            if hasattr(response, 'usage_metadata'):
+                usage = response.usage_metadata
+                print(f"   🔍 Usage metadata: {usage}")
+                
+                # Check if thinking tokens were actually disabled/limited
+                if hasattr(usage, 'thoughts_token_count'):
+                    if usage.thoughts_token_count and usage.thoughts_token_count > 0:
+                        if thinking_budget > 0 and usage.thoughts_token_count > thinking_budget:
+                            print(f"   ⚠️ WARNING: Thinking tokens exceeded budget: {usage.thoughts_token_count} > {thinking_budget}")
+                        elif thinking_budget == 0:
+                            print(f"   ⚠️ WARNING: Thinking tokens still used despite being disabled: {usage.thoughts_token_count}")
+                        else:
+                            print(f"   ✅ Thinking tokens used: {usage.thoughts_token_count}")
+                    else:
+                        print(f"   ✅ Thinking successfully disabled (0 thinking tokens)")
+            
+            if not result:
+                print(f"   ❌ Gemini returned empty response")
+                print(f"   🔍 Response attributes: {list(response.__dict__.keys()) if hasattr(response, '__dict__') else 'No __dict__'}")
                 result = ""
                 finish_reason = 'error'
-                
-                # Try extracting from candidates with improved logic
-                if hasattr(response, 'candidates') and response.candidates:
-                    for candidate in response.candidates:
-                        if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
-                            parts = candidate.content.parts
-                            candidate_text = ''.join(part.text for part in parts if hasattr(part, 'text'))
-                            if candidate_text:
-                                result = candidate_text
-                                if hasattr(candidate, 'finish_reason'):
-                                    finish_reason = str(candidate.finish_reason)
-                                    if 'MAX_TOKENS' in finish_reason:
-                                        finish_reason = 'length'
-                                break
+            else:
+                print(f"   ✅ Successfully extracted {len(result)} characters")
             
             return UnifiedResponse(
                 content=result,
                 finish_reason=finish_reason,
                 raw_response=response,
-                usage=None  # Gemini doesn't provide usage info for images
+                usage=None
             )
             
         except Exception as e:
-            print(f"Gemini image processing error: {e}")
-            error_msg = str(e)
-            
-            # Check for safety blocks
-            if "safety" in error_msg.lower() or "blocked" in error_msg.lower():
-                if disable_safety:
-                    print("Content blocked despite safety settings disabled")
-                return UnifiedResponse(
-                    content="",
-                    finish_reason='safety',
-                    error_details={'error': error_msg}
-                )
+            print(f"   ❌ Gemini image processing error: {e}")
+            import traceback
+            traceback.print_exc()
             
             return UnifiedResponse(
                 content="",
                 finish_reason='error',
-                error_details={'error': error_msg}
+                error_details={'error': str(e)}
             )
-
+        
     def _send_openai_image(self, messages, image_base64, temperature, 
                           max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
         """
