@@ -2145,7 +2145,7 @@ class UnifiedClient:
         else:
             thinking_status = " (thinking not supported)"
             
-        #print(f"🔒 Gemini Safety Status: {safety_status}")
+        print(f"🔒 Gemini Safety Status: {safety_status}")
         
         # Save configuration to file
         config_data = {
