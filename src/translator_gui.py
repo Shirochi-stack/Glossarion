@@ -900,6 +900,13 @@ class TranslatorGUI:
         self.optimize_for_ocr_var = tk.BooleanVar(value=self.config.get('optimize_for_ocr', True))
         self.progressive_encoding_var = tk.BooleanVar(value=self.config.get('progressive_encoding', True))
         self.save_compressed_images_var = tk.BooleanVar(value=self.config.get('save_compressed_images', False))
+
+        
+        # Initialize custom API endpoint variables
+        self.openai_base_url_var = tk.StringVar(value=self.config.get('openai_base_url', ''))
+        self.groq_base_url_var = tk.StringVar(value=self.config.get('groq_base_url', ''))
+        self.fireworks_base_url_var = tk.StringVar(value=self.config.get('fireworks_base_url', ''))
+        
         # Initialize metadata/batch variables the same way
         self.translate_metadata_fields = self.config.get('translate_metadata_fields', {})
         # Initialize metadata translation UI and prompts
@@ -5438,6 +5445,10 @@ Recent translations to summarize:
             'SINGLE_API_IMAGE_CHUNKS': "1" if self.single_api_image_chunks_var.get() else "0",
             'ENABLE_GEMINI_THINKING': "1" if self.enable_gemini_thinking_var.get() else "0",
             'THINKING_BUDGET': self.thinking_budget_var.get() if self.enable_gemini_thinking_var.get() else '0',
+            # Custom API endpoints
+            'OPENAI_CUSTOM_BASE_URL': self.openai_base_url_var.get() if self.openai_base_url_var.get() else '',
+            'GROQ_API_URL': self.groq_base_url_var.get() if self.groq_base_url_var.get() else '',
+            'FIREWORKS_API_URL': self.fireworks_base_url_var.get() if hasattr(self, 'fireworks_base_url_var') and self.fireworks_base_url_var.get() else '',
 
             # Image compression settings
             'ENABLE_IMAGE_COMPRESSION': "1" if self.config.get('enable_image_compression', False) else "0",
@@ -7999,6 +8010,9 @@ Recent translations to summarize:
        # Section 6: Anti-Duplicate Parameters
        self._create_anti_duplicate_section(scrollable_frame)
        
+       # Section 7: Custom API Endpoints (NEW)
+       self._create_custom_api_endpoints_section(scrollable_frame)
+       
        # Save & Close buttons
        self._create_settings_buttons(scrollable_frame, dialog, canvas)
        
@@ -8954,7 +8968,196 @@ Recent translations to summarize:
         # Log the reset
         if hasattr(self, 'append_log'):
             self.append_log("🔄 Anti-duplicate parameters reset to defaults")        
-     
+  
+    def _create_custom_api_endpoints_section(self, parent_frame):
+        """Create the Custom API Endpoints section"""
+        # Custom API Endpoints Section
+        endpoints_frame = tb.LabelFrame(parent_frame, text="Custom API Endpoints", padding=10)
+        endpoints_frame.grid(row=7, column=0, columnspan=2, sticky=tk.NSEW, padx=5, pady=5)
+        
+        # In your Custom API Endpoints section:
+
+        # Main OpenAI Base URL (always visible)
+        openai_url_frame = tb.Frame(endpoints_frame)
+        openai_url_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        tb.Label(openai_url_frame, text="OpenAI Base URL:").pack(side=tk.LEFT, padx=(0, 5))
+        self.openai_base_url_var = tk.StringVar(value=self.config.get('openai_base_url', ''))
+        self.openai_base_url_entry = tb.Entry(openai_url_frame, textvariable=self.openai_base_url_var, width=50)
+        self.openai_base_url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        tb.Button(openai_url_frame, text="Clear", 
+                 command=lambda: self.openai_base_url_var.set(""),
+                 bootstyle="secondary", width=8).pack(side=tk.LEFT)
+
+        # Help text for main field
+        help_text = tb.Label(endpoints_frame, 
+                            text="Leave empty for default OpenAI API. For Ollama: http://localhost:11434/v1",
+                            font=('TkDefaultFont', 8), foreground='gray')
+        help_text.pack(anchor=tk.W, padx=5, pady=(0, 5))
+
+        # Show More Fields button
+        self.show_more_endpoints = False
+        self.more_fields_button = tb.Button(endpoints_frame, 
+                                           text="▼ Show More Fields", 
+                                           command=self.toggle_more_endpoints,
+                                           bootstyle="link")
+        self.more_fields_button.pack(anchor=tk.W, padx=5, pady=5)
+
+        # Container for additional fields (initially hidden)
+        self.additional_endpoints_frame = tb.Frame(endpoints_frame)
+        # Don't pack it initially - it's hidden
+
+        # Inside the additional_endpoints_frame:
+        # Groq/Local Base URL
+        groq_url_frame = tb.Frame(self.additional_endpoints_frame)
+        groq_url_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        tb.Label(groq_url_frame, text="Groq/Local Base URL:").pack(side=tk.LEFT, padx=(0, 5))
+        self.groq_base_url_var = tk.StringVar(value=self.config.get('groq_base_url', ''))
+        self.groq_base_url_entry = tb.Entry(groq_url_frame, textvariable=self.groq_base_url_var, width=50)
+        self.groq_base_url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        tb.Button(groq_url_frame, text="Clear", 
+                 command=lambda: self.groq_base_url_var.set(""),
+                 bootstyle="secondary", width=8).pack(side=tk.LEFT)
+
+        groq_help = tb.Label(self.additional_endpoints_frame, 
+                            text="For vLLM: http://localhost:8000/v1 | For LM Studio: http://localhost:1234/v1",
+                            font=('TkDefaultFont', 8), foreground='gray')
+        groq_help.pack(anchor=tk.W, padx=5, pady=(0, 5))
+
+        # Fireworks Base URL
+        fireworks_url_frame = tb.Frame(self.additional_endpoints_frame)
+        fireworks_url_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        tb.Label(fireworks_url_frame, text="Fireworks Base URL:").pack(side=tk.LEFT, padx=(0, 5))
+        self.fireworks_base_url_var = tk.StringVar(value=self.config.get('fireworks_base_url', ''))
+        self.fireworks_base_url_entry = tb.Entry(fireworks_url_frame, textvariable=self.fireworks_base_url_var, width=50)
+        self.fireworks_base_url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        tb.Button(fireworks_url_frame, text="Clear", 
+                 command=lambda: self.fireworks_base_url_var.set(""),
+                 bootstyle="secondary", width=8).pack(side=tk.LEFT)
+
+        # Info about multiple endpoints
+        info_frame = tb.Frame(self.additional_endpoints_frame)
+        info_frame.pack(fill=tk.X, padx=5, pady=10)
+
+        info_text = """💡 Advanced: Use multiple endpoints to run different local LLM servers simultaneously.
+        • Use model prefix 'groq/' to route through Groq endpoint
+        • Use model prefix 'fireworks/' to route through Fireworks endpoint
+        • Most users only need the main OpenAI endpoint above"""
+
+        tb.Label(info_frame, text=info_text, 
+                font=('TkDefaultFont', 8), foreground='#0dcaf0',  # Light blue color
+                wraplength=600, justify=tk.LEFT).pack(anchor=tk.W)
+
+        # Test Connection button (always visible)
+        test_button = tb.Button(endpoints_frame, text="Test Connection", 
+                               command=self.test_api_connections,
+                               bootstyle="info")
+        test_button.pack(pady=10)
+
+    def toggle_more_endpoints(self):
+        """Toggle visibility of additional endpoint fields"""
+        self.show_more_endpoints = not self.show_more_endpoints
+        
+        if self.show_more_endpoints:
+            self.additional_endpoints_frame.pack(fill=tk.BOTH, expand=True, after=self.more_fields_button)
+            self.more_fields_button.configure(text="▲ Show Fewer Fields")
+        else:
+            self.additional_endpoints_frame.pack_forget()
+            self.more_fields_button.configure(text="▼ Show More Fields")
+        
+        # Update dialog scrolling if needed
+        if hasattr(self, 'current_dialog') and self.current_dialog:
+            self.current_dialog.update_idletasks()
+            self.current_dialog.canvas.configure(scrollregion=self.current_dialog.canvas.bbox("all"))
+                 
+    def test_api_connections(self):
+        """Test all configured API connections"""
+        # Ensure we have the openai module
+        try:
+            import openai
+        except ImportError:
+            messagebox.showerror("Error", "OpenAI library not installed")
+            return
+        
+        # Get API key from the main GUI
+        api_key = self.api_key_entry.get() if hasattr(self, 'api_key_entry') else self.config.get('api_key', '')
+        if not api_key:
+            api_key = "sk-dummy-key"  # For local models
+        
+        # Collect all configured endpoints
+        endpoints_to_test = []
+        
+        # OpenAI endpoint
+        openai_url = self.openai_base_url_var.get()
+        if openai_url:
+            endpoints_to_test.append(("OpenAI", openai_url, self.model_var.get() if hasattr(self, 'model_var') else "gpt-3.5-turbo"))
+        
+        # Groq endpoint
+        if hasattr(self, 'groq_base_url_var'):
+            groq_url = self.groq_base_url_var.get()
+            if groq_url:
+                # For Groq, we need a groq-prefixed model
+                current_model = self.model_var.get() if hasattr(self, 'model_var') else "llama-3-70b"
+                groq_model = current_model if current_model.startswith('groq/') else current_model.replace('groq/', '')
+                endpoints_to_test.append(("Groq/Local", groq_url, groq_model))
+        
+        # Fireworks endpoint
+        if hasattr(self, 'fireworks_base_url_var'):
+            fireworks_url = self.fireworks_base_url_var.get()
+            if fireworks_url:
+                # For Fireworks, we need the accounts/ prefix
+                current_model = self.model_var.get() if hasattr(self, 'model_var') else "llama-v3-70b-instruct"
+                fw_model = current_model if current_model.startswith('accounts/') else f"accounts/fireworks/models/{current_model.replace('fireworks/', '')}"
+                endpoints_to_test.append(("Fireworks", fireworks_url, fw_model))
+        
+        if not endpoints_to_test:
+            messagebox.showinfo("Info", "No custom endpoints configured. Using default API endpoints.")
+            return
+        
+        # Test each endpoint
+        results = []
+        for name, base_url, model in endpoints_to_test:
+            try:
+                # Create client for this endpoint
+                test_client = openai.OpenAI(
+                    api_key=api_key,
+                    base_url=base_url,
+                    timeout=5.0  # Short timeout for testing
+                )
+                
+                # Try a minimal completion
+                response = test_client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": "Hi"}],
+                    max_tokens=5
+                )
+                
+                results.append(f"✅ {name}: Connected successfully! (Model: {model})")
+            except Exception as e:
+                error_msg = str(e)
+                # Simplify common error messages
+                if "404" in error_msg:
+                    error_msg = "404 - Endpoint not found. Check URL and model name."
+                elif "401" in error_msg or "403" in error_msg:
+                    error_msg = "Authentication failed. Check API key."
+                elif "model" in error_msg.lower() and "not found" in error_msg.lower():
+                    error_msg = f"Model '{model}' not found at this endpoint."
+                
+                results.append(f"❌ {name}: {error_msg}")
+        
+        # Show results
+        result_message = "Connection Test Results:\n\n" + "\n\n".join(results)
+        
+        # Determine if all succeeded
+        all_success = all("✅" in r for r in results)
+        
+        if all_success:
+            messagebox.showinfo("Success", result_message)
+        else:
+            messagebox.showwarning("Test Results", result_message)
+        
     def _create_settings_buttons(self, parent, dialog, canvas):
         """Create save and close buttons for settings dialog"""
         button_frame = tk.Frame(parent)
@@ -9003,6 +9206,9 @@ Recent translations to summarize:
                     'single_api_image_chunks': self.single_api_image_chunks_var.get(),
                     'enable_gemini_thinking': self.enable_gemini_thinking_var.get(),
                     'thinking_budget': int(self.thinking_budget_var.get()) if self.thinking_budget_var.get().lstrip('-').isdigit() else 0,
+                    'openai_base_url': self.openai_base_url_var.get(),
+                    'groq_base_url': self.groq_base_url_var.get() if hasattr(self, 'groq_base_url_var') else '',
+                    'fireworks_base_url': self.fireworks_base_url_var.get() if hasattr(self, 'fireworks_base_url_var') else '',
                     
                     # ALL Anti-duplicate parameters (moved below other settings)
                     'enable_anti_duplicate': getattr(self, 'enable_anti_duplicate_var', type('', (), {'get': lambda: False})).get(),
@@ -9083,6 +9289,10 @@ Recent translations to summarize:
                     'SINGLE_API_IMAGE_CHUNKS': "1" if self.single_api_image_chunks_var.get() else "0",
                     'ENABLE_GEMINI_THINKING': "1" if self.enable_gemini_thinking_var.get() else "0",
                     'THINKING_BUDGET': self.thinking_budget_var.get() if self.enable_gemini_thinking_var.get() else '0',
+                    # Custom API endpoints
+                    'OPENAI_CUSTOM_BASE_URL': self.openai_base_url_var.get() if self.openai_base_url_var.get() else '',
+                    'GROQ_API_URL': self.groq_base_url_var.get() if hasattr(self, 'groq_base_url_var') and self.groq_base_url_var.get() else '',
+                    'FIREWORKS_API_URL': self.fireworks_base_url_var.get() if hasattr(self, 'fireworks_base_url_var') and self.fireworks_base_url_var.get() else '',
                     
                     # Image compression settings
                     'ENABLE_IMAGE_COMPRESSION': "1" if self.config.get('enable_image_compression', False) else "0",
@@ -9611,6 +9821,9 @@ Recent translations to summarize:
             self.config['single_api_image_chunks'] = self.single_api_image_chunks_var.get()
             self.config['enable_gemini_thinking'] = self.enable_gemini_thinking_var.get()
             self.config['thinking_budget'] = int(self.thinking_budget_var.get()) if self.thinking_budget_var.get().lstrip('-').isdigit() else 0
+            self.config['openai_base_url'] = self.openai_base_url_var.get()
+            self.config['fireworks_base_url'] = self.fireworks_base_url_var.get()
+
 
             # Save image compression settings if they exist
             # These are saved from the compression dialog, but we ensure defaults here
