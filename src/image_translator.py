@@ -499,8 +499,12 @@ class ImageTranslator:
                             print(f"   📝 Created temp compressed image")
                         
                         compression_ratio = (1 - compressed_size_mb / original_size_mb) * 100
-                        print(f"   ✅ Compressed: {original_size_mb:.2f}MB → {compressed_size_mb:.2f}MB "
-                              f"({compression_ratio:.1f}% reduction, quality: {quality})")
+                        if compression_ratio > 0:
+                            print(f"   ✅ Compressed: {original_size_mb:.2f}MB → {compressed_size_mb:.2f}MB "
+                                  f"({compression_ratio:.1f}% reduction, quality: {quality})")
+                        else:
+                            print(f"   ⚠️ Compression increased size: {original_size_mb:.2f}MB → {compressed_size_mb:.2f}MB "
+                                  f"({abs(compression_ratio):.1f}% larger, quality: {quality})")
                         
                         # Special note for GIF conversions
                         if is_gif:
