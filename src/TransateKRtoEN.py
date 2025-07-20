@@ -5524,7 +5524,7 @@ def main(log_callback=None, stop_callback=None):
                     print(f"  📌 History will reset after this chunk (current: {len(history_manager.load_history())//2}/{config.HIST_LIMIT} exchanges)")
                     
                 if check_stop():
-                    print(f"❌ Translation stopped during chapter {idx+1}, chunk {chunk_idx}")
+                    print(f"❌ Translation stopped during chapter {actual_num}, chunk {chunk_idx}")
                     return
                 
                 current_chunk_number += 1
@@ -5730,7 +5730,7 @@ def main(log_callback=None, stop_callback=None):
                         time.sleep(1)
 
             if check_stop():
-                print(f"❌ Translation stopped before saving chapter {idx+1}")
+                print(f"❌ Translation stopped before saving chapter {actual_num}")
                 return
 
             if len(translated_chunks) > 1:
