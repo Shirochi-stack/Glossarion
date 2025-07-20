@@ -679,6 +679,11 @@ class ImageTranslator:
                         uncompressed_size = os.path.getsize(chunk_path)
                         total_uncompressed_size += uncompressed_size
                     
+                    # Get original chunk size before any compression
+                    original_buffer = BytesIO()
+                    chunk.save(original_buffer, format='PNG')
+                    original_chunk_size = len(original_buffer.getvalue())
+
                     # Convert chunk to bytes with compression if enabled
                     if compression_enabled:
                         print(f"   🗜️ Compressing chunk {i+1}/{num_chunks}...")
@@ -706,8 +711,9 @@ class ImageTranslator:
                         # Calculate compression stats
                         compressed_size = len(chunk_bytes)
                         if save_cleaned:
-                            compression_ratio = (1 - compressed_size / uncompressed_size) * 100
-                            print(f"   📊 Chunk {i+1}: {uncompressed_size:,} → {compressed_size:,} bytes ({compression_ratio:.1f}% reduction, format: {format_used.upper()})")
+                            # Use the original chunk size we calculated earlier, not the debug file size
+                            compression_ratio = (1 - compressed_size / original_chunk_size) * 100
+                            print(f"   📊 Chunk {i+1}: {original_chunk_size:,} → {compressed_size:,} bytes ({compression_ratio:.1f}% reduction, format: {format_used.upper()})")
                             total_compressed_size += compressed_size
                             
                             # Save compressed chunk for debugging
@@ -1870,9 +1876,15 @@ class ImageTranslator:
             # Crop and process the chunk
             chunk = img.crop((0, start_y, width, end_y))
             
+            # Get original chunk size first (before compression)
+            original_buffer = BytesIO()
+            chunk.save(original_buffer, format='PNG')
+            original_chunk_bytes = original_buffer.getvalue()
+            original_size = len(original_chunk_bytes) / 1024  # KB
+
             # Convert chunk to bytes with compression
             chunk_bytes = self._image_to_bytes_with_compression(chunk)
-            
+
             # Save debug chunks if enabled
             if save_debug_chunks or save_compressed_chunks:
                 # Save original chunk
@@ -1920,7 +1932,6 @@ class ImageTranslator:
                         f.write(compressed_buffer.getvalue())
                     
                     # Log compression info
-                    original_size = len(chunk_bytes) / 1024  # KB
                     compressed_size = len(compressed_buffer.getvalue()) / 1024  # KB
                     compression_ratio = (1 - compressed_size / original_size) * 100 if original_size > 0 else 0
                     
