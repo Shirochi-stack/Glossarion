@@ -3840,7 +3840,8 @@ class UnifiedClient:
                 else:
                     print(f"   🧠 Thinking Budget: {thinking_budget} tokens")
             else:
-                print(f"   🧠 Model does not support thinking parameter")
+                #print(f"   🧠 Model does not support thinking parameter")
+                pass
             
             # Make the API call
             response = self.gemini_client.models.generate_content(
