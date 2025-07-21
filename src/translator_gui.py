@@ -783,7 +783,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.5.0"
+        __version__ = "3.5.1"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -906,6 +906,7 @@ class TranslatorGUI:
         self.openai_base_url_var = tk.StringVar(value=self.config.get('openai_base_url', ''))
         self.groq_base_url_var = tk.StringVar(value=self.config.get('groq_base_url', ''))
         self.fireworks_base_url_var = tk.StringVar(value=self.config.get('fireworks_base_url', ''))
+        self.use_custom_openai_endpoint_var = tk.BooleanVar(value=self.config.get('use_custom_openai_endpoint', False))
         
         # Initialize metadata/batch variables the same way
         self.translate_metadata_fields = self.config.get('translate_metadata_fields', {})
@@ -1538,7 +1539,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.5.0 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.5.1 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -2413,7 +2414,7 @@ Recent translations to summarize:
             # Save the system prompt too
             self.config['book_title_system_prompt'] = self.title_system_prompt_text.get('1.0', tk.END).strip()
             
-            messagebox.showinfo("Success", "Book title prompts saved!")
+            #messagebox.showinfo("Success", "Book title prompts saved!")
             dialog.destroy()
         
         def reset_title_prompt():
@@ -5449,6 +5450,8 @@ Recent translations to summarize:
             'OPENAI_CUSTOM_BASE_URL': self.openai_base_url_var.get() if self.openai_base_url_var.get() else '',
             'GROQ_API_URL': self.groq_base_url_var.get() if self.groq_base_url_var.get() else '',
             'FIREWORKS_API_URL': self.fireworks_base_url_var.get() if hasattr(self, 'fireworks_base_url_var') and self.fireworks_base_url_var.get() else '',
+            'USE_CUSTOM_OPENAI_ENDPOINT': '1' if self.use_custom_openai_endpoint_var.get() else '0',
+
 
             # Image compression settings
             'ENABLE_IMAGE_COMPRESSION': "1" if self.config.get('enable_image_compression', False) else "0",
@@ -8968,32 +8971,51 @@ Recent translations to summarize:
         # Log the reset
         if hasattr(self, 'append_log'):
             self.append_log("🔄 Anti-duplicate parameters reset to defaults")        
-  
+
     def _create_custom_api_endpoints_section(self, parent_frame):
         """Create the Custom API Endpoints section"""
         # Custom API Endpoints Section
         endpoints_frame = tb.LabelFrame(parent_frame, text="Custom API Endpoints", padding=10)
         endpoints_frame.grid(row=7, column=0, columnspan=2, sticky=tk.NSEW, padx=5, pady=5)
         
-        # In your Custom API Endpoints section:
+        # Checkbox to enable/disable custom endpoint (MOVED TO TOP)
+        custom_endpoint_checkbox_frame = tb.Frame(endpoints_frame)
+        custom_endpoint_checkbox_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
 
-        # Main OpenAI Base URL (always visible)
+        self.use_custom_endpoint_checkbox = tb.Checkbutton(
+            custom_endpoint_checkbox_frame,
+            text="Enable Custom OpenAI Endpoint",
+            variable=self.use_custom_openai_endpoint_var,
+            command=self.toggle_custom_endpoint_ui,
+            bootstyle="primary"
+        )
+        self.use_custom_endpoint_checkbox.pack(side=tk.LEFT)
+
+        # Main OpenAI Base URL
         openai_url_frame = tb.Frame(endpoints_frame)
         openai_url_frame.pack(fill=tk.X, padx=5, pady=5)
 
-        tb.Label(openai_url_frame, text="OpenAI Base URL:").pack(side=tk.LEFT, padx=(0, 5))
+        tb.Label(openai_url_frame, text="Override API Endpoint:").pack(side=tk.LEFT, padx=(0, 5))
         self.openai_base_url_var = tk.StringVar(value=self.config.get('openai_base_url', ''))
         self.openai_base_url_entry = tb.Entry(openai_url_frame, textvariable=self.openai_base_url_var, width=50)
         self.openai_base_url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
-        tb.Button(openai_url_frame, text="Clear", 
+        
+        # Clear button
+        self.openai_clear_button = tb.Button(openai_url_frame, text="Clear", 
                  command=lambda: self.openai_base_url_var.set(""),
-                 bootstyle="secondary", width=8).pack(side=tk.LEFT)
+                 bootstyle="secondary", width=8)
+        self.openai_clear_button.pack(side=tk.LEFT)
+        
+        # Set initial state based on checkbox
+        if not self.use_custom_openai_endpoint_var.get():
+            self.openai_base_url_entry.configure(state='disabled')
+            self.openai_clear_button.configure(state='disabled')
 
         # Help text for main field
         help_text = tb.Label(endpoints_frame, 
-                            text="Leave empty for default OpenAI API. For Ollama: http://localhost:11434/v1",
+                            text="Enable checkbox to use custom endpoint. For Ollama: http://localhost:11434/v1",
                             font=('TkDefaultFont', 8), foreground='gray')
-        help_text.pack(anchor=tk.W, padx=5, pady=(0, 5))
+        help_text.pack(anchor=tk.W, padx=5, pady=(0, 10))
 
         # Show More Fields button
         self.show_more_endpoints = False
@@ -9056,6 +9078,17 @@ Recent translations to summarize:
                                bootstyle="info")
         test_button.pack(pady=10)
 
+    def toggle_custom_endpoint_ui(self):
+        """Enable/disable the OpenAI base URL entry and clear button based on checkbox"""
+        if self.use_custom_openai_endpoint_var.get():
+            self.openai_base_url_entry.configure(state='normal')
+            self.openai_clear_button.configure(state='normal')
+            print("✅ Custom OpenAI endpoint enabled")
+        else:
+            self.openai_base_url_entry.configure(state='disabled')
+            self.openai_clear_button.configure(state='disabled')
+            print("❌ Custom OpenAI endpoint disabled - using default OpenAI API")
+
     def toggle_more_endpoints(self):
         """Toggle visibility of additional endpoint fields"""
         self.show_more_endpoints = not self.show_more_endpoints
@@ -9090,9 +9123,13 @@ Recent translations to summarize:
         endpoints_to_test = []
         
         # OpenAI endpoint
-        openai_url = self.openai_base_url_var.get()
-        if openai_url:
-            endpoints_to_test.append(("OpenAI", openai_url, self.model_var.get() if hasattr(self, 'model_var') else "gpt-3.5-turbo"))
+        if self.use_custom_openai_endpoint_var.get():
+            openai_url = self.openai_base_url_var.get()
+            if openai_url:
+                endpoints_to_test.append(("OpenAI (Custom)", openai_url, self.model_var.get() if hasattr(self, 'model_var') else "gpt-3.5-turbo"))
+        else:
+            # Test default OpenAI endpoint if no custom URL or toggle is off
+            endpoints_to_test.append(("OpenAI (Default)", "https://api.openai.com/v1", self.model_var.get() if hasattr(self, 'model_var') else "gpt-3.5-turbo"))
         
         # Groq endpoint
         if hasattr(self, 'groq_base_url_var'):
@@ -9209,6 +9246,8 @@ Recent translations to summarize:
                     'openai_base_url': self.openai_base_url_var.get(),
                     'groq_base_url': self.groq_base_url_var.get() if hasattr(self, 'groq_base_url_var') else '',
                     'fireworks_base_url': self.fireworks_base_url_var.get() if hasattr(self, 'fireworks_base_url_var') else '',
+                    'use_custom_openai_endpoint': self.use_custom_openai_endpoint_var.get(),
+
                     
                     # ALL Anti-duplicate parameters (moved below other settings)
                     'enable_anti_duplicate': getattr(self, 'enable_anti_duplicate_var', type('', (), {'get': lambda: False})).get(),
@@ -9293,6 +9332,7 @@ Recent translations to summarize:
                     'OPENAI_CUSTOM_BASE_URL': self.openai_base_url_var.get() if self.openai_base_url_var.get() else '',
                     'GROQ_API_URL': self.groq_base_url_var.get() if hasattr(self, 'groq_base_url_var') and self.groq_base_url_var.get() else '',
                     'FIREWORKS_API_URL': self.fireworks_base_url_var.get() if hasattr(self, 'fireworks_base_url_var') and self.fireworks_base_url_var.get() else '',
+                    'USE_CUSTOM_OPENAI_ENDPOINT': '1' if self.use_custom_openai_endpoint_var.get() else '0',
                     
                     # Image compression settings
                     'ENABLE_IMAGE_COMPRESSION': "1" if self.config.get('enable_image_compression', False) else "0",
@@ -9823,6 +9863,8 @@ Recent translations to summarize:
             self.config['thinking_budget'] = int(self.thinking_budget_var.get()) if self.thinking_budget_var.get().lstrip('-').isdigit() else 0
             self.config['openai_base_url'] = self.openai_base_url_var.get()
             self.config['fireworks_base_url'] = self.fireworks_base_url_var.get()
+            self.config['use_custom_openai_endpoint'] = self.use_custom_openai_endpoint_var.get()
+
 
 
             # Save image compression settings if they exist
@@ -9907,7 +9949,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.5.0...")
+    print("🚀 Starting Glossarion v3.5.1...")
     
     # Initialize splash screen
     splash_manager = None
