@@ -359,7 +359,7 @@ class UnifiedClient:
             self.request_timeout = int(os.getenv("CHUNK_TIMEOUT", "900"))
             logger.info(f"Using GUI-configured timeout: {self.request_timeout}s")
         else:
-            self.request_timeout = 3600  # 1 hour default
+            self.request_timeout = 36000  # 10 hour default
             logger.info(f"Using default timeout: {self.request_timeout}s")
         
         # Stats tracking
@@ -398,20 +398,36 @@ class UnifiedClient:
             self._setup_client()
             print(f"[DEBUG] After setup - client_type: {self.client_type}, openai_client: {self.openai_client}")
             
-            # FORCE OPENAI CLIENT IF CUSTOM BASE URL IS SET
+            # FORCE OPENAI CLIENT IF CUSTOM BASE URL IS SET AND ENABLED
+            use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
             custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
-            if custom_base_url and self.openai_client is None:
-                print(f"[DEBUG] Custom base URL detected, forcing OpenAI client for model: {self.model}")
-                self.client_type = 'openai'
-                
-                if openai is None:
-                    raise ImportError("OpenAI library not installed. Install with: pip install openai")
-                
-                self.openai_client = openai.OpenAI(
-                    api_key=self.api_key,
-                    base_url=custom_base_url
-                )
-                print(f"[DEBUG] OpenAI client created with custom base URL: {custom_base_url}")
+
+            # Only force OpenAI client if:
+            # 1. Custom endpoint is enabled via toggle
+            # 2. We have a custom URL
+            # 3. No client was set up (or it's already openai)
+            if custom_base_url and use_custom_endpoint and self.openai_client is None:
+                if self.client_type is None or self.client_type == 'openai':
+                    print(f"[DEBUG] Custom base URL detected and enabled, using OpenAI client for model: {self.model}")
+                    self.client_type = 'openai'
+                    
+                    if openai is None:
+                        raise ImportError("OpenAI library not installed. Install with: pip install openai")
+                    
+                    # Validate URL has protocol
+                    if not custom_base_url.startswith(('http://', 'https://')):
+                        print(f"[WARNING] Custom base URL missing protocol, adding https://")
+                        custom_base_url = 'https://' + custom_base_url
+                    
+                    self.openai_client = openai.OpenAI(
+                        api_key=self.api_key,
+                        base_url=custom_base_url
+                    )
+                    print(f"[DEBUG] OpenAI client created with custom base URL: {custom_base_url}")
+                else:
+                    print(f"[DEBUG] Custom base URL set but model {self.model} uses {self.client_type}, not overriding")
+            elif custom_base_url and not use_custom_endpoint:
+                print(f"[DEBUG] Custom base URL detected but disabled via toggle, using standard client")
 
             
     def _setup_client(self):
@@ -419,15 +435,7 @@ class UnifiedClient:
         model_lower = self.model.lower()
         print(f"[DEBUG] _setup_client called with model: {self.model}")
         
-        # Check if we're using a custom OpenAI base URL
-        custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', os.getenv('OPENAI_API_BASE', ''))
-        if custom_base_url and custom_base_url != 'https://api.openai.com/v1':
-            # Force OpenAI client type for custom endpoints
-            self.client_type = 'openai'
-            logger.info(f"Using OpenAI client for custom endpoint with model: {self.model}")
-            return
-        
-        # Check model prefixes (existing code)
+        # Check model prefixes FIRST to determine provider
         self.client_type = None
         for prefix, provider in self.MODEL_PROVIDERS.items():
             if model_lower.startswith(prefix):
@@ -435,6 +443,24 @@ class UnifiedClient:
                 print(f"[DEBUG] Matched prefix '{prefix}' -> provider '{provider}'")
                 break
         
+        # Check if we're using a custom OpenAI base URL
+        custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', os.getenv('OPENAI_API_BASE', ''))
+        use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+        
+        # Only apply custom endpoint logic for OpenAI models or unmatched models
+        if custom_base_url and custom_base_url != 'https://api.openai.com/v1' and use_custom_endpoint:
+            if not self.client_type:
+                # No prefix matched - assume it's a custom model that should use OpenAI endpoint
+                self.client_type = 'openai'
+                logger.info(f"Using OpenAI client for custom endpoint with unmatched model: {self.model}")
+            elif self.client_type == 'openai':
+                logger.info(f"Using custom OpenAI endpoint for OpenAI model: {self.model}")
+            else:
+                logger.info(f"Model {self.model} matched to {self.client_type}, not using custom OpenAI endpoint")
+        elif not use_custom_endpoint and custom_base_url and self.client_type == 'openai':
+            logger.info("Custom OpenAI endpoint disabled via toggle, using default endpoint")
+        
+        # If still no client type, show error with suggestions
         if not self.client_type:
             # Provide helpful suggestions
             suggestions = []
@@ -460,8 +486,22 @@ class UnifiedClient:
             if openai is None:
                 raise ImportError("OpenAI library not installed. Install with: pip install openai")
             
+            # Check if custom endpoints are enabled
+            use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+            
             # Check for custom base URL
-            base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', os.getenv('OPENAI_API_BASE', 'https://api.openai.com/v1'))
+            if use_custom_endpoint:
+                base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', os.getenv('OPENAI_API_BASE', 'https://api.openai.com/v1'))
+                
+                # Validate URL has protocol if it's not the default
+                if base_url != 'https://api.openai.com/v1' and not base_url.startswith(('http://', 'https://')):
+                    print(f"[WARNING] Custom base URL missing protocol, adding https://")
+                    base_url = 'https://' + base_url
+            else:
+                # Force default endpoint when toggle is off
+                base_url = 'https://api.openai.com/v1'
+                print(f"[DEBUG] Custom endpoints disabled, using default OpenAI endpoint")
+            
             print(f"[DEBUG] Using base URL: {base_url}")
             
             # Create OpenAI client with custom base URL support
@@ -2254,7 +2294,7 @@ class UnifiedClient:
                         candidate = response.candidates[0]
                         if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
                             parts = candidate.content.parts
-                            result = ''.join(part.text for part in parts if hasattr(part, 'text'))
+                            result = ''.join(part.text for part in (parts or []) if hasattr(part, 'text'))
                         
                         # Check finish reason
                         if hasattr(candidate, 'finish_reason'):
@@ -2885,6 +2925,28 @@ class UnifiedClient:
         max_retries = 3
         api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
         
+        # DEBUG: Print what we're getting
+        #print(f"[DEBUG] Provider: {provider}")
+        #print(f"[DEBUG] Original base_url: {base_url}")
+        #print(f"[DEBUG] USE_CUSTOM_OPENAI_ENDPOINT: {os.getenv('USE_CUSTOM_OPENAI_ENDPOINT')}")
+        #print(f"[DEBUG] OPENAI_CUSTOM_BASE_URL: {os.getenv('OPENAI_CUSTOM_BASE_URL')}")
+        
+        # CUSTOM ENDPOINT OVERRIDE - Check if enabled and override base_url
+        use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+        actual_api_key = self.api_key  # Store original API key
+        
+        if use_custom_endpoint:
+            custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
+            if custom_base_url:
+                print(f"🔄 Custom endpoint enabled: Overriding {provider} endpoint")
+                print(f"   Original: {base_url}")
+                print(f"   Override: {custom_base_url}")
+                base_url = custom_base_url
+                # Use dummy API key for local endpoints
+                actual_api_key = "ollama"  # or any dummy string
+        else:
+            #print(f"[DEBUG] Custom endpoint NOT enabled or no URL set")
+            pass
         # Check if safety settings are disabled via GUI toggle
         disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
         
@@ -2908,9 +2970,9 @@ class UnifiedClient:
                         raise UnifiedClientError("Operation cancelled")
                     
                     client = openai.OpenAI(
-                        api_key=self.api_key,
-                        base_url=base_url,
-                        timeout=float(self.request_timeout)  # Use configured timeout
+                        api_key=actual_api_key,  # Use overridden API key
+                        base_url=base_url,       # Use overridden base URL
+                        timeout=float(self.request_timeout)
                     )
                     
                     # Get user-configured anti-duplicate parameters
@@ -3000,7 +3062,7 @@ class UnifiedClient:
             # Use HTTP API with retry logic
             if headers is None:
                 headers = {
-                    "Authorization": f"Bearer {self.api_key}",
+                    "Authorization": f"Bearer {actual_api_key}",  # Use overridden API key
                     "Content-Type": "application/json"
                 }
             
@@ -3013,7 +3075,7 @@ class UnifiedClient:
             
             # Some providers need special headers
             if provider == 'zhipu':
-                headers["Authorization"] = f"Bearer {self.api_key}"
+                headers["Authorization"] = f"Bearer {actual_api_key}"
             elif provider == 'baidu':
                 # Baidu might need special auth handling
                 headers["Content-Type"] = "application/json"
@@ -3128,7 +3190,7 @@ class UnifiedClient:
         """Send request to Qwen API"""
         return self._send_openai_compatible(
             messages, temperature, max_tokens,
-            base_url="https://dashscope.aliyuncs.com/api/v1",
+            base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
             response_name=response_name,
             provider="qwen"
         )
