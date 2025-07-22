@@ -783,7 +783,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.5.2"
+        __version__ = "3.5.3"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1558,7 +1558,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.5.2 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.5.3 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -7983,18 +7983,7 @@ Recent translations to summarize:
         if hasattr(self, 'thinking_budget_entry'):
             if self.enable_gemini_thinking_var.get():
                 self.thinking_budget_entry.config(state='normal')
-                # Restore previous value or use default
-                if hasattr(self, '_previous_thinking_budget') and self._previous_thinking_budget:
-                    self.thinking_budget_var.set(self._previous_thinking_budget)
-                else:
-                    # Use saved config value
-                    saved_budget = str(self.config.get('thinking_budget', '-1'))
-                    self.thinking_budget_var.set(saved_budget)
             else:
-                # Save current value before disabling
-                current_value = self.thinking_budget_var.get()
-                if current_value not in ['0', '']:
-                    self._previous_thinking_budget = current_value
                 self.thinking_budget_entry.config(state='disabled')
 
     def open_other_settings(self):
@@ -9965,7 +9954,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.5.2...")
+    print("🚀 Starting Glossarion v3.5.3...")
     
     # Initialize splash screen
     splash_manager = None
