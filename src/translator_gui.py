@@ -783,7 +783,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.5.1"
+        __version__ = "3.5.2"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -960,116 +960,135 @@ class TranslatorGUI:
         self.default_translation_chunk_prompt = "[This is part {chunk_idx}/{total_chunks}]. You must maintain the narrative flow with the previous chunks while translating it and following all system prompt guidelines previously mentioned.\n{chunk_html}"
         self.default_image_chunk_prompt = "This is part {chunk_idx} of {total_chunks} of a longer image. You must maintain the narrative flow with the previous chunks while translating it and following all system prompt guidelines previously mentioned. {context}"
         self.default_prompts = {
+
             "korean": (
                 "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
-                "- Use an easy to read comedy translation style.\n"
+                "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
+                "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
                 "- Retain Korean honorifics and respectful speech markers in romanized form, including but not limited to: -nim, -ssi, -yang, -gun, -isiyeo, -hasoseo. For archaic/classical Korean honorific forms (like 이시여/isiyeo, 하소서/hasoseo), preserve them as-is rather than converting to modern equivalents.\n"
                 "- Always localize Korean terminology to proper English equivalents instead of literal translations (examples: 마왕 = Demon King; 마술 = magic).\n"
-                "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
+                "- When translating Korean's pronoun-dropping style, insert pronouns in English only where needed for clarity: use they/them as default except where glossary specifies otherwise, use I/me for first-person narration, and maintain natural English flow without overusing pronouns just because they're omitted in Korean.\n"
                 "- All Korean profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Korean quotation marks (" ", ' ', 「」, 『』) as-is without converting to English quotes.\n"
+                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 생 means 'life/living', 활 means 'active', 관 means 'hall/building' - together 생활관 means Dormitory. When you see [생활관], write [Dormitory]. Do not write [생활관] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
             ),
             "japanese": (
                 "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
-                "- Use an easy to read comedy translation style.\n"
+                "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
+                "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
                 "- Retain Japanese honorifics and respectful speech markers in romanized form, including but not limited to: -san, -sama, -chan, -kun, -dono, -sensei, -senpai, -kouhai. For archaic/classical Japanese honorific forms, preserve them as-is rather than converting to modern equivalents.\n"
                 "- Always localize Japanese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 魔術 = magic).\n"
-                "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
+                "- When translating Japanese's pronoun-dropping style, insert pronouns in English only where needed for clarity: use they/them as default except where glossary specifies otherwise, use I/me for first-person narration while reflecting the Japanese pronoun's nuance (私/僕/俺/etc.) through speech patterns rather than the pronoun itself, and maintain natural English flow without overusing pronouns just because they're omitted in Japanese.\n"
                 "- All Japanese profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Japanese quotation marks (「」 and 『』) as-is without converting to English quotes.\n"
+                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory. When you see [生活館], write [Dormitory]. Do not write [生活館] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
             ),
             "chinese": (
                 "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
-                "- Use an easy to read comedy translation style.\n"
+                "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
+                "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
                 "- Retain Chinese titles and respectful forms of address in romanized form, including but not limited to: laoban, laoshi, shifu, xiaojie, xiansheng, taitai, daren, qianbei. For archaic/classical Chinese respectful forms, preserve them as-is rather than converting to modern equivalents.\n"
                 "- Always localize Chinese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 法术 = magic).\n"
-                "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
+                "- When translating Chinese's flexible pronoun usage, insert pronouns in English only where needed for clarity: use they/them as default except where glossary specifies otherwise, use I/me for first-person narration while reflecting the pronoun's nuance (我/吾/咱/人家/etc.) through speech patterns and formality level rather than the pronoun itself, and since Chinese pronouns don't indicate gender in speech (他/她/它 all sound like 'tā'), rely on context or glossary rather than assuming gender.\n"
                 "- All Chinese profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Chinese quotation marks (「」 for dialogue, 《》 for titles) as-is without converting to English quotes.\n"
+                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory. When you see [生活館], write [Dormitory]. Do not write [生活館] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
             ),
             "korean_OCR": (
                 "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
-                "- Use an easy to read comedy translation style.\n"
+                "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
+                "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
                 "- Retain Korean honorifics and respectful speech markers in romanized form, including but not limited to: -nim, -ssi, -yang, -gun, -isiyeo, -hasoseo. For archaic/classical Korean honorific forms (like 이시여/isiyeo, 하소서/hasoseo), preserve them as-is rather than converting to modern equivalents.\n"
                 "- Always localize Korean terminology to proper English equivalents instead of literal translations (examples: 마왕 = Demon King; 마술 = magic).\n"
-                "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
+                "- When translating Korean's pronoun-dropping style, insert pronouns in English only where needed for clarity: use they/them as default except where glossary specifies otherwise, use I/me for first-person narration, and maintain natural English flow without overusing pronouns just because they're omitted in Korean.\n"
                 "- All Korean profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Korean quotation marks (" ", ' ', 「」, 『』) as-is without converting to English quotes.\n"
+                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 생 means 'life/living', 활 means 'active', 관 means 'hall/building' - together 생활관 means Dormitory. When you see [생활관], write [Dormitory]. Do not write [생활관] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
                 "- Add HTML tags for proper formatting as expected of a novel.\n"
-                "- Wrap every paragraph in <p> tags; do not insert any literal tabs or spaces."
+                "- Wrap every paragraph in <p> tags; do not insert any literal tabs or spaces.\n"
             ),
             "japanese_OCR": (
                 "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
-                "- Use an easy to read comedy translation style.\n"
+                "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
+                "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
                 "- Retain Japanese honorifics and respectful speech markers in romanized form, including but not limited to: -san, -sama, -chan, -kun, -dono, -sensei, -senpai, -kouhai. For archaic/classical Japanese honorific forms, preserve them as-is rather than converting to modern equivalents.\n"
                 "- Always localize Japanese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 魔術 = magic).\n"
-                "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
+                "- When translating Japanese's pronoun-dropping style, insert pronouns in English only where needed for clarity: use they/them as default except where glossary specifies otherwise, use I/me for first-person narration while reflecting the Japanese pronoun's nuance (私/僕/俺/etc.) through speech patterns rather than the pronoun itself, and maintain natural English flow without overusing pronouns just because they're omitted in Japanese.\n"
                 "- All Japanese profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Japanese quotation marks (「」 and 『』) as-is without converting to English quotes.\n"
+                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory. When you see [生活館], write [Dormitory]. Do not write [生活館] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
                 "- Add HTML tags for proper formatting as expected of a novel.\n"
-                "- Wrap every paragraph in <p> tags; do not insert any literal tabs or spaces."
+                "- Wrap every paragraph in <p> tags; do not insert any literal tabs or spaces.\n"
             ),
             "chinese_OCR": (
                 "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
-                "- Use an easy to read comedy translation style.\n"
+                "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
+                "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
                 "- Retain Chinese titles and respectful forms of address in romanized form, including but not limited to: laoban, laoshi, shifu, xiaojie, xiansheng, taitai, daren, qianbei. For archaic/classical Chinese respectful forms, preserve them as-is rather than converting to modern equivalents.\n"
                 "- Always localize Chinese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 法术 = magic).\n"
-                "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
+                "- When translating Chinese's flexible pronoun usage, insert pronouns in English only where needed for clarity: use they/them as default except where glossary specifies otherwise, use I/me for first-person narration while reflecting the pronoun's nuance (我/吾/咱/人家/etc.) through speech patterns and formality level rather than the pronoun itself, and since Chinese pronouns don't indicate gender in speech (他/她/它 all sound like 'tā'), rely on context or glossary rather than assuming gender.\n"
                 "- All Chinese profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Chinese quotation marks (「」 for dialogue, 《》 for titles) as-is without converting to English quotes.\n"
+                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory. When you see [生活館], write [Dormitory]. Do not write [生活館] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
                 "- Add HTML tags for proper formatting as expected of a novel.\n"
-                "- Wrap every paragraph in <p> tags; do not insert any literal tabs or spaces."
+                "- Wrap every paragraph in <p> tags; do not insert any literal tabs or spaces.\n"
             ),
             "korean_TXT": (
                 "You are a professional Korean to English novel translator, you must strictly output only English text while following these rules:\n"
-                "- Use an easy to read comedy translation style.\n"
+                "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
+                "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
                 "- Retain Korean honorifics and respectful speech markers in romanized form, including but not limited to: -nim, -ssi, -yang, -gun, -isiyeo, -hasoseo. For archaic/classical Korean honorific forms (like 이시여/isiyeo, 하소서/hasoseo), preserve them as-is rather than converting to modern equivalents.\n"
                 "- Always localize Korean terminology to proper English equivalents instead of literal translations (examples: 마왕 = Demon King; 마술 = magic).\n"
-                "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
+                "- When translating Korean's pronoun-dropping style, insert pronouns in English only where needed for clarity: use they/them as default except where glossary specifies otherwise, use I/me for first-person narration, and maintain natural English flow without overusing pronouns just because they're omitted in Korean.\n"
                 "- All Korean profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Korean quotation marks (" ", ' ', 「」, 『』) as-is without converting to English quotes.\n"
-                "- Use line breaks for proper formatting as expected of a novel."
+                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 생 means 'life/living', 활 means 'active', 관 means 'hall/building' - together 생활관 means Dormitory. When you see [생활관], write [Dormitory]. Do not write [생활관] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
+                "- Use line breaks for proper formatting as expected of a novel.\n"
             ),
             "japanese_TXT": (
                 "You are a professional Japanese to English novel translator, you must strictly output only English text while following these rules:\n"
-                "- Use an easy to read comedy translation style.\n"
+                "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
+                "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
                 "- Retain Japanese honorifics and respectful speech markers in romanized form, including but not limited to: -san, -sama, -chan, -kun, -dono, -sensei, -senpai, -kouhai. For archaic/classical Japanese honorific forms, preserve them as-is rather than converting to modern equivalents.\n"
                 "- Always localize Japanese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 魔術 = magic).\n"
-                "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
+                "- When translating Japanese's pronoun-dropping style, insert pronouns in English only where needed for clarity: use they/them as default except where glossary specifies otherwise, use I/me for first-person narration while reflecting the Japanese pronoun's nuance (私/僕/俺/etc.) through speech patterns rather than the pronoun itself, and maintain natural English flow without overusing pronouns just because they're omitted in Japanese.\n"
                 "- All Japanese profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Japanese quotation marks (「」 and 『』) as-is without converting to English quotes.\n"
-                "- Use line breaks for proper formatting as expected of a novel."
+                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory. When you see [生活館], write [Dormitory]. Do not write [生活館] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
+                "- Use line breaks for proper formatting as expected of a novel.\n"
             ),
             "chinese_TXT": (
                 "You are a professional Chinese to English novel translator, you must strictly output only English text while following these rules:\n"
-                "- Use an easy to read comedy translation style.\n"
+                "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
+                "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
                 "- Retain Chinese titles and respectful forms of address in romanized form, including but not limited to: laoban, laoshi, shifu, xiaojie, xiansheng, taitai, daren, qianbei. For archaic/classical Chinese respectful forms, preserve them as-is rather than converting to modern equivalents.\n"
                 "- Always localize Chinese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 法术 = magic).\n"
-                "- If and only If a character pronoun is not mentioned (e.g., Glossary/Raw text), or implied, then you must use gender neutral pronouns like they/them (and keep 'I' neutral in first-person).\n"
+                "- When translating Chinese's flexible pronoun usage, insert pronouns in English only where needed for clarity: use they/them as default except where glossary specifies otherwise, use I/me for first-person narration while reflecting the pronoun's nuance (我/吾/咱/人家/etc.) through speech patterns and formality level rather than the pronoun itself, and since Chinese pronouns don't indicate gender in speech (他/她/它 all sound like 'tā'), rely on context or glossary rather than assuming gender.\n"
                 "- All Chinese profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Chinese quotation marks (「」 for dialogue, 《》 for titles) as-is without converting to English quotes.\n"
-                "- Use line breaks for proper formatting as expected of a novel."
+                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory. When you see [生活館], write [Dormitory]. Do not write [生活館] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
+                "- Use line breaks for proper formatting as expected of a novel.\n"
             ),
             "Manga_JP": (
                 "You are a professional Japanese to English Manga translator.\n"
@@ -1421,7 +1440,7 @@ Recent translations to summarize:
         self.auto_glossary_prompt = self.config.get('auto_glossary_prompt', self.default_auto_glossary_prompt)
         self.rolling_summary_system_prompt = self.config.get('rolling_summary_system_prompt', self.default_rolling_summary_system_prompt)
         self.rolling_summary_user_prompt = self.config.get('rolling_summary_user_prompt', self.default_rolling_summary_user_prompt)
-        self.append_glossary_prompt = self.config.get('append_glossary_prompt', "Character/Term Glossary (use these translations consistently):")
+        self.append_glossary_prompt = self.config.get('append_glossary_prompt', "Character Entry Glossary (use these translations consistently):")
         self.translation_chunk_prompt = self.config.get('translation_chunk_prompt', self.default_translation_chunk_prompt)
         self.image_chunk_prompt = self.config.get('image_chunk_prompt', self.default_image_chunk_prompt)
         
@@ -1539,7 +1558,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.5.1 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.5.2 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -7967,19 +7986,16 @@ Recent translations to summarize:
                 # Restore previous value or use default
                 if hasattr(self, '_previous_thinking_budget') and self._previous_thinking_budget:
                     self.thinking_budget_var.set(self._previous_thinking_budget)
-                elif self.thinking_budget_var.get() == '0':
-                    # Only use default if no previous value exists
-                    default_budget = self.config.get('thinking_budget', '8192')
-                    if default_budget == '0':
-                        default_budget = '8192'  # Fallback if config has 0
-                    self.thinking_budget_var.set(default_budget)
+                else:
+                    # Use saved config value
+                    saved_budget = str(self.config.get('thinking_budget', '-1'))
+                    self.thinking_budget_var.set(saved_budget)
             else:
                 # Save current value before disabling
                 current_value = self.thinking_budget_var.get()
-                if current_value != '0':
+                if current_value not in ['0', '']:
                     self._previous_thinking_budget = current_value
                 self.thinking_budget_entry.config(state='disabled')
-                self.thinking_budget_var.set('0')
 
     def open_other_settings(self):
        """Open the Other Settings dialog"""
@@ -9796,7 +9812,7 @@ Recent translations to summarize:
             if delay_val and not delay_val.replace('.', '', 1).isdigit():
                 messagebox.showerror("Invalid Input", "Please enter a valid number for API call delay")
                 return
-            self.config['delay'] = safe_int(delay_val, 2)
+            self.config['delay'] = safe_float(delay_val, 2)
             
             trans_temp_val = self.trans_temp.get().strip()
             if trans_temp_val:
@@ -9949,7 +9965,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.5.1...")
+    print("🚀 Starting Glossarion v3.5.2...")
     
     # Initialize splash screen
     splash_manager = None
