@@ -2470,7 +2470,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
 
         # HTML tag check:
         check_missing_html_tag = qa_settings.get('check_missing_html_tag', True)
-        
+
         if check_missing_html_tag and filename.lower().endswith('.html'):
             # Use the new comprehensive check
             has_issues, html_issues = check_html_structure_issues(full_path, log)
@@ -2486,6 +2486,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 
                 # Log the issues found
                 log(f"   → Found HTML structure issues in {filename}: {', '.join(html_issues)}")
+        
         
         # Check for multiple headers
         if check_multiple_headers:
@@ -2671,58 +2672,10 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     if total_time > 60:
         log(f"   ({int(total_time // 60)} minutes {int(total_time % 60)} seconds)")
 
-def check_insufficient_paragraph_tags(html_content, threshold=0.3):
-    """
-    Check if HTML content has insufficient paragraph tags.
-    Returns True if the ratio of text in <p> tags to total text is below threshold.
-    
-    Args:
-        html_content: The raw HTML content from the file
-        threshold: Minimum ratio of text that should be in paragraph tags (default 0.3 = 30%)
-    
-    Returns:
-        bool: True if file has insufficient paragraph tags
-    """
-    from bs4 import BeautifulSoup
-    import re
-    
-    try:
-        # Parse HTML
-        soup = BeautifulSoup(html_content, 'html.parser')
-        
-        # Get all text content
-        total_text = soup.get_text(separator='\n', strip=True)
-        total_text_length = len(total_text)
-        
-        # Skip very short files
-        if total_text_length < 100:
-            return False
-        
-        # Get text specifically from paragraph tags
-        p_tags = soup.find_all('p')
-        p_text_length = sum(len(p.get_text(strip=True)) for p in p_tags)
-        
-        # Calculate ratio
-        if total_text_length == 0:
-            return False
-            
-        p_ratio = p_text_length / total_text_length
-        
-        # Debug info (remove in production)
-        # print(f"Total text length: {total_text_length}, P tag text: {p_text_length}, Ratio: {p_ratio:.2%}")
-        
-        # Check if we have enough paragraph tags
-        return p_ratio < threshold
-        
-    except Exception as e:
-        # If parsing fails, don't flag as issue
-        print(f"Error checking paragraph tags: {e}")
-        return False
-
 
 def check_html_structure_issues(file_path, log=print):
     """
-    Comprehensive HTML structure check including missing tags and insufficient paragraphs.
+    Check for HTML structure problems including unwrapped text.
     
     Returns:
         tuple: (has_issues, issue_types) where issue_types is a list of specific issues found
@@ -2733,40 +2686,41 @@ def check_html_structure_issues(file_path, log=print):
         
         issues = []
         
-        # Check 1: Missing basic HTML structure
-        content_lower = content.lower()
-        has_html_tag = '<html' in content_lower
-        has_body_tag = '<body' in content_lower
-        
-        if not has_html_tag or not has_body_tag:
+        # Check 1: Empty file
+        if not content.strip():
             issues.append('missing_html_structure')
-        
-        # Check 2: Insufficient paragraph tags
-        if check_insufficient_paragraph_tags(content):
-            issues.append('insufficient_paragraph_tags')
+            return True, issues
+            
+        # Check 2: No HTML tags at all
+        if '<' not in content or '>' not in content:
+            issues.append('missing_html_structure')
+            return True, issues
         
         # Check 3: Large blocks of unwrapped text
-        # Look for text that's not inside any HTML tag
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(content, 'html.parser')
-        
-        # Find direct text nodes under body
-        body = soup.find('body')
-        if body:
-            # Get direct text children of body (not wrapped in any tag)
-            direct_text = []
-            for child in body.children:
-                if isinstance(child, str) and child.strip():
-                    direct_text.append(child.strip())
+        from bs4 import BeautifulSoup, NavigableString
+        try:
+            soup = BeautifulSoup(content, 'html.parser')
             
-            # If we have significant unwrapped text, flag it
-            unwrapped_text_length = sum(len(text) for text in direct_text)
-            total_text_length = len(soup.get_text(strip=True))
-            
-            if total_text_length > 0:
-                unwrapped_ratio = unwrapped_text_length / total_text_length
-                if unwrapped_ratio > 0.2:  # More than 20% unwrapped
+            # Look for text that's sitting directly in body (not in any tag)
+            body = soup.find('body')
+            if body:
+                unwrapped_text_total = 0
+                
+                # Check all direct children of body
+                for element in body.children:
+                    if isinstance(element, NavigableString):
+                        text = str(element).strip()
+                        # Count any non-whitespace text
+                        if text and not text.isspace():
+                            unwrapped_text_total += len(text)
+                
+                # If we found significant unwrapped text, that's a problem
+                if unwrapped_text_total > 100:  # More than 100 chars of unwrapped text
                     issues.append('unwrapped_text_content')
+                    log(f"   Found {unwrapped_text_total} characters of unwrapped text")
+        
+        except Exception as e:
+            log(f"   Warning: Could not parse HTML structure: {e}")
         
         return len(issues) > 0, issues
         
@@ -2774,6 +2728,60 @@ def check_html_structure_issues(file_path, log=print):
         log(f"Error checking HTML structure for {file_path}: {e}")
         return False, []
 
+
+def check_insufficient_paragraph_tags(html_content, threshold=0.3):
+    """
+    Check if HTML content has insufficient paragraph tags.
+    
+    Args:
+        html_content: The raw HTML content from the file
+        threshold: Minimum ratio of text that should be in paragraph tags (default 0.3 = 30%)
+    
+    Returns:
+        bool: True if file has insufficient paragraph tags
+    """
+    from bs4 import BeautifulSoup, NavigableString
+    
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Get total text length
+        total_text = soup.get_text(strip=True)
+        total_length = len(total_text)
+        
+        # Skip short files
+        if total_length < 200:
+            return False
+        
+        # Count text in paragraph tags
+        p_text_length = 0
+        for p in soup.find_all('p'):
+            p_text_length += len(p.get_text(strip=True))
+        
+        # Also check for unwrapped text in body
+        body = soup.find('body')
+        if body:
+            for element in body.children:
+                if isinstance(element, NavigableString):
+                    text = str(element).strip()
+                    if len(text) > 50:  # Significant unwrapped text block
+                        # If we find big chunks of unwrapped text, flag it
+                        return True
+        
+        # Calculate ratio
+        if total_length == 0:
+            return False
+            
+        ratio = p_text_length / total_length
+        
+        # Flag if not enough text is in paragraphs
+        return ratio < threshold
+        
+    except Exception as e:
+        print(f"Error checking paragraph tags: {e}")
+        return False
+
+        
 def launch_gui():
     """Launch GUI interface with mode selection"""
     def run_scan():
