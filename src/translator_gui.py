@@ -135,26 +135,201 @@ class UIHelper:
     @staticmethod
     def setup_text_undo_redo(text_widget):
         """Set up undo/redo bindings for a text widget"""
-        def handle_undo(event):
-            try: 
-                text_widget.edit_undo()
-            except tk.TclError: 
-                pass
-            return "break"
+        # NUCLEAR OPTION: Disable built-in undo completely
+        try:
+            text_widget.config(undo=False)
+        except:
+            pass
         
-        def handle_redo(event):
-            try: 
-                text_widget.edit_redo()
-            except tk.TclError: 
-                pass
-            return "break"
+        # Remove ALL possible z-related bindings
+        all_z_bindings = [
+            'z', 'Z', '<z>', '<Z>', '<Key-z>', '<Key-Z>', 
+            '<Alt-z>', '<Alt-Z>', '<Meta-z>', '<Meta-Z>', 
+            '<Mod1-z>', '<Mod1-Z>', '<<Undo>>', '<<Redo>>',
+            '<Control-Key-z>', '<Control-Key-Z>'
+        ]
         
-        # Windows/Linux bindings
-        text_widget.bind('<Control-z>', handle_undo)
-        text_widget.bind('<Control-y>', handle_redo)
+        for seq in all_z_bindings:
+            try:
+                text_widget.unbind(seq)
+                text_widget.unbind_all(seq)  
+                text_widget.unbind_class('Text', seq)
+            except:
+                pass
+        
+        # Create our own undo/redo stack with better management
+        class UndoRedoManager:
+            def __init__(self):
+                self.undo_stack = []
+                self.redo_stack = []
+                self.is_undoing = False
+                self.is_redoing = False
+                self.last_action_was_undo = False
+                
+            def save_state(self):
+                """Save current state to undo stack"""
+                if self.is_undoing or self.is_redoing:
+                    return
+                    
+                try:
+                    content = text_widget.get(1.0, tk.END)
+                    # Only save if content changed
+                    if not self.undo_stack or self.undo_stack[-1] != content:
+                        self.undo_stack.append(content)
+                        if len(self.undo_stack) > 100:
+                            self.undo_stack.pop(0)
+                        # Only clear redo stack if this is a new edit (not from undo)
+                        if not self.last_action_was_undo:
+                            self.redo_stack.clear()
+                        self.last_action_was_undo = False
+                except:
+                    pass
+            
+            def undo(self):
+                """Perform undo"""
+                print(f"[DEBUG] Undo called. Stack size: {len(self.undo_stack)}, Redo stack: {len(self.redo_stack)}")
+                if len(self.undo_stack) > 1:
+                    self.is_undoing = True
+                    self.last_action_was_undo = True
+                    try:
+                        # Save cursor position
+                        cursor_pos = text_widget.index(tk.INSERT)
+                        
+                        # Move current state to redo stack
+                        current = self.undo_stack.pop()
+                        self.redo_stack.append(current)
+                        
+                        # Restore previous state
+                        previous = self.undo_stack[-1]
+                        text_widget.delete(1.0, tk.END)
+                        text_widget.insert(1.0, previous.rstrip('\n'))
+                        
+                        # Restore cursor position
+                        try:
+                            text_widget.mark_set(tk.INSERT, cursor_pos)
+                            text_widget.see(tk.INSERT)
+                        except:
+                            text_widget.mark_set(tk.INSERT, "1.0")
+                            
+                        print(f"[DEBUG] Undo complete. New redo stack size: {len(self.redo_stack)}")
+                    finally:
+                        self.is_undoing = False
+                return "break"
+            
+            def redo(self):
+                """Perform redo"""
+                print(f"[DEBUG] Redo called. Redo stack size: {len(self.redo_stack)}")
+                if self.redo_stack:
+                    self.is_redoing = True
+                    try:
+                        # Save cursor position
+                        cursor_pos = text_widget.index(tk.INSERT)
+                        
+                        # Get next state
+                        next_state = self.redo_stack.pop()
+                        
+                        # Add to undo stack
+                        self.undo_stack.append(next_state)
+                        
+                        # Restore state
+                        text_widget.delete(1.0, tk.END)
+                        text_widget.insert(1.0, next_state.rstrip('\n'))
+                        
+                        # Restore cursor position
+                        try:
+                            text_widget.mark_set(tk.INSERT, cursor_pos)
+                            text_widget.see(tk.INSERT)
+                        except:
+                            text_widget.mark_set(tk.INSERT, "end-1c")
+                            
+                        print(f"[DEBUG] Redo complete. Remaining redo stack: {len(self.redo_stack)}")
+                    finally:
+                        self.is_redoing = False
+                        self.last_action_was_undo = True
+                return "break"
+        
+        # Create manager instance
+        manager = UndoRedoManager()
+        
+        # CRITICAL: Override ALL key handling to intercept 'z'
+        def handle_key_press(event):
+            """Intercept ALL key presses"""
+            # Check for 'z' or 'Z'
+            if event.keysym.lower() == 'z':
+                # Check if Control is pressed
+                if event.state & 0x4:  # Control key is pressed
+                    # This is Control+Z - let it pass to our undo handler
+                    return None  # Let it pass through to our Control+Z binding
+                else:
+                    # Just 'z' without Control - insert it manually
+                    if event.char in ['z', 'Z']:
+                        try:
+                            text_widget.insert(tk.INSERT, event.char)
+                        except:
+                            pass
+                        return "break"
+            
+            # Check for Control+Y (redo)  
+            if event.keysym.lower() == 'y' and (event.state & 0x4):
+                return None  # Let it pass through to our Control+Y binding
+            
+            # All other keys pass through
+            return None
+        
+        # Bind with highest priority
+        text_widget.bind('<Key>', handle_key_press, add=False)
+        
+        # Bind undo/redo commands
+        text_widget.bind('<Control-z>', lambda e: manager.undo())
+        text_widget.bind('<Control-Z>', lambda e: manager.undo())
+        text_widget.bind('<Control-y>', lambda e: manager.redo())
+        text_widget.bind('<Control-Y>', lambda e: manager.redo())
+        text_widget.bind('<Control-Shift-z>', lambda e: manager.redo())
+        text_widget.bind('<Control-Shift-Z>', lambda e: manager.redo())
+        
         # macOS bindings
-        text_widget.bind('<Command-z>', handle_undo)
-        text_widget.bind('<Command-Shift-z>', handle_redo)
+        text_widget.bind('<Command-z>', lambda e: manager.undo())
+        text_widget.bind('<Command-Z>', lambda e: manager.undo())
+        text_widget.bind('<Command-Shift-z>', lambda e: manager.redo())
+        
+        # Track changes more efficiently
+        save_timer = [None]
+        
+        def schedule_save():
+            """Schedule a save operation with debouncing"""
+            # Cancel any pending save
+            if save_timer[0]:
+                text_widget.after_cancel(save_timer[0])
+            # Schedule new save
+            save_timer[0] = text_widget.after(200, manager.save_state)
+        
+        def on_text_modified(event=None):
+            """Handle text modifications"""
+            # Don't save during undo/redo or for modifier keys
+            if event and event.keysym in ['Control_L', 'Control_R', 'Alt_L', 'Alt_R', 
+                                         'Shift_L', 'Shift_R', 'Left', 'Right', 'Up', 'Down',
+                                         'Home', 'End', 'Prior', 'Next']:
+                return
+            
+            if not manager.is_undoing and not manager.is_redoing:
+                schedule_save()
+        
+        # More efficient change tracking
+        text_widget.bind('<KeyRelease>', on_text_modified)
+        text_widget.bind('<<Paste>>', lambda e: text_widget.after(10, manager.save_state))
+        text_widget.bind('<<Cut>>', lambda e: text_widget.after(10, manager.save_state))
+        
+        # Save initial state
+        def initialize():
+            """Initialize with current content"""
+            try:
+                content = text_widget.get(1.0, tk.END)
+                manager.undo_stack.append(content)
+                print(f"[DEBUG] Initial state saved. Content length: {len(content)}")
+            except:
+                pass
+        
+        text_widget.after(50, initialize)
     
     @staticmethod
     def setup_dialog_scrolling(dialog_window, canvas):
@@ -215,13 +390,69 @@ class UIHelper:
     @staticmethod
     def setup_scrollable_text(parent, **text_kwargs):
         """Create a scrolled text widget with undo/redo support"""
-        text_widget = scrolledtext.ScrolledText(parent, 
-                                               undo=True, 
-                                               autoseparators=True, 
-                                               maxundo=-1,
-                                               **text_kwargs)
+        # Remove undo=True from kwargs if present, as we'll handle it ourselves
+        text_kwargs.pop('undo', None)
+        text_kwargs.pop('autoseparators', None)
+        text_kwargs.pop('maxundo', None)
+        
+        # Create ScrolledText without built-in undo
+        text_widget = scrolledtext.ScrolledText(parent, **text_kwargs)
+        
+        # Apply our custom undo/redo setup
         UIHelper.setup_text_undo_redo(text_widget)
+        
+        # Extra protection for ScrolledText widgets
+        UIHelper._fix_scrolledtext_z_key(text_widget)
+        
         return text_widget
+    
+    @staticmethod
+    def _fix_scrolledtext_z_key(scrolled_widget):
+        """Apply additional fixes specifically for ScrolledText widgets"""
+        # ScrolledText stores the actual Text widget in different ways depending on version
+        # Try to find the actual text widget
+        text_widget = None
+        
+        # Method 1: Direct attribute
+        if hasattr(scrolled_widget, 'text'):
+            text_widget = scrolled_widget.text
+        # Method 2: It might be the widget itself
+        elif hasattr(scrolled_widget, 'insert') and hasattr(scrolled_widget, 'delete'):
+            text_widget = scrolled_widget
+        # Method 3: Look in children
+        else:
+            for child in scrolled_widget.winfo_children():
+                if isinstance(child, tk.Text):
+                    text_widget = child
+                    break
+        
+        if not text_widget:
+            # If we can't find the text widget, work with scrolled_widget directly
+            text_widget = scrolled_widget
+        
+        # Remove ALL 'z' related bindings at all levels
+        for widget in [text_widget, scrolled_widget]:
+            for seq in ['z', 'Z', '<z>', '<Z>', '<Key-z>', '<Key-Z>', 
+                       '<<Undo>>', '<<Redo>>', '<Alt-z>', '<Alt-Z>',
+                       '<Meta-z>', '<Meta-Z>', '<Mod1-z>', '<Mod1-Z>']:
+                try:
+                    widget.unbind(seq)
+                    widget.unbind_all(seq)
+                except:
+                    pass
+        
+        # Override the 'z' key completely
+        def intercept_z(event):
+            if event.char in ['z', 'Z']:
+                if not (event.state & 0x4):  # No Control key
+                    text_widget.insert(tk.INSERT, event.char)
+                    return "break"
+            return None
+        
+        # Bind with high priority to both widgets
+        text_widget.bind('<KeyPress>', intercept_z, add=False)
+        text_widget.bind('z', lambda e: intercept_z(e))
+        text_widget.bind('Z', lambda e: intercept_z(e))
     
     @staticmethod
     def block_text_editing(text_widget):
@@ -245,7 +476,17 @@ class UIHelper:
             return "break"
         
         text_widget.bind("<Key>", block_editing)
-
+    
+    @staticmethod
+    def disable_spinbox_mousewheel(spinbox):
+        """Disable mousewheel scrolling on a spinbox to prevent accidental value changes"""
+        def block_wheel(event):
+            return "break"
+        
+        spinbox.bind("<MouseWheel>", block_wheel)  # Windows
+        spinbox.bind("<Button-4>", block_wheel)    # Linux scroll up
+        spinbox.bind("<Button-5>", block_wheel)    # Linux scroll down
+        
 class WindowManager:
     """Unified window geometry and dialog management - FULLY REFACTORED V2"""
     
@@ -783,7 +1024,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.5.3"
+        __version__ = "3.5.4"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1558,7 +1799,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.5.3 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.5.4 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -6599,445 +6840,557 @@ Recent translations to summarize:
             self.qa_thread.start()
 
     def show_qa_scanner_settings(self, parent_dialog, qa_settings):
-        """Show QA Scanner settings dialog using WindowManager properly"""
-        # Use setup_scrollable from WindowManager - NOT create_scrollable_dialog
-        dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
-            parent_dialog,
-            "QA Scanner Settings",
-            width=800,
-            height=None,  # Let WindowManager calculate optimal height
-            modal=True,
-            resizable=True,
-            max_width_ratio=0.9,
-            max_height_ratio=0.9
-        )
-        
-        # Main settings frame
-        main_frame = tk.Frame(scrollable_frame, padx=30, pady=20)
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # Title
-        title_label = tk.Label(
-            main_frame,
-            text="QA Scanner Settings",
-            font=('Arial', 24, 'bold')
-        )
-        title_label.pack(pady=(0, 20))
-        
-        # Foreign Character Settings Section
-        foreign_section = tk.LabelFrame(
-            main_frame,
-            text="Foreign Character Detection",
-            font=('Arial', 12, 'bold'),
-            padx=20,
-            pady=15
-        )
-        foreign_section.pack(fill=tk.X, pady=(0, 20))
-        
-        # Threshold setting
-        threshold_frame = tk.Frame(foreign_section)
-        threshold_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        tk.Label(
-            threshold_frame,
-            text="Minimum foreign characters to flag:",
-            font=('Arial', 10)
-        ).pack(side=tk.LEFT)
-        
-        threshold_var = tk.IntVar(value=qa_settings.get('foreign_char_threshold', 10))
-        threshold_spinbox = tb.Spinbox(
-            threshold_frame,
-            from_=0,
-            to=1000,
-            textvariable=threshold_var,
-            width=10,
-            bootstyle="primary"
-        )
-        threshold_spinbox.pack(side=tk.LEFT, padx=(10, 0))
-        
-        tk.Label(
-            threshold_frame,
-            text="(0 = always flag, higher = more tolerant)",
-            font=('Arial', 9),
-            fg='gray'
-        ).pack(side=tk.LEFT, padx=(10, 0))
-        
-        # Excluded characters - using UIHelper for scrollable text
-        excluded_frame = tk.Frame(foreign_section)
-        excluded_frame.pack(fill=tk.X, pady=(10, 0))
-        
-        tk.Label(
-            excluded_frame,
-            text="Additional characters to exclude from detection:",
-            font=('Arial', 10)
-        ).pack(anchor=tk.W)
-        
-        # Use regular Text widget with manual scroll setup instead of ScrolledText
-        excluded_text_frame = tk.Frame(excluded_frame)
-        excluded_text_frame.pack(fill=tk.X, pady=(5, 0))
-        
-        excluded_text = tk.Text(
-            excluded_text_frame,
-            height=7,
-            width=60,
-            font=('Consolas', 10),
-            wrap=tk.WORD,
-            undo=True
-        )
-        excluded_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        # Add scrollbar manually
-        excluded_scrollbar = ttk.Scrollbar(excluded_text_frame, orient="vertical", command=excluded_text.yview)
-        excluded_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        excluded_text.configure(yscrollcommand=excluded_scrollbar.set)
-        
-        # Setup undo/redo for the text widget
-        UIHelper.setup_text_undo_redo(excluded_text)
-        
-        excluded_text.insert(1.0, qa_settings.get('excluded_characters', ''))
-        
-        tk.Label(
-            excluded_frame,
-            text="Enter characters separated by spaces (e.g., ™ © ® • …)",
-            font=('Arial', 9),
-            fg='gray'
-        ).pack(anchor=tk.W)
-        
-        # Detection Options Section
-        detection_section = tk.LabelFrame(
-            main_frame,
-            text="Detection Options",
-            font=('Arial', 12, 'bold'),
-            padx=20,
-            pady=15
-        )
-        detection_section.pack(fill=tk.X, pady=(0, 20))
-        
-        # Checkboxes for detection options
-        check_encoding_var = tk.BooleanVar(value=qa_settings.get('check_encoding_issues', False))
-        check_repetition_var = tk.BooleanVar(value=qa_settings.get('check_repetition', True))
-        check_artifacts_var = tk.BooleanVar(value=qa_settings.get('check_translation_artifacts', True))
-        
-        tb.Checkbutton(
-            detection_section,
-            text="Check for encoding issues (�, □, ◇)",
-            variable=check_encoding_var,
-            bootstyle="primary"
-        ).pack(anchor=tk.W, pady=2)
-        
-        tb.Checkbutton(
-            detection_section,
-            text="Check for excessive repetition",
-            variable=check_repetition_var,
-            bootstyle="primary"
-        ).pack(anchor=tk.W, pady=2)
-        
-        tb.Checkbutton(
-            detection_section,
-            text="Check for translation artifacts (MTL notes, watermarks)",
-            variable=check_artifacts_var,
-            bootstyle="primary"
-        ).pack(anchor=tk.W, pady=2)
-        
-        # File Processing Section
-        file_section = tk.LabelFrame(
-            main_frame,
-            text="File Processing",
-            font=('Arial', 12, 'bold'),
-            padx=20,
-            pady=15
-        )
-        file_section.pack(fill=tk.X, pady=(0, 20))
-        
-        # Minimum file length
-        min_length_frame = tk.Frame(file_section)
-        min_length_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        tk.Label(
-            min_length_frame,
-            text="Minimum file length (characters):",
-            font=('Arial', 10)
-        ).pack(side=tk.LEFT)
-        
-        min_length_var = tk.IntVar(value=qa_settings.get('min_file_length', 0))
-        min_length_spinbox = tb.Spinbox(
-            min_length_frame,
-            from_=0,
-            to=10000,
-            textvariable=min_length_var,
-            width=10,
-            bootstyle="primary"
-        )
-        min_length_spinbox.pack(side=tk.LEFT, padx=(10, 0))
-
-        # Add a separator
-        separator = ttk.Separator(main_frame, orient='horizontal')
-        separator.pack(fill=tk.X, pady=15)
-        
-        # Word Count Cross-Reference Section
-        wordcount_section = tk.LabelFrame(
-            main_frame,
-            text="Word Count Analysis",
-            font=('Arial', 12, 'bold'),
-            padx=20,
-            pady=15
-        )
-        wordcount_section.pack(fill=tk.X, pady=(0, 20))
-        
-        check_word_count_var = tk.BooleanVar(value=qa_settings.get('check_word_count_ratio', False))
-        tb.Checkbutton(
-            wordcount_section,
-            text="Cross-reference word counts with original EPUB",
-            variable=check_word_count_var,
-            bootstyle="primary"
-        ).pack(anchor=tk.W, pady=(0, 5))
-        
-        tk.Label(
-            wordcount_section,
-            text="Compares word counts between original and translated files to detect missing content.\n" +
-                 "Accounts for typical expansion ratios when translating from CJK to English.",
-            wraplength=700,
-            justify=tk.LEFT,
-            fg='gray'
-        ).pack(anchor=tk.W, padx=(20, 0))
- 
-        # Show current EPUB status and allow selection
-        epub_frame = tk.Frame(wordcount_section)
-        epub_frame.pack(anchor=tk.W, pady=(10, 5))
-
-        current_epub = self.get_current_epub_path()
-        if current_epub:
-            status_text = f"📖 Current EPUB: {os.path.basename(current_epub)}"
-            status_color = 'green'
-        else:
-            status_text = "📖 No EPUB file selected"
-            status_color = 'red'
-
-        status_label = tk.Label(
-            epub_frame,
-            text=status_text,
-            fg=status_color,
-            font=('Arial', 10)
-        )
-        status_label.pack(side=tk.LEFT)
-
-        def select_epub_for_qa():
-            epub_path = filedialog.askopenfilename(
-                title="Select Source EPUB File",
-                filetypes=[("EPUB files", "*.epub"), ("All files", "*.*")],
-                parent=dialog
+            """Show QA Scanner settings dialog using WindowManager properly"""
+            # Use setup_scrollable from WindowManager - NOT create_scrollable_dialog
+            dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
+                parent_dialog,
+                "QA Scanner Settings",
+                width=800,
+                height=None,  # Let WindowManager calculate optimal height
+                modal=True,
+                resizable=True,
+                max_width_ratio=0.9,
+                max_height_ratio=0.9
             )
-            if epub_path:
-                self.selected_epub_path = epub_path
-                self.config['last_epub_path'] = epub_path
-                self.save_config(show_message=False)
-                status_label.config(
-                    text=f"📖 Current EPUB: {os.path.basename(epub_path)}",
-                    fg='green'
-                )
-                self.append_log(f"✅ Selected EPUB for QA: {os.path.basename(epub_path)}")
-
-        tk.Button(
-            epub_frame,
-            text="Select EPUB",
-            command=select_epub_for_qa,
-            font=('Arial', 9)
-        ).pack(side=tk.LEFT, padx=(10, 0))
-
-        # Add option to disable mismatch warning
-        warn_mismatch_var = tk.BooleanVar(value=qa_settings.get('warn_name_mismatch', True))
-        tb.Checkbutton(
-            wordcount_section,
-            text="Warn when EPUB and folder names don't match",
-            variable=warn_mismatch_var,
-            bootstyle="primary"
-        ).pack(anchor=tk.W, pady=(10, 5))
-
-        # Additional Checks Section
-        additional_section = tk.LabelFrame(
-            main_frame,
-            text="Additional Checks",
-            font=('Arial', 12, 'bold'),
-            padx=20,
-            pady=15
-        )
-        additional_section.pack(fill=tk.X, pady=(20, 0))
-
-        # Multiple headers check
-        check_multiple_headers_var = tk.BooleanVar(value=qa_settings.get('check_multiple_headers', True))
-        tb.Checkbutton(
-            additional_section,
-            text="Detect files with 2 or more headers (h1-h6 tags)",
-            variable=check_multiple_headers_var,
-            bootstyle="primary"
-        ).pack(anchor=tk.W, pady=(5, 5))
-
-        tk.Label(
-            additional_section,
-            text="Identifies files that may have been incorrectly split or merged.\n" +
-                 "Useful for detecting chapters that contain multiple sections.",
-            wraplength=700,
-            justify=tk.LEFT,
-            fg='gray'
-        ).pack(anchor=tk.W, padx=(20, 0))
-
-        # Missing HTML tag check
-        html_tag_frame = tk.Frame(additional_section)
-        html_tag_frame.pack(fill=tk.X, pady=(10, 5))
-
-        check_missing_html_tag_var = tk.BooleanVar(value=qa_settings.get('check_missing_html_tag', True))
-        check_missing_html_tag_check = tb.Checkbutton(
-            html_tag_frame,
-            text="Flag HTML files with missing <html> tag",
-            variable=check_missing_html_tag_var,
-            bootstyle="primary"
-        )
-        check_missing_html_tag_check.pack(side=tk.LEFT)
-
-        tk.Label(
-            html_tag_frame,
-            text="(Checks if HTML files have proper structure)",
-            font=('Arial', 9),
-            foreground='gray'
-        ).pack(side=tk.LEFT, padx=(10, 0))
-
-        # Report Settings Section
-        report_section = tk.LabelFrame(
-            main_frame,
-            text="Report Settings",
-            font=('Arial', 12, 'bold'),
-            padx=20,
-            pady=15
-        )
-        report_section.pack(fill=tk.X, pady=(0, 20))
-
-        # Report format
-        format_frame = tk.Frame(report_section)
-        format_frame.pack(fill=tk.X, pady=(0, 10))
-
-        tk.Label(
-            format_frame,
-            text="Report format:",
-            font=('Arial', 10)
-        ).pack(side=tk.LEFT)
-
-        format_var = tk.StringVar(value=qa_settings.get('report_format', 'detailed'))
-        format_options = [
-            ("Summary only", "summary"),
-            ("Detailed (recommended)", "detailed"),
-            ("Verbose (all data)", "verbose")
-        ]
-
-        for idx, (text, value) in enumerate(format_options):
-            rb = tb.Radiobutton(
-                format_frame,
-                text=text,
-                variable=format_var,
-                value=value,
+            
+            # Main settings frame
+            main_frame = tk.Frame(scrollable_frame, padx=30, pady=20)
+            main_frame.pack(fill=tk.BOTH, expand=True)
+            
+            # Title
+            title_label = tk.Label(
+                main_frame,
+                text="QA Scanner Settings",
+                font=('Arial', 24, 'bold')
+            )
+            title_label.pack(pady=(0, 20))
+            
+            # Foreign Character Settings Section
+            foreign_section = tk.LabelFrame(
+                main_frame,
+                text="Foreign Character Detection",
+                font=('Arial', 12, 'bold'),
+                padx=20,
+                pady=15
+            )
+            foreign_section.pack(fill=tk.X, pady=(0, 20))
+            
+            # Threshold setting
+            threshold_frame = tk.Frame(foreign_section)
+            threshold_frame.pack(fill=tk.X, pady=(0, 10))
+            
+            tk.Label(
+                threshold_frame,
+                text="Minimum foreign characters to flag:",
+                font=('Arial', 10)
+            ).pack(side=tk.LEFT)
+            
+            threshold_var = tk.IntVar(value=qa_settings.get('foreign_char_threshold', 10))
+            threshold_spinbox = tb.Spinbox(
+                threshold_frame,
+                from_=0,
+                to=1000,
+                textvariable=threshold_var,
+                width=10,
                 bootstyle="primary"
             )
-            rb.pack(side=tk.LEFT, padx=(10 if idx == 0 else 5, 0))
-
-        # Auto-save report
-        auto_save_var = tk.BooleanVar(value=qa_settings.get('auto_save_report', True))
-        tb.Checkbutton(
-            report_section,
-            text="Automatically save report after scan",
-            variable=auto_save_var,
-            bootstyle="primary"
-        ).pack(anchor=tk.W)
-
-        # Buttons
-        button_frame = tk.Frame(main_frame)
-        button_frame.pack(fill=tk.X, pady=(20, 0))
-        button_inner = tk.Frame(button_frame)
-        button_inner.pack()
-        
-        def save_settings():
-            """Save QA scanner settings"""
-            try:
-                qa_settings['foreign_char_threshold'] = threshold_var.get()
-                qa_settings['excluded_characters'] = excluded_text.get(1.0, tk.END).strip()
-                qa_settings['check_encoding_issues'] = check_encoding_var.get()
-                qa_settings['check_repetition'] = check_repetition_var.get()
-                qa_settings['check_translation_artifacts'] = check_artifacts_var.get()
-                qa_settings['min_file_length'] = min_length_var.get()
-                qa_settings['report_format'] = format_var.get()
-                qa_settings['auto_save_report'] = auto_save_var.get()
-                qa_settings['check_word_count_ratio'] = check_word_count_var.get()
-                qa_settings['check_multiple_headers'] = check_multiple_headers_var.get()
-                qa_settings['warn_name_mismatch'] = warn_mismatch_var.get()
-                qa_settings['check_missing_html_tag'] = check_missing_html_tag_var.get()
-
-                
-                # Save to main config
-                self.config['qa_scanner_settings'] = qa_settings
-                
-                # Call save_config with show_message=False to avoid the error
-                self.save_config(show_message=False)
-                
-                self.append_log("✅ QA Scanner settings saved")
-                dialog._cleanup_scrolling()  # Clean up scrolling bindings
-                dialog.destroy()
-                
-            except Exception as e:
-                self.append_log(f"❌ Error saving QA settings: {str(e)}")
-                messagebox.showerror("Error", f"Failed to save settings: {str(e)}")
-        
-        def reset_defaults():
-            """Reset to default settings"""
-            result = messagebox.askyesno(
-                "Reset to Defaults", 
-                "Are you sure you want to reset all settings to defaults?",
-                parent=dialog
+            threshold_spinbox.pack(side=tk.LEFT, padx=(10, 0))
+            
+            # Disable mousewheel scrolling on spinbox
+            UIHelper.disable_spinbox_mousewheel(threshold_spinbox)
+            
+            tk.Label(
+                threshold_frame,
+                text="(0 = always flag, higher = more tolerant)",
+                font=('Arial', 9),
+                fg='gray'
+            ).pack(side=tk.LEFT, padx=(10, 0))
+            
+            # Excluded characters - using UIHelper for scrollable text
+            excluded_frame = tk.Frame(foreign_section)
+            excluded_frame.pack(fill=tk.X, pady=(10, 0))
+            
+            tk.Label(
+                excluded_frame,
+                text="Additional characters to exclude from detection:",
+                font=('Arial', 10)
+            ).pack(anchor=tk.W)
+            
+            # Use regular Text widget with manual scroll setup instead of ScrolledText
+            excluded_text_frame = tk.Frame(excluded_frame)
+            excluded_text_frame.pack(fill=tk.X, pady=(5, 0))
+            
+            excluded_text = tk.Text(
+                excluded_text_frame,
+                height=7,
+                width=60,
+                font=('Consolas', 10),
+                wrap=tk.WORD,
+                undo=True
             )
-            if result:
-                threshold_var.set(10)
-                excluded_text.delete(1.0, tk.END)
-                check_encoding_var.set(False)
-                check_repetition_var.set(True)
-                check_artifacts_var.set(True)
-                min_length_var.set(0)
-                format_var.set('detailed')
-                auto_save_var.set(True)
-                check_word_count_var.set(False)
-                check_multiple_headers_var.set(True)
-                warn_mismatch_var.set(False)
-                check_missing_html_tag_var.set(True)
-        
-        # Create buttons using ttkbootstrap styles
-        save_btn = tb.Button(
-            button_inner,
-            text="Save Settings",
-            command=save_settings,
-            bootstyle="success",
-            width=15
-        )
-        save_btn.pack(side=tk.LEFT, padx=5)
-        
-        reset_btn = tb.Button(
-            button_inner,
-            text="Reset Defaults",
-            command=reset_defaults,
-            bootstyle="warning",
-            width=15
-        )
-        reset_btn.pack(side=tk.RIGHT, padx=(5, 0))
-        
-        cancel_btn = tb.Button(
-            button_inner,
-            text="Cancel",
-            command=lambda: [dialog._cleanup_scrolling(), dialog.destroy()],
-            bootstyle="secondary",
-            width=15
-        )
-        cancel_btn.pack(side=tk.RIGHT)
-        
-        # Use WindowManager's auto_resize_dialog to properly size the window
-        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=0.85)
-        
-        # Handle window close - setup_scrollable adds _cleanup_scrolling method
-        dialog.protocol("WM_DELETE_WINDOW", lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
+            excluded_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            
+            # Add scrollbar manually
+            excluded_scrollbar = ttk.Scrollbar(excluded_text_frame, orient="vertical", command=excluded_text.yview)
+            excluded_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            excluded_text.configure(yscrollcommand=excluded_scrollbar.set)
+            
+            # Setup undo/redo for the text widget
+            UIHelper.setup_text_undo_redo(excluded_text)
+            
+            excluded_text.insert(1.0, qa_settings.get('excluded_characters', ''))
+            
+            tk.Label(
+                excluded_frame,
+                text="Enter characters separated by spaces (e.g., ™ © ® • …)",
+                font=('Arial', 9),
+                fg='gray'
+            ).pack(anchor=tk.W)
+            
+            # Detection Options Section
+            detection_section = tk.LabelFrame(
+                main_frame,
+                text="Detection Options",
+                font=('Arial', 12, 'bold'),
+                padx=20,
+                pady=15
+            )
+            detection_section.pack(fill=tk.X, pady=(0, 20))
+            
+            # Checkboxes for detection options
+            check_encoding_var = tk.BooleanVar(value=qa_settings.get('check_encoding_issues', False))
+            check_repetition_var = tk.BooleanVar(value=qa_settings.get('check_repetition', True))
+            check_artifacts_var = tk.BooleanVar(value=qa_settings.get('check_translation_artifacts', True))
+            
+            tb.Checkbutton(
+                detection_section,
+                text="Check for encoding issues (�, □, ◇)",
+                variable=check_encoding_var,
+                bootstyle="primary"
+            ).pack(anchor=tk.W, pady=2)
+            
+            tb.Checkbutton(
+                detection_section,
+                text="Check for excessive repetition",
+                variable=check_repetition_var,
+                bootstyle="primary"
+            ).pack(anchor=tk.W, pady=2)
+            
+            tb.Checkbutton(
+                detection_section,
+                text="Check for translation artifacts (MTL notes, watermarks)",
+                variable=check_artifacts_var,
+                bootstyle="primary"
+            ).pack(anchor=tk.W, pady=2)
+            
+            # File Processing Section
+            file_section = tk.LabelFrame(
+                main_frame,
+                text="File Processing",
+                font=('Arial', 12, 'bold'),
+                padx=20,
+                pady=15
+            )
+            file_section.pack(fill=tk.X, pady=(0, 20))
+            
+            # Minimum file length
+            min_length_frame = tk.Frame(file_section)
+            min_length_frame.pack(fill=tk.X, pady=(0, 10))
+            
+            tk.Label(
+                min_length_frame,
+                text="Minimum file length (characters):",
+                font=('Arial', 10)
+            ).pack(side=tk.LEFT)
+            
+            min_length_var = tk.IntVar(value=qa_settings.get('min_file_length', 0))
+            min_length_spinbox = tb.Spinbox(
+                min_length_frame,
+                from_=0,
+                to=10000,
+                textvariable=min_length_var,
+                width=10,
+                bootstyle="primary"
+            )
+            min_length_spinbox.pack(side=tk.LEFT, padx=(10, 0))
+            
+            # Disable mousewheel scrolling on spinbox
+            UIHelper.disable_spinbox_mousewheel(min_length_spinbox)
+
+            # Add a separator
+            separator = ttk.Separator(main_frame, orient='horizontal')
+            separator.pack(fill=tk.X, pady=15)
+            
+            # Word Count Cross-Reference Section
+            wordcount_section = tk.LabelFrame(
+                main_frame,
+                text="Word Count Analysis",
+                font=('Arial', 12, 'bold'),
+                padx=20,
+                pady=15
+            )
+            wordcount_section.pack(fill=tk.X, pady=(0, 20))
+            
+            check_word_count_var = tk.BooleanVar(value=qa_settings.get('check_word_count_ratio', False))
+            tb.Checkbutton(
+                wordcount_section,
+                text="Cross-reference word counts with original EPUB",
+                variable=check_word_count_var,
+                bootstyle="primary"
+            ).pack(anchor=tk.W, pady=(0, 5))
+            
+            tk.Label(
+                wordcount_section,
+                text="Compares word counts between original and translated files to detect missing content.\n" +
+                     "Accounts for typical expansion ratios when translating from CJK to English.",
+                wraplength=700,
+                justify=tk.LEFT,
+                fg='gray'
+            ).pack(anchor=tk.W, padx=(20, 0))
+     
+            # Show current EPUB status and allow selection
+            epub_frame = tk.Frame(wordcount_section)
+            epub_frame.pack(anchor=tk.W, pady=(10, 5))
+
+            current_epub = self.get_current_epub_path()
+            if current_epub:
+                status_text = f"📖 Current EPUB: {os.path.basename(current_epub)}"
+                status_color = 'green'
+            else:
+                status_text = "📖 No EPUB file selected"
+                status_color = 'red'
+
+            status_label = tk.Label(
+                epub_frame,
+                text=status_text,
+                fg=status_color,
+                font=('Arial', 10)
+            )
+            status_label.pack(side=tk.LEFT)
+
+            def select_epub_for_qa():
+                epub_path = filedialog.askopenfilename(
+                    title="Select Source EPUB File",
+                    filetypes=[("EPUB files", "*.epub"), ("All files", "*.*")],
+                    parent=dialog
+                )
+                if epub_path:
+                    self.selected_epub_path = epub_path
+                    self.config['last_epub_path'] = epub_path
+                    self.save_config(show_message=False)
+                    status_label.config(
+                        text=f"📖 Current EPUB: {os.path.basename(epub_path)}",
+                        fg='green'
+                    )
+                    self.append_log(f"✅ Selected EPUB for QA: {os.path.basename(epub_path)}")
+
+            tk.Button(
+                epub_frame,
+                text="Select EPUB",
+                command=select_epub_for_qa,
+                font=('Arial', 9)
+            ).pack(side=tk.LEFT, padx=(10, 0))
+
+            # Add option to disable mismatch warning
+            warn_mismatch_var = tk.BooleanVar(value=qa_settings.get('warn_name_mismatch', True))
+            tb.Checkbutton(
+                wordcount_section,
+                text="Warn when EPUB and folder names don't match",
+                variable=warn_mismatch_var,
+                bootstyle="primary"
+            ).pack(anchor=tk.W, pady=(10, 5))
+
+            # Additional Checks Section
+            additional_section = tk.LabelFrame(
+                main_frame,
+                text="Additional Checks",
+                font=('Arial', 12, 'bold'),
+                padx=20,
+                pady=15
+            )
+            additional_section.pack(fill=tk.X, pady=(20, 0))
+
+            # Multiple headers check
+            check_multiple_headers_var = tk.BooleanVar(value=qa_settings.get('check_multiple_headers', True))
+            tb.Checkbutton(
+                additional_section,
+                text="Detect files with 2 or more headers (h1-h6 tags)",
+                variable=check_multiple_headers_var,
+                bootstyle="primary"
+            ).pack(anchor=tk.W, pady=(5, 5))
+
+            tk.Label(
+                additional_section,
+                text="Identifies files that may have been incorrectly split or merged.\n" +
+                     "Useful for detecting chapters that contain multiple sections.",
+                wraplength=700,
+                justify=tk.LEFT,
+                fg='gray'
+            ).pack(anchor=tk.W, padx=(20, 0))
+
+            # Missing HTML tag check
+            html_tag_frame = tk.Frame(additional_section)
+            html_tag_frame.pack(fill=tk.X, pady=(10, 5))
+
+            check_missing_html_tag_var = tk.BooleanVar(value=qa_settings.get('check_missing_html_tag', True))
+            check_missing_html_tag_check = tb.Checkbutton(
+                html_tag_frame,
+                text="Flag HTML files with missing <html> tag",
+                variable=check_missing_html_tag_var,
+                bootstyle="primary"
+            )
+            check_missing_html_tag_check.pack(side=tk.LEFT)
+
+            tk.Label(
+                html_tag_frame,
+                text="(Checks if HTML files have proper structure)",
+                font=('Arial', 9),
+                foreground='gray'
+            ).pack(side=tk.LEFT, padx=(10, 0))
+
+            # NEW: Paragraph Structure Check
+            paragraph_section_frame = tk.Frame(additional_section)
+            paragraph_section_frame.pack(fill=tk.X, pady=(15, 5))
+            
+            # Separator line
+            ttk.Separator(paragraph_section_frame, orient='horizontal').pack(fill=tk.X, pady=(0, 10))
+            
+            # Checkbox for paragraph structure check
+            check_paragraph_structure_var = tk.BooleanVar(value=qa_settings.get('check_paragraph_structure', True))
+            paragraph_check = tb.Checkbutton(
+                paragraph_section_frame,
+                text="Check for insufficient paragraph tags",
+                variable=check_paragraph_structure_var,
+                bootstyle="primary"
+            )
+            paragraph_check.pack(anchor=tk.W)
+            
+            # Threshold setting frame
+            threshold_container = tk.Frame(paragraph_section_frame)
+            threshold_container.pack(fill=tk.X, pady=(10, 5), padx=(20, 0))
+            
+            tk.Label(
+                threshold_container,
+                text="Minimum text in <p> tags:",
+                font=('Arial', 10)
+            ).pack(side=tk.LEFT)
+            
+            # Get current threshold value (default 30%)
+            current_threshold = int(qa_settings.get('paragraph_threshold', 0.3) * 100)
+            paragraph_threshold_var = tk.IntVar(value=current_threshold)
+            
+            # Spinbox for threshold
+            paragraph_threshold_spinbox = tb.Spinbox(
+                threshold_container,
+                from_=0,
+                to=100,
+                textvariable=paragraph_threshold_var,
+                width=8,
+                bootstyle="primary"
+            )
+            paragraph_threshold_spinbox.pack(side=tk.LEFT, padx=(10, 5))
+            
+            # Disable mousewheel scrolling on the spinbox
+            UIHelper.disable_spinbox_mousewheel(paragraph_threshold_spinbox)
+            
+            tk.Label(
+                threshold_container,
+                text="%",
+                font=('Arial', 10)
+            ).pack(side=tk.LEFT)
+            
+            # Threshold value label
+            threshold_value_label = tk.Label(
+                threshold_container,
+                text=f"(currently {current_threshold}%)",
+                font=('Arial', 9),
+                fg='gray'
+            )
+            threshold_value_label.pack(side=tk.LEFT, padx=(10, 0))
+            
+            # Update label when spinbox changes
+            def update_threshold_label(*args):
+                try:
+                    value = paragraph_threshold_var.get()
+                    threshold_value_label.config(text=f"(currently {value}%)")
+                except (tk.TclError, ValueError):
+                    # Handle empty or invalid input
+                    threshold_value_label.config(text="(currently --%)")
+            paragraph_threshold_var.trace('w', update_threshold_label)
+            
+            # Description
+            tk.Label(
+                paragraph_section_frame,
+                text="Detects HTML files where text content is not properly wrapped in paragraph tags.\n" +
+                     "Files with less than the specified percentage of text in <p> tags will be flagged.\n" +
+                     "Also checks for large blocks of unwrapped text directly in the body element.",
+                wraplength=700,
+                justify=tk.LEFT,
+                fg='gray'
+            ).pack(anchor=tk.W, padx=(20, 0), pady=(5, 0))
+            
+            # Enable/disable threshold setting based on checkbox
+            def toggle_paragraph_threshold(*args):
+                if check_paragraph_structure_var.get():
+                    paragraph_threshold_spinbox.config(state='normal')
+                else:
+                    paragraph_threshold_spinbox.config(state='disabled')
+            
+            check_paragraph_structure_var.trace('w', toggle_paragraph_threshold)
+            toggle_paragraph_threshold()  # Set initial state
+
+            # Report Settings Section
+            report_section = tk.LabelFrame(
+                main_frame,
+                text="Report Settings",
+                font=('Arial', 12, 'bold'),
+                padx=20,
+                pady=15
+            )
+            report_section.pack(fill=tk.X, pady=(0, 20))
+
+            # Report format
+            format_frame = tk.Frame(report_section)
+            format_frame.pack(fill=tk.X, pady=(0, 10))
+
+            tk.Label(
+                format_frame,
+                text="Report format:",
+                font=('Arial', 10)
+            ).pack(side=tk.LEFT)
+
+            format_var = tk.StringVar(value=qa_settings.get('report_format', 'detailed'))
+            format_options = [
+                ("Summary only", "summary"),
+                ("Detailed (recommended)", "detailed"),
+                ("Verbose (all data)", "verbose")
+            ]
+
+            for idx, (text, value) in enumerate(format_options):
+                rb = tb.Radiobutton(
+                    format_frame,
+                    text=text,
+                    variable=format_var,
+                    value=value,
+                    bootstyle="primary"
+                )
+                rb.pack(side=tk.LEFT, padx=(10 if idx == 0 else 5, 0))
+
+            # Auto-save report
+            auto_save_var = tk.BooleanVar(value=qa_settings.get('auto_save_report', True))
+            tb.Checkbutton(
+                report_section,
+                text="Automatically save report after scan",
+                variable=auto_save_var,
+                bootstyle="primary"
+            ).pack(anchor=tk.W)
+
+            # Buttons
+            button_frame = tk.Frame(main_frame)
+            button_frame.pack(fill=tk.X, pady=(20, 0))
+            button_inner = tk.Frame(button_frame)
+            button_inner.pack()
+            
+            def save_settings():
+                """Save QA scanner settings"""
+                try:
+                    qa_settings['foreign_char_threshold'] = threshold_var.get()
+                    qa_settings['excluded_characters'] = excluded_text.get(1.0, tk.END).strip()
+                    qa_settings['check_encoding_issues'] = check_encoding_var.get()
+                    qa_settings['check_repetition'] = check_repetition_var.get()
+                    qa_settings['check_translation_artifacts'] = check_artifacts_var.get()
+                    qa_settings['min_file_length'] = min_length_var.get()
+                    qa_settings['report_format'] = format_var.get()
+                    qa_settings['auto_save_report'] = auto_save_var.get()
+                    qa_settings['check_word_count_ratio'] = check_word_count_var.get()
+                    qa_settings['check_multiple_headers'] = check_multiple_headers_var.get()
+                    qa_settings['warn_name_mismatch'] = warn_mismatch_var.get()
+                    qa_settings['check_missing_html_tag'] = check_missing_html_tag_var.get()
+                    qa_settings['check_paragraph_structure'] = check_paragraph_structure_var.get()
+                    
+                    # Validate and save paragraph threshold
+                    try:
+                        threshold_value = paragraph_threshold_var.get()
+                        if 0 <= threshold_value <= 100:
+                            qa_settings['paragraph_threshold'] = threshold_value / 100.0  # Convert to decimal
+                        else:
+                            raise ValueError("Threshold must be between 0 and 100")
+                    except (tk.TclError, ValueError) as e:
+                        # Default to 30% if invalid
+                        qa_settings['paragraph_threshold'] = 0.3
+                        self.append_log("⚠️ Invalid paragraph threshold, using default 30%")
+
+                    
+                    # Save to main config
+                    self.config['qa_scanner_settings'] = qa_settings
+                    
+                    # Call save_config with show_message=False to avoid the error
+                    self.save_config(show_message=False)
+                    
+                    self.append_log("✅ QA Scanner settings saved")
+                    dialog._cleanup_scrolling()  # Clean up scrolling bindings
+                    dialog.destroy()
+                    
+                except Exception as e:
+                    self.append_log(f"❌ Error saving QA settings: {str(e)}")
+                    messagebox.showerror("Error", f"Failed to save settings: {str(e)}")
+            
+            def reset_defaults():
+                """Reset to default settings"""
+                result = messagebox.askyesno(
+                    "Reset to Defaults", 
+                    "Are you sure you want to reset all settings to defaults?",
+                    parent=dialog
+                )
+                if result:
+                    threshold_var.set(10)
+                    excluded_text.delete(1.0, tk.END)
+                    check_encoding_var.set(False)
+                    check_repetition_var.set(True)
+                    check_artifacts_var.set(True)
+                    min_length_var.set(0)
+                    format_var.set('detailed')
+                    auto_save_var.set(True)
+                    check_word_count_var.set(False)
+                    check_multiple_headers_var.set(True)
+                    warn_mismatch_var.set(False)
+                    check_missing_html_tag_var.set(True)
+                    check_paragraph_structure_var.set(True)
+                    paragraph_threshold_var.set(30)  # 30% default
+            
+            # Create buttons using ttkbootstrap styles
+            save_btn = tb.Button(
+                button_inner,
+                text="Save Settings",
+                command=save_settings,
+                bootstyle="success",
+                width=15
+            )
+            save_btn.pack(side=tk.LEFT, padx=5)
+            
+            reset_btn = tb.Button(
+                button_inner,
+                text="Reset Defaults",
+                command=reset_defaults,
+                bootstyle="warning",
+                width=15
+            )
+            reset_btn.pack(side=tk.RIGHT, padx=(5, 0))
+            
+            cancel_btn = tb.Button(
+                button_inner,
+                text="Cancel",
+                command=lambda: [dialog._cleanup_scrolling(), dialog.destroy()],
+                bootstyle="secondary",
+                width=15
+            )
+            cancel_btn.pack(side=tk.RIGHT)
+            
+            # Use WindowManager's auto_resize_dialog to properly size the window
+            self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=0.85)
+            
+            # Handle window close - setup_scrollable adds _cleanup_scrolling method
+            dialog.protocol("WM_DELETE_WINDOW", lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
         
     def toggle_token_limit(self):
        """Toggle whether the token-limit entry is active or not."""
@@ -9954,7 +10307,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.5.3...")
+    print("🚀 Starting Glossarion v3.5.4...")
     
     # Initialize splash screen
     splash_manager = None
