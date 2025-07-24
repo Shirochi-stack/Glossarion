@@ -2310,7 +2310,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'min_file_length': 0,
             'report_format': 'detailed',
             'auto_save_report': True,
-            'check_missing_html_tag': True,      
+            'check_missing_html_tag': True, 
+            'check_paragraph_structure': True,       # NEW
+            'paragraph_threshold': 0.3,              # NEW - 30% minimum            
             'check_word_count_ratio': False,     
             'check_multiple_headers': True,   
             'warn_name_mismatch': True           
@@ -2335,8 +2337,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     log(f"   ✓ Repetition check: {'ENABLED' if qa_settings.get('check_repetition', True) else 'DISABLED'}")
     log(f"   ✓ Translation artifacts check: {'ENABLED' if qa_settings.get('check_translation_artifacts', True) else 'DISABLED'}")
     log(f"   ✓ Foreign char threshold: {qa_settings.get('foreign_char_threshold', 10)}")
-    log(f"   ✓ Missing HTML tag check: {'ENABLED' if qa_settings.get('check_missing_html_tag', False) else 'DISABLED'}")  # ADD THIS LINE
-    log(f"   ✓ Word count ratio check: {'ENABLED' if qa_settings.get('check_word_count_ratio', False) else 'DISABLED'}")  # OPTIONAL
+    log(f"   ✓ Missing HTML tag check: {'ENABLED' if qa_settings.get('check_missing_html_tag', False) else 'DISABLED'}")
+    log(f"   ✓ Paragraph structure check: {'ENABLED' if qa_settings.get('check_paragraph_structure', True) else 'DISABLED'}")    
+    log(f"   ✓ Word count ratio check: {'ENABLED' if qa_settings.get('check_word_count_ratio', False) else 'DISABLED'}") 
     log(f"   ✓ Multiple headers check: {'ENABLED' if qa_settings.get('check_multiple_headers', False) else 'DISABLED'}")  
     
     # Initialize configuration
@@ -2468,23 +2471,21 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         # HTML tag check:
         check_missing_html_tag = qa_settings.get('check_missing_html_tag', True)
         
-        # DEBUG: Print the setting value
-        if idx < 5:  # Only for first few files
-            print(f"[DEBUG] check_missing_html_tag setting: {check_missing_html_tag}")
-        
         if check_missing_html_tag and filename.lower().endswith('.html'):
-            has_html = check_html_structure(full_path)
-            if not has_html:
-                issues.append("missing_html_tag")
-                log(f"   → Found missing HTML tags in {filename}")
-                print(f"[DEBUG] Added 'missing_html_tag' to issues list for {filename}")
-                print(f"[DEBUG] Current issues list: {issues}")
-            else:
-                if idx < 5:
-                    print(f"[DEBUG] File {filename} has HTML tags, not flagging")
-        else:
-            if idx < 5:
-                print(f"[DEBUG] Skipping HTML check: check_missing_html_tag={check_missing_html_tag}, is_html={filename.lower().endswith('.html')}")
+            # Use the new comprehensive check
+            has_issues, html_issues = check_html_structure_issues(full_path, log)
+            
+            if has_issues:
+                for issue in html_issues:
+                    if issue == 'missing_html_structure':
+                        issues.append("missing_html_tag")
+                    elif issue == 'insufficient_paragraph_tags':
+                        issues.append("insufficient_paragraph_tags")
+                    elif issue == 'unwrapped_text_content':
+                        issues.append("unwrapped_text_content")
+                
+                # Log the issues found
+                log(f"   → Found HTML structure issues in {filename}: {', '.join(html_issues)}")
         
         # Check for multiple headers
         if check_multiple_headers:
@@ -2669,6 +2670,109 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     log(f"\n⏱️ Total scan time: {total_time:.1f} seconds")
     if total_time > 60:
         log(f"   ({int(total_time // 60)} minutes {int(total_time % 60)} seconds)")
+
+def check_insufficient_paragraph_tags(html_content, threshold=0.3):
+    """
+    Check if HTML content has insufficient paragraph tags.
+    Returns True if the ratio of text in <p> tags to total text is below threshold.
+    
+    Args:
+        html_content: The raw HTML content from the file
+        threshold: Minimum ratio of text that should be in paragraph tags (default 0.3 = 30%)
+    
+    Returns:
+        bool: True if file has insufficient paragraph tags
+    """
+    from bs4 import BeautifulSoup
+    import re
+    
+    try:
+        # Parse HTML
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Get all text content
+        total_text = soup.get_text(separator='\n', strip=True)
+        total_text_length = len(total_text)
+        
+        # Skip very short files
+        if total_text_length < 100:
+            return False
+        
+        # Get text specifically from paragraph tags
+        p_tags = soup.find_all('p')
+        p_text_length = sum(len(p.get_text(strip=True)) for p in p_tags)
+        
+        # Calculate ratio
+        if total_text_length == 0:
+            return False
+            
+        p_ratio = p_text_length / total_text_length
+        
+        # Debug info (remove in production)
+        # print(f"Total text length: {total_text_length}, P tag text: {p_text_length}, Ratio: {p_ratio:.2%}")
+        
+        # Check if we have enough paragraph tags
+        return p_ratio < threshold
+        
+    except Exception as e:
+        # If parsing fails, don't flag as issue
+        print(f"Error checking paragraph tags: {e}")
+        return False
+
+
+def check_html_structure_issues(file_path, log=print):
+    """
+    Comprehensive HTML structure check including missing tags and insufficient paragraphs.
+    
+    Returns:
+        tuple: (has_issues, issue_types) where issue_types is a list of specific issues found
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+        
+        issues = []
+        
+        # Check 1: Missing basic HTML structure
+        content_lower = content.lower()
+        has_html_tag = '<html' in content_lower
+        has_body_tag = '<body' in content_lower
+        
+        if not has_html_tag or not has_body_tag:
+            issues.append('missing_html_structure')
+        
+        # Check 2: Insufficient paragraph tags
+        if check_insufficient_paragraph_tags(content):
+            issues.append('insufficient_paragraph_tags')
+        
+        # Check 3: Large blocks of unwrapped text
+        # Look for text that's not inside any HTML tag
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(content, 'html.parser')
+        
+        # Find direct text nodes under body
+        body = soup.find('body')
+        if body:
+            # Get direct text children of body (not wrapped in any tag)
+            direct_text = []
+            for child in body.children:
+                if isinstance(child, str) and child.strip():
+                    direct_text.append(child.strip())
+            
+            # If we have significant unwrapped text, flag it
+            unwrapped_text_length = sum(len(text) for text in direct_text)
+            total_text_length = len(soup.get_text(strip=True))
+            
+            if total_text_length > 0:
+                unwrapped_ratio = unwrapped_text_length / total_text_length
+                if unwrapped_ratio > 0.2:  # More than 20% unwrapped
+                    issues.append('unwrapped_text_content')
+        
+        return len(issues) > 0, issues
+        
+    except Exception as e:
+        log(f"Error checking HTML structure for {file_path}: {e}")
+        return False, []
 
 def launch_gui():
     """Launch GUI interface with mode selection"""
