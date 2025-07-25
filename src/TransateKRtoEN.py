@@ -1189,7 +1189,7 @@ class ChapterExtractor:
     def _extract_chapters_universal(self, zf, extraction_mode="smart"):
         """Universal chapter extraction with three modes: smart, comprehensive, full
         
-        Fixed to handle Section/Chapter pairs properly
+        All modes now properly merge Section/Chapter pairs
         """
         chapters = []
         sample_texts = []
@@ -1231,6 +1231,10 @@ class ChapterExtractor:
         # Sort files to ensure proper order
         html_files.sort()
         
+        # Do merging for ALL modes now
+        processed_files = set()
+        merged_chapters = {}
+        
         # Group files by their base number to detect Section/Chapter pairs
         file_groups = {}
         for file_path in html_files:
@@ -1244,9 +1248,6 @@ class ChapterExtractor:
                 file_groups[base_num].append(file_path)
         
         # Process file groups and merge Section/Chapter pairs
-        processed_files = set()
-        merged_chapters = {}
-        
         for base_num, group_files in sorted(file_groups.items()):
             if len(group_files) == 2:
                 # Check if we have a Section/Chapter pair
@@ -1292,7 +1293,8 @@ class ChapterExtractor:
                             chapter_text = chapter_soup.get_text(strip=True)
                             
                             # Determine if they should be merged
-                            if len(section_text) < 500 and len(chapter_text) > 1000:
+                            # More lenient merging: if section is short, merge regardless of chapter length
+                            if len(section_text) < 500:
                                 # Section is likely just a header, merge them
                                 print(f"  → Merging: {os.path.basename(section_file)} ({len(section_text)} chars) + {os.path.basename(chapter_file)} ({len(chapter_text)} chars)")
                                 
@@ -1319,14 +1321,12 @@ class ChapterExtractor:
                         print(f"[WARNING] Failed to analyze {base_num} files: {e}")
         
         # Continue with regular processing
-        content_hashes = {}
-        seen_chapters = {}
+        sample_texts = []
         file_size_groups = {}
         h1_count = 0
         h2_count = 0
         
         chapter_num = 1
-        actual_num = 1
         processed_count = 0  # Track actually processed chapters
 
         for idx, file_path in enumerate(html_files):
@@ -1375,21 +1375,12 @@ class ChapterExtractor:
                 
                 # Mode-specific logic
                 if extraction_mode == "comprehensive":
-                    actual_chapter_num = None
+                    # For comprehensive mode, just use sequential numbering
+                    # This ensures every file gets a unique chapter number
+                    chapter_num = processed_count
                     filename_base = os.path.basename(file_path)
+                    print(f"[EXTRACT DEBUG] File: {filename_base}, Assigning Chapter: {chapter_num}")
                     
-                    print(f"[EXTRACT DEBUG] Trying to extract number from: {filename_base}")
-
-                    for pattern in self.pattern_manager.FILENAME_EXTRACT_PATTERNS:
-                        match = re.search(pattern, filename_base, re.IGNORECASE)
-                        if match:
-                            actual_chapter_num = int(match.group(1))
-                            break
-
-                    if actual_chapter_num is not None:
-                        chapter_num = actual_chapter_num
-                    else:
-                        chapter_num += 1
                 elif extraction_mode == "smart":
                     h1_tags = soup.find_all('h1')
                     h2_tags = soup.find_all('h2')
@@ -1414,17 +1405,12 @@ class ChapterExtractor:
                 
                 content_hash = ContentProcessor.get_content_hash(content_html)
                 
-                # Smart mode duplicate detection
+                # Smart mode - collect samples but NO duplicate detection
                 if extraction_mode == "smart":
                     file_size = len(content_text)
                     if file_size not in file_size_groups:
                         file_size_groups[file_size] = []
                     file_size_groups[file_size].append(file_path)
-                    
-                    if content_hash in content_hashes:
-                        duplicate_info = content_hashes[content_hash]
-                        print(f"[DEBUG] Skipping duplicate content: {file_path} (matches {duplicate_info['filename']})")
-                        continue
                     
                     if len(sample_texts) < 5:
                         sample_texts.append(content_text[:1000])
@@ -1437,23 +1423,8 @@ class ChapterExtractor:
                     
                     if chapter_num is None:
                         chapter_num = processed_count  # Use actual chapter count
-                        while chapter_num in seen_chapters:
-                            chapter_num += 1
                         detection_method = "sequential_fallback"
                         print(f"[DEBUG] No chapter number found in {file_path}, assigning: {chapter_num}")
-                    
-                    if chapter_num in seen_chapters:
-                        existing_info = seen_chapters[chapter_num]
-                        existing_hash = existing_info['content_hash']
-                        
-                        if existing_hash != content_hash:
-                            original_num = chapter_num
-                            while chapter_num in seen_chapters:
-                                chapter_num += 1
-                            detection_method += "_reassigned"
-                        else:
-                            print(f"[DEBUG] Skipping duplicate chapter {chapter_num}: {file_path}")
-                            continue
                 else:
                     # Comprehensive and full modes
                     chapter_title = None
@@ -1472,12 +1443,13 @@ class ChapterExtractor:
                     
                     detection_method = f"{extraction_mode}_sequential"
                 
-                if actual_num is None:
-                    actual_num = processed_count  # Use processed count instead of idx + 1
+                # Ensure chapter_num is always an integer
+                if isinstance(chapter_num, float):
+                    chapter_num = int(chapter_num)
                 
                 chapter_info = {
-                    "num": actual_num,
-                    "title": chapter_title or f"Chapter {actual_num}",
+                    "num": chapter_num,
+                    "title": chapter_title or f"Chapter {chapter_num}",
                     "body": content_html,
                     "filename": file_path,
                     "original_basename": os.path.splitext(os.path.basename(file_path))[0],
@@ -1501,26 +1473,16 @@ class ChapterExtractor:
                 
                 chapters.append(chapter_info)
                 
-                if extraction_mode == "smart":
-                    content_hashes[content_hash] = {
-                        'filename': file_path,
-                        'chapter_num': chapter_num
-                    }
-                    seen_chapters[chapter_num] = {
-                        'content_hash': content_hash,
-                        'filename': file_path
-                    }
-                
                 # Logging based on mode
                 if extraction_mode in ["comprehensive", "full"]:
                     if is_image_only_chapter:
-                        print(f"[{actual_num:04d}] 📸 Image-only chapter: {chapter_title} ({len(images)} images)")
+                        print(f"[{chapter_num:04d}] 📸 Image-only chapter: {chapter_title} ({len(images)} images)")
                     elif len(images) > 0 and len(content_text) >= 500:
-                        print(f"[{actual_num:04d}] 📖📸 Mixed chapter: {chapter_title} ({len(content_text)} chars, {len(images)} images)")
+                        print(f"[{chapter_num:04d}] 📖📸 Mixed chapter: {chapter_title} ({len(content_text)} chars, {len(images)} images)")
                     elif len(content_text) < 50:
-                        print(f"[{actual_num:04d}] 📄 Empty/placeholder: {chapter_title}")
+                        print(f"[{chapter_num:04d}] 📄 Empty/placeholder: {chapter_title}")
                     else:
-                        print(f"[{actual_num:04d}] 📖 Text chapter: {chapter_title} ({len(content_text)} chars)")
+                        print(f"[{chapter_num:04d}] 📖 Text chapter: {chapter_title} ({len(content_text)} chars)")
                 else:
                     if file_path in merged_chapters:
                         print(f"[DEBUG] ✅ Chapter {chapter_num}: {chapter_title[:50]}... (MERGED, {detection_method})")
@@ -1710,7 +1672,12 @@ class ChapterExtractor:
         """Print extraction summary"""
         print(f"\n📊 Chapter Extraction Summary ({extraction_mode.capitalize()} Mode):")
         print(f"   • Total chapters extracted: {len(chapters)}")
-        print(f"   • Chapter range: {chapters[0]['num']} to {chapters[-1]['num']}")
+        
+        # Format chapter range handling both int and float
+        first_num = chapters[0]['num']
+        last_num = chapters[-1]['num']
+        
+        print(f"   • Chapter range: {first_num} to {last_num}")
         print(f"   • Detected language: {detected_language}")
         
         if extraction_mode == "smart":
@@ -1724,6 +1691,7 @@ class ChapterExtractor:
         print(f"   • Image-only chapters: {image_only_count}")
         print(f"   • Mixed content chapters: {mixed_count}")
         
+        # Check for missing chapters (only for integer sequences)
         expected_chapters = set(range(chapters[0]['num'], chapters[-1]['num'] + 1))
         actual_chapters = set(c['num'] for c in chapters)
         missing = expected_chapters - actual_chapters
