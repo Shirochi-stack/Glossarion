@@ -1187,7 +1187,10 @@ class ChapterExtractor:
         return extracted_resources
     
     def _extract_chapters_universal(self, zf, extraction_mode="smart"):
-        """Universal chapter extraction with three modes: smart, comprehensive, full"""
+        """Universal chapter extraction with three modes: smart, comprehensive, full
+        
+        Fixed to handle Section/Chapter pairs properly
+        """
         chapters = []
         sample_texts = []
         
@@ -1225,6 +1228,97 @@ class ChapterExtractor:
         }
         print(f"📚 Found {len(html_files)} {mode_description.get(extraction_mode, 'files')} in EPUB")
         
+        # Sort files to ensure proper order
+        html_files.sort()
+        
+        # Group files by their base number to detect Section/Chapter pairs
+        file_groups = {}
+        for file_path in html_files:
+            filename = os.path.basename(file_path)
+            # Extract base number (e.g., "No00014" from "No00014Section.xhtml")
+            match = re.match(r'(No\d+)', filename)
+            if match:
+                base_num = match.group(1)
+                if base_num not in file_groups:
+                    file_groups[base_num] = []
+                file_groups[base_num].append(file_path)
+        
+        # Process file groups and merge Section/Chapter pairs
+        processed_files = set()
+        merged_chapters = {}
+        
+        for base_num, group_files in sorted(file_groups.items()):
+            if len(group_files) == 2:
+                # Check if we have a Section/Chapter pair
+                section_file = None
+                chapter_file = None
+                
+                for file_path in group_files:
+                    if 'section' in file_path.lower():
+                        section_file = file_path
+                    elif 'chapter' in file_path.lower():
+                        chapter_file = file_path
+                
+                if section_file and chapter_file:
+                    # We have a Section/Chapter pair - analyze them
+                    print(f"[DEBUG] Detected Section/Chapter pair: {base_num}")
+                    
+                    try:
+                        # Read section file
+                        section_data = zf.read(section_file)
+                        section_html = None
+                        for encoding in ['utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr', 'gbk', 'big5']:
+                            try:
+                                section_html = section_data.decode(encoding)
+                                break
+                            except UnicodeDecodeError:
+                                continue
+                        
+                        # Read chapter file
+                        chapter_data = zf.read(chapter_file)
+                        chapter_html = None
+                        for encoding in ['utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr', 'gbk', 'big5']:
+                            try:
+                                chapter_html = chapter_data.decode(encoding)
+                                break
+                            except UnicodeDecodeError:
+                                continue
+                        
+                        if section_html and chapter_html:
+                            section_soup = BeautifulSoup(section_html, 'html.parser')
+                            chapter_soup = BeautifulSoup(chapter_html, 'html.parser')
+                            
+                            section_text = section_soup.get_text(strip=True)
+                            chapter_text = chapter_soup.get_text(strip=True)
+                            
+                            # Determine if they should be merged
+                            if len(section_text) < 500 and len(chapter_text) > 1000:
+                                # Section is likely just a header, merge them
+                                print(f"  → Merging: {os.path.basename(section_file)} ({len(section_text)} chars) + {os.path.basename(chapter_file)} ({len(chapter_text)} chars)")
+                                
+                                # Extract section header content
+                                section_body = section_soup.body if section_soup.body else section_soup
+                                chapter_body = chapter_soup.body if chapter_soup.body else chapter_soup
+                                
+                                # Create merged content
+                                merged_body = str(section_body) + "\n" + str(chapter_body)
+                                
+                                # Store merged chapter info
+                                merged_chapters[chapter_file] = {
+                                    'merged_html': merged_body,
+                                    'section_file': section_file,
+                                    'is_merged': True
+                                }
+                                
+                                # Mark section file as processed (skip it)
+                                processed_files.add(section_file)
+                            else:
+                                print(f"  → Both files have substantial content, treating separately")
+                        
+                    except Exception as e:
+                        print(f"[WARNING] Failed to analyze {base_num} files: {e}")
+        
+        # Continue with regular processing
         content_hashes = {}
         seen_chapters = {}
         file_size_groups = {}
@@ -1233,22 +1327,36 @@ class ChapterExtractor:
         
         chapter_num = 1
         actual_num = 1
+        processed_count = 0  # Track actually processed chapters
 
-        for idx, file_path in enumerate(sorted(html_files)):
+        for idx, file_path in enumerate(html_files):
+            # Skip files that were merged as section headers
+            if file_path in processed_files:
+                continue
+            
+            # Increment processed count for actual chapters
+            processed_count += 1
+                
             try:
-                file_data = zf.read(file_path)
-                
-                html_content = None
-                for encoding in ['utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr', 'gbk', 'big5']:
-                    try:
-                        html_content = file_data.decode(encoding)
-                        break
-                    except UnicodeDecodeError:
+                # Check if this file has merged content
+                if file_path in merged_chapters:
+                    html_content = merged_chapters[file_path]['merged_html']
+                    print(f"[DEBUG] Processing merged chapter: {file_path}")
+                else:
+                    # Read file normally
+                    file_data = zf.read(file_path)
+                    
+                    html_content = None
+                    for encoding in ['utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr', 'gbk', 'big5']:
+                        try:
+                            html_content = file_data.decode(encoding)
+                            break
+                        except UnicodeDecodeError:
+                            continue
+                    
+                    if not html_content:
+                        print(f"[WARNING] Could not decode {file_path}")
                         continue
-                
-                if not html_content:
-                    print(f"[WARNING] Could not decode {file_path}")
-                    continue
                 
                 soup = BeautifulSoup(html_content, 'html.parser')
                 
@@ -1328,7 +1436,7 @@ class ChapterExtractor:
                     )
                     
                     if chapter_num is None:
-                        chapter_num = len(chapters) + 1
+                        chapter_num = processed_count  # Use actual chapter count
                         while chapter_num in seen_chapters:
                             chapter_num += 1
                         detection_method = "sequential_fallback"
@@ -1365,7 +1473,7 @@ class ChapterExtractor:
                     detection_method = f"{extraction_mode}_sequential"
                 
                 if actual_num is None:
-                    actual_num = idx + 1  # Use 1-based numbering
+                    actual_num = processed_count  # Use processed count instead of idx + 1
                 
                 chapter_info = {
                     "num": actual_num,
@@ -1382,6 +1490,11 @@ class ChapterExtractor:
                     "is_image_only": is_image_only_chapter,
                     "extraction_mode": extraction_mode
                 }
+                
+                # Add merge info if applicable
+                if file_path in merged_chapters:
+                    chapter_info["was_merged"] = True
+                    chapter_info["merged_with"] = merged_chapters[file_path]['section_file']
                 
                 if extraction_mode == "smart":
                     chapter_info["language_sample"] = content_text[:500]
@@ -1409,11 +1522,13 @@ class ChapterExtractor:
                     else:
                         print(f"[{actual_num:04d}] 📖 Text chapter: {chapter_title} ({len(content_text)} chars)")
                 else:
-                    if is_image_only_chapter:
+                    if file_path in merged_chapters:
+                        print(f"[DEBUG] ✅ Chapter {chapter_num}: {chapter_title[:50]}... (MERGED, {detection_method})")
+                    elif is_image_only_chapter:
                         print(f"[DEBUG] ✅ Chapter {chapter_num}: {chapter_title[:50]}... (IMAGE-ONLY, {detection_method})")
                     else:
                         print(f"[DEBUG] ✅ Chapter {chapter_num}: {chapter_title[:50]}... ({detection_method})")
-                    
+                        
             except Exception as e:
                 print(f"[ERROR] Failed to process {file_path}: {e}")
                 continue
