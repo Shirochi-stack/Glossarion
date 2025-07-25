@@ -1024,7 +1024,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.5.4"
+        __version__ = "3.5.5"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1708,10 +1708,10 @@ Recent translations to summarize:
             ('append_glossary_var', 'append_glossary', False),
             ('reset_failed_chapters_var', 'reset_failed_chapters', True),
             ('retry_truncated_var', 'retry_truncated', False),
-            ('retry_duplicate_var', 'retry_duplicate_bodies', True),
+            ('retry_duplicate_var', 'retry_duplicate_bodies', False),
             ('enable_image_translation_var', 'enable_image_translation', False),
             ('process_webnovel_images_var', 'process_webnovel_images', True),
-            ('comprehensive_extraction_var', 'comprehensive_extraction', False),
+            # REMOVED: ('comprehensive_extraction_var', 'comprehensive_extraction', False),
             ('hide_image_translation_label_var', 'hide_image_translation_label', True),
             ('retry_timeout_var', 'retry_timeout', True),
             ('batch_translation_var', 'batch_translation', False),
@@ -1719,7 +1719,7 @@ Recent translations to summarize:
             ('disable_zero_detection_var', 'disable_zero_detection', True),
             ('use_header_as_output_var', 'use_header_as_output', False),
             ('emergency_restore_var', 'emergency_paragraph_restore', False),
-            ('contextual_var', 'contextual', True),
+            ('contextual_var', 'contextual', False),
             ('REMOVE_AI_ARTIFACTS_var', 'REMOVE_AI_ARTIFACTS', False),
             ('enable_watermark_removal_var', 'enable_watermark_removal', True),
             ('save_cleaned_images_var', 'save_cleaned_images', False),
@@ -1756,6 +1756,11 @@ Recent translations to summarize:
         
         for var_name, key, default in str_vars:
             setattr(self, var_name, create_var(tk.StringVar, key, str(default)))
+        
+        # NEW: Initialize extraction mode variable
+        self.extraction_mode_var = tk.StringVar(
+            value=self.config.get('extraction_mode', 'smart')
+        )
         
         self.book_title_prompt = self.config.get('book_title_prompt', 
             "Translate this book title to English while retaining any acronyms:")
@@ -1799,7 +1804,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.5.4 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.5.5 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def _create_file_section(self):
@@ -2041,72 +2046,96 @@ Recent translations to summarize:
         tb.Button(self.frame, text="Delete Profile", command=self.delete_profile, width=14).grid(row=2, column=3, sticky=tk.W, padx=5, pady=5)
     
     def _create_settings_section(self):
-        """Create all settings controls"""
-        # Contextual
-        tb.Checkbutton(self.frame, text="Contextual Translation", variable=self.contextual_var).grid(
-            row=3, column=0, columnspan=2, sticky=tk.W, padx=5, pady=5)
+            """Create all settings controls"""
+            # API delay (left side)
+            tb.Label(self.frame, text="API call delay (s):").grid(row=4, column=0, sticky=tk.W, padx=5, pady=5)
+            self.delay_entry = tb.Entry(self.frame, width=8)
+            self.delay_entry.insert(0, str(self.config.get('delay', 2)))
+            self.delay_entry.grid(row=4, column=1, sticky=tk.W, padx=5, pady=5)
+            
+            # Chapter Range
+            tb.Label(self.frame, text="Chapter range (e.g., 5-10):").grid(row=5, column=0, sticky=tk.W, padx=5, pady=5)
+            self.chapter_range_entry = tb.Entry(self.frame, width=12)
+            self.chapter_range_entry.insert(0, self.config.get('chapter_range', ''))
+            self.chapter_range_entry.grid(row=5, column=1, sticky=tk.W, padx=5, pady=5)
+            
+            # Token limit
+            tb.Label(self.frame, text="Input Token limit:").grid(row=6, column=0, sticky=tk.W, padx=5, pady=5)
+            self.token_limit_entry = tb.Entry(self.frame, width=8)
+            self.token_limit_entry.insert(0, str(self.config.get('token_limit', 200000)))
+            self.token_limit_entry.grid(row=6, column=1, sticky=tk.W, padx=5, pady=5)
+            
+            self.toggle_token_btn = tb.Button(self.frame, text="Disable Input Token Limit",
+                                             command=self.toggle_token_limit, bootstyle="danger-outline", width=21)
+            self.toggle_token_btn.grid(row=7, column=1, sticky=tk.W, padx=5, pady=5)
+            
+            # Contextual Translation (right side, row 3) - with extra padding on top
+            tb.Checkbutton(self.frame, text="Contextual Translation", variable=self.contextual_var,
+                          command=self._on_contextual_toggle).grid(
+                row=3, column=2, columnspan=2, sticky=tk.W, padx=5, pady=(25, 5))  # Added extra top padding
+            
+            # Translation History Limit (row 4)
+            self.trans_history_label = tb.Label(self.frame, text="Translation History Limit:")
+            self.trans_history_label.grid(row=4, column=2, sticky=tk.W, padx=5, pady=5)
+            self.trans_history = tb.Entry(self.frame, width=6)
+            self.trans_history.insert(0, str(self.config.get('translation_history_limit', 2)))
+            self.trans_history.grid(row=4, column=3, sticky=tk.W, padx=5, pady=5)
+            
+            # Rolling History (row 5)
+            self.rolling_checkbox = tb.Checkbutton(self.frame, text="Rolling History Window", variable=self.translation_history_rolling_var,
+                          bootstyle="round-toggle")
+            self.rolling_checkbox.grid(row=5, column=2, sticky=tk.W, padx=5, pady=5)
+            self.rolling_history_desc = tk.Label(self.frame, text="(Keep recent history instead of purging)",
+                    font=('TkDefaultFont', 11), fg='gray')
+            self.rolling_history_desc.grid(row=5, column=3, sticky=tk.W, padx=5, pady=5)
+            
+            # Temperature (row 6)
+            tb.Label(self.frame, text="Temperature:").grid(row=6, column=2, sticky=tk.W, padx=5, pady=5)
+            self.trans_temp = tb.Entry(self.frame, width=6)
+            self.trans_temp.insert(0, str(self.config.get('translation_temperature', 0.3)))
+            self.trans_temp.grid(row=6, column=3, sticky=tk.W, padx=5, pady=5)
+            
+            # Batch Translation (row 7)
+            self.batch_checkbox = tb.Checkbutton(self.frame, text="Batch Translation", variable=self.batch_translation_var,
+                          bootstyle="round-toggle")
+            self.batch_checkbox.grid(row=7, column=2, sticky=tk.W, padx=5, pady=5)
+            self.batch_size_entry = tb.Entry(self.frame, width=6, textvariable=self.batch_size_var)
+            self.batch_size_entry.grid(row=7, column=3, sticky=tk.W, padx=5, pady=5)
+            
+            # Set batch entry state
+            self.batch_size_entry.config(state=tk.NORMAL if self.batch_translation_var.get() else tk.DISABLED)
+            self.batch_translation_var.trace('w', lambda *args: self.batch_size_entry.config(
+                state=tk.NORMAL if self.batch_translation_var.get() else tk.DISABLED))
+            
+            # Hidden entries for compatibility
+            self.title_trim = tb.Entry(self.frame, width=6)
+            self.title_trim.insert(0, str(self.config.get('title_trim_count', 1)))
+            self.group_trim = tb.Entry(self.frame, width=6)
+            self.group_trim.insert(0, str(self.config.get('group_affiliation_trim_count', 1)))
+            self.traits_trim = tb.Entry(self.frame, width=6)
+            self.traits_trim.insert(0, str(self.config.get('traits_trim_count', 1)))
+            self.refer_trim = tb.Entry(self.frame, width=6)
+            self.refer_trim.insert(0, str(self.config.get('refer_trim_count', 1)))
+            self.loc_trim = tb.Entry(self.frame, width=6)
+            self.loc_trim.insert(0, str(self.config.get('locations_trim_count', 1)))
+            
+            # Set initial state based on contextual translation
+            self._on_contextual_toggle()
+
+    def _on_contextual_toggle(self):
+        """Handle contextual translation toggle - enable/disable related controls"""
+        is_contextual = self.contextual_var.get()
         
-        # API delay
-        tb.Label(self.frame, text="API call delay (s):").grid(row=4, column=0, sticky=tk.W, padx=5, pady=5)
-        self.delay_entry = tb.Entry(self.frame, width=8)
-        self.delay_entry.insert(0, str(self.config.get('delay', 2)))
-        self.delay_entry.grid(row=4, column=1, sticky=tk.W, padx=5, pady=5)
+        # Disable controls when contextual is ON, enable when OFF
+        state = tk.NORMAL if is_contextual else tk.DISABLED
         
-        # Chapter Range
-        tb.Label(self.frame, text="Chapter range (e.g., 5-10):").grid(row=5, column=0, sticky=tk.W, padx=5, pady=5)
-        self.chapter_range_entry = tb.Entry(self.frame, width=12)
-        self.chapter_range_entry.insert(0, self.config.get('chapter_range', ''))
-        self.chapter_range_entry.grid(row=5, column=1, sticky=tk.W, padx=5, pady=5)
+        # Disable/enable translation history limit entry and gray out label
+        self.trans_history.config(state=state)
+        self.trans_history_label.config(foreground='white' if is_contextual else 'gray')
         
-        # Token limit
-        tb.Label(self.frame, text="Input Token limit:").grid(row=6, column=0, sticky=tk.W, padx=5, pady=5)
-        self.token_limit_entry = tb.Entry(self.frame, width=8)
-        self.token_limit_entry.insert(0, str(self.config.get('token_limit', 200000)))
-        self.token_limit_entry.grid(row=6, column=1, sticky=tk.W, padx=5, pady=5)
-        
-        self.toggle_token_btn = tb.Button(self.frame, text="Disable Input Token Limit",
-                                         command=self.toggle_token_limit, bootstyle="danger-outline", width=21)
-        self.toggle_token_btn.grid(row=7, column=1, sticky=tk.W, padx=5, pady=5)
-        
-        # Translation settings (right side)
-        tb.Label(self.frame, text="Temperature:").grid(row=4, column=2, sticky=tk.W, padx=5, pady=5)
-        self.trans_temp = tb.Entry(self.frame, width=6)
-        self.trans_temp.insert(0, str(self.config.get('translation_temperature', 0.3)))
-        self.trans_temp.grid(row=4, column=3, sticky=tk.W, padx=5, pady=5)
-        
-        tb.Label(self.frame, text="Transl. Hist. Limit:").grid(row=5, column=2, sticky=tk.W, padx=5, pady=5)
-        self.trans_history = tb.Entry(self.frame, width=6)
-        self.trans_history.insert(0, str(self.config.get('translation_history_limit', 2)))
-        self.trans_history.grid(row=5, column=3, sticky=tk.W, padx=5, pady=5)
-        
-        # Batch Translation
-        tb.Checkbutton(self.frame, text="Batch Translation", variable=self.batch_translation_var,
-                      bootstyle="round-toggle").grid(row=6, column=2, sticky=tk.W, padx=5, pady=5)
-        self.batch_size_entry = tb.Entry(self.frame, width=6, textvariable=self.batch_size_var)
-        self.batch_size_entry.grid(row=6, column=3, sticky=tk.W, padx=5, pady=5)
-        
-        # Set batch entry state
-        self.batch_size_entry.config(state=tk.NORMAL if self.batch_translation_var.get() else tk.DISABLED)
-        self.batch_translation_var.trace('w', lambda *args: self.batch_size_entry.config(
-            state=tk.NORMAL if self.batch_translation_var.get() else tk.DISABLED))
-        
-        # Rolling History
-        tb.Checkbutton(self.frame, text="Rolling History Window", variable=self.translation_history_rolling_var,
-                      bootstyle="round-toggle").grid(row=7, column=2, sticky=tk.W, padx=5, pady=5)
-        tk.Label(self.frame, text="(Keep recent history instead of purging)",
-                font=('TkDefaultFont', 11), fg='gray').grid(row=7, column=3, sticky=tk.W, padx=5, pady=5)
-        
-        # Hidden entries for compatibility
-        self.title_trim = tb.Entry(self.frame, width=6)
-        self.title_trim.insert(0, str(self.config.get('title_trim_count', 1)))
-        self.group_trim = tb.Entry(self.frame, width=6)
-        self.group_trim.insert(0, str(self.config.get('group_affiliation_trim_count', 1)))
-        self.traits_trim = tb.Entry(self.frame, width=6)
-        self.traits_trim.insert(0, str(self.config.get('traits_trim_count', 1)))
-        self.refer_trim = tb.Entry(self.frame, width=6)
-        self.refer_trim.insert(0, str(self.config.get('refer_trim_count', 1)))
-        self.loc_trim = tb.Entry(self.frame, width=6)
-        self.loc_trim.insert(0, str(self.config.get('locations_trim_count', 1)))
+        # Disable/enable rolling history checkbox and gray out description
+        self.rolling_checkbox.config(state=state)
+        self.rolling_history_desc.config(foreground='gray' if is_contextual else '#404040')
     
     def _create_api_section(self):
         """Create API key section"""
@@ -5688,7 +5717,8 @@ Recent translations to summarize:
             'BATCH_SIZE': self.batch_size_var.get(),
             'DISABLE_ZERO_DETECTION': "1" if self.disable_zero_detection_var.get() else "0",
             'TRANSLATION_HISTORY_ROLLING': "1" if self.translation_history_rolling_var.get() else "0",
-            'COMPREHENSIVE_EXTRACTION': "1" if self.comprehensive_extraction_var.get() else "0",
+            # CHANGED: Replace COMPREHENSIVE_EXTRACTION with EXTRACTION_MODE
+            'EXTRACTION_MODE': self.extraction_mode_var.get(),
             'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var.get() else "0",
             'DUPLICATE_DETECTION_MODE': self.duplicate_detection_mode_var.get(),
             'CHAPTER_NUMBER_OFFSET': str(self.chapter_number_offset_var.get()), 
@@ -5712,7 +5742,6 @@ Recent translations to summarize:
             'FIREWORKS_API_URL': self.fireworks_base_url_var.get() if hasattr(self, 'fireworks_base_url_var') and self.fireworks_base_url_var.get() else '',
             'USE_CUSTOM_OPENAI_ENDPOINT': '1' if self.use_custom_openai_endpoint_var.get() else '0',
 
-
             # Image compression settings
             'ENABLE_IMAGE_COMPRESSION': "1" if self.config.get('enable_image_compression', False) else "0",
             'AUTO_COMPRESS_ENABLED': "1" if self.config.get('auto_compress_enabled', True) else "0",
@@ -5728,7 +5757,6 @@ Recent translations to summarize:
             'OPTIMIZE_FOR_OCR': "1" if self.config.get('optimize_for_ocr', True) else "0",
             'PROGRESSIVE_ENCODING': "1" if self.config.get('progressive_encoding', True) else "0",
             'SAVE_COMPRESSED_IMAGES': "1" if self.config.get('save_compressed_images', False) else "0",
-
 
             # Metadata and batch header translation settings
             'TRANSLATE_METADATA_FIELDS': json.dumps(self.translate_metadata_fields),
@@ -5762,6 +5790,7 @@ Recent translations to summarize:
             
            
        }
+
 
     def run_glossary_extraction_thread(self):
        """Start glossary extraction in a separate thread"""
@@ -8813,12 +8842,36 @@ Recent translations to summarize:
         tk.Label(section_frame, text="Automatically retry failed/deleted chapters\non each translation run",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
         
-        tb.Checkbutton(section_frame, text="Comprehensive Chapter Extraction", 
-                      variable=self.comprehensive_extraction_var,
+        # NEW: Replace comprehensive extraction checkbox with radio buttons
+        extraction_frame = tk.LabelFrame(section_frame, text="Chapter Extraction Mode", padx=10, pady=5)
+        extraction_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Initialize extraction_mode_var if not exists
+        if not hasattr(self, 'extraction_mode_var'):
+            self.extraction_mode_var = tk.StringVar(
+                value=self.config.get('extraction_mode', 'smart')
+            )
+        
+        tb.Radiobutton(extraction_frame, text="Smart Extraction (Recommended)", 
+                      variable=self.extraction_mode_var, value="smart",
                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
         
-        tk.Label(section_frame, text="Extract ALL files (disable smart filtering)",
-                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+        tk.Label(extraction_frame, text="Filters navigation/metadata, detects duplicates,\nuses intelligent chapter detection",
+                font=('TkDefaultFont', 9), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
+        
+        tb.Radiobutton(extraction_frame, text="Comprehensive Extraction", 
+                      variable=self.extraction_mode_var, value="comprehensive",
+                      bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+        
+        tk.Label(extraction_frame, text="Moderate filtering, extracts most content files,\nsimpler chapter numbering",
+                font=('TkDefaultFont', 9), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
+        
+        tb.Radiobutton(extraction_frame, text="Full Extraction", 
+                      variable=self.extraction_mode_var, value="full",
+                      bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+        
+        tk.Label(extraction_frame, text="NO filtering - extracts ALL HTML/XHTML files,\npreserves complete HTML structure",
+                font=('TkDefaultFont', 9), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
         
         tb.Checkbutton(section_frame, text="Disable Image Gallery in EPUB", 
                       variable=self.disable_epub_gallery_var,
@@ -8842,7 +8895,7 @@ Recent translations to summarize:
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
                 
 
-         # NEW: Chapter number offset
+         # Chapter number offset
         ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
         
         offset_frame = tk.Frame(section_frame)
@@ -8901,7 +8954,8 @@ Recent translations to summarize:
             font=('TkDefaultFont', 8),
             fg='gray',
             justify=tk.LEFT
-        ).pack(anchor=tk.W, padx=(20, 0))        
+        ).pack(anchor=tk.W, padx=(20, 0))
+     
 
     def _create_image_translation_section(self, parent):
         """Create image translation section"""
@@ -9585,7 +9639,7 @@ Recent translations to summarize:
                         "Translate this book title to English while retaining any acronyms:"),
                     'emergency_paragraph_restore': self.emergency_restore_var.get(),
                     'reset_failed_chapters': self.reset_failed_chapters_var.get(),
-                    'comprehensive_extraction': self.comprehensive_extraction_var.get(),
+                    'extraction_mode': self.extraction_mode_var.get(),
                     'disable_epub_gallery': self.disable_epub_gallery_var.get(),
                     'disable_zero_detection': self.disable_zero_detection_var.get(),
                     'enable_image_translation': self.enable_image_translation_var.get(),
@@ -9665,7 +9719,7 @@ Recent translations to summarize:
                     "BOOK_TITLE_PROMPT": self.book_title_prompt,
                     "EMERGENCY_PARAGRAPH_RESTORE": "1" if self.emergency_restore_var.get() else "0",
                     "RESET_FAILED_CHAPTERS": "1" if self.reset_failed_chapters_var.get() else "0",
-                    "COMPREHENSIVE_EXTRACTION": "1" if self.comprehensive_extraction_var.get() else "0",
+                    "EXTRACTION_MODE": self.extraction_mode_var.get(),
                     "ENABLE_IMAGE_TRANSLATION": "1" if self.enable_image_translation_var.get() else "0",
                     "PROCESS_WEBNOVEL_IMAGES": "1" if self.process_webnovel_images_var.get() else "0",
                     "WEBNOVEL_MIN_HEIGHT": str(self.config['webnovel_min_height']),
@@ -10208,6 +10262,7 @@ Recent translations to summarize:
             self.config['save_cleaned_images'] = self.save_cleaned_images_var.get()
             self.config['advanced_watermark_removal'] = self.advanced_watermark_removal_var.get()
             self.config['compression_factor'] = self.compression_factor_var.get()
+            self.config['extraction_mode'] = self.extraction_mode_var.get()
             self.config['translation_chunk_prompt'] = self.translation_chunk_prompt
             self.config['image_chunk_prompt'] = self.image_chunk_prompt
             self.config['force_ncx_only'] = self.force_ncx_only_var.get()
@@ -10307,7 +10362,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.5.4...")
+    print("🚀 Starting Glossarion v3.5.5...")
     
     # Initialize splash screen
     splash_manager = None
