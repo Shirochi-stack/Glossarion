@@ -2086,6 +2086,119 @@ class UnifiedClient:
         
         return False
 
+    def _extract_gemini_response_text(self, response, supports_thinking=False, thinking_budget=-1):
+        """
+        Enhanced extraction method that handles various response structures,
+        including when thinking is enabled.
+        """
+        result = ""
+        finish_reason = 'stop'
+        
+        # Method 1: Try direct text access first
+        try:
+            if hasattr(response, 'text') and response.text:
+                result = response.text
+                print(f"   ✅ Got text directly: {len(result)} chars")
+                return result, finish_reason
+        except Exception as e:
+            print(f"   ⚠️ Failed to get text directly: {e}")
+        
+        # Method 2: Try candidates with enhanced extraction
+        if hasattr(response, 'candidates') and response.candidates:
+            print(f"   🔍 Number of candidates: {len(response.candidates)}")
+            
+            for i, candidate in enumerate(response.candidates):
+                print(f"   🔍 Checking candidate {i+1}")
+                
+                # Check finish reason
+                if hasattr(candidate, 'finish_reason'):
+                    finish_reason_str = str(candidate.finish_reason)
+                    print(f"   🔍 Finish reason: {finish_reason_str}")
+                    if 'MAX_TOKENS' in finish_reason_str:
+                        finish_reason = 'length'
+                    elif 'SAFETY' in finish_reason_str:
+                        finish_reason = 'safety'
+                
+                # Method 2a: Try candidate.text directly (some models provide this)
+                if hasattr(candidate, 'text'):
+                    try:
+                        if candidate.text:
+                            result = candidate.text
+                            print(f"   ✅ Got text from candidate.text: {len(result)} chars")
+                            return result, finish_reason
+                    except:
+                        pass
+                
+                # Method 2b: Extract from content.parts
+                if hasattr(candidate, 'content'):
+                    # Try direct text on content
+                    if hasattr(candidate.content, 'text'):
+                        try:
+                            if candidate.content.text:
+                                result = candidate.content.text
+                                print(f"   ✅ Got text from candidate.content.text: {len(result)} chars")
+                                return result, finish_reason
+                        except:
+                            pass
+                    
+                    # Try parts
+                    if hasattr(candidate.content, 'parts') and candidate.content.parts:
+                        parts = candidate.content.parts
+                        print(f"   🔍 Candidate has {len(parts)} parts")
+                        
+                        text_parts = []
+                        for j, part in enumerate(parts):
+                            # Skip thinking parts if they're marked differently
+                            if hasattr(part, 'thinking') and part.thinking:
+                                print(f"   🔍 Part {j+1} is a thinking part, skipping")
+                                continue
+                            
+                            # Extract text from part
+                            if hasattr(part, 'text') and part.text:
+                                print(f"   🔍 Part {j+1} has text: {len(part.text)} chars")
+                                text_parts.append(part.text)
+                        
+                        if text_parts:
+                            result = ''.join(text_parts)
+                            print(f"   ✅ Extracted text from parts: {len(result)} chars")
+                            return result, finish_reason
+        
+        # Method 3: Check for thinking-specific response structure
+        if supports_thinking and thinking_budget != 0:
+            print("   🔍 Checking for thinking-specific response structure...")
+            
+            # Some models might have a separate 'output' or 'response' field when thinking is enabled
+            if hasattr(response, 'output') and response.output:
+                result = str(response.output)
+                print(f"   ✅ Got text from response.output: {len(result)} chars")
+                return result, finish_reason
+            
+            if hasattr(response, 'response') and response.response:
+                result = str(response.response)
+                print(f"   ✅ Got text from response.response: {len(result)} chars")
+                return result, finish_reason
+        
+        # Method 4: Last resort - inspect all attributes
+        if not result:
+            print("   🔍 Last resort: inspecting all response attributes...")
+            attrs = dir(response)
+            text_attrs = [attr for attr in attrs if 'text' in attr.lower() or 'content' in attr.lower() or 'output' in attr.lower()]
+            print(f"   🔍 Potential text attributes: {text_attrs}")
+            
+            for attr in text_attrs:
+                if not attr.startswith('_'):  # Skip private attributes
+                    try:
+                        value = getattr(response, attr)
+                        if value and isinstance(value, str) and len(value) > 10:  # Likely actual content
+                            result = value
+                            print(f"   ✅ Got text from response.{attr}: {len(result)} chars")
+                            return result, finish_reason
+                    except:
+                        pass
+        
+        print(f"   ❌ Failed to extract any text from response")
+        return result, finish_reason
+
     def _send_gemini(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to Gemini API with support for both text and multi-image messages"""
         
@@ -2326,7 +2439,14 @@ class UnifiedClient:
             if attempt < attempts:
                 logger.info(f"Retrying with max_output_tokens={current_tokens}")
                 print(f"🔄 Retrying Gemini with reduced tokens: {current_tokens}")
-
+                
+        # After getting the response, use the enhanced extraction method
+        result, finish_reason = self._extract_gemini_response_text(
+            response, 
+            supports_thinking=supports_thinking,
+            thinking_budget=thinking_budget
+        )
+        
         if not result:
             print("All Gemini retries failed")
             self._log_truncation_failure(
@@ -2338,8 +2458,6 @@ class UnifiedClient:
             )
             result = "[]" if self.context == 'glossary' else ""
             finish_reason = 'error'
-
-        # Don't save here - the main send() method handles saving
         
         return UnifiedResponse(
             content=result,
@@ -3925,66 +4043,12 @@ class UnifiedClient:
                         finish_reason='safety',
                         error_details={'block_reason': str(feedback.block_reason)}
                     )
-            # Extract response text with error handling
-            result = ""
-            finish_reason = 'stop'
-            
-            try:
-                if hasattr(response, 'text') and response.text:
-                    result = response.text
-                    print(f"   ✅ Got text directly: {len(result)} chars")
-                else:
-                    raise AttributeError("No text attribute or empty text")
-            except Exception as e:
-                print(f"   ⚠️ Failed to get text directly: {e}")
-                
-                # Enhanced candidate debugging
-                if hasattr(response, 'candidates'):
-                    print(f"   🔍 Number of candidates: {len(response.candidates) if response.candidates else 0}")
-                    
-                    if response.candidates:
-                        for i, candidate in enumerate(response.candidates):
-                            print(f"   🔍 Checking candidate {i+1}")
-                            
-                            # Check finish reason
-                            if hasattr(candidate, 'finish_reason'):
-                                print(f"   🔍 Finish reason: {candidate.finish_reason}")
-                            
-                            # Check safety ratings
-                            if hasattr(candidate, 'safety_ratings'):
-                                print(f"   🔍 Safety ratings: {candidate.safety_ratings}")
-                            
-                            if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
-                                parts = candidate.content.parts
-                                print(f"   🔍 Candidate has {len(parts) if parts else 0} parts")
-                                
-                                if parts:
-                                    text_parts = []
-                                    for j, part in enumerate(parts):
-                                        if hasattr(part, 'text') and part.text:
-                                            print(f"   🔍 Part {j+1} has text: {len(part.text)} chars")
-                                            text_parts.append(part.text)
-                                        else:
-                                            print(f"   🔍 Part {j+1} has no text")
-                                    
-                                    if text_parts:
-                                        result = ''.join(text_parts)
-                                        print(f"   ✅ Extracted text from candidate {i+1}: {len(result)} chars")
-                                        break
-                            else:
-                                print(f"   ❌ Candidate {i+1} has no content or parts")
-                            
-                            # Update finish reason
-                            if hasattr(candidate, 'finish_reason'):
-                                finish_reason_str = str(candidate.finish_reason)
-                                if 'MAX_TOKENS' in finish_reason_str:
-                                    finish_reason = 'length'
-                                elif 'SAFETY' in finish_reason_str:
-                                    finish_reason = 'safety'
-                    else:
-                        print("   ❌ No candidates in response")
-                else:
-                    print("   ❌ Response has no candidates attribute")
+            # Use the enhanced extraction method
+            result, finish_reason = self._extract_gemini_response_text(
+                response,
+                supports_thinking=supports_thinking,
+                thinking_budget=thinking_budget
+            )
             
             # Check usage metadata for debugging
             if hasattr(response, 'usage_metadata'):
@@ -4027,7 +4091,6 @@ class UnifiedClient:
                 finish_reason='error',
                 error_details={'error': str(e)}
             )
-
         
     def _send_openai_image(self, messages, image_base64, temperature, 
                           max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
