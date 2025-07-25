@@ -8852,7 +8852,7 @@ Recent translations to summarize:
                 value=self.config.get('extraction_mode', 'smart')
             )
         
-        tb.Radiobutton(extraction_frame, text="Smart Extraction (Recommended)", 
+        tb.Radiobutton(extraction_frame, text="Smart Extraction", 
                       variable=self.extraction_mode_var, value="smart",
                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
         
