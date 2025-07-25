@@ -1043,15 +1043,18 @@ class ContentProcessor:
 # UNIFIED CHAPTER EXTRACTOR
 # =====================================================
 class ChapterExtractor:
-    """Unified chapter extraction"""
+    """Unified chapter extraction with three modes: Smart, Comprehensive, and Full"""
     
     def __init__(self):
         self.pattern_manager = PatternManager()
         
     def extract_chapters(self, zf, output_dir):
         """Extract chapters and all resources from EPUB"""
-        print("🚀 Starting comprehensive EPUB extraction...")
-        print("✅ Using enhanced extraction with full resource handling")
+        print("🚀 Starting EPUB extraction...")
+        
+        # Get extraction mode from environment
+        extraction_mode = os.getenv("EXTRACTION_MODE", "smart").lower()
+        print(f"✅ Using {extraction_mode.capitalize()} extraction mode")
         
         extracted_resources = self._extract_all_resources(zf, output_dir)
         
@@ -1065,7 +1068,7 @@ class ChapterExtractor:
             metadata = self._extract_epub_metadata(zf)
             print(f"📋 Extracted metadata: {list(metadata.keys())}")
         
-        chapters, detected_language = self._extract_chapters_universal(zf)
+        chapters, detected_language = self._extract_chapters_universal(zf, extraction_mode)
         
         if not chapters:
             print("❌ No chapters could be extracted!")
@@ -1105,6 +1108,7 @@ class ChapterExtractor:
             'chapter_count': len(chapters),
             'detected_language': detected_language,
             'extracted_resources': extracted_resources,
+            'extraction_mode': extraction_mode,
             'extraction_summary': {
                 'total_chapters': len(chapters),
                 'chapter_range': f"{chapters[0]['num']}-{chapters[-1]['num']}",
@@ -1124,7 +1128,7 @@ class ChapterExtractor:
         self._create_extraction_report(output_dir, metadata, chapters, extracted_resources)
         self._log_extraction_summary(chapters, extracted_resources, detected_language)
         
-        print("🔍 VERIFICATION: Comprehensive chapter extraction completed successfully")
+        print(f"🔍 VERIFICATION: {extraction_mode.capitalize()} chapter extraction completed successfully")
         
         return chapters
     
@@ -1182,25 +1186,24 @@ class ChapterExtractor:
         
         return extracted_resources
     
-    def _extract_chapters_universal(self, zf, comprehensive_mode=None):
-        """Universal chapter extraction with mode toggle"""
-        if comprehensive_mode is None:
-            comprehensive_mode = os.getenv("COMPREHENSIVE_EXTRACTION", "0") == "1"
-        
+    def _extract_chapters_universal(self, zf, extraction_mode="smart"):
+        """Universal chapter extraction with three modes: smart, comprehensive, full"""
         chapters = []
         sample_texts = []
         
         html_files = []
         for name in zf.namelist():
             if name.lower().endswith(('.xhtml', '.html', '.htm')):
-                if not comprehensive_mode:
+                if extraction_mode == "smart":
+                    # Smart mode: aggressive filtering
                     lower_name = name.lower()
                     if any(skip in lower_name for skip in [
                         'nav', 'toc', 'contents', 'cover', 'title', 'index',
                         'copyright', 'acknowledgment', 'dedication'
                     ]):
                         continue
-                else:
+                elif extraction_mode == "comprehensive":
+                    # Comprehensive mode: moderate filtering
                     skip_keywords = ['nav.', 'toc.', 'contents.', 'copyright.', 'cover.']
                     basename = os.path.basename(name.lower())
                     should_skip = False
@@ -1211,10 +1214,16 @@ class ChapterExtractor:
                     if should_skip:
                         print(f"[SKIP] Navigation/TOC file: {name}")
                         continue
+                # else: full mode - no filtering at all
                 
                 html_files.append(name)
         
-        print(f"📚 Found {len(html_files)} {'HTML files' if comprehensive_mode else 'potential content files'} in EPUB")
+        mode_description = {
+            "smart": "potential content files",
+            "comprehensive": "HTML files",
+            "full": "ALL HTML/XHTML files (no filtering)"
+        }
+        print(f"📚 Found {len(html_files)} {mode_description.get(extraction_mode, 'files')} in EPUB")
         
         content_hashes = {}
         seen_chapters = {}
@@ -1243,14 +1252,21 @@ class ChapterExtractor:
                 
                 soup = BeautifulSoup(html_content, 'html.parser')
                 
-                if soup.body:
-                    content_html = str(soup.body)
-                    content_text = soup.body.get_text(strip=True)
-                else:
-                    content_html = html_content
+                # In full mode, keep the entire HTML structure
+                if extraction_mode == "full":
+                    content_html = html_content  # Keep EVERYTHING
                     content_text = soup.get_text(strip=True)
+                else:
+                    # Smart and comprehensive modes extract body content
+                    if soup.body:
+                        content_html = str(soup.body)
+                        content_text = soup.body.get_text(strip=True)
+                    else:
+                        content_html = html_content
+                        content_text = soup.get_text(strip=True)
                 
-                if comprehensive_mode:
+                # Mode-specific logic
+                if extraction_mode == "comprehensive":
                     actual_chapter_num = None
                     filename_base = os.path.basename(file_path)
                     
@@ -1266,7 +1282,7 @@ class ChapterExtractor:
                         chapter_num = actual_chapter_num
                     else:
                         chapter_num += 1
-                else:
+                elif extraction_mode == "smart":
                     h1_tags = soup.find_all('h1')
                     h2_tags = soup.find_all('h2')
                     if h1_tags:
@@ -1279,7 +1295,8 @@ class ChapterExtractor:
                 
                 is_image_only_chapter = has_images and len(content_text.strip()) < 500
                 
-                if not comprehensive_mode:
+                # Smart mode filtering
+                if extraction_mode == "smart":
                     if len(content_text.strip()) < 10 and not has_images:
                         print(f"[DEBUG] Skipping empty file: {file_path} (no text, no images)")
                         continue
@@ -1289,7 +1306,8 @@ class ChapterExtractor:
                 
                 content_hash = ContentProcessor.get_content_hash(content_html)
                 
-                if not comprehensive_mode:
+                # Smart mode duplicate detection
+                if extraction_mode == "smart":
                     file_size = len(content_text)
                     if file_size not in file_size_groups:
                         file_size_groups[file_size] = []
@@ -1303,7 +1321,8 @@ class ChapterExtractor:
                     if len(sample_texts) < 5:
                         sample_texts.append(content_text[:1000])
                 
-                if not comprehensive_mode:
+                # Chapter info extraction
+                if extraction_mode == "smart":
                     chapter_num, chapter_title, detection_method = self._extract_chapter_info(
                         soup, file_path, content_text, html_content
                     )
@@ -1323,13 +1342,12 @@ class ChapterExtractor:
                             original_num = chapter_num
                             while chapter_num in seen_chapters:
                                 chapter_num += 1
-                            #print(f"[WARNING] Chapter {original_num} already exists with different content")
-                            #print(f"[INFO] Reassigning {file_path} to chapter {chapter_num}")
                             detection_method += "_reassigned"
                         else:
                             print(f"[DEBUG] Skipping duplicate chapter {chapter_num}: {file_path}")
                             continue
                 else:
+                    # Comprehensive and full modes
                     chapter_title = None
                     if soup.title and soup.title.string:
                         chapter_title = soup.title.string.strip()
@@ -1344,7 +1362,7 @@ class ChapterExtractor:
                     if not chapter_title:
                         chapter_title = os.path.splitext(os.path.basename(file_path))[0]
                     
-                    detection_method = "comprehensive_sequential"
+                    detection_method = f"{extraction_mode}_sequential"
                 
                 if actual_num is None:
                     actual_num = idx + 1  # Use 1-based numbering
@@ -1361,15 +1379,16 @@ class ChapterExtractor:
                     "has_images": has_images,
                     "image_count": len(images),
                     "is_empty": len(content_text.strip()) == 0,
-                    "is_image_only": is_image_only_chapter
+                    "is_image_only": is_image_only_chapter,
+                    "extraction_mode": extraction_mode
                 }
                 
-                if not comprehensive_mode:
+                if extraction_mode == "smart":
                     chapter_info["language_sample"] = content_text[:500]
                 
                 chapters.append(chapter_info)
                 
-                if not comprehensive_mode:
+                if extraction_mode == "smart":
                     content_hashes[content_hash] = {
                         'filename': file_path,
                         'chapter_num': chapter_num
@@ -1379,7 +1398,8 @@ class ChapterExtractor:
                         'filename': file_path
                     }
                 
-                if comprehensive_mode:
+                # Logging based on mode
+                if extraction_mode in ["comprehensive", "full"]:
                     if is_image_only_chapter:
                         print(f"[{actual_num:04d}] 📸 Image-only chapter: {chapter_title} ({len(images)} images)")
                     elif len(images) > 0 and len(content_text) >= 500:
@@ -1400,17 +1420,17 @@ class ChapterExtractor:
         
         chapters.sort(key=lambda x: x["num"])
         
-        if not comprehensive_mode and h2_count > h1_count:
+        if extraction_mode == "smart" and h2_count > h1_count:
             print(f"📊 Note: This EPUB uses primarily <h2> tags ({h2_count} files) vs <h1> tags ({h1_count} files)")
         
-        combined_sample = ' '.join(sample_texts) if not comprehensive_mode else ''
+        combined_sample = ' '.join(sample_texts) if extraction_mode == "smart" else ''
         detected_language = self._detect_content_language(combined_sample) if combined_sample else 'unknown'
         
         if chapters:
-            self._print_extraction_summary(chapters, detected_language, comprehensive_mode, 
-                                         h1_count if not comprehensive_mode else 0, 
-                                         h2_count if not comprehensive_mode else 0,
-                                         file_size_groups if not comprehensive_mode else {})
+            self._print_extraction_summary(chapters, detected_language, extraction_mode, 
+                                         h1_count if extraction_mode == "smart" else 0, 
+                                         h2_count if extraction_mode == "smart" else 0,
+                                         file_size_groups if extraction_mode == "smart" else {})
         
         return chapters, detected_language
     
@@ -1571,14 +1591,14 @@ class ChapterExtractor:
         else:
             return 'unknown'
     
-    def _print_extraction_summary(self, chapters, detected_language, comprehensive_mode, h1_count, h2_count, file_size_groups):
+    def _print_extraction_summary(self, chapters, detected_language, extraction_mode, h1_count, h2_count, file_size_groups):
         """Print extraction summary"""
-        print(f"\n📊 Chapter Extraction Summary:")
+        print(f"\n📊 Chapter Extraction Summary ({extraction_mode.capitalize()} Mode):")
         print(f"   • Total chapters extracted: {len(chapters)}")
         print(f"   • Chapter range: {chapters[0]['num']} to {chapters[-1]['num']}")
         print(f"   • Detected language: {detected_language}")
         
-        if not comprehensive_mode:
+        if extraction_mode == "smart":
             print(f"   • Primary header type: {'<h2>' if h2_count > h1_count else '<h1>'}")
         
         image_only_count = sum(1 for c in chapters if c.get('is_image_only', False))
@@ -1595,7 +1615,7 @@ class ChapterExtractor:
         if missing:
             print(f"   ⚠️ Missing chapter numbers: {sorted(missing)}")
         
-        if not comprehensive_mode:
+        if extraction_mode == "smart":
             method_stats = Counter(c['detection_method'] for c in chapters)
             print(f"   📈 Detection methods used:")
             for method, count in method_stats.most_common():
@@ -1607,6 +1627,9 @@ class ChapterExtractor:
         else:
             empty_chapters = sum(1 for c in chapters if c.get('is_empty'))
             print(f"   • Empty/placeholder: {empty_chapters}")
+            
+        if extraction_mode == "full":
+            print(f"   🔍 Full extraction preserved all HTML structure and tags")
     
     def _extract_epub_metadata(self, zf):
         """Extract comprehensive metadata from EPUB file including all custom fields"""
@@ -1853,9 +1876,11 @@ class ChapterExtractor:
             f.write("EPUB Extraction Report\n")
             f.write("=" * 50 + "\n\n")
             
+            f.write(f"EXTRACTION MODE: {metadata.get('extraction_mode', 'unknown').upper()}\n\n")
+            
             f.write("METADATA:\n")
             for key, value in metadata.items():
-                if key not in ['chapter_titles', 'extracted_resources']:
+                if key not in ['chapter_titles', 'extracted_resources', 'extraction_mode']:
                     f.write(f"  {key}: {value}\n")
             
             f.write(f"\nCHAPTERS ({len(chapters)}):\n")
@@ -1946,7 +1971,9 @@ class ChapterExtractor:
     
     def _log_extraction_summary(self, chapters, extracted_resources, detected_language, html_files_written=0):
         """Log final extraction summary with HTML file information"""
-        print(f"\n✅ Comprehensive extraction complete!")
+        extraction_mode = chapters[0].get('extraction_mode', 'unknown') if chapters else 'unknown'
+        
+        print(f"\n✅ {extraction_mode.capitalize()} extraction complete!")
         print(f"   📚 Chapters: {len(chapters)}")
         print(f"   📄 HTML files written: {html_files_written}")
         print(f"   🎨 Resources: {sum(len(files) for files in extracted_resources.values())}")
