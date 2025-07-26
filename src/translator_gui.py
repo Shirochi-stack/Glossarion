@@ -1125,6 +1125,7 @@ class TranslatorGUI:
         self.thinking_budget_var = tk.StringVar(value=str(self.config.get('thinking_budget', '-1')))
         self.remove_ai_artifacts = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
         print(f"   🎨 Remove AI Artifacts: {'ENABLED' if self.remove_ai_artifacts else 'DISABLED'}")
+        self.disable_chapter_merging_var = tk.BooleanVar(value=self.config.get('disable_chapter_merging', False))
 
         # Initialize compression-related variables
         self.enable_image_compression_var = tk.BooleanVar(value=self.config.get('enable_image_compression', False))
@@ -5717,8 +5718,8 @@ Recent translations to summarize:
             'BATCH_SIZE': self.batch_size_var.get(),
             'DISABLE_ZERO_DETECTION': "1" if self.disable_zero_detection_var.get() else "0",
             'TRANSLATION_HISTORY_ROLLING': "1" if self.translation_history_rolling_var.get() else "0",
-            # CHANGED: Replace COMPREHENSIVE_EXTRACTION with EXTRACTION_MODE
             'EXTRACTION_MODE': self.extraction_mode_var.get(),
+            'DISABLE_CHAPTER_MERGING': '1' if self.disable_chapter_merging_var.get() else '0',
             'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var.get() else "0",
             'DUPLICATE_DETECTION_MODE': self.duplicate_detection_mode_var.get(),
             'CHAPTER_NUMBER_OFFSET': str(self.chapter_number_offset_var.get()), 
@@ -5790,8 +5791,7 @@ Recent translations to summarize:
             
            
        }
-
-
+        print(f"[DEBUG] DISABLE_CHAPTER_MERGING = '{os.getenv('DISABLE_CHAPTER_MERGING', '0')}'")
     def run_glossary_extraction_thread(self):
        """Start glossary extraction in a separate thread"""
        if not self._lazy_load_modules():
@@ -8856,7 +8856,7 @@ Recent translations to summarize:
                       variable=self.extraction_mode_var, value="smart",
                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
         
-        tk.Label(extraction_frame, text="Filters navigation/metadata, detects duplicates,\nuses intelligent chapter detection",
+        tk.Label(extraction_frame, text="Filters navigation/metadata, \nuses intelligent chapter detection",
                 font=('TkDefaultFont', 9), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
         
         tb.Radiobutton(extraction_frame, text="Comprehensive Extraction", 
@@ -8871,6 +8871,23 @@ Recent translations to summarize:
                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
         
         tk.Label(extraction_frame, text="NO filtering - extracts ALL HTML/XHTML files,\npreserves complete HTML structure",
+                font=('TkDefaultFont', 9), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
+        
+        # NEW: Add separator before merge toggle
+        ttk.Separator(extraction_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
+        
+        # NEW: Initialize disable_chapter_merging_var if not exists
+        if not hasattr(self, 'disable_chapter_merging_var'):
+            self.disable_chapter_merging_var = tk.BooleanVar(
+                value=self.config.get('disable_chapter_merging', False)
+            )
+        
+        # NEW: Add disable chapter merging toggle
+        tb.Checkbutton(extraction_frame, text="Disable Chapter Merging", 
+                      variable=self.disable_chapter_merging_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+        
+        tk.Label(extraction_frame, text="Disable automatic merging of Section/Chapter pairs.\nEach file will be treated as a separate chapter.",
                 font=('TkDefaultFont', 9), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
         
         tb.Checkbutton(section_frame, text="Disable Image Gallery in EPUB", 
@@ -9640,6 +9657,7 @@ Recent translations to summarize:
                     'emergency_paragraph_restore': self.emergency_restore_var.get(),
                     'reset_failed_chapters': self.reset_failed_chapters_var.get(),
                     'extraction_mode': self.extraction_mode_var.get(),
+                    'disable_chapter_merging': self.disable_chapter_merging_var.get(),
                     'disable_epub_gallery': self.disable_epub_gallery_var.get(),
                     'disable_zero_detection': self.disable_zero_detection_var.get(),
                     'enable_image_translation': self.enable_image_translation_var.get(),
@@ -9720,6 +9738,7 @@ Recent translations to summarize:
                     "EMERGENCY_PARAGRAPH_RESTORE": "1" if self.emergency_restore_var.get() else "0",
                     "RESET_FAILED_CHAPTERS": "1" if self.reset_failed_chapters_var.get() else "0",
                     "EXTRACTION_MODE": self.extraction_mode_var.get(),
+                    'DISABLE_CHAPTER_MERGING': '1' if self.disable_chapter_merging_var.get() else '0',
                     "ENABLE_IMAGE_TRANSLATION": "1" if self.enable_image_translation_var.get() else "0",
                     "PROCESS_WEBNOVEL_IMAGES": "1" if self.process_webnovel_images_var.get() else "0",
                     "WEBNOVEL_MIN_HEIGHT": str(self.config['webnovel_min_height']),
@@ -10277,6 +10296,8 @@ Recent translations to summarize:
             self.config['openai_base_url'] = self.openai_base_url_var.get()
             self.config['fireworks_base_url'] = self.fireworks_base_url_var.get()
             self.config['use_custom_openai_endpoint'] = self.use_custom_openai_endpoint_var.get()
+            self.config['disable_chapter_merging'] = self.disable_chapter_merging_var.get()
+
 
 
 
