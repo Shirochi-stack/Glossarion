@@ -1373,7 +1373,7 @@ class ChapterExtractor:
                     print(f"[ERROR] No cached data for {file_path}")
                     continue
                 
-                print(f"[DEBUG] Processing file: {file_path} (cached size: {len(file_data)} bytes)")
+                #print(f"[DEBUG] Processing file: {file_path} (cached size: {len(file_data)} bytes)")
                 
                 # Decode the file data
                 html_content = None
@@ -1390,7 +1390,7 @@ class ChapterExtractor:
                     print(f"[WARNING] Could not decode {file_path}")
                     continue
                 
-                print(f"[DEBUG] Decoded {file_path} with {detected_encoding}")
+               # print(f"[DEBUG] Decoded {file_path} with {detected_encoding}")
                 
                 # Verify we have the correct content
                 if "人物设定" in html_content:
@@ -1418,7 +1418,7 @@ class ChapterExtractor:
                         content_html = html_content
                         content_text = soup.get_text(strip=True)
                 
-                print(f"[DEBUG] Extracted text length: {len(content_text)}, preview: {content_text[:100]}...")
+                #print(f"[DEBUG] Extracted text length: {len(content_text)}, preview: {content_text[:100]}...")
                 
                 # Mode-specific logic
                 if extraction_mode == "comprehensive":
@@ -1542,20 +1542,27 @@ class ChapterExtractor:
                 # Logging based on mode
                 if extraction_mode in ["comprehensive", "full"]:
                     if is_image_only_chapter:
-                        print(f"[{chapter_num:04d}] 📸 Image-only chapter: {chapter_title} ({len(images)} images)")
+                        #print(f"[{chapter_num:04d}] 📸 Image-only chapter: {chapter_title} ({len(images)} images)")
+                        pass
                     elif len(images) > 0 and len(content_text) >= 500:
-                        print(f"[{chapter_num:04d}] 📖📸 Mixed chapter: {chapter_title} ({len(content_text)} chars, {len(images)} images)")
+                        #print(f"[{chapter_num:04d}] 📖📸 Mixed chapter: {chapter_title} ({len(content_text)} chars, {len(images)} images)")
+                        pass
                     elif len(content_text) < 50:
-                        print(f"[{chapter_num:04d}] 📄 Empty/placeholder: {chapter_title}")
+                        #print(f"[{chapter_num:04d}] 📄 Empty/placeholder: {chapter_title}")
+                        pass
                     else:
-                        print(f"[{chapter_num:04d}] 📖 Text chapter: {chapter_title} ({len(content_text)} chars)")
+                        #print(f"[{chapter_num:04d}] 📖 Text chapter: {chapter_title} ({len(content_text)} chars)")
+                        pass
                 else:
                     if not disable_merging and file_path in merged_chapters:
-                        print(f"[DEBUG] ✅ Chapter {chapter_num}: {chapter_title[:50]}... (MERGED, {detection_method})")
+                        #print(f"[DEBUG] ✅ Chapter {chapter_num}: {chapter_title[:50]}... (MERGED, {detection_method})")
+                        pass
                     elif is_image_only_chapter:
-                        print(f"[DEBUG] ✅ Chapter {chapter_num}: {chapter_title[:50]}... (IMAGE-ONLY, {detection_method})")
+                        #print(f"[DEBUG] ✅ Chapter {chapter_num}: {chapter_title[:50]}... (IMAGE-ONLY, {detection_method})")
+                        pass
                     else:
-                        print(f"[DEBUG] ✅ Chapter {chapter_num}: {chapter_title[:50]}... ({detection_method})")
+                        #print(f"[DEBUG] ✅ Chapter {chapter_num}: {chapter_title[:50]}... ({detection_method})")
+                        pass
                         
             except Exception as e:
                 print(f"[ERROR] Failed to process {file_path}: {e}")
