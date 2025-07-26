@@ -125,7 +125,9 @@ class PatternManager:
         r'(\d{3,5})[_\.]',          # 3-5 digit pattern with padding
         r'[Cc]hapter[_\s]*(\d+)',   # Chapter word pattern
         r'[Cc]h[_\s]*(\d+)',        # Ch abbreviation
-        r'No(\d+)',                 # No prefix
+        r'No(\d+)Chapter',          # No prefix with Chapter - matches "No00013Chapter.xhtml"
+        r'No(\d+)Section',          # No prefix with Section - matches "No00013Section.xhtml"
+        r'No(\d+)(?=\.|_|$)',       # No prefix followed by end, dot, or underscore (not followed by text)
         r'第(\d+)[章话回]',          # Chinese chapter markers
         r'_(\d+)(?:_|\.|$)',        # Number between underscores or at end
         r'^(\d+)(?:_|\.|$)',        # Starting with number
@@ -1194,6 +1196,9 @@ class ChapterExtractor:
         chapters = []
         sample_texts = []
         
+        # First, let's create a file content cache to ensure we're reading the right files
+        file_contents = {}
+        
         html_files = []
         for name in zf.namelist():
             if name.lower().endswith(('.xhtml', '.html', '.htm')):
@@ -1220,6 +1225,14 @@ class ChapterExtractor:
                 # else: full mode - no filtering at all
                 
                 html_files.append(name)
+                
+                # Pre-read and cache file contents
+                try:
+                    file_data = zf.read(name)
+                    file_contents[name] = file_data
+                    print(f"[DEBUG] Cached file: {name} (size: {len(file_data)} bytes)")
+                except Exception as e:
+                    print(f"[ERROR] Failed to cache {name}: {e}")
         
         mode_description = {
             "smart": "potential content files",
@@ -1231,94 +1244,110 @@ class ChapterExtractor:
         # Sort files to ensure proper order
         html_files.sort()
         
-        # Do merging for ALL modes now
+        # Check if merging is disabled via environment variable
+        disable_merging = os.getenv("DISABLE_CHAPTER_MERGING", "0") == "1"
+        
         processed_files = set()
         merged_chapters = {}
         
-        # Group files by their base number to detect Section/Chapter pairs
-        file_groups = {}
-        for file_path in html_files:
-            filename = os.path.basename(file_path)
-            # Extract base number (e.g., "No00014" from "No00014Section.xhtml")
-            match = re.match(r'(No\d+)', filename)
-            if match:
-                base_num = match.group(1)
-                if base_num not in file_groups:
-                    file_groups[base_num] = []
-                file_groups[base_num].append(file_path)
-        
-        # Process file groups and merge Section/Chapter pairs
-        for base_num, group_files in sorted(file_groups.items()):
-            if len(group_files) == 2:
-                # Check if we have a Section/Chapter pair
-                section_file = None
-                chapter_file = None
-                
-                for file_path in group_files:
-                    if 'section' in file_path.lower():
-                        section_file = file_path
-                    elif 'chapter' in file_path.lower():
-                        chapter_file = file_path
-                
-                if section_file and chapter_file:
-                    # We have a Section/Chapter pair - analyze them
-                    print(f"[DEBUG] Detected Section/Chapter pair: {base_num}")
+        if disable_merging:
+            print("📌 Chapter merging is DISABLED - processing all files independently")
+        else:
+            print("📌 Chapter merging is ENABLED")
+            
+            # Only do merging logic if not disabled
+            file_groups = {}
+            
+            # Group files by their base number to detect Section/Chapter pairs
+            for file_path in html_files:
+                filename = os.path.basename(file_path)
+                # Extract base number (e.g., "No00014" from "No00014Section.xhtml")
+                match = re.match(r'(No\d+)', filename)
+                if match:
+                    base_num = match.group(1)
+                    if base_num not in file_groups:
+                        file_groups[base_num] = []
+                    file_groups[base_num].append(file_path)
+            
+            # Process file groups and merge Section/Chapter pairs
+            for base_num, group_files in sorted(file_groups.items()):
+                if len(group_files) == 2:
+                    # Check if we have a Section/Chapter pair
+                    section_file = None
+                    chapter_file = None
                     
-                    try:
-                        # Read section file
-                        section_data = zf.read(section_file)
-                        section_html = None
-                        for encoding in ['utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr', 'gbk', 'big5']:
-                            try:
-                                section_html = section_data.decode(encoding)
-                                break
-                            except UnicodeDecodeError:
-                                continue
+                    for file_path in group_files:
+                        if 'section' in file_path.lower():
+                            section_file = file_path
+                        elif 'chapter' in file_path.lower():
+                            chapter_file = file_path
+                    
+                    if section_file and chapter_file:
+                        # We have a Section/Chapter pair - analyze them
+                        print(f"[DEBUG] Detected Section/Chapter pair: {base_num}")
                         
-                        # Read chapter file
-                        chapter_data = zf.read(chapter_file)
-                        chapter_html = None
-                        for encoding in ['utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr', 'gbk', 'big5']:
-                            try:
-                                chapter_html = chapter_data.decode(encoding)
-                                break
-                            except UnicodeDecodeError:
-                                continue
-                        
-                        if section_html and chapter_html:
-                            section_soup = BeautifulSoup(section_html, 'html.parser')
-                            chapter_soup = BeautifulSoup(chapter_html, 'html.parser')
+                        try:
+                            # Use cached content
+                            section_data = file_contents.get(section_file)
+                            chapter_data = file_contents.get(chapter_file)
                             
-                            section_text = section_soup.get_text(strip=True)
-                            chapter_text = chapter_soup.get_text(strip=True)
+                            if not section_data or not chapter_data:
+                                print(f"[ERROR] Missing cached data for {base_num} files")
+                                continue
                             
-                            # Determine if they should be merged
-                            # More lenient merging: if section is short, merge regardless of chapter length
-                            if len(section_text) < 500:
-                                # Section is likely just a header, merge them
-                                print(f"  → Merging: {os.path.basename(section_file)} ({len(section_text)} chars) + {os.path.basename(chapter_file)} ({len(chapter_text)} chars)")
+                            section_html = None
+                            for encoding in ['utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr', 'gbk', 'big5']:
+                                try:
+                                    section_html = section_data.decode(encoding)
+                                    break
+                                except UnicodeDecodeError:
+                                    continue
+                            
+                            chapter_html = None
+                            for encoding in ['utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr', 'gbk', 'big5']:
+                                try:
+                                    chapter_html = chapter_data.decode(encoding)
+                                    break
+                                except UnicodeDecodeError:
+                                    continue
+                            
+                            if section_html and chapter_html:
+                                section_soup = BeautifulSoup(section_html, 'html.parser')
+                                chapter_soup = BeautifulSoup(chapter_html, 'html.parser')
                                 
-                                # Extract section header content
-                                section_body = section_soup.body if section_soup.body else section_soup
-                                chapter_body = chapter_soup.body if chapter_soup.body else chapter_soup
+                                section_text = section_soup.get_text(strip=True)
+                                chapter_text = chapter_soup.get_text(strip=True)
                                 
-                                # Create merged content
-                                merged_body = str(section_body) + "\n" + str(chapter_body)
+                                print(f"[DEBUG] Section text preview: {section_text[:100]}")
+                                print(f"[DEBUG] Chapter text preview: {chapter_text[:100]}")
                                 
-                                # Store merged chapter info
-                                merged_chapters[chapter_file] = {
-                                    'merged_html': merged_body,
-                                    'section_file': section_file,
-                                    'is_merged': True
-                                }
-                                
-                                # Mark section file as processed (skip it)
-                                processed_files.add(section_file)
-                            else:
-                                print(f"  → Both files have substantial content, treating separately")
-                        
-                    except Exception as e:
-                        print(f"[WARNING] Failed to analyze {base_num} files: {e}")
+                                # Determine if they should be merged
+                                # More lenient merging: if section is short, merge regardless of chapter length
+                                if len(section_text) < 500:
+                                    # Section is likely just a header, merge them
+                                    print(f"  → Merging: {os.path.basename(section_file)} ({len(section_text)} chars) + {os.path.basename(chapter_file)} ({len(chapter_text)} chars)")
+                                    
+                                    # Extract section header content
+                                    section_body = section_soup.body if section_soup.body else section_soup
+                                    chapter_body = chapter_soup.body if chapter_soup.body else chapter_soup
+                                    
+                                    # Create merged content
+                                    merged_body = str(section_body) + "\n" + str(chapter_body)
+                                    
+                                    # Store merged chapter info
+                                    merged_chapters[chapter_file] = {
+                                        'merged_html': merged_body,
+                                        'section_file': section_file,
+                                        'is_merged': True
+                                    }
+                                    
+                                    # Mark section file as processed (skip it)
+                                    processed_files.add(section_file)
+                                else:
+                                    print(f"  → Both files have substantial content, treating separately")
+                            
+                        except Exception as e:
+                            print(f"[WARNING] Failed to analyze {base_num} files: {e}")
         
         # Continue with regular processing
         sample_texts = []
@@ -1330,33 +1359,49 @@ class ChapterExtractor:
         processed_count = 0  # Track actually processed chapters
 
         for idx, file_path in enumerate(html_files):
-            # Skip files that were merged as section headers
-            if file_path in processed_files:
+            # Skip files that were merged as section headers (only when merging is enabled)
+            if not disable_merging and file_path in processed_files:
                 continue
             
             # Increment processed count for actual chapters
             processed_count += 1
                 
             try:
-                # Check if this file has merged content
-                if file_path in merged_chapters:
-                    html_content = merged_chapters[file_path]['merged_html']
-                    print(f"[DEBUG] Processing merged chapter: {file_path}")
-                else:
-                    # Read file normally
-                    file_data = zf.read(file_path)
-                    
-                    html_content = None
-                    for encoding in ['utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr', 'gbk', 'big5']:
-                        try:
-                            html_content = file_data.decode(encoding)
-                            break
-                        except UnicodeDecodeError:
-                            continue
-                    
-                    if not html_content:
-                        print(f"[WARNING] Could not decode {file_path}")
+                # Use cached file data
+                file_data = file_contents.get(file_path)
+                if not file_data:
+                    print(f"[ERROR] No cached data for {file_path}")
+                    continue
+                
+                print(f"[DEBUG] Processing file: {file_path} (cached size: {len(file_data)} bytes)")
+                
+                # Decode the file data
+                html_content = None
+                detected_encoding = None
+                for encoding in ['utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr', 'gbk', 'big5']:
+                    try:
+                        html_content = file_data.decode(encoding)
+                        detected_encoding = encoding
+                        break
+                    except UnicodeDecodeError:
                         continue
+                
+                if not html_content:
+                    print(f"[WARNING] Could not decode {file_path}")
+                    continue
+                
+                print(f"[DEBUG] Decoded {file_path} with {detected_encoding}")
+                
+                # Verify we have the correct content
+                if "人物设定" in html_content:
+                    print(f"[VERIFY] Found '人物设定' in {file_path} - This is the Section file")
+                if "主要人物" in html_content:
+                    print(f"[VERIFY] Found '主要人物' in {file_path} - This is the Chapter file")
+                
+                # Only use merged content if merging is enabled AND this file has merged content
+                if not disable_merging and file_path in merged_chapters:
+                    html_content = merged_chapters[file_path]['merged_html']
+                    print(f"[DEBUG] Using merged content for: {file_path}")
                 
                 soup = BeautifulSoup(html_content, 'html.parser')
                 
@@ -1372,6 +1417,8 @@ class ChapterExtractor:
                     else:
                         content_html = html_content
                         content_text = soup.get_text(strip=True)
+                
+                print(f"[DEBUG] Extracted text length: {len(content_text)}, preview: {content_text[:100]}...")
                 
                 # Mode-specific logic
                 if extraction_mode == "comprehensive":
@@ -1417,14 +1464,33 @@ class ChapterExtractor:
                 
                 # Chapter info extraction
                 if extraction_mode == "smart":
-                    chapter_num, chapter_title, detection_method = self._extract_chapter_info(
-                        soup, file_path, content_text, html_content
-                    )
-                    
-                    if chapter_num is None:
-                        chapter_num = processed_count  # Use actual chapter count
-                        detection_method = "sequential_fallback"
-                        print(f"[DEBUG] No chapter number found in {file_path}, assigning: {chapter_num}")
+                    # When merging is disabled, use sequential numbering
+                    if disable_merging:
+                        chapter_num = processed_count
+                        chapter_title = None
+                        if soup.title and soup.title.string:
+                            chapter_title = soup.title.string.strip()
+                        
+                        if not chapter_title:
+                            for header_tag in ['h1', 'h2', 'h3']:
+                                header = soup.find(header_tag)
+                                if header:
+                                    chapter_title = header.get_text(strip=True)
+                                    break
+                        
+                        if not chapter_title:
+                            chapter_title = os.path.splitext(os.path.basename(file_path))[0]
+                        
+                        detection_method = "sequential_no_merge"
+                    else:
+                        chapter_num, chapter_title, detection_method = self._extract_chapter_info(
+                            soup, file_path, content_text, html_content
+                        )
+                        
+                        if chapter_num is None:
+                            chapter_num = processed_count  # Use actual chapter count
+                            detection_method = "sequential_fallback"
+                            print(f"[DEBUG] No chapter number found in {file_path}, assigning: {chapter_num}")
                 else:
                     # Comprehensive and full modes
                     chapter_title = None
@@ -1464,7 +1530,7 @@ class ChapterExtractor:
                 }
                 
                 # Add merge info if applicable
-                if file_path in merged_chapters:
+                if not disable_merging and file_path in merged_chapters:
                     chapter_info["was_merged"] = True
                     chapter_info["merged_with"] = merged_chapters[file_path]['section_file']
                 
@@ -1484,7 +1550,7 @@ class ChapterExtractor:
                     else:
                         print(f"[{chapter_num:04d}] 📖 Text chapter: {chapter_title} ({len(content_text)} chars)")
                 else:
-                    if file_path in merged_chapters:
+                    if not disable_merging and file_path in merged_chapters:
                         print(f"[DEBUG] ✅ Chapter {chapter_num}: {chapter_title[:50]}... (MERGED, {detection_method})")
                     elif is_image_only_chapter:
                         print(f"[DEBUG] ✅ Chapter {chapter_num}: {chapter_title[:50]}... (IMAGE-ONLY, {detection_method})")
@@ -1493,6 +1559,8 @@ class ChapterExtractor:
                         
             except Exception as e:
                 print(f"[ERROR] Failed to process {file_path}: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
         
         chapters.sort(key=lambda x: x["num"])
@@ -1517,25 +1585,43 @@ class ChapterExtractor:
         chapter_title = None
         detection_method = None
         
-        # Try filename first
-        for pattern, flags, method in self.pattern_manager.CHAPTER_PATTERNS:
-            if method.endswith('_number'):
-                match = re.search(pattern, file_path, flags)
-                if match:
-                    try:
-                        num_str = match.group(1)
-                        if num_str.isdigit():
-                            chapter_num = int(num_str)
-                            detection_method = f"filename_{method}"
-                            break
-                        elif method == 'chinese_chapter_cn':
-                            converted = self._convert_chinese_number(num_str)
-                            if converted:
-                                chapter_num = converted
+        # SPECIAL HANDLING: When we have Section/Chapter pairs, differentiate them
+        filename = os.path.basename(file_path)
+        if 'Section' in filename and 'Chapter' not in filename:
+            # For Section files, add 0.1 to the base number
+            match = re.search(r'No(\d+)', filename)
+            if match:
+                base_num = int(match.group(1))
+                chapter_num = base_num + 0.1  # Section gets .1
+                detection_method = "filename_section_special"
+        elif 'Chapter' in filename and 'Section' not in filename:
+            # For Chapter files, use the base number
+            match = re.search(r'No(\d+)', filename)
+            if match:
+                chapter_num = int(match.group(1))
+                detection_method = "filename_chapter_special"
+        
+        # If not handled by special logic, continue with normal extraction
+        if not chapter_num:
+            # Try filename first
+            for pattern, flags, method in self.pattern_manager.CHAPTER_PATTERNS:
+                if method.endswith('_number'):
+                    match = re.search(pattern, file_path, flags)
+                    if match:
+                        try:
+                            num_str = match.group(1)
+                            if num_str.isdigit():
+                                chapter_num = int(num_str)
                                 detection_method = f"filename_{method}"
                                 break
-                    except (ValueError, IndexError):
-                        continue
+                            elif method == 'chinese_chapter_cn':
+                                converted = self._convert_chinese_number(num_str)
+                                if converted:
+                                    chapter_num = converted
+                                    detection_method = f"filename_{method}"
+                                    break
+                        except (ValueError, IndexError):
+                            continue
         
         # Try content if not found in filename
         if not chapter_num:
