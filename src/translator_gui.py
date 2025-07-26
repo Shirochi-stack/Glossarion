@@ -1760,7 +1760,7 @@ Recent translations to summarize:
         
         # NEW: Initialize extraction mode variable
         self.extraction_mode_var = tk.StringVar(
-            value=self.config.get('extraction_mode', 'full')
+            value=self.config.get('extraction_mode', 'smart')
         )
         
         self.book_title_prompt = self.config.get('book_title_prompt', 
