@@ -1253,7 +1253,8 @@ class ChapterExtractor:
         if disable_merging:
             print("📌 Chapter merging is DISABLED - processing all files independently")
         else:
-            print("📌 Chapter merging is ENABLED")
+            #print("📌 Chapter merging is ENABLED")
+            pass
             
             # Only do merging logic if not disabled
             file_groups = {}
@@ -4524,8 +4525,8 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
             {"role": "system", "content": book_title_system_prompt},
             {"role": "user", "content": f"{book_title_prompt}\n\n{title}"}
         ]
-        
-        translated_title, _ = client.send(messages, temperature=temperature, max_tokens=512)
+        max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
+        translated_title, _ = client.send(messages, temperature=temperature, max_tokens=max_tokens)
         
         print(f"[DEBUG] Raw API response: '{translated_title}'")
         print(f"[DEBUG] Response length: {len(translated_title)} (original: {len(title)})")
