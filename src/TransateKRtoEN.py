@@ -5304,7 +5304,7 @@ def main(log_callback=None, stop_callback=None):
             has_meaningful_text = ContentProcessor.is_meaningful_text_content(c["body"])
             text_size = c.get('file_size', 0)
             
-            is_empty_chapter = (not has_images and text_size < 50)
+            is_empty_chapter = (not has_images and text_size < 10)
             is_image_only_chapter = (has_images and not has_meaningful_text)
             
             # Handle empty chapters
