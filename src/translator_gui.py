@@ -1024,7 +1024,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.5.7"
+        __version__ = "3.6.1"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1126,6 +1126,8 @@ class TranslatorGUI:
         self.remove_ai_artifacts = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
         print(f"   🎨 Remove AI Artifacts: {'ENABLED' if self.remove_ai_artifacts else 'DISABLED'}")
         self.disable_chapter_merging_var = tk.BooleanVar(value=self.config.get('disable_chapter_merging', False))
+        self.selected_files = []
+        self.current_file_index = 0
 
         # Initialize compression-related variables
         self.enable_image_compression_var = tk.BooleanVar(value=self.config.get('enable_image_compression', False))
@@ -1214,7 +1216,7 @@ class TranslatorGUI:
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Korean quotation marks (" ", ' ', 「」, 『』) as-is without converting to English quotes.\n"
-                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 생 means 'life/living', 활 means 'active', 관 means 'hall/building' - together 생활관 means Dormitory. When you see [생활관], write [Dormitory]. Do not write [생활관] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
+                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 생 means 'life/living', 활 means 'active', 관 means 'hall/building' - together 생활관 means Dormitory.\n"
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
             ),
             "japanese": (
@@ -1228,7 +1230,7 @@ class TranslatorGUI:
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Japanese quotation marks (「」 and 『』) as-is without converting to English quotes.\n"
-                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory. When you see [生活館], write [Dormitory]. Do not write [生活館] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
+                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
             ),
             "chinese": (
@@ -1242,7 +1244,7 @@ class TranslatorGUI:
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Chinese quotation marks (「」 for dialogue, 《》 for titles) as-is without converting to English quotes.\n"
-                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory. When you see [生活館], write [Dormitory]. Do not write [生活館] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
+                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
             ),
             "korean_OCR": (
@@ -1256,7 +1258,7 @@ class TranslatorGUI:
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Korean quotation marks (" ", ' ', 「」, 『』) as-is without converting to English quotes.\n"
-                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 생 means 'life/living', 활 means 'active', 관 means 'hall/building' - together 생활관 means Dormitory. When you see [생활관], write [Dormitory]. Do not write [생활관] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
+                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 생 means 'life/living', 활 means 'active', 관 means 'hall/building' - together 생활관 means Dormitory.\n"
                 "- Add HTML tags for proper formatting as expected of a novel.\n"
                 "- Wrap every paragraph in <p> tags; do not insert any literal tabs or spaces.\n"
             ),
@@ -1271,7 +1273,7 @@ class TranslatorGUI:
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Japanese quotation marks (「」 and 『』) as-is without converting to English quotes.\n"
-                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory. When you see [生活館], write [Dormitory]. Do not write [生活館] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
+                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
                 "- Add HTML tags for proper formatting as expected of a novel.\n"
                 "- Wrap every paragraph in <p> tags; do not insert any literal tabs or spaces.\n"
             ),
@@ -1286,7 +1288,7 @@ class TranslatorGUI:
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Chinese quotation marks (「」 for dialogue, 《》 for titles) as-is without converting to English quotes.\n"
-                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory. When you see [生活館], write [Dormitory]. Do not write [生活館] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
+                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
                 "- Add HTML tags for proper formatting as expected of a novel.\n"
                 "- Wrap every paragraph in <p> tags; do not insert any literal tabs or spaces.\n"
             ),
@@ -1301,7 +1303,7 @@ class TranslatorGUI:
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Korean quotation marks (" ", ' ', 「」, 『』) as-is without converting to English quotes.\n"
-                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 생 means 'life/living', 활 means 'active', 관 means 'hall/building' - together 생활관 means Dormitory. When you see [생활관], write [Dormitory]. Do not write [생활관] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
+                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 생 means 'life/living', 활 means 'active', 관 means 'hall/building' - together 생활관 means Dormitory.\n"
                 "- Use line breaks for proper formatting as expected of a novel.\n"
             ),
             "japanese_TXT": (
@@ -1315,7 +1317,7 @@ class TranslatorGUI:
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Japanese quotation marks (「」 and 『』) as-is without converting to English quotes.\n"
-                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory. When you see [生活館], write [Dormitory]. Do not write [生活館] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
+                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
                 "- Use line breaks for proper formatting as expected of a novel.\n"
             ),
             "chinese_TXT": (
@@ -1329,7 +1331,7 @@ class TranslatorGUI:
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
                 "- Keep original Chinese quotation marks (「」 for dialogue, 《》 for titles) as-is without converting to English quotes.\n"
-                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory. When you see [生活館], write [Dormitory]. Do not write [生活館] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
+                "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
                 "- Use line breaks for proper formatting as expected of a novel.\n"
             ),
             "Manga_JP": (
@@ -1790,7 +1792,7 @@ Recent translations to summarize:
             self.frame.grid_rowconfigure(r, weight=1 if r in [9, 10] else 0, minsize=200 if r == 9 else 150 if r == 10 else 0)
         
         # Create UI elements using helper methods
-        self._create_file_section()
+        self.create_file_section()
         self._create_model_section()
         self._create_profile_section()
         self._create_settings_section()
@@ -1805,15 +1807,49 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.5.7 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.6.1 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
-    def _create_file_section(self):
-        """Create file selection section"""
-        tb.Label(self.frame, text="Input File:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+    def create_file_section(self):
+        """Create file selection section with multi-file support"""
+        # Initialize file selection variables
+        self.selected_files = []
+        self.current_file_index = 0
+        
+        # File label
+        tb.Label(self.frame, text="Input File(s):").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        
+        # File entry
         self.entry_epub = tb.Entry(self.frame, width=50)
         self.entry_epub.grid(row=0, column=1, columnspan=3, sticky=tk.EW, padx=5, pady=5)
-        tb.Button(self.frame, text="Browse", command=self.browse_file, width=12).grid(row=0, column=4, sticky=tk.EW, padx=5, pady=5)
+        self.entry_epub.insert(0, "No file selected")
+        
+        # Create browse menu
+        self.browse_menu = tk.Menu(self.master, tearoff=0)
+        self.browse_menu.add_command(label="📄 Select Single File", command=self.browse_file)
+        self.browse_menu.add_command(label="📑 Select Multiple Files", command=self.browse_multiple_files)
+        self.browse_menu.add_command(label="📁 Select Folder", command=self.browse_folder)
+        self.browse_menu.add_separator()
+        self.browse_menu.add_command(label="🗑️ Clear Selection", command=self.clear_file_selection)
+        
+        # Create browse menu button
+        self.btn_browse_menu = tb.Menubutton(
+            self.frame,
+            text="Browse ▼",
+            menu=self.browse_menu,
+            width=12,
+            bootstyle="primary"
+        )
+        self.btn_browse_menu.grid(row=0, column=4, sticky=tk.EW, padx=5, pady=5)
+        
+        # File selection status label (shows file count and details)
+        self.file_status_label = tb.Label(
+            self.frame,
+            text="",
+            font=('Arial', 9),
+            bootstyle="info"
+        )
+        self.file_status_label.grid(row=1, column=1, columnspan=3, sticky=tk.W, padx=5, pady=(0, 5))
         
         # Google Cloud Credentials button
         self.gcloud_button = tb.Button(
@@ -1838,14 +1874,28 @@ Recent translations to summarize:
         # Hide by default
         self.vertex_location_entry.grid_remove()
         
-        # Status label for credentials (on next row)
+        # Status label for credentials
         self.gcloud_status_label = tb.Label(
             self.frame,
             text="",
             font=('Arial', 9),
             bootstyle="secondary"
         )
-        self.gcloud_status_label.grid(row=1, column=1, columnspan=4, sticky=tk.W, padx=5, pady=(0, 5))
+        self.gcloud_status_label.grid(row=2, column=1, columnspan=3, sticky=tk.W, padx=5, pady=(0, 5))
+        
+        # Optional: Add checkbox for enhanced functionality
+        options_frame = tb.Frame(self.frame)
+        options_frame.grid(row=4, column=0, columnspan=5, sticky=tk.EW, padx=5, pady=5)
+        
+        # Deep scan option for folders
+        self.deep_scan_var = tk.BooleanVar(value=False)
+        self.deep_scan_check = tb.Checkbutton(
+            options_frame,
+            text="Deep scan folders (include subfolders)",
+            variable=self.deep_scan_var,
+            bootstyle="round-toggle"
+        )
+        self.deep_scan_check.pack(side='left')
 
     def select_google_credentials(self):
         """Select Google Cloud credentials JSON file"""
@@ -5400,7 +5450,7 @@ Recent translations to summarize:
         self.config['force_safe_ratios'] = is_safe
         self.save_config()
     
-    # Thread management methods
+    # Updated Translation Methods
     def run_translation_thread(self):
         """Start translation in a separate thread"""
         if hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive():
@@ -5412,6 +5462,15 @@ Recent translations to summarize:
             self.stop_translation()
             return
         
+        # Check if files are selected
+        if not hasattr(self, 'selected_files') or not self.selected_files:
+            # Try to get file from entry field (backward compatibility)
+            file_path = self.entry_epub.get().strip()
+            if not file_path or file_path.startswith("No file selected") or "files selected" in file_path:
+                messagebox.showerror("Error", "Please select file(s) to translate.")
+                return
+            self.selected_files = [file_path]
+        
         self.stop_requested = False
         if translation_stop_flag:
             translation_stop_flag(False)
@@ -5421,43 +5480,464 @@ Recent translations to summarize:
         self.master.after(100, self.update_run_button)
 
     def run_translation_direct(self):
-        """Run translation directly without subprocess"""
+        """Run translation directly - handles multiple files and different file types"""
         try:
             self.append_log("🔄 Loading translation modules...")
             if not self._lazy_load_modules():
-               self.append_log("❌ Failed to load translation modules")
-               return
+                self.append_log("❌ Failed to load translation modules")
+                return
 
+            # Process each file
+            total_files = len(self.selected_files)
+            successful = 0
+            failed = 0
+            
+            # Check if we're processing multiple images - if so, create a combined output folder
+            image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
+            image_files = [f for f in self.selected_files if os.path.splitext(f)[1].lower() in image_extensions]
+            
+            combined_image_output_dir = None
+            if len(image_files) > 1:
+                # Get the common parent directory name or use timestamp
+                parent_dir = os.path.dirname(self.selected_files[0])
+                folder_name = os.path.basename(parent_dir) if parent_dir else f"translated_images_{int(time.time())}"
+                combined_image_output_dir = folder_name
+                os.makedirs(combined_image_output_dir, exist_ok=True)
+                
+                # Create images subdirectory for originals
+                images_dir = os.path.join(combined_image_output_dir, "images")
+                os.makedirs(images_dir, exist_ok=True)
+                
+                self.append_log(f"📁 Created combined output directory: {combined_image_output_dir}")
+            
+            for i, file_path in enumerate(self.selected_files):
+                if self.stop_requested:
+                    self.append_log(f"⏹️ Translation stopped by user at file {i+1}/{total_files}")
+                    break
+                
+                self.current_file_index = i
+                
+                # Log progress for multiple files
+                if total_files > 1:
+                    self.append_log(f"\n{'='*60}")
+                    self.append_log(f"📄 Processing file {i+1}/{total_files}: {os.path.basename(file_path)}")
+                    progress_percent = ((i + 1) / total_files) * 100
+                    self.append_log(f"📊 Overall progress: {progress_percent:.1f}%")
+                    self.append_log(f"{'='*60}")
+                
+                if not os.path.exists(file_path):
+                    self.append_log(f"❌ File not found: {file_path}")
+                    failed += 1
+                    continue
+                
+                # Determine file type and process accordingly
+                ext = os.path.splitext(file_path)[1].lower()
+                
+                try:
+                    if ext in image_extensions:
+                        # Process as image with combined output directory if applicable
+                        if self._process_image_file(file_path, combined_image_output_dir):
+                            successful += 1
+                        else:
+                            failed += 1
+                    elif ext in {'.epub', '.txt'}:
+                        # Process as EPUB/TXT
+                        if self._process_text_file(file_path):
+                            successful += 1
+                        else:
+                            failed += 1
+                    else:
+                        self.append_log(f"⚠️ Unsupported file type: {ext}")
+                        failed += 1
+                        
+                except Exception as e:
+                    self.append_log(f"❌ Error processing {os.path.basename(file_path)}: {str(e)}")
+                    import traceback
+                    self.append_log(f"❌ Full error: {traceback.format_exc()}")
+                    failed += 1
+            
+            # Final summary
+            if total_files > 1:
+                self.append_log(f"\n{'='*60}")
+                self.append_log(f"📊 Translation Summary:")
+                self.append_log(f"   ✅ Successful: {successful} files")
+                if failed > 0:
+                    self.append_log(f"   ❌ Failed: {failed} files")
+                self.append_log(f"   📁 Total: {total_files} files")
+                
+                if combined_image_output_dir and successful > 0:
+                    self.append_log(f"\n💡 Tip: You can now compile the HTML files in '{combined_image_output_dir}' into an EPUB")
+                    
+                    # Check for cover image
+                    cover_found = False
+                    for img_name in ['cover.png', 'cover.jpg', 'cover.jpeg', 'cover.webp']:
+                        if os.path.exists(os.path.join(combined_image_output_dir, "images", img_name)):
+                            self.append_log(f"   📖 Found cover image: {img_name}")
+                            cover_found = True
+                            break
+                    
+                    if not cover_found:
+                        # Use first image as cover
+                        images_in_dir = os.listdir(os.path.join(combined_image_output_dir, "images"))
+                        if images_in_dir:
+                            self.append_log(f"   📖 First image will be used as cover: {images_in_dir[0]}")
+                
+                self.append_log(f"{'='*60}")
+            
+        except Exception as e:
+            self.append_log(f"❌ Translation setup error: {e}")
+            import traceback
+            self.append_log(f"❌ Full error: {traceback.format_exc()}")
+        
+        finally:
+            self.stop_requested = False
+            if translation_stop_flag:
+                translation_stop_flag(False)
+            self.translation_thread = None
+            self.current_file_index = 0
+            self.master.after(0, self.update_run_button)
+
+    def _process_image_file(self, image_path, combined_output_dir=None):
+        """Process a single image file using the direct image translation API"""
+        try:
+            import time
+            import shutil
+            
+            # Check if image translation is enabled
+            if not hasattr(self, 'enable_image_translation_var') or not self.enable_image_translation_var.get():
+                self.append_log(f"⚠️ Image translation not enabled. Enable it in settings to translate images.")
+                return False
+            
+            # Get the file index for numbering
+            file_index = getattr(self, 'current_file_index', 0) + 1
+            
+            # Get API key and model
+            api_key = self.api_key_entry.get().strip()
+            model = self.model_var.get().strip()
+            
+            if not api_key:
+                self.append_log("❌ Error: Please enter your API key.")
+                return False
+            
+            if not model:
+                self.append_log("❌ Error: Please select a model.")
+                return False
+            
+            self.append_log(f"🖼️ Processing image: {os.path.basename(image_path)}")
+            self.append_log(f"🤖 Using model: {model}")
+            
+            # Check if it's a vision-capable model
+            vision_models = [
+                'claude-opus-4-20250514', 'claude-sonnet-4-20250514',
+                'gpt-4-turbo', 'gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini',
+                'gpt-4-vision-preview',
+                'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-exp',
+                'gemini-2.5-pro', 'gemini-2.5-flash',
+                'llama-3.2-11b-vision', 'llama-3.2-90b-vision',
+                'eh/gemini-2.5-flash', 'eh/gemini-1.5-flash', 'eh/gpt-4o'  # ElectronHub variants
+            ]
+            
+            model_lower = model.lower()
+            if not any(vm in model_lower for vm in [m.lower() for m in vision_models]):
+                self.append_log(f"⚠️ Model '{model}' may not support vision. Trying anyway...")
+            
+            # Initialize API client
+            try:
+                from unified_api_client import UnifiedClient
+                client = UnifiedClient(model=model, api_key=api_key)
+            except Exception as e:
+                self.append_log(f"❌ Failed to initialize API client: {str(e)}")
+                return False
+            
+            # Read the image
+            try:
+                # Get image name for payload naming
+                image_name = os.path.basename(image_path)
+                base_name = os.path.splitext(image_name)[0]
+                
+                with open(image_path, 'rb') as img_file:
+                    image_data = img_file.read()
+                
+                # Convert to base64
+                import base64
+                import json
+                image_base64 = base64.b64encode(image_data).decode('utf-8')
+                
+                # Check image size
+                size_mb = len(image_data) / (1024 * 1024)
+                self.append_log(f"📊 Image size: {size_mb:.2f} MB")
+                
+            except Exception as e:
+                self.append_log(f"❌ Failed to read image: {str(e)}")
+                return False
+            
+            # Get system prompt from configuration
+            profile_name = self.config.get('active_profile', 'korean')
+            prompt_profiles = self.config.get('prompt_profiles', {})
+            
+            # Get the main translation prompt
+            system_prompt = ""
+            if isinstance(prompt_profiles, dict) and profile_name in prompt_profiles:
+                profile_data = prompt_profiles[profile_name]
+                if isinstance(profile_data, str):
+                    # Old format: prompt_profiles[profile_name] = "prompt text"
+                    system_prompt = profile_data
+                elif isinstance(profile_data, dict):
+                    # New format: prompt_profiles[profile_name] = {"prompt": "...", "book_title_prompt": "..."}
+                    system_prompt = profile_data.get('prompt', '')
+            else:
+                # Fallback to check if prompt is stored directly in config
+                system_prompt = self.config.get(profile_name, '')
+            
+            if not system_prompt:
+                # Last fallback - empty string
+                system_prompt = ""
+            
+            # Get temperature and max tokens from GUI
+            temperature = float(self.temperature_entry.get()) if hasattr(self, 'temperature_entry') else 0.3
+            max_tokens = int(self.max_output_tokens_var.get()) if hasattr(self, 'max_output_tokens_var') else 8192
+            
+            # Build messages for vision API
+            messages = [
+                {"role": "system", "content": system_prompt}
+            ]
+            
+            self.append_log(f"🌐 Sending image to vision API...")
+            self.append_log(f"   System prompt length: {len(system_prompt)} chars")
+            self.append_log(f"   Temperature: {temperature}")
+            self.append_log(f"   Max tokens: {max_tokens}")
+            
+            # Debug: Show first 100 chars of system prompt
+            if system_prompt:
+                preview = system_prompt[:100] + "..." if len(system_prompt) > 100 else system_prompt
+                self.append_log(f"   System prompt preview: {preview}")
+            
+            # Make the API call
+            try:
+                # Create Payloads directory for API response tracking
+                payloads_dir = "Payloads"
+                os.makedirs(payloads_dir, exist_ok=True)
+                
+                # Create timestamp for unique filename
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                payload_file = os.path.join(payloads_dir, f"image_api_{timestamp}_{base_name}.json")
+                
+                # Save the request payload
+                request_payload = {
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "model": model,
+                    "image_file": image_name,
+                    "image_size_mb": size_mb,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "messages": messages,
+                    "image_base64": image_base64[:100] + "..." if len(image_base64) > 100 else image_base64  # Just preview
+                }
+                
+                with open(payload_file, 'w', encoding='utf-8') as f:
+                    json.dump(request_payload, f, ensure_ascii=False, indent=2)
+                
+                self.append_log(f"📝 Saved request payload: {payload_file}")
+                
+                # Call the vision API directly
+                # send_image expects: messages, image_data, temperature, max_tokens
+                response = client.send_image(
+                    messages,
+                    image_base64,
+                    temperature=temperature,
+                    max_tokens=max_tokens
+                )
+                
+                # Extract content and finish reason from response
+                response_content = None
+                finish_reason = None
+                
+                if hasattr(response, 'content'):
+                    response_content = response.content
+                    finish_reason = response.finish_reason if hasattr(response, 'finish_reason') else 'unknown'
+                elif isinstance(response, tuple) and len(response) >= 2:
+                    # Handle tuple response (content, finish_reason)
+                    response_content, finish_reason = response
+                elif isinstance(response, str):
+                    # Handle direct string response
+                    response_content = response
+                    finish_reason = 'complete'
+                else:
+                    self.append_log(f"❌ Unexpected response type: {type(response)}")
+                    self.append_log(f"   Response: {response}")
+                
+                # Save the response payload
+                response_payload = {
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "response_content": response_content,
+                    "finish_reason": finish_reason,
+                    "content_length": len(response_content) if response_content else 0
+                }
+                
+                response_file = os.path.join(payloads_dir, f"image_api_response_{timestamp}_{base_name}.json")
+                with open(response_file, 'w', encoding='utf-8') as f:
+                    json.dump(response_payload, f, ensure_ascii=False, indent=2)
+                
+                self.append_log(f"📝 Saved response payload: {response_file}")
+                
+                # Check if we got valid content
+                if not response_content or response_content.strip() == "[IMAGE TRANSLATION FAILED]":
+                    self.append_log(f"❌ Image translation failed - no text extracted from image")
+                    self.append_log(f"   This may mean:")
+                    self.append_log(f"   - The image doesn't contain readable text")
+                    self.append_log(f"   - The model couldn't process the image")
+                    self.append_log(f"   - The image format is not supported")
+                    
+                    # Try to get more info about the failure
+                    if hasattr(response, 'error_details'):
+                        self.append_log(f"   Error details: {response.error_details}")
+                    
+                    return False
+                
+                if response_content:
+                    self.append_log(f"✅ Received translation from API")
+                    
+                    # Create output directory structure
+                    image_name = os.path.basename(image_path)
+                    base_name = os.path.splitext(image_name)[0]
+                    
+                    # Use combined output directory if provided, otherwise create individual directory
+                    if combined_output_dir:
+                        output_dir = combined_output_dir
+                        # Copy image to images subdirectory
+                        images_dir = os.path.join(output_dir, "images")
+                        dest_image = os.path.join(images_dir, image_name)
+                        if not os.path.exists(dest_image):
+                            shutil.copy2(image_path, dest_image)
+                    else:
+                        output_dir = base_name
+                        os.makedirs(output_dir, exist_ok=True)
+                        # Copy original image to the output directory
+                        shutil.copy2(image_path, os.path.join(output_dir, image_name))
+                    
+                    # Get book title prompt for translating the filename
+                    book_title_prompt = self.config.get('book_title_prompt', '')
+                    
+                    # If no book title prompt in main config, check in profile
+                    if not book_title_prompt and isinstance(prompt_profiles, dict) and profile_name in prompt_profiles:
+                        profile_data = prompt_profiles[profile_name]
+                        if isinstance(profile_data, dict):
+                            book_title_prompt = profile_data.get('book_title_prompt', '')
+                    
+                    # If still no book title prompt, use the main system prompt
+                    if not book_title_prompt:
+                        book_title_prompt = system_prompt
+                    
+                    # Translate the image filename/title
+                    self.append_log(f"📝 Translating image title...")
+                    title_messages = [
+                        {"role": "system", "content": book_title_prompt},
+                        {"role": "user", "content": base_name}
+                    ]
+                    
+                    try:
+                        title_response = client.send(
+                            title_messages,
+                            temperature=temperature,
+                            max_tokens=max_tokens
+                        )
+                        
+                        # Extract title translation
+                        if hasattr(title_response, 'content'):
+                            translated_title = title_response.content.strip() if title_response.content else base_name
+                        else:
+                            # Handle tuple response
+                            title_content, _ = title_response
+                            translated_title = title_content.strip() if title_content else base_name
+                    except Exception as e:
+                        self.append_log(f"⚠️ Title translation failed: {str(e)}")
+                        translated_title = base_name  # Fallback to original if translation fails
+                    
+                    # Create clean HTML content with just the translated title and content
+                    html_content = f'''<!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8"/>
+        <title>{translated_title}</title>
+        <style>
+            body {{ 
+                font-family: Arial, sans-serif; 
+                line-height: 1.6; 
+                margin: 40px;
+                max-width: 800px;
+            }}
+            h1 {{
+                color: #333;
+                border-bottom: 2px solid #0066cc;
+                padding-bottom: 10px;
+            }}
+        </style>
+    </head>
+    <body>
+        <h1>{translated_title}</h1>
+        {response_content}
+    </body>
+    </html>'''
+                    
+                    # Save HTML file with proper numbering
+                    html_file = os.path.join(output_dir, f"response_{file_index:03d}_{base_name}.html")
+                    with open(html_file, 'w', encoding='utf-8') as f:
+                        f.write(html_content)
+                    
+                    # Copy original image to the output directory (for reference, not displayed)
+                    if not combined_output_dir:
+                        shutil.copy2(image_path, os.path.join(output_dir, image_name))
+                    
+                    # Show preview
+                    if response_content and response_content.strip():
+                        preview = response_content[:500] + "..." if len(response_content) > 500 else response_content
+                        self.append_log(f"📝 Translation preview:")
+                        self.append_log(f"{preview}")
+                    else:
+                        self.append_log(f"⚠️ Translation appears to be empty")
+                    
+                    self.append_log(f"✅ Translation saved to: {html_file}")
+                    self.append_log(f"📁 Output directory: {output_dir}")
+                    
+                    return True
+                else:
+                    self.append_log(f"❌ No translation received from API")
+                    if finish_reason:
+                        self.append_log(f"   Finish reason: {finish_reason}")
+                    return False
+                    
+            except Exception as e:
+                self.append_log(f"❌ API call failed: {str(e)}")
+                import traceback
+                self.append_log(f"❌ Full error: {traceback.format_exc()}")
+                return False
+            
+        except Exception as e:
+            self.append_log(f"❌ Error processing image: {str(e)}")
+            import traceback
+            self.append_log(f"❌ Full error: {traceback.format_exc()}")
+            return False
+
+    def _process_text_file(self, file_path):
+        """Process EPUB or TXT file (existing translation logic)"""
+        try:
             if translation_main is None:
-               self.append_log("❌ Translation module is not available")
-               messagebox.showerror("Module Error", "Translation module is not available. Please ensure all files are present.")
-               return
-
-            epub_path = self.entry_epub.get()
-            if not epub_path or not os.path.isfile(epub_path):
-               self.append_log("❌ Error: Please select a valid EPUB file.")
-               return
+                self.append_log("❌ Translation module is not available")
+                return False
 
             api_key = self.api_key_entry.get()
             model = self.model_var.get()
             
-            # ADD THIS: Validate Vertex AI credentials
+            # Validate API key and model (same as original)
             if '@' in model or model.startswith('vertex/'):
                 google_creds = self.config.get('google_cloud_credentials')
                 if not google_creds or not os.path.exists(google_creds):
                     self.append_log("❌ Error: Google Cloud credentials required for Vertex AI models.")
-                    messagebox.showerror(
-                        "Error", 
-                        "Google Cloud credentials required for Vertex AI models.\n\n" +
-                        "Please click 'GCloud Creds' to select your service account JSON file."
-                    )
-                    return
+                    return False
                 
-                # Set environment variable
                 os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_creds
                 self.append_log(f"🔑 Using Google Cloud credentials: {os.path.basename(google_creds)}")
                 
-                # If API key is empty, use project ID from credentials
                 if not api_key:
                     try:
                         with open(google_creds, 'r') as f:
@@ -5468,184 +5948,91 @@ Recent translations to summarize:
                         api_key = 'vertex-ai-project'
             elif not api_key:
                 self.append_log("❌ Error: Please enter your API key.")
-                return
+                return False
 
             old_argv = sys.argv
             old_env = dict(os.environ)
-           
+            
             try:
+                # Set up environment (same as original)
                 self.append_log(f"🔧 Setting up environment variables...")
-                self.append_log(f"📖 EPUB: {os.path.basename(epub_path)}")
+                self.append_log(f"📖 File: {os.path.basename(file_path)}")
                 self.append_log(f"🤖 Model: {self.model_var.get()}")
-                if hasattr(self, 'api_key_visible') and self.api_key_visible:
-                    # User has clicked "Show", so we can show partial key
-                    if api_key and api_key.strip():
-                        self.append_log(f"🔑 API Key: {api_key[:10]}...")
-                    else:
-                        self.append_log("❌ API Key: Not configured")
-                else:
-                    # API key is hidden, don't expose any part
-                    if api_key and api_key.strip():
-                        self.append_log("🔑 API Key: ******** (configured)")
-                    else:
-                        self.append_log("❌ API Key: Not configured")
-                self.append_log(f"📤 Output Token Limit: {self.max_output_tokens}")
-               
-               # Log key settings
-                if self.enable_auto_glossary_var.get():
-                   self.append_log("✅ Automatic glossary generation ENABLED")
-                   self.append_log(f"📑 Targeted Glossary Settings:")
-                   self.append_log(f"   • Min frequency: {self.glossary_min_frequency_var.get()} occurrences")
-                   self.append_log(f"   • Max character names: {self.glossary_max_names_var.get()}")
-                   self.append_log(f"   • Max titles/ranks: {self.glossary_max_titles_var.get()}")
-                   self.append_log(f"   • Translation batch size: {self.glossary_batch_size_var.get()}")
-                else:
-                   self.append_log("⚠️ Automatic glossary generation DISABLED")
-
-                if self.batch_translation_var.get():
-                    self.append_log(f"📦 Batch translation ENABLED - processing {self.batch_size_var.get()} chapters per API call")
-                    self.append_log("   💡 This can improve speed but may reduce per-chapter customization")
-                else:
-                    self.append_log("📄 Standard translation mode - processing one chapter at a time")
-
+                
+                # IMPORTANT: Set IS_TEXT_FILE_TRANSLATION flag for text files
+                if file_path.lower().endswith('.txt'):
+                    os.environ['IS_TEXT_FILE_TRANSLATION'] = '1'
+                    self.append_log("📄 Processing as text file")
+                
                 # Set environment variables
-                env_vars = self._get_environment_variables(epub_path, api_key)
-                print(f"DEBUG: MANUAL_GLOSSARY env var = '{env_vars.get('MANUAL_GLOSSARY', 'NOT SET')}'")
+                env_vars = self._get_environment_variables(file_path, api_key)
                 os.environ.update(env_vars)
-
+                
+                # Handle chapter range
                 chap_range = self.chapter_range_entry.get().strip()
                 if chap_range:
-                   os.environ['CHAPTER_RANGE'] = chap_range
-                   self.append_log(f"📊 Chapter Range: {chap_range}")
-
-                # Handle token limit
-                if self.token_limit_disabled:
-                   os.environ['MAX_INPUT_TOKENS'] = ''
-                   self.append_log("🎯 Input Token Limit: Unlimited (disabled)")
+                    os.environ['CHAPTER_RANGE'] = chap_range
+                    self.append_log(f"📊 Chapter Range: {chap_range}")
+                
+                # Set other environment variables (token limits, etc.)
+                if hasattr(self, 'token_limit_disabled') and self.token_limit_disabled:
+                    os.environ['MAX_INPUT_TOKENS'] = ''
                 else:
                     token_val = self.token_limit_entry.get().strip()
                     if token_val and token_val.isdigit():
-                       os.environ['MAX_INPUT_TOKENS'] = token_val
-                       self.append_log(f"🎯 Input Token Limit: {token_val}")
+                        os.environ['MAX_INPUT_TOKENS'] = token_val
                     else:
-                       default_limit = '1000000'
-                       os.environ['MAX_INPUT_TOKENS'] = default_limit
-                       self.append_log(f"🎯 Input Token Limit: {default_limit} (default)")
-               
-                # Log image translation status
-                if self.enable_image_translation_var.get():
-                    self.append_log("🖼️ Image translation ENABLED")
-                    vision_models = [
-                        # Anthropic Claude
-                        'claude-opus-4-20250514',        # Claude 4 Opus with vision capabilities
-                        'claude-sonnet-4-20250514',      # Claude 4 Sonnet with vision capabilities
-                        
-                        # OpenAI GPT
-                        'gpt-4-turbo',                   # Still available with vision
-                        'gpt-4o',                        # GPT-4 Omni with native multimodal support
-                        'gpt-4o-mini',                   # Smaller, faster GPT-4o variant
-                        'gpt-4.1',                       # Latest GPT-4.1 with vision support
-                        'gpt-4.1-mini',                  # Efficient GPT-4.1 variant
-                        'gpt-4-vision-preview',          # GPT-4 with vision (legacy)
-                        
-                        # Google Gemini
-                        'gemini-1.5-pro',                # Still available
-                        'gemini-1.5-flash',              # Still available
-                        'gemini-2.0-flash',              # Gemini 2.0 with multimodal capabilities
-                        'gemini-2.0-flash-exp',          # Experimental version
-                        'gemini-2.5-pro',                # Latest thinking model with vision
-                        'gemini-2.5-flash',              # Efficient Gemini 2.5 variant
-                        
-                        # Meta Llama
-                        'llama-3.2-11b-vision',          # Llama 3.2 Vision 11B model
-                        'llama-3.2-90b-vision',          # Llama 3.2 Vision 90B model
-                        
-                        # Alibaba Qwen
-                        'qwen-2.5-vl-72b',               # Qwen 2.5 Vision Language 72B
-                        
-                        # Microsoft
-                        'florence-2-base',               # Microsoft Florence 2 base model
-                        'florence-2-large',              # Microsoft Florence 2 large model
-                        'phi-4-multimodal',              # Microsoft Phi 4 with multimodal support
-                        
-                        # Mistral AI
-                        'pixtral-12b-2409',              # Pixtral 12B multimodal model
-                        'pixtral-large-latest',          # Pixtral Large (124B parameters)
-                        
-                        # Other Notable Models
-                        'moondream-2',                   # Tiny vision language model
-                        'smolvlm',                       # Lightweight efficient VLM
-                        'gemma-3-27b',                   # Google's Gemma 3 with vision
-                        'deepseek-janus-pro',            # Deepseek's vision model
-                        'yi-vl-34b',                     # Yi Vision Language model
-                        'bakllava-7b',                   # BakLLaVA multimodal model
-                        'cogvlm',                        # CogVLM for visual reasoning
-                    ]
-                    if self.model_var.get().lower() in vision_models:
-                        self.append_log(f"   ✅ Using vision-capable model: {self.model_var.get()}")
-                        self.append_log(f"   • Max images per chapter: {self.max_images_per_chapter_var.get()}")
-                        if self.process_webnovel_images_var.get():
-                            self.append_log(f"   • Web novel images: Enabled (min height: {self.webnovel_min_height_var.get()}px)")
-                    else:
-                        self.append_log(f"   ⚠️ Model {self.model_var.get()} may not support vision")
-                        self.append_log("   ⚠️ Image translation may be skipped")
-                else:
-                    self.append_log("🖼️ Image translation disabled")
-               
-                # Validate glossary path before passing to backend
+                        os.environ['MAX_INPUT_TOKENS'] = '1000000'
+                
+                # Validate glossary path
                 if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path:
-                   # If this is an auto-loaded glossary, check if it matches the current file
                     if (hasattr(self, 'auto_loaded_glossary_path') and 
-                       self.manual_glossary_path == self.auto_loaded_glossary_path):
-                       # This is an auto-loaded glossary
+                        self.manual_glossary_path == self.auto_loaded_glossary_path):
                         if (hasattr(self, 'auto_loaded_glossary_for_file') and 
-                           hasattr(self, 'file_path') and 
-                           self.file_path == self.auto_loaded_glossary_for_file):
-                           # The glossary matches the current file
-                           os.environ['MANUAL_GLOSSARY'] = self.manual_glossary_path
-                           self.append_log(f"📑 Using auto-loaded glossary: {os.path.basename(self.manual_glossary_path)}")
-                        else:
-                           # The glossary is from a different file, don't use it
-                           self.append_log("📑 Skipping auto-loaded glossary (different novel)")
+                            hasattr(self, 'file_path') and 
+                            self.file_path == self.auto_loaded_glossary_for_file):
+                            os.environ['MANUAL_GLOSSARY'] = self.manual_glossary_path
+                            self.append_log(f"📑 Using auto-loaded glossary: {os.path.basename(self.manual_glossary_path)}")
                     else:
-                       # This is a manually loaded glossary, always use it
-                       os.environ['MANUAL_GLOSSARY'] = self.manual_glossary_path
-                       self.append_log(f"📑 Using manual glossary: {os.path.basename(self.manual_glossary_path)}")
-               
-                sys.argv = ['TransateKRtoEN.py', epub_path]
-
+                        os.environ['MANUAL_GLOSSARY'] = self.manual_glossary_path
+                        self.append_log(f"📑 Using manual glossary: {os.path.basename(self.manual_glossary_path)}")
+                
+                # Set sys.argv to match what TransateKRtoEN.py expects
+                sys.argv = ['TransateKRtoEN.py', file_path]
+                
                 self.append_log("🚀 Starting translation...")
-
+                
+                # Ensure Payloads directory exists
                 os.makedirs("Payloads", exist_ok=True)
-
+                
+                # Run translation
                 translation_main(
-                   log_callback=self.append_log,
-                   stop_callback=lambda: self.stop_requested
+                    log_callback=self.append_log,
+                    stop_callback=lambda: self.stop_requested
                 )
-               
+                
                 if not self.stop_requested:
-                   self.append_log("✅ Translation completed successfully!")
-               
+                    self.append_log("✅ Translation completed successfully!")
+                    return True
+                else:
+                    return False
+                    
             except Exception as e:
                 self.append_log(f"❌ Translation error: {e}")
-                self.append_log_with_api_error_detection(str(e))
+                if hasattr(self, 'append_log_with_api_error_detection'):
+                    self.append_log_with_api_error_detection(str(e))
                 import traceback
                 self.append_log(f"❌ Full error: {traceback.format_exc()}")
-           
+                return False
+            
             finally:
                 sys.argv = old_argv
                 os.environ.clear()
                 os.environ.update(old_env)
-
+                
         except Exception as e:
-           self.append_log(f"❌ Translation setup error: {e}")
-
-        finally:
-           self.stop_requested = False
-           if translation_stop_flag:
-               translation_stop_flag(False)
-           self.translation_thread = None
-           self.master.after(0, self.update_run_button)
+            self.append_log(f"❌ Error in text file processing: {str(e)}")
+            return False
 
     def _get_environment_variables(self, epub_path, api_key):
         """Get all environment variables for translation/glossary"""
@@ -7763,40 +8150,151 @@ Recent translations to summarize:
         
         return False
 
+    # File Selection Methods
     def browse_file(self):
+        """Select a single file"""
         path = filedialog.askopenfilename(
+            title="Select File",
             filetypes=[
-                ("Supported files", "*.epub;*.txt"),
+                ("Supported files", "*.epub;*.txt;*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp"),
                 ("EPUB files", "*.epub"),
                 ("Text files", "*.txt"),
+                ("Image files", "*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp"),
+                ("PNG files", "*.png"),
+                ("JPEG files", "*.jpg;*.jpeg"),
+                ("GIF files", "*.gif"),
+                ("BMP files", "*.bmp"),
+                ("WebP files", "*.webp"),
                 ("All files", "*.*")
             ]
         )
         if path:
-            self.entry_epub.delete(0, tk.END)
-            self.entry_epub.insert(0, path)
+            self._handle_file_selection([path])
+
+    def browse_multiple_files(self):
+        """Select multiple files at once"""
+        paths = filedialog.askopenfilenames(
+            title="Select Multiple Files (Ctrl+Click or Shift+Click)",
+            filetypes=[
+                ("Supported files", "*.epub;*.txt;*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp"),
+                ("EPUB files", "*.epub"),
+                ("Text files", "*.txt"),
+                ("Image files", "*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp"),
+                ("All files", "*.*")
+            ]
+        )
+        if paths:
+            self._handle_file_selection(list(paths))
+
+    def browse_folder(self):
+        """Select an entire folder of files"""
+        folder_path = filedialog.askdirectory(
+            title="Select Folder Containing Files to Translate"
+        )
+        if folder_path:
+            # Find all supported files in the folder
+            supported_extensions = {'.epub', '.txt', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
+            files = []
             
-            # Store the selected file path for tracking
-            self.file_path = path
+            # Recursively find files if deep scan is enabled
+            if hasattr(self, 'deep_scan_var') and self.deep_scan_var.get():
+                for root, dirs, filenames in os.walk(folder_path):
+                    for filename in filenames:
+                        file_path = os.path.join(root, filename)
+                        if os.path.splitext(filename)[1].lower() in supported_extensions:
+                            files.append(file_path)
+            else:
+                # Just scan the immediate folder
+                for filename in sorted(os.listdir(folder_path)):
+                    file_path = os.path.join(folder_path, filename)
+                    if os.path.isfile(file_path):
+                        ext = os.path.splitext(filename)[1].lower()
+                        if ext in supported_extensions:
+                            files.append(file_path)
             
-            # Clear previous auto-loaded glossary if switching files
-            if hasattr(self, 'auto_loaded_glossary_for_file') and path != self.auto_loaded_glossary_for_file:
-                if hasattr(self, 'auto_loaded_glossary_path') and self.manual_glossary_path == self.auto_loaded_glossary_path:
-                    self.manual_glossary_path = None
-                    self.append_log("📑 Cleared auto-loaded glossary from previous file")
+            if files:
+                self._handle_file_selection(sorted(files))
+                self.append_log(f"📁 Found {len(files)} supported files in: {os.path.basename(folder_path)}")
+            else:
+                messagebox.showwarning("No Files Found", 
+                                     f"No supported files found in:\n{folder_path}\n\nSupported formats: EPUB, TXT, PNG, JPG, JPEG, GIF, BMP, WebP")
+
+    def clear_file_selection(self):
+        """Clear all selected files"""
+        self.entry_epub.delete(0, tk.END)
+        self.entry_epub.insert(0, "No file selected")
+        self.selected_files = []
+        self.file_path = None
+        self.current_file_index = 0
+        self.append_log("🗑️ Cleared file selection")
+
+    def _handle_file_selection(self, paths):
+        """Common handler for file selection"""
+        if not paths:
+            return
+        
+        # Store the list of selected files
+        self.selected_files = paths
+        self.current_file_index = 0
+        
+        # Update the entry field
+        self.entry_epub.delete(0, tk.END)
+        
+        # Define image extensions
+        image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
+        
+        if len(paths) == 1:
+            # Single file - display full path
+            self.entry_epub.insert(0, paths[0])
+            self.file_path = paths[0]  # For backward compatibility
+        else:
+            # Multiple files - display count and summary
+            # Group by type
+            images = [p for p in paths if os.path.splitext(p)[1].lower() in image_extensions]
+            epubs = [p for p in paths if p.lower().endswith('.epub')]
+            txts = [p for p in paths if p.lower().endswith('.txt')]
+            
+            summary_parts = []
+            if epubs:
+                summary_parts.append(f"{len(epubs)} EPUB")
+            if txts:
+                summary_parts.append(f"{len(txts)} TXT")
+            if images:
+                summary_parts.append(f"{len(images)} images")
+            
+            display_text = f"{len(paths)} files selected ({', '.join(summary_parts)})"
+            self.entry_epub.insert(0, display_text)
+            self.file_path = paths[0]  # Set first file as primary
+        
+        # Check if these are image files
+        image_files = [p for p in paths if os.path.splitext(p)[1].lower() in image_extensions]
+        
+        if image_files:
+            # Enable image translation if not already enabled
+            if hasattr(self, 'enable_image_translation_var') and not self.enable_image_translation_var.get():
+                self.enable_image_translation_var.set(True)
+                self.append_log(f"🖼️ Detected {len(image_files)} image file(s) - automatically enabled image translation")
+            
+            # Clear glossary for image files
+            if hasattr(self, 'auto_loaded_glossary_path'):
+                self.manual_glossary_path = None
                 self.auto_loaded_glossary_path = None
                 self.auto_loaded_glossary_for_file = None
+                self.append_log("📑 Cleared glossary settings (image files selected)")
+        else:
+            # Handle EPUB/TXT files
+            epub_files = [p for p in paths if p.lower().endswith('.epub')]
             
-            # Auto-load glossary for epub files
-            if path.lower().endswith('.epub'):
-                self.auto_load_glossary_for_file(path)
-            else:
-                # For non-epub files, clear any auto-loaded glossary
-                if hasattr(self, 'auto_loaded_glossary_path') and self.manual_glossary_path == self.auto_loaded_glossary_path:
+            if len(epub_files) == 1:
+                # Single EPUB - auto-load glossary
+                self.auto_load_glossary_for_file(epub_files[0])
+            elif len(epub_files) > 1:
+                # Multiple EPUBs - clear glossary
+                if hasattr(self, 'auto_loaded_glossary_path'):
                     self.manual_glossary_path = None
                     self.auto_loaded_glossary_path = None
                     self.auto_loaded_glossary_for_file = None
-                    self.append_log("📑 Cleared auto-loaded glossary (non-EPUB file selected)")
+                    self.append_log("📑 Multiple files selected - glossary auto-loading disabled")
 
     def toggle_api_visibility(self):
         show = self.api_key_entry.cget('show')
@@ -10383,7 +10881,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.5.7...")
+    print("🚀 Starting Glossarion v3.6.1...")
     
     # Initialize splash screen
     splash_manager = None
