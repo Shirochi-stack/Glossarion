@@ -2860,12 +2860,34 @@ Recent translations to summarize:
         return uses_zero_based
     
     def force_retranslation(self):
-        """Force retranslation of specific chapters with improved display"""
-        input_path = self.entry_epub.get()
-        if not input_path or not os.path.isfile(input_path):
-            messagebox.showerror("Error", "Please select a valid EPUB or text file first.")
+        """Force retranslation of specific chapters or images with improved display"""
+        
+        # Check for multiple file selection first
+        if hasattr(self, 'selected_files') and len(self.selected_files) > 1:
+            self._force_retranslation_multiple_files()
             return
         
+        # Check if it's a folder selection (for images)
+        if hasattr(self, 'selected_files') and len(self.selected_files) > 0:
+            # Check if the first selected file is actually a folder
+            first_item = self.selected_files[0]
+            if os.path.isdir(first_item):
+                self._force_retranslation_images_folder(first_item)
+                return
+        
+        # Original logic for single files
+        input_path = self.entry_epub.get()
+        if not input_path or not os.path.isfile(input_path):
+            messagebox.showerror("Error", "Please select a valid EPUB, text file, or image folder first.")
+            return
+        
+        # Check if it's an image file
+        image_extensions = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')
+        if input_path.lower().endswith(image_extensions):
+            self._force_retranslation_single_image(input_path)
+            return
+        
+        # Original EPUB/text file logic continues here...
         epub_base = os.path.splitext(os.path.basename(input_path))[0]
         output_dir = epub_base  # KEEP THIS AS IS - it's relative to current working directory
         
@@ -3225,6 +3247,737 @@ Recent translations to summarize:
                      bootstyle="success").grid(row=1, column=2, columnspan=1, padx=5, pady=10, sticky="ew")
             tb.Button(button_frame, text="Cancel", command=dialog.destroy, 
                      bootstyle="secondary").grid(row=1, column=3, columnspan=1, padx=5, pady=10, sticky="ew")
+
+
+    def _force_retranslation_multiple_files(self):
+        """Handle force retranslation when multiple files are selected"""
+        
+        # Categorize selected files
+        epub_files = []
+        text_files = []
+        image_files = []
+        folders = []
+        
+        image_extensions = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')
+        
+        for file_path in self.selected_files:
+            if os.path.isdir(file_path):
+                folders.append(file_path)
+            elif file_path.lower().endswith('.epub'):
+                epub_files.append(file_path)
+            elif file_path.lower().endswith('.txt'):
+                text_files.append(file_path)
+            elif file_path.lower().endswith(image_extensions):
+                image_files.append(file_path)
+        
+        # Build summary message
+        summary_parts = []
+        if epub_files:
+            summary_parts.append(f"{len(epub_files)} EPUB file(s)")
+        if text_files:
+            summary_parts.append(f"{len(text_files)} text file(s)")
+        if image_files:
+            summary_parts.append(f"{len(image_files)} image file(s)")
+        if folders:
+            summary_parts.append(f"{len(folders)} folder(s)")
+        
+        if not summary_parts:
+            messagebox.showinfo("Info", "No valid files selected.")
+            return
+        
+        # Create dialog
+        dialog = self.wm.create_simple_dialog(
+            self.master,
+            "Force Retranslation - Multiple Files",
+            width=950,
+            height=700
+        )
+        
+        # Add summary label
+        summary_text = f"Selected: {', '.join(summary_parts)}"
+        tk.Label(dialog, text=summary_text, font=('Arial', 12, 'bold')).pack(pady=10)
+        
+        # Create notebook for tabs
+        notebook = ttk.Notebook(dialog)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        # Track all tabs and their data
+        tab_data = []
+        
+        # Create a tab for each EPUB/text file
+        for file_path in epub_files + text_files:
+            file_base = os.path.splitext(os.path.basename(file_path))[0]
+            output_dir = file_base
+            
+            # Skip if no output
+            if not os.path.exists(output_dir):
+                continue
+                
+            progress_file = os.path.join(output_dir, "translation_progress.json")
+            if not os.path.exists(progress_file):
+                continue
+            
+            # Create tab for this file
+            tab_frame = tk.Frame(notebook)
+            tab_name = file_base[:20] + "..." if len(file_base) > 20 else file_base
+            notebook.add(tab_frame, text=tab_name)
+            
+            # Load progress data
+            try:
+                with open(progress_file, 'r', encoding='utf-8') as f:
+                    prog = json.load(f)
+                
+                # Create the same interface as single file retranslation
+                instruction_label = tk.Label(tab_frame, text="Select chapters to retranslate:", font=('Arial', 11))
+                instruction_label.pack(pady=5)
+                
+                # Main frame for listbox
+                main_frame = tk.Frame(tab_frame)
+                main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+                
+                # Scrollbars
+                h_scrollbar = ttk.Scrollbar(main_frame, orient=tk.HORIZONTAL)
+                h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+                
+                v_scrollbar = ttk.Scrollbar(main_frame, orient=tk.VERTICAL)
+                v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+                
+                # Listbox
+                listbox = tk.Listbox(
+                    main_frame,
+                    selectmode=tk.MULTIPLE,
+                    yscrollcommand=v_scrollbar.set,
+                    xscrollcommand=h_scrollbar.set,
+                    width=100
+                )
+                listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+                
+                v_scrollbar.config(command=listbox.yview)
+                h_scrollbar.config(command=listbox.xview)
+                
+                # Process chapters (same logic as single file)
+                files_to_entries = {}
+                for chapter_key, chapter_info in prog.get("chapters", {}).items():
+                    output_file = chapter_info.get("output_file", "")
+                    if output_file:
+                        if output_file not in files_to_entries:
+                            files_to_entries[output_file] = []
+                        files_to_entries[output_file].append((chapter_key, chapter_info))
+                
+                # Build display info
+                chapter_display_info = []
+                for output_file, entries in files_to_entries.items():
+                    chapter_key, chapter_info = entries[0]
+                    
+                    # Get chapter number
+                    chapter_num = chapter_info.get('actual_num', chapter_info.get('chapter_num', 0))
+                    status = chapter_info.get("status", "unknown")
+                    
+                    # Check file existence
+                    if status == "completed":
+                        output_path = os.path.join(output_dir, output_file)
+                        if not os.path.exists(output_path):
+                            status = "file_missing"
+                    
+                    chapter_display_info.append({
+                        'key': chapter_key,
+                        'num': chapter_num,
+                        'info': chapter_info,
+                        'output_file': output_file,
+                        'status': status,
+                        'duplicate_count': len(entries),
+                        'entries': entries  # Store all entries for deletion
+                    })
+                
+                # Sort by chapter number
+                chapter_display_info.sort(key=lambda x: x['num'] if x['num'] is not None else 999999)
+                
+                # Populate listbox
+                for info in chapter_display_info:
+                    chapter_num = info['num']
+                    status = info['status']
+                    output_file = info['output_file']
+                    
+                    # Status indicators
+                    status_icons = {
+                        'completed': '✅',
+                        'failed': '❌',
+                        'qa_failed': '❌',
+                        'file_missing': '⚠️',
+                        'in_progress': '🔄',
+                        'unknown': '❓'
+                    }
+                    
+                    icon = status_icons.get(status, '❓')
+                    
+                    # Format display
+                    if isinstance(chapter_num, float) and chapter_num.is_integer():
+                        display = f"Chapter {int(chapter_num):03d} | {icon} {status} | {output_file}"
+                    elif isinstance(chapter_num, float):
+                        display = f"Chapter {chapter_num:06.1f} | {icon} {status} | {output_file}"
+                    else:
+                        display = f"Chapter {chapter_num:03d} | {icon} {status} | {output_file}"
+                    
+                    if info['duplicate_count'] > 1:
+                        display += f" | ({info['duplicate_count']} entries)"
+                    
+                    listbox.insert(tk.END, display)
+                
+                # Selection count label
+                selection_count_label = tk.Label(tab_frame, text="Selected: 0", font=('Arial', 9))
+                selection_count_label.pack(pady=2)
+                
+                def update_selection_count(*args):
+                    count = len(listbox.curselection())
+                    selection_count_label.config(text=f"Selected: {count}")
+                
+                listbox.bind('<<ListboxSelect>>', update_selection_count)
+                
+                # Store tab data
+                tab_data.append({
+                    'file_path': file_path,
+                    'file_base': file_base,
+                    'output_dir': output_dir,
+                    'progress_file': progress_file,
+                    'prog': prog,
+                    'listbox': listbox,
+                    'chapter_display_info': chapter_display_info,
+                    'selection_count_label': selection_count_label,
+                    'files_to_entries': files_to_entries
+                })
+                
+            except Exception as e:
+                error_label = tk.Label(tab_frame, text=f"Error loading progress: {str(e)}", fg='red')
+                error_label.pack(pady=20)
+        
+        # Add tabs for image folders
+        for folder_path in folders:
+            folder_name = os.path.basename(folder_path)
+            output_dir = f"{folder_name}_translated"
+            
+            if not os.path.exists(output_dir):
+                continue
+            
+            # Create tab
+            tab_frame = tk.Frame(notebook)
+            tab_name = "📁 " + (folder_name[:17] + "..." if len(folder_name) > 17 else folder_name)
+            notebook.add(tab_frame, text=tab_name)
+            
+            # Instructions
+            tk.Label(tab_frame, text="Select images to retranslate:", font=('Arial', 11)).pack(pady=5)
+            
+            # Main frame
+            main_frame = tk.Frame(tab_frame)
+            main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+            
+            # Scrollbars
+            h_scrollbar = ttk.Scrollbar(main_frame, orient=tk.HORIZONTAL)
+            h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+            
+            v_scrollbar = ttk.Scrollbar(main_frame, orient=tk.VERTICAL)
+            v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            
+            # Listbox
+            listbox = tk.Listbox(
+                main_frame,
+                selectmode=tk.MULTIPLE,
+                yscrollcommand=v_scrollbar.set,
+                xscrollcommand=h_scrollbar.set,
+                width=100
+            )
+            listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            
+            v_scrollbar.config(command=listbox.yview)
+            h_scrollbar.config(command=listbox.xview)
+            
+            # Find files
+            file_info = []
+            
+            # HTML files
+            for file in sorted(os.listdir(output_dir)):
+                if file.endswith('.html'):
+                    match = re.match(r'response_(\d+)_(.+)\.html', file)
+                    if match:
+                        index = match.group(1)
+                        base_name = match.group(2)
+                        display = f"📄 Image {index} | {base_name} | ✅ Translated"
+                    else:
+                        display = f"📄 {file} | ✅ Translated"
+                    
+                    listbox.insert(tk.END, display)
+                    file_info.append({
+                        'type': 'translated',
+                        'file': file,
+                        'path': os.path.join(output_dir, file)
+                    })
+            
+            # Cover images
+            images_dir = os.path.join(output_dir, "images")
+            if os.path.exists(images_dir):
+                for file in sorted(os.listdir(images_dir)):
+                    if file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')):
+                        display = f"🖼️ Cover | {file} | ⏭️ Skipped"
+                        listbox.insert(tk.END, display)
+                        file_info.append({
+                            'type': 'cover',
+                            'file': file,
+                            'path': os.path.join(images_dir, file)
+                        })
+            
+            # Selection count
+            selection_count_label = tk.Label(tab_frame, text="Selected: 0", font=('Arial', 9))
+            selection_count_label.pack(pady=2)
+            
+            def update_selection_count(*args):
+                count = len(listbox.curselection())
+                selection_count_label.config(text=f"Selected: {count}")
+            
+            listbox.bind('<<ListboxSelect>>', update_selection_count)
+            
+            # Store image tab data
+            tab_data.append({
+                'type': 'image_folder',
+                'folder_path': folder_path,
+                'output_dir': output_dir,
+                'listbox': listbox,
+                'file_info': file_info,
+                'selection_count_label': selection_count_label
+            })
+        
+        # Bottom button frame
+        button_frame = tk.Frame(dialog)
+        button_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
+        
+        # Configure grid columns
+        for i in range(6):
+            button_frame.columnconfigure(i, weight=1)
+        
+        # Button functions
+        def select_all_current_tab():
+            current_idx = notebook.index("current")
+            if current_idx < len(tab_data):
+                tab = tab_data[current_idx]
+                tab['listbox'].select_set(0, tk.END)
+                if 'selection_count_label' in tab:
+                    count = tab['listbox'].size()
+                    tab['selection_count_label'].config(text=f"Selected: {count}")
+        
+        def clear_all_current_tab():
+            current_idx = notebook.index("current")
+            if current_idx < len(tab_data):
+                tab = tab_data[current_idx]
+                tab['listbox'].select_clear(0, tk.END)
+                if 'selection_count_label' in tab:
+                    tab['selection_count_label'].config(text="Selected: 0")
+        
+        def select_status_current_tab(status_to_select):
+            current_idx = notebook.index("current")
+            if current_idx < len(tab_data):
+                tab = tab_data[current_idx]
+                
+                # Only works for EPUB/text tabs
+                if 'chapter_display_info' in tab:
+                    tab['listbox'].select_clear(0, tk.END)
+                    for idx, info in enumerate(tab['chapter_display_info']):
+                        if status_to_select == 'failed':
+                            if info['status'] in ['failed', 'qa_failed']:
+                                tab['listbox'].select_set(idx)
+                        else:
+                            if info['status'] == status_to_select:
+                                tab['listbox'].select_set(idx)
+                    
+                    # Update count
+                    count = len(tab['listbox'].curselection())
+                    tab['selection_count_label'].config(text=f"Selected: {count}")
+        
+        def remove_qa_failed_mark():
+            current_idx = notebook.index("current")
+            if current_idx >= len(tab_data):
+                return
+                
+            tab = tab_data[current_idx]
+            if 'chapter_display_info' not in tab:
+                messagebox.showinfo("Info", "This function only works on EPUB/text file tabs.")
+                return
+            
+            selected = tab['listbox'].curselection()
+            if not selected:
+                messagebox.showwarning("No Selection", "Please select at least one chapter.")
+                return
+            
+            # Filter for QA failed chapters
+            selected_chapters = [tab['chapter_display_info'][i] for i in selected]
+            qa_failed_chapters = [ch for ch in selected_chapters if ch['status'] == 'qa_failed']
+            
+            if not qa_failed_chapters:
+                messagebox.showwarning("No QA Failed Chapters", 
+                                     "None of the selected chapters have 'qa_failed' status.")
+                return
+            
+            # Confirm
+            count = len(qa_failed_chapters)
+            if not messagebox.askyesno("Confirm Remove QA Failed Mark", 
+                                      f"Remove QA failed mark from {count} chapters?"):
+                return
+            
+            # Remove marks
+            cleared_count = 0
+            for info in qa_failed_chapters:
+                for chapter_key, _ in info['entries']:
+                    if chapter_key in tab['prog']["chapters"]:
+                        tab['prog']["chapters"][chapter_key]["status"] = "completed"
+                        tab['prog']["chapters"][chapter_key].pop("qa_issues", None)
+                        tab['prog']["chapters"][chapter_key].pop("qa_timestamp", None)
+                        tab['prog']["chapters"][chapter_key].pop("qa_issues_found", None)
+                        tab['prog']["chapters"][chapter_key].pop("duplicate_confidence", None)
+                        cleared_count += 1
+            
+            # Save
+            with open(tab['progress_file'], 'w', encoding='utf-8') as f:
+                json.dump(tab['prog'], f, ensure_ascii=False, indent=2)
+            
+            messagebox.showinfo("Success", f"Removed QA failed mark from {cleared_count} chapters.")
+            dialog.destroy()
+        
+        def retranslate_selected():
+            # Collect all selected items from all tabs
+            all_selected = []
+            
+            for tab_idx, tab in enumerate(tab_data):
+                selected_indices = tab['listbox'].curselection()
+                if not selected_indices:
+                    continue
+                
+                if tab.get('type') == 'image_folder':
+                    # Handle image folders
+                    for idx in selected_indices:
+                        file_info = tab['file_info'][idx]
+                        all_selected.append({
+                            'type': 'image',
+                            'tab_name': notebook.tab(tab_idx, "text"),
+                            'file_path': file_info['path'],
+                            'file_type': file_info['type']
+                        })
+                else:
+                    # Handle EPUB/text chapters
+                    for idx in selected_indices:
+                        info = tab['chapter_display_info'][idx]
+                        all_selected.append({
+                            'type': 'chapter',
+                            'tab_name': tab['file_base'],
+                            'chapter_num': info['num'],
+                            'output_file': info['output_file'],
+                            'output_dir': tab['output_dir'],
+                            'entries': info['entries'],
+                            'prog': tab['prog'],
+                            'progress_file': tab['progress_file']
+                        })
+            
+            if not all_selected:
+                messagebox.showwarning("No Selection", "Please select at least one item to retranslate.")
+                return
+            
+            # Build confirmation
+            chapter_count = sum(1 for x in all_selected if x['type'] == 'chapter')
+            image_count = sum(1 for x in all_selected if x['type'] == 'image')
+            
+            msg_parts = []
+            if chapter_count > 0:
+                msg_parts.append(f"{chapter_count} chapter(s)")
+            if image_count > 0:
+                msg_parts.append(f"{image_count} image file(s)")
+            
+            if not messagebox.askyesno("Confirm Retranslation", 
+                                      f"Delete {' and '.join(msg_parts)} for retranslation?"):
+                return
+            
+            # Process deletions
+            deleted_count = 0
+            modified_progress_files = set()
+            
+            for item in all_selected:
+                if item['type'] == 'chapter':
+                    # Delete chapter file
+                    output_path = os.path.join(item['output_dir'], item['output_file'])
+                    try:
+                        if os.path.exists(output_path):
+                            os.remove(output_path)
+                            deleted_count += 1
+                    except Exception as e:
+                        print(f"Failed to delete {output_path}: {e}")
+                    
+                    # Update progress
+                    for chapter_key, _ in item['entries']:
+                        if chapter_key in item['prog']["chapters"]:
+                            content_hash = item['prog']["chapters"][chapter_key].get("content_hash")
+                            del item['prog']["chapters"][chapter_key]
+                            
+                            # Clean up related data
+                            if content_hash and content_hash in item['prog'].get("content_hashes", {}):
+                                del item['prog']["content_hashes"][content_hash]
+                            
+                            if content_hash and content_hash in item['prog'].get("chapter_chunks", {}):
+                                del item['prog']["chapter_chunks"][content_hash]
+                    
+                    modified_progress_files.add(item['progress_file'])
+                    
+                elif item['type'] == 'image':
+                    # Delete image file
+                    try:
+                        if os.path.exists(item['file_path']):
+                            os.remove(item['file_path'])
+                            deleted_count += 1
+                    except Exception as e:
+                        print(f"Failed to delete {item['file_path']}: {e}")
+            
+            # Save all modified progress files
+            for progress_file in modified_progress_files:
+                # Find the corresponding prog data
+                for tab in tab_data:
+                    if tab.get('progress_file') == progress_file:
+                        with open(progress_file, 'w', encoding='utf-8') as f:
+                            json.dump(tab['prog'], f, ensure_ascii=False, indent=2)
+                        break
+            
+            messagebox.showinfo("Success", 
+                f"Deleted {deleted_count} file(s).\n\n"
+                "They will be retranslated on the next run.")
+            dialog.destroy()
+        
+        # Row 1: Selection buttons
+        tb.Button(button_frame, text="Select All", command=select_all_current_tab, 
+                  bootstyle="info").grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+        tb.Button(button_frame, text="Clear Selection", command=clear_all_current_tab, 
+                  bootstyle="secondary").grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        tb.Button(button_frame, text="Select Completed", command=lambda: select_status_current_tab('completed'), 
+                  bootstyle="success").grid(row=0, column=2, padx=5, pady=5, sticky="ew")
+        tb.Button(button_frame, text="Select Failed", command=lambda: select_status_current_tab('failed'), 
+                  bootstyle="danger").grid(row=0, column=3, padx=5, pady=5, sticky="ew")
+        
+        # Row 2: Action buttons
+        tb.Button(button_frame, text="Retranslate Selected", command=retranslate_selected, 
+                  bootstyle="warning").grid(row=1, column=0, columnspan=2, padx=5, pady=10, sticky="ew")
+        tb.Button(button_frame, text="Remove QA Failed Mark", command=remove_qa_failed_mark, 
+                  bootstyle="success").grid(row=1, column=2, columnspan=1, padx=5, pady=10, sticky="ew")
+        tb.Button(button_frame, text="Cancel", command=dialog.destroy, 
+                  bootstyle="secondary").grid(row=1, column=3, columnspan=1, padx=5, pady=10, sticky="ew")
+
+    def _force_retranslation_images_folder(self, folder_path):
+        """Handle force retranslation for image folders"""
+        # Look for translated output folder
+        folder_name = os.path.basename(folder_path)
+        output_dir = f"{folder_name}_translated"
+        
+        if not os.path.exists(output_dir):
+            messagebox.showinfo("Info", f"No translation output found for this folder.\nExpected: {output_dir}")
+            return
+        
+        # Find all HTML files in the output directory
+        html_files = []
+        image_files = []
+        
+        for file in os.listdir(output_dir):
+            if file.endswith('.html'):
+                html_files.append(file)
+        
+        # Check for images subdirectory (cover images)
+        images_dir = os.path.join(output_dir, "images")
+        if os.path.exists(images_dir):
+            for file in os.listdir(images_dir):
+                if file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')):
+                    image_files.append(file)
+        
+        if not html_files and not image_files:
+            messagebox.showinfo("Info", "No translated files found in the output directory.")
+            return
+        
+        # Create dialog
+        dialog = self.wm.create_simple_dialog(
+            self.master,
+            "Force Retranslation - Images",
+            width=800,
+            height=600
+        )
+        
+        # Add instructions
+        instruction_text = f"Found {len(html_files)} translated images and {len(image_files)} cover images:"
+        tk.Label(dialog, text=instruction_text, font=('Arial', 12)).pack(pady=10)
+        
+        # Create main frame for listbox and scrollbars
+        main_frame = tk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        # Create scrollbars
+        h_scrollbar = ttk.Scrollbar(main_frame, orient=tk.HORIZONTAL)
+        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        v_scrollbar = ttk.Scrollbar(main_frame, orient=tk.VERTICAL)
+        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Create listbox
+        listbox = tk.Listbox(
+            main_frame, 
+            selectmode=tk.MULTIPLE, 
+            yscrollcommand=v_scrollbar.set,
+            xscrollcommand=h_scrollbar.set,
+            width=100
+        )
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Configure scrollbars
+        v_scrollbar.config(command=listbox.yview)
+        h_scrollbar.config(command=listbox.xview)
+        
+        # Keep track of file info
+        file_info = []
+        
+        # Add translated HTML files
+        for html_file in sorted(html_files):
+            # Extract original image name from HTML filename
+            # Expected format: response_001_imagename.html
+            match = re.match(r'response_(\d+)_(.+)\.html', html_file)
+            if match:
+                index = match.group(1)
+                base_name = match.group(2)
+                display = f"📄 Image {index} | {base_name} | ✅ Translated"
+            else:
+                display = f"📄 {html_file} | ✅ Translated"
+            
+            listbox.insert(tk.END, display)
+            file_info.append({
+                'type': 'translated',
+                'file': html_file,
+                'path': os.path.join(output_dir, html_file)
+            })
+        
+        # Add cover images
+        for img_file in sorted(image_files):
+            display = f"🖼️ Cover | {img_file} | ⏭️ Skipped (cover)"
+            listbox.insert(tk.END, display)
+            file_info.append({
+                'type': 'cover',
+                'file': img_file,
+                'path': os.path.join(images_dir, img_file)
+            })
+        
+        # Selection count label
+        selection_count_label = tk.Label(dialog, text="Selected: 0", font=('Arial', 10))
+        selection_count_label.pack(pady=(5, 10))
+        
+        def update_selection_count(*args):
+            count = len(listbox.curselection())
+            selection_count_label.config(text=f"Selected: {count}")
+        
+        listbox.bind('<<ListboxSelect>>', update_selection_count)
+        
+        # Button frame
+        button_frame = tk.Frame(dialog)
+        button_frame.pack(pady=10)
+        
+        def select_all():
+            listbox.select_set(0, tk.END)
+            update_selection_count()
+        
+        def clear_selection():
+            listbox.select_clear(0, tk.END)
+            update_selection_count()
+        
+        def select_translated():
+            listbox.select_clear(0, tk.END)
+            for idx, info in enumerate(file_info):
+                if info['type'] == 'translated':
+                    listbox.select_set(idx)
+            update_selection_count()
+        
+        def retranslate_selected():
+            selected = listbox.curselection()
+            if not selected:
+                messagebox.showwarning("No Selection", "Please select at least one file.")
+                return
+            
+            # Count types
+            translated_count = sum(1 for i in selected if file_info[i]['type'] == 'translated')
+            cover_count = sum(1 for i in selected if file_info[i]['type'] == 'cover')
+            
+            # Build confirmation message
+            msg_parts = []
+            if translated_count > 0:
+                msg_parts.append(f"{translated_count} translated image(s)")
+            if cover_count > 0:
+                msg_parts.append(f"{cover_count} cover image(s)")
+            
+            confirm_msg = f"This will delete {' and '.join(msg_parts)}.\n\nContinue?"
+            
+            if not messagebox.askyesno("Confirm Deletion", confirm_msg):
+                return
+            
+            # Delete selected files
+            deleted_count = 0
+            for idx in selected:
+                info = file_info[idx]
+                try:
+                    if os.path.exists(info['path']):
+                        os.remove(info['path'])
+                        deleted_count += 1
+                except Exception as e:
+                    print(f"Failed to delete {info['path']}: {e}")
+            
+            messagebox.showinfo("Success", 
+                f"Deleted {deleted_count} file(s).\n\n"
+                "They will be retranslated on the next run.")
+            
+            dialog.destroy()
+        
+        # Add buttons
+        tb.Button(button_frame, text="Select All", command=select_all, bootstyle="info").pack(side=tk.LEFT, padx=5)
+        tb.Button(button_frame, text="Clear Selection", command=clear_selection, bootstyle="secondary").pack(side=tk.LEFT, padx=5)
+        tb.Button(button_frame, text="Select Translated", command=select_translated, bootstyle="success").pack(side=tk.LEFT, padx=5)
+        tb.Button(button_frame, text="Delete Selected", command=retranslate_selected, bootstyle="danger").pack(side=tk.LEFT, padx=5)
+        tb.Button(button_frame, text="Cancel", command=dialog.destroy, bootstyle="secondary").pack(side=tk.LEFT, padx=5)
+
+
+    def _force_retranslation_single_image(self, image_path):
+        """Handle force retranslation for a single image"""
+        # Check if it's in a translated folder
+        parent_dir = os.path.dirname(image_path)
+        image_name = os.path.basename(image_path)
+        base_name = os.path.splitext(image_name)[0]
+        
+        # Look for output in a folder with the image's base name
+        output_dir = base_name
+        if not os.path.exists(output_dir):
+            # Also check if this image is part of a batch translation
+            parent_name = os.path.basename(parent_dir)
+            output_dir = f"{parent_name}_translated"
+            if not os.path.exists(output_dir):
+                messagebox.showinfo("Info", "No translation output found for this image.")
+                return
+        
+        # Find the HTML file for this image
+        html_files = []
+        for file in os.listdir(output_dir):
+            if file.endswith('.html') and base_name in file:
+                html_files.append(file)
+        
+        if not html_files:
+            messagebox.showinfo("Info", f"No translated HTML found for {image_name}")
+            return
+        
+        # If only one file, just confirm and delete
+        if len(html_files) == 1:
+            html_file = html_files[0]
+            if messagebox.askyesno("Confirm Deletion", 
+                                  f"Delete translation for {image_name}?\n\nFile: {html_file}"):
+                try:
+                    os.remove(os.path.join(output_dir, html_file))
+                    messagebox.showinfo("Success", "Translation deleted. It will be retranslated on the next run.")
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to delete file: {e}")
+        else:
+            # Multiple files found, show selection dialog
+            messagebox.showinfo("Multiple Files", 
+                              f"Found {len(html_files)} translations for this image.\n"
+                              "Please use folder selection for batch management.")
 
     
     def glossary_manager(self):
@@ -5900,7 +6653,7 @@ Recent translations to summarize:
                     
                     # Show preview
                     if response_content and response_content.strip():
-                        preview = response_content[:500] + "..." if len(response_content) > 500 else response_content
+                        preview = response_content[:200] + "..." if len(response_content) > 200 else response_content
                         self.append_log(f"📝 Translation preview:")
                         self.append_log(f"{preview}")
                     else:
