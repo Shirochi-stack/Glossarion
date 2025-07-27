@@ -1230,7 +1230,6 @@ class ChapterExtractor:
                 try:
                     file_data = zf.read(name)
                     file_contents[name] = file_data
-                    print(f"[DEBUG] Cached file: {name} (size: {len(file_data)} bytes)")
                 except Exception as e:
                     print(f"[ERROR] Failed to cache {name}: {e}")
         
@@ -1253,8 +1252,7 @@ class ChapterExtractor:
         if disable_merging:
             print("📌 Chapter merging is DISABLED - processing all files independently")
         else:
-            #print("📌 Chapter merging is ENABLED")
-            pass
+            print("📌 Chapter merging is ENABLED")
             
             # Only do merging logic if not disabled
             file_groups = {}
@@ -1262,10 +1260,26 @@ class ChapterExtractor:
             # Group files by their base number to detect Section/Chapter pairs
             for file_path in html_files:
                 filename = os.path.basename(file_path)
-                # Extract base number (e.g., "No00014" from "No00014Section.xhtml")
+                
+                # Try different patterns to extract base number
+                base_num = None
+                
+                # Pattern 1: "No00014" from "No00014Section.xhtml"
                 match = re.match(r'(No\d+)', filename)
                 if match:
                     base_num = match.group(1)
+                else:
+                    # Pattern 2: "0014" from "0014_section.html" or "0014_chapter.html"
+                    match = re.match(r'^(\d+)[_\-]', filename)
+                    if match:
+                        base_num = match.group(1)
+                    else:
+                        # Pattern 3: Just numbers at the start
+                        match = re.match(r'^(\d+)', filename)
+                        if match:
+                            base_num = match.group(1)
+                
+                if base_num:
                     if base_num not in file_groups:
                         file_groups[base_num] = []
                     file_groups[base_num].append(file_path)
@@ -1278,14 +1292,18 @@ class ChapterExtractor:
                     chapter_file = None
                     
                     for file_path in group_files:
-                        if 'section' in file_path.lower():
+                        basename = os.path.basename(file_path)
+                        # More strict detection - must have 'section' or 'chapter' in the filename
+                        if 'section' in basename.lower() and 'chapter' not in basename.lower():
                             section_file = file_path
-                        elif 'chapter' in file_path.lower():
+                        elif 'chapter' in basename.lower() and 'section' not in basename.lower():
                             chapter_file = file_path
                     
                     if section_file and chapter_file:
-                        # We have a Section/Chapter pair - analyze them
+                        # We have a confirmed Section/Chapter pair - analyze them
                         print(f"[DEBUG] Detected Section/Chapter pair: {base_num}")
+                        print(f"  Section: {os.path.basename(section_file)}")
+                        print(f"  Chapter: {os.path.basename(chapter_file)}")
                         
                         try:
                             # Use cached content
@@ -1319,36 +1337,82 @@ class ChapterExtractor:
                                 section_text = section_soup.get_text(strip=True)
                                 chapter_text = chapter_soup.get_text(strip=True)
                                 
-                                print(f"[DEBUG] Section text preview: {section_text[:100]}")
-                                print(f"[DEBUG] Chapter text preview: {chapter_text[:100]}")
+                                print(f"[DEBUG] Section text preview: {section_text[:50]}..." if section_text else "[DEBUG] Section is empty")
+                                print(f"[DEBUG] Chapter text preview: {chapter_text[:50]}..." if chapter_text else "[DEBUG] Chapter is empty")
                                 
-                                # Determine if they should be merged
-                                # More lenient merging: if section is short, merge regardless of chapter length
-                                if len(section_text) < 500:
-                                    # Section is likely just a header, merge them
-                                    print(f"  → Merging: {os.path.basename(section_file)} ({len(section_text)} chars) + {os.path.basename(chapter_file)} ({len(chapter_text)} chars)")
+                                # FIXED: Section/Chapter specific merging logic
+                                # Only merge actual Section/Chapter pairs, not random small files
+                                # For Section files, use a much lower threshold since they're often just headers
+                                should_merge = False
+                                merge_reason = ""
+                                
+                                # Check if this is truly a Section/Chapter pair based on naming
+                                is_section_chapter_pair = ('section' in section_file.lower() and 
+                                                         'chapter' in chapter_file.lower() and
+                                                         base_num in section_file and 
+                                                         base_num in chapter_file)
+                                
+                                if is_section_chapter_pair:
+                                    # For confirmed Section/Chapter pairs, be very lenient with merging
+                                    if len(section_text) < 200:  # Very low threshold for section files
+                                        should_merge = True
+                                        merge_reason = f"section file with only {len(section_text)} chars"
+                                    elif len(section_text) < 500:  # Still merge if under 500 chars for sections
+                                        should_merge = True
+                                        merge_reason = f"small section file ({len(section_text)} chars)"
+                                    # Could add more general conditions here if needed
+                                    # For example: checking for header-like patterns, very short text, etc.
+                                else:
+                                    # Not a Section/Chapter pair - don't merge
+                                    print(f"  → Not a Section/Chapter pair, treating separately")
+                                
+                                if should_merge:
+                                    print(f"  → MERGING ({merge_reason}):")
+                                    print(f"     Section: {os.path.basename(section_file)} ({len(section_text)} chars)")
+                                    print(f"     Chapter: {os.path.basename(chapter_file)} ({len(chapter_text)} chars)")
+                                
                                     
-                                    # Extract section header content
-                                    section_body = section_soup.body if section_soup.body else section_soup
-                                    chapter_body = chapter_soup.body if chapter_soup.body else chapter_soup
+                                    # Extract body content from both files
+                                    section_body_content = ""
+                                    chapter_body_content = ""
                                     
-                                    # Create merged content
-                                    merged_body = str(section_body) + "\n" + str(chapter_body)
+                                    # Get section body content
+                                    if section_soup.body:
+                                        # Get all content from body, not just the body tag
+                                        section_body_content = ''.join(str(child) for child in section_soup.body.children)
+                                    else:
+                                        section_body_content = section_html
+                                    
+                                    # Get chapter body content
+                                    if chapter_soup.body:
+                                        # Get all content from body, not just the body tag
+                                        chapter_body_content = ''.join(str(child) for child in chapter_soup.body.children)
+                                    else:
+                                        chapter_body_content = chapter_html
+                                    
+                                    # Create merged content with proper separation
+                                    merged_body = section_body_content + "\n<hr/>\n" + chapter_body_content
                                     
                                     # Store merged chapter info
                                     merged_chapters[chapter_file] = {
                                         'merged_html': merged_body,
                                         'section_file': section_file,
-                                        'is_merged': True
+                                        'is_merged': True,
+                                        'section_text_length': len(section_text),
+                                        'chapter_text_length': len(chapter_text)
                                     }
                                     
                                     # Mark section file as processed (skip it)
                                     processed_files.add(section_file)
+                                    
+                                    print(f"     → Merged content length: {len(merged_body)} chars")
                                 else:
-                                    print(f"  → Both files have substantial content, treating separately")
+                                    print(f"  → NOT MERGING: Both files have substantial content, treating separately")
                             
                         except Exception as e:
                             print(f"[WARNING] Failed to analyze {base_num} files: {e}")
+                            import traceback
+                            traceback.print_exc()
         
         # Continue with regular processing
         sample_texts = []
@@ -1362,6 +1426,7 @@ class ChapterExtractor:
         for idx, file_path in enumerate(html_files):
             # Skip files that were merged as section headers (only when merging is enabled)
             if not disable_merging and file_path in processed_files:
+                print(f"[DEBUG] Skipping already processed section file: {file_path}")
                 continue
             
             # Increment processed count for actual chapters
@@ -1373,8 +1438,6 @@ class ChapterExtractor:
                 if not file_data:
                     print(f"[ERROR] No cached data for {file_path}")
                     continue
-                
-                #print(f"[DEBUG] Processing file: {file_path} (cached size: {len(file_data)} bytes)")
                 
                 # Decode the file data
                 html_content = None
@@ -1391,18 +1454,12 @@ class ChapterExtractor:
                     print(f"[WARNING] Could not decode {file_path}")
                     continue
                 
-               # print(f"[DEBUG] Decoded {file_path} with {detected_encoding}")
-                
-                # Verify we have the correct content
-                if "人物设定" in html_content:
-                    print(f"[VERIFY] Found '人物设定' in {file_path} - This is the Section file")
-                if "主要人物" in html_content:
-                    print(f"[VERIFY] Found '主要人物' in {file_path} - This is the Chapter file")
-                
-                # Only use merged content if merging is enabled AND this file has merged content
+                # Check if this file has merged content
                 if not disable_merging and file_path in merged_chapters:
-                    html_content = merged_chapters[file_path]['merged_html']
                     print(f"[DEBUG] Using merged content for: {file_path}")
+                    merge_info = merged_chapters[file_path]
+                    html_content = merge_info['merged_html']
+                    print(f"[DEBUG] Merged content includes section ({merge_info['section_text_length']} chars) + chapter ({merge_info['chapter_text_length']} chars)")
                 
                 soup = BeautifulSoup(html_content, 'html.parser')
                 
@@ -1419,15 +1476,15 @@ class ChapterExtractor:
                         content_html = html_content
                         content_text = soup.get_text(strip=True)
                 
-                #print(f"[DEBUG] Extracted text length: {len(content_text)}, preview: {content_text[:100]}...")
+                
+                # REMOVED: File skipping logic based on content length
+                # We now process ALL files regardless of content length
                 
                 # Mode-specific logic
                 if extraction_mode == "comprehensive":
                     # For comprehensive mode, just use sequential numbering
                     # This ensures every file gets a unique chapter number
                     chapter_num = processed_count
-                    filename_base = os.path.basename(file_path)
-                    print(f"[EXTRACT DEBUG] File: {filename_base}, Assigning Chapter: {chapter_num}")
                     
                 elif extraction_mode == "smart":
                     h1_tags = soup.find_all('h1')
@@ -1440,16 +1497,11 @@ class ChapterExtractor:
                 images = soup.find_all('img')
                 has_images = len(images) > 0
                 
+                # Note: We still identify image-only chapters but don't skip them
                 is_image_only_chapter = has_images and len(content_text.strip()) < 500
                 
-                # Smart mode filtering
-                if extraction_mode == "smart":
-                    if len(content_text.strip()) < 10 and not has_images:
-                        print(f"[DEBUG] Skipping empty file: {file_path} (no text, no images)")
-                        continue
-                    
-                    if is_image_only_chapter:
-                        print(f"[DEBUG] Image-only chapter detected: {file_path} ({len(images)} images, {len(content_text)} chars)")
+                if is_image_only_chapter:
+                    print(f"[DEBUG] Image-only chapter detected: {file_path} ({len(images)} images, {len(content_text)} chars)")
                 
                 content_hash = ContentProcessor.get_content_hash(content_html)
                 
@@ -1540,30 +1592,9 @@ class ChapterExtractor:
                 
                 chapters.append(chapter_info)
                 
-                # Logging based on mode
-                if extraction_mode in ["comprehensive", "full"]:
-                    if is_image_only_chapter:
-                        #print(f"[{chapter_num:04d}] 📸 Image-only chapter: {chapter_title} ({len(images)} images)")
-                        pass
-                    elif len(images) > 0 and len(content_text) >= 500:
-                        #print(f"[{chapter_num:04d}] 📖📸 Mixed chapter: {chapter_title} ({len(content_text)} chars, {len(images)} images)")
-                        pass
-                    elif len(content_text) < 50:
-                        #print(f"[{chapter_num:04d}] 📄 Empty/placeholder: {chapter_title}")
-                        pass
-                    else:
-                        #print(f"[{chapter_num:04d}] 📖 Text chapter: {chapter_title} ({len(content_text)} chars)")
-                        pass
-                else:
-                    if not disable_merging and file_path in merged_chapters:
-                        #print(f"[DEBUG] ✅ Chapter {chapter_num}: {chapter_title[:50]}... (MERGED, {detection_method})")
-                        pass
-                    elif is_image_only_chapter:
-                        #print(f"[DEBUG] ✅ Chapter {chapter_num}: {chapter_title[:50]}... (IMAGE-ONLY, {detection_method})")
-                        pass
-                    else:
-                        #print(f"[DEBUG] ✅ Chapter {chapter_num}: {chapter_title[:50]}... ({detection_method})")
-                        pass
+                # Simple progress indicator
+                if processed_count % 10 == 0:
+                    print(f"[Progress] Processed {processed_count} chapters...")
                         
             except Exception as e:
                 print(f"[ERROR] Failed to process {file_path}: {e}")
@@ -1572,6 +1603,15 @@ class ChapterExtractor:
                 continue
         
         chapters.sort(key=lambda x: x["num"])
+        
+        # Print final processing summary
+        if processed_count > 0:
+            print(f"\n✅ Processed {processed_count} chapters total")
+            if not disable_merging:
+                merged_count = sum(1 for c in chapters if c.get('was_merged', False))
+                if merged_count > 0:
+                    print(f"   • {merged_count} chapters were merged from Section/Chapter pairs")
+                    print(f"   • {len(processed_files)} section files were merged into their chapters")
         
         if extraction_mode == "smart" and h2_count > h1_count:
             print(f"📊 Note: This EPUB uses primarily <h2> tags ({h2_count} files) vs <h1> tags ({h1_count} files)")
@@ -1595,16 +1635,31 @@ class ChapterExtractor:
         
         # SPECIAL HANDLING: When we have Section/Chapter pairs, differentiate them
         filename = os.path.basename(file_path)
-        if 'Section' in filename and 'Chapter' not in filename:
+        
+        # Handle different naming patterns for Section/Chapter files
+        if ('section' in filename.lower() or '_section' in filename.lower()) and 'chapter' not in filename.lower():
             # For Section files, add 0.1 to the base number
+            # Try different patterns
             match = re.search(r'No(\d+)', filename)
+            if not match:
+                match = re.search(r'^(\d+)[_\-]', filename)
+            if not match:
+                match = re.search(r'^(\d+)', filename)
+                
             if match:
                 base_num = int(match.group(1))
                 chapter_num = base_num + 0.1  # Section gets .1
                 detection_method = "filename_section_special"
-        elif 'Chapter' in filename and 'Section' not in filename:
+                
+        elif ('chapter' in filename.lower() or '_chapter' in filename.lower()) and 'section' not in filename.lower():
             # For Chapter files, use the base number
+            # Try different patterns
             match = re.search(r'No(\d+)', filename)
+            if not match:
+                match = re.search(r'^(\d+)[_\-]', filename)
+            if not match:
+                match = re.search(r'^(\d+)', filename)
+                
             if match:
                 chapter_num = int(match.group(1))
                 detection_method = "filename_chapter_special"
@@ -1780,10 +1835,17 @@ class ChapterExtractor:
         image_only_count = sum(1 for c in chapters if c.get('is_image_only', False))
         text_only_count = sum(1 for c in chapters if not c.get('has_images', False) and c.get('file_size', 0) >= 500)
         mixed_count = sum(1 for c in chapters if c.get('has_images', False) and c.get('file_size', 0) >= 500)
+        empty_count = sum(1 for c in chapters if c.get('file_size', 0) < 50)
         
         print(f"   • Text-only chapters: {text_only_count}")
         print(f"   • Image-only chapters: {image_only_count}")
         print(f"   • Mixed content chapters: {mixed_count}")
+        print(f"   • Empty/minimal content: {empty_count}")
+        
+        # Check for merged chapters
+        merged_count = sum(1 for c in chapters if c.get('was_merged', False))
+        if merged_count > 0:
+            print(f"   • Merged chapters: {merged_count}")
         
         # Check for missing chapters (only for integer sequences)
         expected_chapters = set(range(chapters[0]['num'], chapters[-1]['num'] + 1))
@@ -1802,8 +1864,7 @@ class ChapterExtractor:
             if large_groups:
                 print(f"   ⚠️ Found {len(large_groups)} file size groups with potential duplicates")
         else:
-            empty_chapters = sum(1 for c in chapters if c.get('is_empty'))
-            print(f"   • Empty/placeholder: {empty_chapters}")
+            print(f"   • Empty/placeholder: {empty_count}")
             
         if extraction_mode == "full":
             print(f"   🔍 Full extraction preserved all HTML structure and tags")
@@ -2170,7 +2231,6 @@ class ChapterExtractor:
         print(f"   ✅ HTML files: {'READY' if html_files_written > 0 else 'NOT READY'}")
         print(f"   ✅ Metadata: READY")
         print(f"   ✅ Resources: READY")
-
 # =====================================================
 # UNIFIED TRANSLATION PROCESSOR
 # =====================================================
