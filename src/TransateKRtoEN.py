@@ -5566,7 +5566,25 @@ def main(log_callback=None, stop_callback=None):
             is_text_only = (not has_images and has_meaningful_text)
             
             if is_empty_chapter:
-                print(f"📄 Empty chapter detected")
+                print(f"📄 Empty chapter {actual_num} detected")
+                
+                # Create filename for empty chapter
+                if isinstance(c['num'], float):
+                    fname = FileUtilities.create_chapter_filename(c, c['num'])
+                else:
+                    fname = FileUtilities.create_chapter_filename(c, actual_num)
+                
+                # Save original content
+                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                    f.write(c["body"])
+                
+                # Update progress tracking
+                progress_manager.update(idx, actual_num, content_hash, fname, status="completed_empty")
+                progress_manager.save()
+                chapters_completed += 1
+                
+                # CRITICAL: Skip translation!
+                continue
 
             elif is_image_only_chapter:
                 print(f"📸 Image-only chapter: {c.get('image_count', 0)} images, no meaningful text")
