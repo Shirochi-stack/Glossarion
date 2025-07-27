@@ -1365,131 +1365,167 @@ class ChapterExtractor:
         return extracted_resources
     
     def _extract_chapters_universal(self, zf, extraction_mode="smart"):
-        """Universal chapter extraction with three modes: smart, comprehensive, full
-        
-        All modes now properly merge Section/Chapter pairs
-        """
-        chapters = []
-        sample_texts = []
-        
-        # First, let's create a file content cache to ensure we're reading the right files
-        file_contents = {}
-        
-        html_files = []
-        for name in zf.namelist():
-            if name.lower().endswith(('.xhtml', '.html', '.htm')):
-                if extraction_mode == "smart":
-                    # Smart mode: aggressive filtering
-                    lower_name = name.lower()
-                    if any(skip in lower_name for skip in [
-                        'nav', 'toc', 'contents', 'cover', 'title', 'index',
-                        'copyright', 'acknowledgment', 'dedication'
-                    ]):
-                        continue
-                elif extraction_mode == "comprehensive":
-                    # Comprehensive mode: moderate filtering
-                    skip_keywords = ['nav.', 'toc.', 'contents.', 'copyright.', 'cover.']
-                    basename = os.path.basename(name.lower())
-                    should_skip = False
-                    for skip in skip_keywords:
-                        if basename == skip + 'xhtml' or basename == skip + 'html' or basename == skip + 'htm':
-                            should_skip = True
-                            break
-                    if should_skip:
-                        print(f"[SKIP] Navigation/TOC file: {name}")
-                        continue
-                # else: full mode - no filtering at all
-                
-                html_files.append(name)
-                
-                # Pre-read and cache file contents
-                try:
-                    file_data = zf.read(name)
-                    file_contents[name] = file_data
-                except Exception as e:
-                    print(f"[ERROR] Failed to cache {name}: {e}")
-        
-        mode_description = {
-            "smart": "potential content files",
-            "comprehensive": "HTML files",
-            "full": "ALL HTML/XHTML files (no filtering)"
-        }
-        print(f"📚 Found {len(html_files)} {mode_description.get(extraction_mode, 'files')} in EPUB")
-        
-        # Sort files to ensure proper order
-        html_files.sort()
-        
-        # Check if merging is disabled via environment variable
-        disable_merging = os.getenv("DISABLE_CHAPTER_MERGING", "0") == "1"
-        
-        processed_files = set()
-        merged_chapters = {}
-        
-        if disable_merging:
-            print("📌 Chapter merging is DISABLED - processing all files independently")
-        else:
-            print("📌 Chapter merging is ENABLED")
+            """Universal chapter extraction with three modes: smart, comprehensive, full
             
-            # Only do merging logic if not disabled
-            file_groups = {}
+            All modes now properly merge Section/Chapter pairs
+            """
+            chapters = []
+            sample_texts = []
             
-            # Group files by their base number to detect Section/Chapter pairs
-            for file_path in html_files:
-                filename = os.path.basename(file_path)
+            html_files = []
+            for name in zf.namelist():
+                if name.lower().endswith(('.xhtml', '.html', '.htm')):
+                    if extraction_mode == "smart":
+                        # Smart mode: aggressive filtering
+                        lower_name = name.lower()
+                        if any(skip in lower_name for skip in [
+                            'nav', 'toc', 'contents', 'cover', 'title', 'index',
+                            'copyright', 'acknowledgment', 'dedication'
+                        ]):
+                            continue
+                    elif extraction_mode == "comprehensive":
+                        # Comprehensive mode: moderate filtering
+                        skip_keywords = ['nav.', 'toc.', 'contents.', 'copyright.', 'cover.']
+                        basename = os.path.basename(name.lower())
+                        should_skip = False
+                        for skip in skip_keywords:
+                            if basename == skip + 'xhtml' or basename == skip + 'html' or basename == skip + 'htm':
+                                should_skip = True
+                                break
+                            if should_skip:
+                                print(f"[SKIP] Navigation/TOC file: {name}")
+                                continue
+                    # else: full mode - no filtering at all
+                    
+                    html_files.append(name)
+            
+            mode_description = {
+                "smart": "potential content files",
+                "comprehensive": "HTML files",
+                "full": "ALL HTML/XHTML files (no filtering)"
+            }
+            print(f"📚 Found {len(html_files)} {mode_description.get(extraction_mode, 'files')} in EPUB")
+            
+            # Sort files to ensure proper order
+            html_files.sort()
+            
+            # Check if merging is disabled via environment variable
+            disable_merging = os.getenv("DISABLE_CHAPTER_MERGING", "0") == "1"
+            
+            processed_files = set()
+            merge_candidates = {}  # Store potential merges without reading files yet
+            
+            if disable_merging:
+                print("📌 Chapter merging is DISABLED - processing all files independently")
+            else:
+                print("📌 Chapter merging is ENABLED")
                 
-                # Try different patterns to extract base number
-                base_num = None
+                # Only do merging logic if not disabled
+                file_groups = {}
                 
-                # Pattern 1: "No00014" from "No00014Section.xhtml"
-                match = re.match(r'(No\d+)', filename)
-                if match:
-                    base_num = match.group(1)
-                else:
-                    # Pattern 2: "0014" from "0014_section.html" or "0014_chapter.html"
-                    match = re.match(r'^(\d+)[_\-]', filename)
+                # Group files by their base number to detect Section/Chapter pairs
+                for file_path in html_files:
+                    filename = os.path.basename(file_path)
+                    
+                    # Try different patterns to extract base number
+                    base_num = None
+                    
+                    # Pattern 1: "No00014" from "No00014Section.xhtml"
+                    match = re.match(r'(No\d+)', filename)
                     if match:
                         base_num = match.group(1)
                     else:
-                        # Pattern 3: Just numbers at the start
-                        match = re.match(r'^(\d+)', filename)
+                        # Pattern 2: "0014" from "0014_section.html" or "0014_chapter.html"
+                        match = re.match(r'^(\d+)[_\-]', filename)
                         if match:
                             base_num = match.group(1)
+                        else:
+                            # Pattern 3: Just numbers at the start
+                            match = re.match(r'^(\d+)', filename)
+                            if match:
+                                base_num = match.group(1)
+                    
+                    if base_num:
+                        if base_num not in file_groups:
+                            file_groups[base_num] = []
+                        file_groups[base_num].append(file_path)
                 
-                if base_num:
-                    if base_num not in file_groups:
-                        file_groups[base_num] = []
-                    file_groups[base_num].append(file_path)
+                # Identify merge candidates WITHOUT reading files yet
+                for base_num, group_files in sorted(file_groups.items()):
+                    if len(group_files) == 2:
+                        # Check if we have a Section/Chapter pair based on filenames only
+                        section_file = None
+                        chapter_file = None
+                        
+                        for file_path in group_files:
+                            basename = os.path.basename(file_path)
+                            # More strict detection - must have 'section' or 'chapter' in the filename
+                            if 'section' in basename.lower() and 'chapter' not in basename.lower():
+                                section_file = file_path
+                            elif 'chapter' in basename.lower() and 'section' not in basename.lower():
+                                chapter_file = file_path
+                        
+                        if section_file and chapter_file:
+                            # Store as potential merge candidate
+                            merge_candidates[chapter_file] = section_file
+                            processed_files.add(section_file)
+                            print(f"[DEBUG] Potential merge candidate: {base_num}")
+                            print(f"  Section: {os.path.basename(section_file)}")
+                            print(f"  Chapter: {os.path.basename(chapter_file)}")
             
-            # Process file groups and merge Section/Chapter pairs
-            for base_num, group_files in sorted(file_groups.items()):
-                if len(group_files) == 2:
-                    # Check if we have a Section/Chapter pair
-                    section_file = None
-                    chapter_file = None
+            # Continue with regular processing
+            sample_texts = []
+            file_size_groups = {}
+            h1_count = 0
+            h2_count = 0
+            
+            # For smart mode, we'll collect all files first, then assign numbers
+            candidate_chapters = []  # Store potential chapters for smart mode
+            actual_chapter_num = 1  # Track real chapter numbers
+            processed_count = 0  # Track actually processed chapters
+            
+            for idx, file_path in enumerate(html_files):
+                # Debug merging logic
+                if 'section' in os.path.basename(file_path).lower():
+                    print(f"[DEBUG] Processing section file: {os.path.basename(file_path)}")
+                    print(f"  - In processed_files: {file_path in processed_files}")
+                    print(f"  - Disable merging: {disable_merging}")
+                
+                # Skip files that were marked as section headers
+                if not disable_merging and file_path in processed_files:
+                    print(f"[DEBUG] Skipping section file: {file_path}")
+                    continue
+                
+                # Increment processed count for actual chapters
+                processed_count += 1
                     
-                    for file_path in group_files:
-                        basename = os.path.basename(file_path)
-                        # More strict detection - must have 'section' or 'chapter' in the filename
-                        if 'section' in basename.lower() and 'chapter' not in basename.lower():
-                            section_file = file_path
-                        elif 'chapter' in basename.lower() and 'section' not in basename.lower():
-                            chapter_file = file_path
+                try:
+                    # Read file data
+                    file_data = zf.read(file_path)
                     
-                    if section_file and chapter_file:
-                        # We have a confirmed Section/Chapter pair - analyze them
-                        print(f"[DEBUG] Detected Section/Chapter pair: {base_num}")
-                        print(f"  Section: {os.path.basename(section_file)}")
-                        print(f"  Chapter: {os.path.basename(chapter_file)}")
+                    # Decode the file data
+                    html_content = None
+                    detected_encoding = None
+                    for encoding in ['utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr', 'gbk', 'big5']:
+                        try:
+                            html_content = file_data.decode(encoding)
+                            detected_encoding = encoding
+                            break
+                        except UnicodeDecodeError:
+                            continue
+                    
+                    if not html_content:
+                        print(f"[WARNING] Could not decode {file_path}")
+                        continue
+                    
+                    # Check if this file needs merging
+                    if not disable_merging and file_path in merge_candidates:
+                        section_file = merge_candidates[file_path]
+                        print(f"[DEBUG] Processing merge for: {file_path}")
                         
                         try:
-                            # Use cached content
-                            section_data = file_contents.get(section_file)
-                            chapter_data = file_contents.get(chapter_file)
-                            
-                            if not section_data or not chapter_data:
-                                print(f"[ERROR] Missing cached data for {base_num} files")
-                                continue
-                            
+                            # Read section file
+                            section_data = zf.read(section_file)
                             section_html = None
                             for encoding in ['utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr', 'gbk', 'big5']:
                                 try:
@@ -1498,204 +1534,64 @@ class ChapterExtractor:
                                 except UnicodeDecodeError:
                                     continue
                             
-                            chapter_html = None
-                            for encoding in ['utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr', 'gbk', 'big5']:
-                                try:
-                                    chapter_html = chapter_data.decode(encoding)
-                                    break
-                                except UnicodeDecodeError:
-                                    continue
-                            
-                            if section_html and chapter_html:
+                            if section_html:
+                                # Quick check if section is small enough to merge
                                 section_soup = BeautifulSoup(section_html, 'html.parser')
-                                chapter_soup = BeautifulSoup(chapter_html, 'html.parser')
-                                
                                 section_text = section_soup.get_text(strip=True)
-                                chapter_text = chapter_soup.get_text(strip=True)
                                 
-                                print(f"[DEBUG] Section text preview: {section_text[:50]}..." if section_text else "[DEBUG] Section is empty")
-                                print(f"[DEBUG] Chapter text preview: {chapter_text[:50]}..." if chapter_text else "[DEBUG] Chapter is empty")
-                                
-                                # FIXED: Section/Chapter specific merging logic
-                                # Only merge actual Section/Chapter pairs, not random small files
-                                # For Section files, use a much lower threshold since they're often just headers
-                                should_merge = False
-                                merge_reason = ""
-                                
-                                # Check if this is truly a Section/Chapter pair based on naming
-                                is_section_chapter_pair = ('section' in section_file.lower() and 
-                                                         'chapter' in chapter_file.lower() and
-                                                         base_num in section_file and 
-                                                         base_num in chapter_file)
-                                
-                                if is_section_chapter_pair:
-                                    # For confirmed Section/Chapter pairs, be very lenient with merging
-                                    if len(section_text) < 200:  # Very low threshold for section files
-                                        should_merge = True
-                                        merge_reason = f"section file with only {len(section_text)} chars"
-                                    elif len(section_text) < 500:  # Still merge if under 500 chars for sections
-                                        should_merge = True
-                                        merge_reason = f"small section file ({len(section_text)} chars)"
-                                    # Could add more general conditions here if needed
-                                    # For example: checking for header-like patterns, very short text, etc.
-                                else:
-                                    # Not a Section/Chapter pair - don't merge
-                                    print(f"  → Not a Section/Chapter pair, treating separately")
-                                
-                                if should_merge:
-                                    print(f"  → MERGING ({merge_reason}):")
-                                    print(f"     Section: {os.path.basename(section_file)} ({len(section_text)} chars)")
-                                    print(f"     Chapter: {os.path.basename(chapter_file)} ({len(chapter_text)} chars)")
-                                
+                                if len(section_text) < 200:  # Merge if section is small
+                                    # Extract body content
+                                    chapter_soup = BeautifulSoup(html_content, 'html.parser')
                                     
-                                    # Extract body content from both files
-                                    section_body_content = ""
-                                    chapter_body_content = ""
-                                    
-                                    # Get section body content
                                     if section_soup.body:
-                                        # Get all content from body, not just the body tag
                                         section_body_content = ''.join(str(child) for child in section_soup.body.children)
                                     else:
                                         section_body_content = section_html
                                     
-                                    # Get chapter body content
                                     if chapter_soup.body:
-                                        # Get all content from body, not just the body tag
                                         chapter_body_content = ''.join(str(child) for child in chapter_soup.body.children)
                                     else:
-                                        chapter_body_content = chapter_html
+                                        chapter_body_content = html_content
                                     
-                                    # Create merged content with proper separation
-                                    merged_body = section_body_content + "\n<hr/>\n" + chapter_body_content
-                                    
-                                    # Store merged chapter info
-                                    merged_chapters[chapter_file] = {
-                                        'merged_html': merged_body,
-                                        'section_file': section_file,
-                                        'is_merged': True,
-                                        'section_text_length': len(section_text),
-                                        'chapter_text_length': len(chapter_text)
-                                    }
-                                    
-                                    # Mark section file as processed (skip it)
-                                    processed_files.add(section_file)
-                                    
-                                    print(f"     → Merged content length: {len(merged_body)} chars")
+                                    # Merge content
+                                    html_content = section_body_content + "\n<hr/>\n" + chapter_body_content
+                                    print(f"  → MERGED: Section ({len(section_text)} chars) + Chapter")
                                 else:
-                                    print(f"  → NOT MERGING: Both files have substantial content, treating separately")
+                                    print(f"  → NOT MERGED: Section too large ({len(section_text)} chars)")
+                                    # Remove from processed files so it gets processed separately
+                                    processed_files.discard(section_file)
                             
                         except Exception as e:
-                            print(f"[WARNING] Failed to analyze {base_num} files: {e}")
-                            import traceback
-                            traceback.print_exc()
-        
-        # Continue with regular processing
-        sample_texts = []
-        file_size_groups = {}
-        h1_count = 0
-        h2_count = 0
-        
-        chapter_num = 1
-        processed_count = 0  # Track actually processed chapters
-
-        for idx, file_path in enumerate(html_files):
-            # Skip files that were merged as section headers (only when merging is enabled)
-            if not disable_merging and file_path in processed_files:
-                print(f"[DEBUG] Skipping already processed section file: {file_path}")
-                continue
-            
-            # Increment processed count for actual chapters
-            processed_count += 1
-                
-            try:
-                # Use cached file data
-                file_data = file_contents.get(file_path)
-                if not file_data:
-                    print(f"[ERROR] No cached data for {file_path}")
-                    continue
-                
-                # Decode the file data
-                html_content = None
-                detected_encoding = None
-                for encoding in ['utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr', 'gbk', 'big5']:
-                    try:
-                        html_content = file_data.decode(encoding)
-                        detected_encoding = encoding
-                        break
-                    except UnicodeDecodeError:
-                        continue
-                
-                if not html_content:
-                    print(f"[WARNING] Could not decode {file_path}")
-                    continue
-                
-                # Check if this file has merged content
-                if not disable_merging and file_path in merged_chapters:
-                    print(f"[DEBUG] Using merged content for: {file_path}")
-                    merge_info = merged_chapters[file_path]
-                    html_content = merge_info['merged_html']
-                    print(f"[DEBUG] Merged content includes section ({merge_info['section_text_length']} chars) + chapter ({merge_info['chapter_text_length']} chars)")
-                
-                soup = BeautifulSoup(html_content, 'html.parser')
-                
-                # In full mode, keep the entire HTML structure
-                if extraction_mode == "full":
-                    content_html = html_content  # Keep EVERYTHING
-                    content_text = soup.get_text(strip=True)
-                else:
-                    # Smart and comprehensive modes extract body content
-                    if soup.body:
-                        content_html = str(soup.body)
-                        content_text = soup.body.get_text(strip=True)
-                    else:
-                        content_html = html_content
+                            print(f"[WARNING] Failed to merge {file_path}: {e}")
+                    
+                    # Parse the (possibly merged) content
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    
+                    # In full mode, keep the entire HTML structure
+                    if extraction_mode == "full":
+                        content_html = html_content  # Keep EVERYTHING
                         content_text = soup.get_text(strip=True)
-                
-                
-                # REMOVED: File skipping logic based on content length
-                # We now process ALL files regardless of content length
-                
-                # Mode-specific logic
-                if extraction_mode == "comprehensive":
-                    # For comprehensive mode, just use sequential numbering
-                    # This ensures every file gets a unique chapter number
-                    chapter_num = processed_count
+                    else:
+                        # Smart and comprehensive modes extract body content
+                        if soup.body:
+                            content_html = str(soup.body)
+                            content_text = soup.body.get_text(strip=True)
+                        else:
+                            content_html = html_content
+                            content_text = soup.get_text(strip=True)
                     
-                elif extraction_mode == "smart":
-                    h1_tags = soup.find_all('h1')
-                    h2_tags = soup.find_all('h2')
-                    if h1_tags:
-                        h1_count += 1
-                    if h2_tags:
-                        h2_count += 1
-                
-                images = soup.find_all('img')
-                has_images = len(images) > 0
-                
-                # Note: We still identify image-only chapters but don't skip them
-                is_image_only_chapter = has_images and len(content_text.strip()) < 500
-                
-                if is_image_only_chapter:
-                    print(f"[DEBUG] Image-only chapter detected: {file_path} ({len(images)} images, {len(content_text)} chars)")
-                
-                content_hash = ContentProcessor.get_content_hash(content_html)
-                
-                # Smart mode - collect samples but NO duplicate detection
-                if extraction_mode == "smart":
-                    file_size = len(content_text)
-                    if file_size not in file_size_groups:
-                        file_size_groups[file_size] = []
-                    file_size_groups[file_size].append(file_path)
+                    # Skip truly empty files in smart mode
+                    # BUT: Never skip anything when merging is disabled (to ensure section files are processed)
+                    if extraction_mode == "smart" and not disable_merging and len(content_text.strip()) < 10:
+                        print(f"[SKIP] Nearly empty file: {file_path} ({len(content_text)} chars)")
+                        continue
                     
-                    if len(sample_texts) < 5:
-                        sample_texts.append(content_text[:1000])
-                
-                # Chapter info extraction
-                if extraction_mode == "smart":
-                    # When merging is disabled, use sequential numbering
-                    if disable_merging:
+                    # Mode-specific logic
+                    if extraction_mode == "comprehensive" or extraction_mode == "full":
+                        # For comprehensive/full mode, use sequential numbering
                         chapter_num = processed_count
+                        actual_chapter_num += 1
+                        
                         chapter_title = None
                         if soup.title and soup.title.string:
                             chapter_title = soup.title.string.strip()
@@ -1710,98 +1606,226 @@ class ChapterExtractor:
                         if not chapter_title:
                             chapter_title = os.path.splitext(os.path.basename(file_path))[0]
                         
-                        detection_method = "sequential_no_merge"
+                        detection_method = f"{extraction_mode}_sequential"
+                        
+                    elif extraction_mode == "smart":
+                        # For smart mode, when merging is disabled, use sequential numbering
+                        if disable_merging:
+                            chapter_num = processed_count
+                            chapter_title = None
+                            if soup.title and soup.title.string:
+                                chapter_title = soup.title.string.strip()
+                            
+                            if not chapter_title:
+                                for header_tag in ['h1', 'h2', 'h3']:
+                                    header = soup.find(header_tag)
+                                    if header:
+                                        chapter_title = header.get_text(strip=True)
+                                        break
+                            
+                            if not chapter_title:
+                                chapter_title = os.path.splitext(os.path.basename(file_path))[0]
+                            
+                            detection_method = "sequential_no_merge"
+                        else:
+                            # When merging is enabled, try to extract chapter info
+                            h1_tags = soup.find_all('h1')
+                            h2_tags = soup.find_all('h2')
+                            if h1_tags:
+                                h1_count += 1
+                            if h2_tags:
+                                h2_count += 1
+                            
+                            # Try to extract chapter number and title
+                            chapter_num, chapter_title, detection_method = self._extract_chapter_info(
+                                soup, file_path, content_text, html_content
+                            )
+                            
+                            # For hash-based filenames, chapter_num might be None
+                            if chapter_num is None:
+                                chapter_num = processed_count  # Use actual chapter count
+                                detection_method = "sequential_fallback"
+                                print(f"[DEBUG] No chapter number found in {file_path}, assigning: {chapter_num}")
+                    
+                    images = soup.find_all('img')
+                    has_images = len(images) > 0
+                    is_image_only_chapter = has_images and len(content_text.strip()) < 500
+                    
+                    if is_image_only_chapter:
+                        print(f"[DEBUG] Image-only chapter detected: {file_path} ({len(images)} images, {len(content_text)} chars)")
+                    
+                    content_hash = ContentProcessor.get_content_hash(content_html)
+                    
+                    # Collect file size groups for smart mode
+                    if extraction_mode == "smart":
+                        file_size = len(content_text)
+                        if file_size not in file_size_groups:
+                            file_size_groups[file_size] = []
+                        file_size_groups[file_size].append(file_path)
+                        
+                        if len(sample_texts) < 5:
+                            sample_texts.append(content_text[:1000])
+                    
+                    # Ensure chapter_num is always an integer
+                    if isinstance(chapter_num, float):
+                        chapter_num = int(chapter_num)
+                    
+                    # Create chapter info
+                    chapter_info = {
+                        "num": chapter_num,  # Now guaranteed to have a value
+                        "title": chapter_title or f"Chapter {chapter_num}",
+                        "body": content_html,
+                        "filename": file_path,
+                        "original_basename": os.path.splitext(os.path.basename(file_path))[0],
+                        "content_hash": content_hash,
+                        "detection_method": detection_method if detection_method else "pending",
+                        "file_size": len(content_text),
+                        "has_images": has_images,
+                        "image_count": len(images),
+                        "is_empty": len(content_text.strip()) == 0,
+                        "is_image_only": is_image_only_chapter,
+                        "extraction_mode": extraction_mode,
+                        "file_index": idx  # Store original file index for sorting
+                    }
+                    
+                    # Add merge info if applicable
+                    if not disable_merging and file_path in merge_candidates:
+                        chapter_info["was_merged"] = True
+                        chapter_info["merged_with"] = merge_candidates[file_path]
+                    
+                    if extraction_mode == "smart":
+                        chapter_info["language_sample"] = content_text[:500]
+                        # Debug for section files
+                        if 'section' in chapter_info['original_basename'].lower():
+                            print(f"[DEBUG] Added section file to candidates: {chapter_info['original_basename']} (size: {chapter_info['file_size']})")
+                    
+                    # For smart mode when merging is enabled, collect candidates
+                    # Otherwise, add directly to chapters
+                    if extraction_mode == "smart" and not disable_merging:
+                        candidate_chapters.append(chapter_info)
                     else:
-                        chapter_num, chapter_title, detection_method = self._extract_chapter_info(
-                            soup, file_path, content_text, html_content
-                        )
-                        
-                        if chapter_num is None:
-                            chapter_num = processed_count  # Use actual chapter count
-                            detection_method = "sequential_fallback"
-                            print(f"[DEBUG] No chapter number found in {file_path}, assigning: {chapter_num}")
+                        # For comprehensive/full mode, or smart mode with merging disabled
+                        chapters.append(chapter_info)
+                            
+                except Exception as e:
+                    print(f"[ERROR] Failed to process {file_path}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
+            
+            # Post-process smart mode candidates (only when merging is enabled)
+            if extraction_mode == "smart" and candidate_chapters and not disable_merging:
+                print(f"\n[SMART MODE] Processing {len(candidate_chapters)} candidate files...")
+                
+                # Debug: Show what files we have
+                section_files = [c for c in candidate_chapters if 'section' in c['original_basename'].lower()]
+                chapter_files = [c for c in candidate_chapters if 'chapter' in c['original_basename'].lower() and 'section' not in c['original_basename'].lower()]
+                other_files = [c for c in candidate_chapters if c not in section_files and c not in chapter_files]
+                
+                print(f"  📊 File breakdown:")
+                print(f"    • Section files: {len(section_files)}")
+                print(f"    • Chapter files: {len(chapter_files)}")
+                print(f"    • Other files: {len(other_files)}")
+                
+                # Original smart mode logic when merging is enabled
+                # First, separate files with detected chapter numbers from those without
+                numbered_chapters = []
+                unnumbered_chapters = []
+                
+                for chapter in candidate_chapters:
+                    if chapter["num"] is not None:
+                        numbered_chapters.append(chapter)
+                    else:
+                        unnumbered_chapters.append(chapter)
+                
+                print(f"  • Files with chapter numbers: {len(numbered_chapters)}")
+                print(f"  • Files without chapter numbers: {len(unnumbered_chapters)}")
+                
+                # Check if we have hash-based filenames (no numbered chapters found)
+                if not numbered_chapters and unnumbered_chapters:
+                    print("  ⚠️ No chapter numbers found - likely hash-based filenames")
+                    print("  → Using file order as chapter sequence")
+                    
+                    # Sort by file index to maintain order
+                    unnumbered_chapters.sort(key=lambda x: x["file_index"])
+                    
+                    # Assign sequential numbers
+                    for i, chapter in enumerate(unnumbered_chapters, 1):
+                        chapter["num"] = i
+                        chapter["detection_method"] = "hash_filename_sequential"
+                        if not chapter["title"] or chapter["title"] == chapter["original_basename"]:
+                            chapter["title"] = f"Chapter {i}"
+                    
+                    chapters = unnumbered_chapters
                 else:
-                    # Comprehensive and full modes
-                    chapter_title = None
-                    if soup.title and soup.title.string:
-                        chapter_title = soup.title.string.strip()
+                    # We have some numbered chapters
+                    chapters = numbered_chapters
                     
-                    if not chapter_title:
-                        for header_tag in ['h1', 'h2', 'h3']:
-                            header = soup.find(header_tag)
-                            if header:
-                                chapter_title = header.get_text(strip=True)
-                                break
-                    
-                    if not chapter_title:
-                        chapter_title = os.path.splitext(os.path.basename(file_path))[0]
-                    
-                    detection_method = f"{extraction_mode}_sequential"
-                
-                # Ensure chapter_num is always an integer
-                if isinstance(chapter_num, float):
-                    chapter_num = int(chapter_num)
-                
-                chapter_info = {
-                    "num": chapter_num,
-                    "title": chapter_title or f"Chapter {chapter_num}",
-                    "body": content_html,
-                    "filename": file_path,
-                    "original_basename": os.path.splitext(os.path.basename(file_path))[0],
-                    "content_hash": content_hash,
-                    "detection_method": detection_method,
-                    "file_size": len(content_text),
-                    "has_images": has_images,
-                    "image_count": len(images),
-                    "is_empty": len(content_text.strip()) == 0,
-                    "is_image_only": is_image_only_chapter,
-                    "extraction_mode": extraction_mode
-                }
-                
-                # Add merge info if applicable
-                if not disable_merging and file_path in merged_chapters:
-                    chapter_info["was_merged"] = True
-                    chapter_info["merged_with"] = merged_chapters[file_path]['section_file']
-                
-                if extraction_mode == "smart":
-                    chapter_info["language_sample"] = content_text[:500]
-                
-                chapters.append(chapter_info)
-                
-                # Simple progress indicator
-                if processed_count % 10 == 0:
-                    print(f"[Progress] Processed {processed_count} chapters...")
+                    # For unnumbered files, check if they might be duplicates or appendices
+                    if unnumbered_chapters:
+                        print(f"  → Analyzing {len(unnumbered_chapters)} unnumbered files...")
                         
-            except Exception as e:
-                print(f"[ERROR] Failed to process {file_path}: {e}")
-                import traceback
-                traceback.print_exc()
-                continue
-        
-        chapters.sort(key=lambda x: x["num"])
-        
-        # Print final processing summary
-        if processed_count > 0:
-            print(f"\n✅ Processed {processed_count} chapters total")
-            if not disable_merging:
-                merged_count = sum(1 for c in chapters if c.get('was_merged', False))
-                if merged_count > 0:
-                    print(f"   • {merged_count} chapters were merged from Section/Chapter pairs")
-                    print(f"   • {len(processed_files)} section files were merged into their chapters")
-        
-        if extraction_mode == "smart" and h2_count > h1_count:
-            print(f"📊 Note: This EPUB uses primarily <h2> tags ({h2_count} files) vs <h1> tags ({h1_count} files)")
-        
-        combined_sample = ' '.join(sample_texts) if extraction_mode == "smart" else ''
-        detected_language = self._detect_content_language(combined_sample) if combined_sample else 'unknown'
-        
-        if chapters:
-            self._print_extraction_summary(chapters, detected_language, extraction_mode, 
-                                         h1_count if extraction_mode == "smart" else 0, 
-                                         h2_count if extraction_mode == "smart" else 0,
-                                         file_size_groups if extraction_mode == "smart" else {})
-        
-        return chapters, detected_language
+                        # Get the max chapter number
+                        max_num = max(c["num"] for c in numbered_chapters)
+                        
+                        # Check each unnumbered file
+                        for chapter in unnumbered_chapters:
+                            # Check if it's very small (might be a separator or note)
+                            if chapter["file_size"] < 200:
+                                print(f"    [SKIP] Very small file: {chapter['filename']} ({chapter['file_size']} chars)")
+                                continue
+                            
+                            # Check if it has similar size to existing chapters (might be duplicate)
+                            size = chapter["file_size"]
+                            similar_chapters = [c for c in numbered_chapters 
+                                              if abs(c["file_size"] - size) < 50]
+                            
+                            if similar_chapters:
+                                # Might be a duplicate, skip it
+                                print(f"    [SKIP] Possible duplicate: {chapter['filename']} (similar size to {len(similar_chapters)} chapters)")
+                                continue
+                            
+                            # Otherwise, add as appendix
+                            max_num += 1
+                            chapter["num"] = max_num
+                            chapter["detection_method"] = "appendix_sequential"
+                            if not chapter["title"] or chapter["title"] == chapter["original_basename"]:
+                                chapter["title"] = f"Appendix {max_num}"
+                            chapters.append(chapter)
+                            print(f"    [ADD] Added as chapter {max_num}: {chapter['filename']}")
+            
+            # Sort chapters by number
+            chapters.sort(key=lambda x: x["num"])
+            
+            # Ensure chapter numbers are integers
+            # When merging is disabled, all chapters should have integer numbers anyway
+            for chapter in chapters:
+                if isinstance(chapter["num"], float):
+                    chapter["num"] = int(chapter["num"])
+            
+            # Final validation
+            if chapters:
+                print(f"\n✅ Final chapter count: {len(chapters)}")
+                print(f"   • Chapter range: {chapters[0]['num']} - {chapters[-1]['num']}")
+                
+                # Check for gaps
+                chapter_nums = [c["num"] for c in chapters]
+                expected_nums = list(range(min(chapter_nums), max(chapter_nums) + 1))
+                missing = set(expected_nums) - set(chapter_nums)
+                if missing:
+                    print(f"   ⚠️ Missing chapter numbers: {sorted(missing)}")
+            
+            # Language detection
+            combined_sample = ' '.join(sample_texts) if extraction_mode == "smart" else ''
+            detected_language = self._detect_content_language(combined_sample) if combined_sample else 'unknown'
+            
+            if chapters:
+                self._print_extraction_summary(chapters, detected_language, extraction_mode, 
+                                             h1_count if extraction_mode == "smart" else 0, 
+                                             h2_count if extraction_mode == "smart" else 0,
+                                             file_size_groups if extraction_mode == "smart" else {})
+            
+            return chapters, detected_language
     
     def _extract_chapter_info(self, soup, file_path, content_text, html_content):
         """Extract chapter number and title from various sources"""
