@@ -1825,7 +1825,7 @@ Recent translations to summarize:
         self.entry_epub.insert(0, "No file selected")
         
         # Create browse menu
-        self.browse_menu = tk.Menu(self.master, tearoff=0)
+        self.browse_menu = tk.Menu(self.master, tearoff=0, font=('Arial', 12))
         self.browse_menu.add_command(label="📄 Select Single File", command=self.browse_file)
         self.browse_menu.add_command(label="📑 Select Multiple Files", command=self.browse_multiple_files)
         self.browse_menu.add_command(label="📁 Select Folder", command=self.browse_folder)
@@ -5608,6 +5608,22 @@ Recent translations to summarize:
                 self.append_log(f"⚠️ Image translation not enabled. Enable it in settings to translate images.")
                 return False
             
+            # Check for cover images
+            image_name = os.path.basename(image_path)
+            if 'cover' in image_name.lower():
+                self.append_log(f"⏭️ Skipping cover image: {image_name}")
+                
+                # Copy cover image to images folder if using combined output
+                if combined_output_dir:
+                    images_dir = os.path.join(combined_output_dir, "images")
+                    os.makedirs(images_dir, exist_ok=True)
+                    dest_image = os.path.join(images_dir, image_name)
+                    if not os.path.exists(dest_image):
+                        shutil.copy2(image_path, dest_image)
+                        self.append_log(f"📁 Copied cover to: {dest_image}")
+                
+                return True  # Return True to indicate successful skip (not an error)
+            
             # Get the file index for numbering
             file_index = getattr(self, 'current_file_index', 0) + 1
             
@@ -5652,7 +5668,6 @@ Recent translations to summarize:
             # Read the image
             try:
                 # Get image name for payload naming
-                image_name = os.path.basename(image_path)
                 base_name = os.path.splitext(image_name)[0]
                 
                 with open(image_path, 'rb') as img_file:
@@ -5731,7 +5746,7 @@ Recent translations to summarize:
                     "temperature": temperature,
                     "max_tokens": max_tokens,
                     "messages": messages,
-                    "image_base64": image_base64
+                    "image_base64": image_base64  # Full payload without truncation
                 }
                 
                 with open(payload_file, 'w', encoding='utf-8') as f:
@@ -5798,17 +5813,12 @@ Recent translations to summarize:
                     self.append_log(f"✅ Received translation from API")
                     
                     # Create output directory structure
-                    image_name = os.path.basename(image_path)
                     base_name = os.path.splitext(image_name)[0]
                     
                     # Use combined output directory if provided, otherwise create individual directory
                     if combined_output_dir:
                         output_dir = combined_output_dir
-                        # Copy image to images subdirectory
-                        images_dir = os.path.join(output_dir, "images")
-                        dest_image = os.path.join(images_dir, image_name)
-                        if not os.path.exists(dest_image):
-                            shutil.copy2(image_path, dest_image)
+                        # Don't copy non-cover images to images folder - only covers go there
                     else:
                         output_dir = base_name
                         os.makedirs(output_dir, exist_ok=True)
@@ -5917,7 +5927,7 @@ Recent translations to summarize:
             import traceback
             self.append_log(f"❌ Full error: {traceback.format_exc()}")
             return False
-
+        
     def _process_text_file(self, file_path):
         """Process EPUB or TXT file (existing translation logic)"""
         try:
