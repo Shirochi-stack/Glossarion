@@ -5707,9 +5707,9 @@ Recent translations to summarize:
             self.append_log(f"   Temperature: {temperature}")
             self.append_log(f"   Max tokens: {max_tokens}")
             
-            # Debug: Show first 100 chars of system prompt
+            # Debug: Show first 200 chars of system prompt
             if system_prompt:
-                preview = system_prompt[:100] + "..." if len(system_prompt) > 100 else system_prompt
+                preview = system_prompt[:200] + "..." if len(system_prompt) > 200 else system_prompt
                 self.append_log(f"   System prompt preview: {preview}")
             
             # Make the API call
@@ -5731,7 +5731,7 @@ Recent translations to summarize:
                     "temperature": temperature,
                     "max_tokens": max_tokens,
                     "messages": messages,
-                    "image_base64": image_base64[:100] + "..." if len(image_base64) > 100 else image_base64  # Just preview
+                    "image_base64": image_base64
                 }
                 
                 with open(payload_file, 'w', encoding='utf-8') as f:
