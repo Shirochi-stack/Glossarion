@@ -72,9 +72,10 @@ class TextFileProcessor:
         if not chapter_breaks:
             # No chapter markers found, treat as single chapter
             print(f"No chapter markers found in {self.file_base}, treating as single document")
+            # FIX: Use "Section 1" instead of filename to avoid number extraction issues
             chapters = [{
                 'num': 1,
-                'title': self.file_base,
+                'title': 'Section 1',  # Changed from self.file_base
                 'content': content
             }]
         else:
@@ -177,7 +178,7 @@ class TextFileProcessor:
                         'num': chunk_num,
                         'title': chunk_title,
                         'body': chunk_html,
-                        'filename': f"{self.file_base}_ch{chapter_data['num']}_part{chunk_idx}.txt",
+                        'filename': f"section_{int(chapter_data['num'])}_part{chunk_idx}.txt",  # Changed to avoid using file_base
                         'content_hash': self._generate_hash(chunk_html),
                         'file_size': len(chunk_html),
                         'has_images': False,
@@ -194,7 +195,7 @@ class TextFileProcessor:
                     'num': chapter_data['num'],  # Keep as integer for non-split chapters
                     'title': chapter_data['title'],
                     'body': chapter_html,
-                    'filename': f"{self.file_base}_ch{chapter_data['num']}.txt",
+                    'filename': f"section_{chapter_data['num']}.txt",  # Changed to avoid using file_base
                     'content_hash': self._generate_hash(chapter_html),
                     'file_size': len(chapter_html),
                     'has_images': False,
@@ -210,9 +211,9 @@ class TextFileProcessor:
                 
             final_chapters.append({
                 'num': 1,
-                'title': self.file_base,
+                'title': 'Section 1',  # Changed from self.file_base
                 'body': self._text_to_html(all_content or 'Empty file'),
-                'filename': f"{self.file_base}_ch1.txt",
+                'filename': 'section_1.txt',  # Changed to avoid using file_base
                 'content_hash': self._generate_hash(all_content or ''),
                 'file_size': len(all_content or ''),
                 'has_images': False,
