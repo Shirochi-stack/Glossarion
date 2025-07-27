@@ -1375,27 +1375,33 @@ class ChapterExtractor:
             html_files = []
             for name in zf.namelist():
                 if name.lower().endswith(('.xhtml', '.html', '.htm')):
+                    # Always skip cover files in ALL modes - check basename exactly
+                    basename = os.path.basename(name).lower()
+                    if basename in ['cover.html', 'cover.xhtml', 'cover.htm']:
+                        print(f"[SKIP] Cover file excluded from all modes: {name}")
+                        continue
+                        
                     if extraction_mode == "smart":
                         # Smart mode: aggressive filtering
                         lower_name = name.lower()
                         if any(skip in lower_name for skip in [
-                            'nav', 'toc', 'contents', 'cover', 'title', 'index',
+                            'nav', 'toc', 'contents', 'title', 'index',
                             'copyright', 'acknowledgment', 'dedication'
                         ]):
                             continue
                     elif extraction_mode == "comprehensive":
                         # Comprehensive mode: moderate filtering
-                        skip_keywords = ['nav.', 'toc.', 'contents.', 'copyright.', 'cover.']
+                        skip_keywords = ['nav.', 'toc.', 'contents.', 'copyright.']
                         basename = os.path.basename(name.lower())
                         should_skip = False
                         for skip in skip_keywords:
                             if basename == skip + 'xhtml' or basename == skip + 'html' or basename == skip + 'htm':
                                 should_skip = True
                                 break
-                            if should_skip:
-                                print(f"[SKIP] Navigation/TOC file: {name}")
-                                continue
-                    # else: full mode - no filtering at all
+                        if should_skip:
+                            print(f"[SKIP] Navigation/TOC file: {name}")
+                            continue
+                    # else: full mode - no filtering at all (except cover which is filtered above)
                     
                     html_files.append(name)
             
