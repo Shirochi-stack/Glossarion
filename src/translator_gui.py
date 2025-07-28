@@ -1024,7 +1024,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.6.2"
+        __version__ = "3.6.3"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1808,7 +1808,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.6.2 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.6.3 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def create_file_section(self):
@@ -4229,7 +4229,7 @@ Recent translations to summarize:
                       variable=self.enable_auto_glossary_var,
                       bootstyle="round-toggle").pack(side=tk.LEFT)
         
-        tk.Label(master_toggle_frame, text="(Automatically extracts and translates character names/terms during translation)",
+        tk.Label(master_toggle_frame, text="(NOT RECOMMENDED, Automatically extracts and translates character names/terms during translation)",
                 font=('TkDefaultFont', 10), fg='gray').pack(side=tk.LEFT, padx=(10, 0))
         
         # Append glossary toggle
@@ -12911,7 +12911,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.6.2...")
+    print("🚀 Starting Glossarion v3.6.3...")
     
     # Initialize splash screen
     splash_manager = None
