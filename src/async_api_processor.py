@@ -2577,8 +2577,10 @@ class AsyncProcessingDialog:
         env_vars['DUPLICATE_DETECTION_MODE'] = self.gui.duplicate_detection_mode_var.get()
         env_vars['CHAPTER_NUMBER_OFFSET'] = str(self.gui.chapter_number_offset_var.get())
         env_vars['COMPRESSION_FACTOR'] = self.gui.compression_factor_var.get()
+        extraction_mode = self.gui.extraction_mode_var.get() if hasattr(self.gui, 'extraction_mode_var') else 'smart'
+        env_vars['COMPREHENSIVE_EXTRACTION'] = "1" if extraction_mode in ['comprehensive', 'full'] else "0"
+        env_vars['EXTRACTION_MODE'] = extraction_mode
         env_vars['DISABLE_ZERO_DETECTION'] = "1" if self.gui.disable_zero_detection_var.get() else "0"
-        env_vars['COMPREHENSIVE_EXTRACTION'] = "1" if self.gui.comprehensive_extraction_var.get() else "0"
         env_vars['USE_HEADER_AS_OUTPUT'] = "1" if self.gui.use_header_as_output_var.get() else "0"
         env_vars['ENABLE_DECIMAL_CHAPTERS'] = "1" if self.gui.enable_decimal_chapters_var.get() else "0"
         env_vars['ENABLE_WATERMARK_REMOVAL'] = "1" if self.gui.enable_watermark_removal_var.get() else "0"
