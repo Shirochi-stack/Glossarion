@@ -6377,8 +6377,7 @@ Recent translations to summarize:
                                 with open(self.PROGRESS_FILE, "r", encoding="utf-8") as pf:
                                     return json.load(pf)
                             except Exception as e:
-                                if hasattr(self, 'append_log'):
-                                    self.append_log(f"⚠️ Creating new progress file due to error: {e}")
+                                self.append_log(f"⚠️ Creating new progress file due to error: {e}")
                                 return {"images": {}, "content_hashes": {}, "version": "1.0"}
                         else:
                             return {"images": {}, "content_hashes": {}, "version": "1.0"}
@@ -6391,34 +6390,13 @@ Recent translations to summarize:
                             # Ensure directory exists
                             os.makedirs(os.path.dirname(self.PROGRESS_FILE), exist_ok=True)
                             
-                            # PYINSTALLER FIX: Use absolute paths and handle temp directory
-                            temp_file = os.path.abspath(self.PROGRESS_FILE + '.tmp')
-                            progress_file = os.path.abspath(self.PROGRESS_FILE)
-                            
-                            # Write to temp file first
+                            temp_file = self.PROGRESS_FILE + '.tmp'
                             with open(temp_file, "w", encoding="utf-8") as pf:
                                 json.dump(self.prog, pf, ensure_ascii=False, indent=2)
                             
-                            # PYINSTALLER FIX: More robust file replacement
-                            try:
-                                # Try to remove existing file
-                                if os.path.exists(progress_file):
-                                    os.remove(progress_file)
-                            except Exception:
-                                # If removal fails, try to overwrite
-                                pass
-                            
-                            # Rename temp to final
-                            try:
-                                os.rename(temp_file, progress_file)
-                            except Exception:
-                                # If rename fails, copy and delete
-                                shutil.copy2(temp_file, progress_file)
-                                try:
-                                    os.remove(temp_file)
-                                except:
-                                    pass
-                                    
+                            if os.path.exists(self.PROGRESS_FILE):
+                                os.remove(self.PROGRESS_FILE)
+                            os.rename(temp_file, self.PROGRESS_FILE)
                         except Exception as e:
                             if hasattr(self, 'append_log'):
                                 self.append_log(f"⚠️ Failed to save progress: {e}")
@@ -6428,20 +6406,11 @@ Recent translations to summarize:
                     def get_content_hash(self, file_path):
                         """Generate content hash for a file"""
                         hasher = hashlib.sha256()
-                        try:
-                            # PYINSTALLER FIX: Use absolute path
-                            abs_path = os.path.abspath(file_path)
-                            with open(abs_path, 'rb') as f:
-                                # Read in chunks to handle large files
-                                for chunk in iter(lambda: f.read(4096), b""):
-                                    hasher.update(chunk)
-                            return hasher.hexdigest()
-                        except Exception as e:
-                            if hasattr(self, 'append_log'):
-                                self.append_log(f"⚠️ Error hashing file {file_path}: {e}")
-                            # Return a unique hash based on filename and timestamp
-                            fallback_data = f"{file_path}_{time.time()}".encode()
-                            return hashlib.sha256(fallback_data).hexdigest()
+                        with open(file_path, 'rb') as f:
+                            # Read in chunks to handle large files
+                            for chunk in iter(lambda: f.read(4096), b""):
+                                hasher.update(chunk)
+                        return hasher.hexdigest()
                     
                     def check_image_status(self, image_path, content_hash):
                         """Check if an image needs translation"""
@@ -6469,9 +6438,8 @@ Recent translations to summarize:
                             output_file = image_info.get("output_file")
                             
                             if status == "completed" and output_file:
-                                # PYINSTALLER FIX: Use absolute path for output file check
-                                abs_output = os.path.abspath(output_file) if output_file else None
-                                if abs_output and os.path.exists(abs_output):
+                                # Check if output file exists
+                                if output_file and os.path.exists(output_file):
                                     return False, f"Image already translated: {output_file}", output_file
                                 else:
                                     # Output file missing, mark for retranslation
@@ -6491,7 +6459,7 @@ Recent translations to summarize:
                         if content_hash in self.prog.get("content_hashes", {}):
                             duplicate_info = self.prog["content_hashes"][content_hash]
                             duplicate_output = duplicate_info.get("output_file")
-                            if duplicate_output and os.path.exists(os.path.abspath(duplicate_output)):
+                            if duplicate_output and os.path.exists(duplicate_output):
                                 return False, f"Duplicate of {duplicate_info.get('original_name')}", duplicate_output
                         
                         return True, None, None
@@ -6502,14 +6470,14 @@ Recent translations to summarize:
                         
                         image_info = {
                             "name": image_name,
-                            "path": os.path.abspath(image_path),  # PYINSTALLER FIX: Store absolute path
+                            "path": image_path,
                             "content_hash": content_hash,
                             "status": status,
                             "last_updated": time.time()
                         }
                         
                         if output_file:
-                            image_info["output_file"] = os.path.abspath(output_file)  # PYINSTALLER FIX
+                            image_info["output_file"] = output_file
                         
                         if error:
                             image_info["error"] = str(error)
@@ -6520,7 +6488,7 @@ Recent translations to summarize:
                         if status == "completed" and output_file:
                             self.prog["content_hashes"][content_hash] = {
                                 "original_name": image_name,
-                                "output_file": os.path.abspath(output_file)  # PYINSTALLER FIX
+                                "output_file": output_file
                             }
                         
                         self.save()
@@ -6531,7 +6499,6 @@ Recent translations to summarize:
                 self.image_progress_manager.append_log = self.append_log
                 self.append_log(f"📊 Progress tracking in: {os.path.join(output_dir, 'translation_progress.json')}")
             
-            # Rest of the method remains the same...
             # Get content hash for the image
             try:
                 content_hash = self.image_progress_manager.get_content_hash(image_path)
@@ -6671,6 +6638,83 @@ Recent translations to summarize:
             if not system_prompt:
                 # Last fallback - empty string
                 system_prompt = ""
+
+            # Check if we should append glossary to the prompt
+            append_glossary = self.config.get('append_glossary', True)  # Default to True
+            if hasattr(self, 'append_glossary_var'):
+                append_glossary = self.append_glossary_var.get()
+            
+            if append_glossary:
+                # Check for manual glossary
+                manual_glossary_path = os.getenv('MANUAL_GLOSSARY')
+                if not manual_glossary_path and hasattr(self, 'manual_glossary_path'):
+                    manual_glossary_path = self.manual_glossary_path
+                
+                if manual_glossary_path and os.path.exists(manual_glossary_path):
+                    try:
+                        self.append_log(f"📑 Loading glossary for system prompt: {os.path.basename(manual_glossary_path)}")
+                        
+                        with open(manual_glossary_path, 'r', encoding='utf-8') as f:
+                            glossary_data = json.load(f)
+                        
+                        # Format glossary for prompt
+                        formatted_entries = {}
+                        
+                        if isinstance(glossary_data, list):
+                            # List format (from glossary extractor)
+                            for char in glossary_data:
+                                if not isinstance(char, dict):
+                                    continue
+                                    
+                                original = char.get('original_name', '')
+                                translated = char.get('name', original)
+                                if original and translated:
+                                    formatted_entries[original] = translated
+                                
+                                # Include titles if present
+                                title = char.get('title')
+                                if title and original:
+                                    formatted_entries[f"{original} ({title})"] = f"{translated} ({title})"
+                                
+                                # Include reference mappings
+                                refer_map = char.get('how_they_refer_to_others', {})
+                                if isinstance(refer_map, dict):
+                                    for other_name, reference in refer_map.items():
+                                        if other_name and reference:
+                                            formatted_entries[f"{original} → {other_name}"] = f"{translated} → {reference}"
+                        
+                        elif isinstance(glossary_data, dict):
+                            # Dictionary format
+                            if "entries" in glossary_data and isinstance(glossary_data["entries"], dict):
+                                formatted_entries = glossary_data["entries"]
+                            else:
+                                # Direct dictionary, exclude metadata
+                                formatted_entries = {k: v for k, v in glossary_data.items() if k != "metadata"}
+                        
+                        # Append glossary to system prompt if we have entries
+                        if formatted_entries:
+                            glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
+                            
+                            # Add newlines if system prompt already has content
+                            if system_prompt:
+                                system_prompt += "\n\n"
+                            
+                            # Get custom glossary prompt or use default
+                            glossary_prompt = self.config.get('append_glossary_prompt', 
+                                "Character/Term Glossary (use these translations consistently):")
+                            
+                            system_prompt += f"{glossary_prompt}\n{glossary_block}"
+                            
+                            self.append_log(f"✅ Added {len(formatted_entries)} glossary entries to system prompt")
+                        else:
+                            self.append_log(f"⚠️ Glossary file has no valid entries")
+                            
+                    except Exception as e:
+                        self.append_log(f"⚠️ Failed to append glossary to prompt: {str(e)}")
+                else:
+                    self.append_log(f"ℹ️ No glossary file found to append to prompt")
+            else:
+                self.append_log(f"ℹ️ Glossary appending disabled in settings")
             
             # Get temperature and max tokens from GUI
             temperature = float(self.temperature_entry.get()) if hasattr(self, 'temperature_entry') else 0.3
@@ -8114,10 +8158,6 @@ Recent translations to summarize:
                 self.master.after(0, lambda: messagebox.showerror("EPUB Converter Failed", f"Error: {error_str}"))
             else:
                 self.append_log("📋 Check the log above for details about what went wrong.")
-        
-        finally:
-            # CRITICAL FIX: Always update the button state when the thread finishes
-            self.master.after(0, self.update_run_button)
                 
     def run_qa_scan(self):
             """Run QA scan with mode selection and settings"""
