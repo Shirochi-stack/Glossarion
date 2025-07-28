@@ -6388,7 +6388,8 @@ Recent translations to summarize:
                                 with open(self.PROGRESS_FILE, "r", encoding="utf-8") as pf:
                                     return json.load(pf)
                             except Exception as e:
-                                self.append_log(f"⚠️ Creating new progress file due to error: {e}")
+                                if hasattr(self, 'append_log'):
+                                    self.append_log(f"⚠️ Creating new progress file due to error: {e}")
                                 return {"images": {}, "content_hashes": {}, "version": "1.0"}
                         else:
                             return {"images": {}, "content_hashes": {}, "version": "1.0"}
@@ -6510,6 +6511,11 @@ Recent translations to summarize:
                 self.image_progress_manager.append_log = self.append_log
                 self.append_log(f"📊 Progress tracking in: {os.path.join(output_dir, 'translation_progress.json')}")
             
+            # Check for stop request early
+            if self.stop_requested:
+                self.append_log("⏹️ Image translation cancelled by user")
+                return False
+            
             # Get content hash for the image
             try:
                 content_hash = self.image_progress_manager.get_content_hash(image_path)
@@ -6563,6 +6569,12 @@ Recent translations to summarize:
                 
                 return True  # Return True to indicate successful skip (not an error)
             
+            # Check for stop before processing
+            if self.stop_requested:
+                self.append_log("⏹️ Image translation cancelled before processing")
+                self.image_progress_manager.update(image_path, content_hash, status="cancelled")
+                return False
+            
             # Get the file index for numbering
             file_index = getattr(self, 'current_file_index', 0) + 1
             
@@ -6598,10 +6610,23 @@ Recent translations to summarize:
             if not any(vm in model_lower for vm in [m.lower() for m in vision_models]):
                 self.append_log(f"⚠️ Model '{model}' may not support vision. Trying anyway...")
             
+            # Check for stop before API initialization
+            if self.stop_requested:
+                self.append_log("⏹️ Image translation cancelled before API initialization")
+                self.image_progress_manager.update(image_path, content_hash, status="cancelled")
+                return False
+            
             # Initialize API client
             try:
                 from unified_api_client import UnifiedClient
                 client = UnifiedClient(model=model, api_key=api_key)
+                
+                # Set stop flag if the client supports it
+                if hasattr(client, 'set_stop_flag'):
+                    client.set_stop_flag(self.stop_requested)
+                elif hasattr(client, 'stop_flag'):
+                    client.stop_flag = self.stop_requested
+                    
             except Exception as e:
                 self.append_log(f"❌ Failed to initialize API client: {str(e)}")
                 self.image_progress_manager.update(image_path, content_hash, status="error", error=f"API client init failed: {e}")
@@ -6746,6 +6771,12 @@ Recent translations to summarize:
                 preview = system_prompt[:200] + "..." if len(system_prompt) > 200 else system_prompt
                 self.append_log(f"   System prompt preview: {preview}")
             
+            # Check stop before making API call
+            if self.stop_requested:
+                self.append_log("⏹️ Image translation cancelled before API call")
+                self.image_progress_manager.update(image_path, content_hash, status="cancelled")
+                return False
+            
             # Make the API call
             try:
                 # Create Payloads directory for API response tracking
@@ -6773,14 +6804,56 @@ Recent translations to summarize:
                 
                 self.append_log(f"📝 Saved request payload: {payload_file}")
                 
-                # Call the vision API directly
-                # send_image expects: messages, image_data, temperature, max_tokens
-                response = client.send_image(
-                    messages,
-                    image_base64,
-                    temperature=temperature,
-                    max_tokens=max_tokens
-                )
+                # Call the vision API with interrupt support
+                # Check if the client supports a stop_callback parameter
+                # Import the send_with_interrupt function from TransateKRtoEN
+                try:
+                    from TransateKRtoEN import send_with_interrupt
+                except ImportError:
+                    self.append_log("⚠️ send_with_interrupt not available, using direct call")
+                    send_with_interrupt = None
+                
+                # Call the vision API with interrupt support
+                if send_with_interrupt:
+                    # For image calls, we need a wrapper since send_with_interrupt expects client.send()
+                    # Create a temporary wrapper client that handles image calls
+                    class ImageClientWrapper:
+                        def __init__(self, real_client, image_data):
+                            self.real_client = real_client
+                            self.image_data = image_data
+                        
+                        def send(self, messages, temperature, max_tokens):
+                            return self.real_client.send_image(messages, self.image_data, temperature=temperature, max_tokens=max_tokens)
+                        
+                        def __getattr__(self, name):
+                            return getattr(self.real_client, name)
+                    
+                    # Create wrapped client
+                    wrapped_client = ImageClientWrapper(client, image_base64)
+                    
+                    # Use send_with_interrupt
+                    response = send_with_interrupt(
+                        messages,
+                        wrapped_client,
+                        temperature,
+                        max_tokens,
+                        lambda: self.stop_requested,
+                        chunk_timeout=self.config.get('chunk_timeout', 300)  # 5 min default
+                    )
+                else:
+                    # Fallback to direct call
+                    response = client.send_image(
+                        messages,
+                        image_base64,
+                        temperature=temperature,
+                        max_tokens=max_tokens
+                    )
+                
+                # Check if stopped after API call
+                if self.stop_requested:
+                    self.append_log("⏹️ Image translation stopped after API call")
+                    self.image_progress_manager.update(image_path, content_hash, status="cancelled")
+                    return False
                 
                 # Extract content and finish reason from response
                 response_content = None
@@ -6858,6 +6931,12 @@ Recent translations to summarize:
                     ]
                     
                     try:
+                        # Check for stop before title translation
+                        if self.stop_requested:
+                            self.append_log("⏹️ Image translation cancelled before title translation")
+                            self.image_progress_manager.update(image_path, content_hash, status="cancelled")
+                            return False
+                        
                         title_response = client.send(
                             title_messages,
                             temperature=temperature,
@@ -6933,11 +7012,17 @@ Recent translations to summarize:
                     return False
                     
             except Exception as e:
-                self.append_log(f"❌ API call failed: {str(e)}")
-                import traceback
-                self.append_log(f"❌ Full error: {traceback.format_exc()}")
-                self.image_progress_manager.update(image_path, content_hash, status="error", error=f"API call failed: {e}")
-                return False
+                # Check if this was a stop/interrupt exception
+                if "stop" in str(e).lower() or "interrupt" in str(e).lower() or self.stop_requested:
+                    self.append_log("⏹️ Image translation interrupted")
+                    self.image_progress_manager.update(image_path, content_hash, status="cancelled")
+                    return False
+                else:
+                    self.append_log(f"❌ API call failed: {str(e)}")
+                    import traceback
+                    self.append_log(f"❌ Full error: {traceback.format_exc()}")
+                    self.image_progress_manager.update(image_path, content_hash, status="error", error=f"API call failed: {e}")
+                    return False
             
         except Exception as e:
             self.append_log(f"❌ Error processing image: {str(e)}")
@@ -7513,7 +7598,12 @@ Recent translations to summarize:
                         temperature=temperature,
                         max_tokens=max_tokens
                     )
-                    
+                    # Check if stopped after API call
+                    if self.stop_requested:
+                        self.append_log("⏹️ Image translation stopped after API call")
+                        self.image_progress_manager.update(image_path, content_hash, status="cancelled")
+                        return False
+                        
                     # Get response content
                     glossary_json = None
                     if hasattr(response, 'content'):
@@ -9599,6 +9689,16 @@ Recent translations to summarize:
             if hasattr(TransateKRtoEN, 'set_stop_flag'):
                 TransateKRtoEN.set_stop_flag(True)
         except: pass
+        
+        try:
+            import unified_api_client
+            if hasattr(unified_api_client, 'set_stop_flag'):
+                unified_api_client.set_stop_flag(True)
+            # If there's a global client instance, stop it too
+            if hasattr(unified_api_client, 'global_stop_flag'):
+                unified_api_client.global_stop_flag = True
+        except:
+            pass        
         
         # Save and encrypt config when stopping
         try:
