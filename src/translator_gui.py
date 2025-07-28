@@ -7433,6 +7433,7 @@ Recent translations to summarize:
         """Process all images from a folder and create a combined glossary"""
         try:
             import hashlib
+            from unified_api_client import UnifiedClient, UnifiedClientError
             
             # Initialize folder-specific progress manager for images
             self.glossary_progress_manager = self._init_image_glossary_progress_manager(folder_name)
@@ -7455,7 +7456,6 @@ Recent translations to summarize:
             
             # Initialize API client
             try:
-                from unified_api_client import UnifiedClient
                 client = UnifiedClient(model=model, api_key=api_key)
             except Exception as e:
                 self.append_log(f"❌ Failed to initialize API client: {str(e)}")
@@ -7478,6 +7478,7 @@ Recent translations to summarize:
             # Process each image
             for i, image_path in enumerate(image_files):
                 if self.stop_requested:
+                    self.append_log("⏹️ Glossary extraction stopped by user")
                     break
                 
                 image_name = os.path.basename(image_path)
@@ -7518,7 +7519,7 @@ Recent translations to summarize:
                     import base64
                     image_base64 = base64.b64encode(image_data).decode('utf-8')
                     size_mb = len(image_data) / (1024 * 1024)
-                    base_name = os.path.splitext(image_name)[0]  # Add base_name here
+                    base_name = os.path.splitext(image_name)[0]
                     self.append_log(f"      📊 Image size: {size_mb:.2f} MB")
                     
                     # Build prompt exactly like extract_glossary_from_epub.py does
@@ -7598,27 +7599,131 @@ Recent translations to summarize:
                     
                     self.append_log(f"      📝 Saved request: {os.path.basename(payload_file)}")
                     self.append_log(f"      🌐 Extracting glossary from image...")
+                
+                    # Use interruptible API call with proper error handling
+                    try:
+                        # Try different import paths
+                        send_with_interrupt = None
+                        
+                        # First try importing from the current module's directory
+                        try:
+                            import sys
+                            # Add the script directory to Python path if not already there
+                            script_dir = os.path.dirname(os.path.abspath(__file__))
+                            if script_dir not in sys.path:
+                                sys.path.insert(0, script_dir)
+                            
+                            # Try importing
+                            from TransateKRtoEN import send_with_interrupt
+                            self.append_log("      ✅ Loaded interrupt support from TranslateKRtoEN")
+                        except ImportError as e:
+                            self.append_log(f"      ⚠️ Could not import from TranslateKRtoEN: {e}")
+                            
+                            # Try alternative import
+                            try:
+                                import TranslateKRtoEN
+                                if hasattr(TranslateKRtoEN, 'send_with_interrupt'):
+                                    send_with_interrupt = TranslateKRtoEN.send_with_interrupt
+                                    self.append_log("      ✅ Found interrupt support via module import")
+                            except Exception as e2:
+                                self.append_log(f"      ⚠️ Alternative import failed: {e2}")
+                        
+                        # If we successfully imported send_with_interrupt, use it
+                        if send_with_interrupt:
+                            # For image calls, we need to temporarily override the send method
+                            original_send = client.send
+                            
+                            # Create a wrapper that captures the image data
+                            def send_wrapper(msgs, temperature=temperature, max_tokens=max_tokens):
+                                return client.send_image(msgs, image_base64, temperature, max_tokens)
+                            
+                            client.send = send_wrapper
+                            
+                            try:
+                                response = send_with_interrupt(
+                                    messages,
+                                    client,
+                                    temperature,
+                                    max_tokens,
+                                    lambda: self.stop_requested,
+                                    chunk_timeout=None
+                                )
+                            finally:
+                                # Always restore original method
+                                client.send = original_send
+                        else:
+                            # Fallback: Create inline interrupt support
+                            self.append_log("      ⚠️ Creating inline interrupt support")
+                            
+                            import threading
+                            import queue
+                            
+                            result_queue = queue.Queue()
+                            
+                            def api_call():
+                                try:
+                                    result = client.send_image(messages, image_base64, temperature=temperature, max_tokens=max_tokens)
+                                    result_queue.put(('success', result))
+                                except Exception as e:
+                                    result_queue.put(('error', e))
+                            
+                            api_thread = threading.Thread(target=api_call)
+                            api_thread.daemon = True
+                            api_thread.start()
+                            
+                            # Check for stop every 0.5 seconds
+                            while api_thread.is_alive():
+                                if self.stop_requested:
+                                    # Cancel the operation
+                                    if hasattr(client, 'cancel_current_operation'):
+                                        client.cancel_current_operation()
+                                    raise UnifiedClientError("Glossary extraction stopped by user")
+                                
+                                try:
+                                    status, result = result_queue.get(timeout=0.5)
+                                    if status == 'error':
+                                        raise result
+                                    response = result
+                                    break
+                                except queue.Empty:
+                                    continue
+                            else:
+                                # Thread finished, get final result
+                                try:
+                                    status, result = result_queue.get(timeout=1.0)
+                                    if status == 'error':
+                                        raise result
+                                    response = result
+                                except queue.Empty:
+                                    raise UnifiedClientError("API call completed but no result received")
+                        
+                    except UnifiedClientError as e:
+                        if "stopped by user" in str(e).lower() or "cancelled" in str(e).lower():
+                            self.append_log("⏹️ Glossary extraction stopped by user")
+                            self.glossary_progress_manager.update(image_path, content_hash, status="cancelled")
+                            return False
+                        else:
+                            raise
                     
-                    response = client.send_image(
-                        messages,
-                        image_base64,
-                        temperature=temperature,
-                        max_tokens=max_tokens
-                    )
                     # Check if stopped after API call
                     if self.stop_requested:
-                        self.append_log("⏹️ Image translation stopped after API call")
-                        self.image_progress_manager.update(image_path, content_hash, status="cancelled")
+                        self.append_log("⏹️ Glossary extraction stopped after API call")
+                        self.glossary_progress_manager.update(image_path, content_hash, status="cancelled")
                         return False
-                        
-                    # Get response content
+                    
+                    # Get response content - handle different return types
                     glossary_json = None
-                    if hasattr(response, 'content'):
+                    
+                    # Handle different response types
+                    if isinstance(response, (list, tuple)) and len(response) >= 2:
+                        glossary_json = response[0]
+                    elif hasattr(response, 'content'):
                         glossary_json = response.content
-                    elif isinstance(response, tuple) and len(response) >= 2:
-                        glossary_json, _ = response
                     elif isinstance(response, str):
                         glossary_json = response
+                    else:
+                        # Try to convert to string
+                        glossary_json = str(response)
                     
                     if glossary_json and glossary_json.strip():
                         # Save response payload
@@ -7820,7 +7925,23 @@ Recent translations to summarize:
                     if i < len(image_files) - 1 and not self.stop_requested:
                         self.append_log(f"      ⏱️ Waiting {api_delay}s before next image...")
                         time.sleep(api_delay)
-                        
+ 
+                        # Use interruptible sleep
+                        elapsed = 0
+                        while elapsed < api_delay and not self.stop_requested:
+                            time.sleep(0.1)  # Check every 100ms
+                            elapsed += 0.1
+                            
+                except UnifiedClientError as e:
+                    if "stopped by user" in str(e).lower() or "cancelled" in str(e).lower():
+                        self.append_log("⏹️ Glossary extraction stopped by user")
+                        self.glossary_progress_manager.update(image_path, content_hash, status="cancelled")
+                        return False
+                    else:
+                        self.append_log(f"      ❌ API Error: {str(e)}")
+                        self.glossary_progress_manager.update(image_path, content_hash, status="error", error=str(e))
+                        skipped += 1
+ 
                 except Exception as e:
                     self.append_log(f"      ❌ Failed to process: {str(e)}")
                     self.glossary_progress_manager.update(image_path, content_hash, status="error", error=str(e))
@@ -8135,12 +8256,38 @@ Recent translations to summarize:
                 self.append_log(f"📤 Output Token Limit: {self.max_output_tokens}")
                 os.environ['MAX_OUTPUT_TOKENS'] = str(self.max_output_tokens)
                 
-                # Run glossary extraction
+                # Enhanced stop callback that checks both flags
+                def enhanced_stop_callback():
+                    # Check GUI stop flag
+                    if self.stop_requested:
+                        return True
+                        
+                    # Check glossary stop flag
+                    if glossary_stop_flag and glossary_stop_flag():
+                        return True
+                        
+                    # Also check if the glossary extraction module has its own stop flag
+                    try:
+                        import extract_glossary_from_epub
+                        if hasattr(extract_glossary_from_epub, 'is_stop_requested') and extract_glossary_from_epub.is_stop_requested():
+                            return True
+                    except:
+                        pass
+                        
+                    return False
+                
+                # Run glossary extraction with enhanced stop callback
                 glossary_main(
                     log_callback=self.append_log,
-                    stop_callback=lambda: self.stop_requested
+                    stop_callback=enhanced_stop_callback
                 )
                 
+                # Check if stopped
+                if self.stop_requested or (glossary_stop_flag and glossary_stop_flag()):
+                    self.append_log("⏹️ Glossary extraction was stopped")
+                    return False
+                
+                # Check if output file exists
                 if not self.stop_requested and os.path.exists(output_path):
                     self.append_log(f"✅ Glossary saved to: {output_path}")
                     return True
