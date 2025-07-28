@@ -117,6 +117,7 @@ class PatternManager:
     
     FILENAME_EXTRACT_PATTERNS = [
         # IMPORTANT: More specific patterns MUST come first
+        r'^\d{3}(\d)_(\d{2})_\.x?html?$', # Captures both parts for decimal: group1.group2
         r'^\d{4}_(\d+)\.x?html?$',  # "0000_1.xhtml" - extracts 1, not 0000
         r'^\d+_(\d+)[_\.]',         # Any digits followed by underscore then capture next digits
         r'^(\d+)[_\.]',             # Standard: "0249_" or "0249."
@@ -499,7 +500,18 @@ class FileUtilities:
                     #print(f"[DEBUG] DECIMAL pattern matched: {decimal_match.group(0)} -> extracted {actual_num}")
                     return actual_num
             
-            # FIRST: Check if this is a "XXXX_Y" format (like 0000_1, 0105_106)
+            # NEW: Check for the XXXX_YY pattern where it represents X.YY decimal chapters
+            # This matches files like "0005_66_.xhtml" as chapter 5.66
+            decimal_prefix_match = re.match(r'^(\d{3})(\d)_(\d{2})_?\.?x?html?$', basename)
+            if decimal_prefix_match:
+                # Extract as decimal: last digit of first group + second group as decimal
+                chapter_num = int(decimal_prefix_match.group(2))  # The 5 from 0005
+                decimal_part = decimal_prefix_match.group(3)      # The 66
+                actual_num = float(f"{chapter_num}.{decimal_part}")
+                #print(f"[DEBUG] DECIMAL PREFIX pattern matched: {basename} -> extracted {actual_num}")
+                return actual_num
+            
+            # EXISTING: Check if this is a "XXXX_Y" format (like 0000_1, 0105_106)
             # This pattern MUST be checked before any other pattern
             prefix_suffix_match = re.match(r'^(\d+)_(\d+)', basename)
             if prefix_suffix_match:
@@ -524,6 +536,15 @@ class FileUtilities:
         if actual_num is None and 'filename' in chapter:
             filename = chapter['filename']
             #print(f"[DEBUG] Checking filename: {filename}")
+            
+            # NEW: Check decimal prefix pattern in filename too
+            decimal_prefix_match = re.match(r'^(\d{3})(\d)_(\d{2})_?\.?x?html?$', filename)
+            if decimal_prefix_match:
+                chapter_num = int(decimal_prefix_match.group(2))
+                decimal_part = decimal_prefix_match.group(3)
+                actual_num = float(f"{chapter_num}.{decimal_part}")
+                #print(f"[DEBUG] DECIMAL PREFIX pattern matched in filename: {filename} -> extracted {actual_num}")
+                return actual_num
             
             for pattern in patterns:
                 # Skip the XXXX_Y patterns for filename
