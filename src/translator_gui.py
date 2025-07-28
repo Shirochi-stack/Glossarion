@@ -6699,6 +6699,11 @@ Recent translations to summarize:
                         
                         with open(manual_glossary_path, 'r', encoding='utf-8') as f:
                             glossary_data = json.load(f)
+                            
+                        output_glossary_path = os.path.join(output_dir, "glossary.json")
+                        with open(output_glossary_path, 'w', encoding='utf-8') as f:
+                            json.dump(glossary_data, f, ensure_ascii=False, indent=2)
+                        self.append_log(f"💾 Saved glossary to output folder for auto-loading")
                         
                         # Format glossary for prompt
                         formatted_entries = {}
@@ -8270,10 +8275,6 @@ Recent translations to summarize:
                     if self.stop_requested:
                         return True
                         
-                    # Check glossary stop flag
-                    if glossary_stop_flag and glossary_stop_flag():
-                        return True
-                        
                     # Also check if the glossary extraction module has its own stop flag
                     try:
                         import extract_glossary_from_epub
@@ -8283,12 +8284,22 @@ Recent translations to summarize:
                         pass
                         
                     return False
-                
-                # Run glossary extraction with enhanced stop callback
-                glossary_main(
-                    log_callback=self.append_log,
-                    stop_callback=enhanced_stop_callback
-                )
+
+                try:
+                    # Import traceback for better error info
+                    import traceback
+                    
+                    # Run glossary extraction with enhanced stop callback
+                    glossary_main(
+                        log_callback=self.append_log,
+                        stop_callback=enhanced_stop_callback
+                    )
+                except Exception as e:
+                    # Get the full traceback
+                    tb_lines = traceback.format_exc()
+                    self.append_log(f"❌ FULL ERROR TRACEBACK:\n{tb_lines}")
+                    self.append_log(f"❌ Error extracting glossary from {os.path.basename(file_path)}: {e}")
+                    return False
                 
                 # Check if stopped
                 if self.stop_requested or (glossary_stop_flag and glossary_stop_flag()):
