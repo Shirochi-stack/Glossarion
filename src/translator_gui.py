@@ -1024,7 +1024,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.6.1"
+        __version__ = "3.6.2"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1808,7 +1808,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.6.1 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.6.2 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def create_file_section(self):
@@ -6919,22 +6919,30 @@ Recent translations to summarize:
                     
                     # Get book title prompt for translating the filename
                     book_title_prompt = self.config.get('book_title_prompt', '')
+                    book_title_system_prompt = self.config.get('book_title_system_prompt', '')
                     
                     # If no book title prompt in main config, check in profile
                     if not book_title_prompt and isinstance(prompt_profiles, dict) and profile_name in prompt_profiles:
                         profile_data = prompt_profiles[profile_name]
                         if isinstance(profile_data, dict):
                             book_title_prompt = profile_data.get('book_title_prompt', '')
+                            # Also check for system prompt in profile
+                            if 'book_title_system_prompt' in profile_data:
+                                book_title_system_prompt = profile_data['book_title_system_prompt']
                     
                     # If still no book title prompt, use the main system prompt
                     if not book_title_prompt:
                         book_title_prompt = system_prompt
                     
+                    # If no book title system prompt configured, use the main system prompt
+                    if not book_title_system_prompt:
+                        book_title_system_prompt = system_prompt
+                    
                     # Translate the image filename/title
                     self.append_log(f"📝 Translating image title...")
                     title_messages = [
-                        {"role": "system", "content": book_title_prompt},
-                        {"role": "user", "content": base_name}
+                        {"role": "system", "content": book_title_system_prompt},
+                        {"role": "user", "content": f"{book_title_prompt}\n\n{base_name}" if book_title_prompt != system_prompt else base_name}
                     ]
                     
                     try:
@@ -6955,7 +6963,7 @@ Recent translations to summarize:
                             translated_title = title_response.content.strip() if title_response.content else base_name
                         else:
                             # Handle tuple response
-                            title_content, _ = title_response
+                            title_content, *_ = title_response
                             translated_title = title_content.strip() if title_content else base_name
                     except Exception as e:
                         self.append_log(f"⚠️ Title translation failed: {str(e)}")
@@ -8364,8 +8372,7 @@ Recent translations to summarize:
                 os.environ['MODEL'] = model
             
             # Set translation parameters from GUI
-            # FIX: Use correct environment variable names
-            os.environ['TRANSLATION_TEMPERATURE'] = str(self.trans_temp.get())  # Changed from TEMPERATURE
+            os.environ['TRANSLATION_TEMPERATURE'] = str(self.trans_temp.get())
             os.environ['MAX_OUTPUT_TOKENS'] = str(self.max_output_tokens)
             
             # Set batch translation settings
@@ -8413,6 +8420,14 @@ Recent translations to summarize:
                 self.master.after(0, lambda: messagebox.showerror("EPUB Converter Failed", f"Error: {error_str}"))
             else:
                 self.append_log("📋 Check the log above for details about what went wrong.")
+        
+        finally:
+            # Always reset the thread and update button state when done
+            self.epub_thread = None
+            self.stop_requested = False
+            # Schedule GUI update on main thread
+            self.master.after(0, self.update_run_button)
+
                 
     def run_qa_scan(self):
             """Run QA scan with mode selection and settings"""
@@ -9891,12 +9906,18 @@ Recent translations to summarize:
        self.append_log("⏳ Please wait... stopping after current API call completes.")
        self.update_run_button()
 
+
     def stop_epub_converter(self):
-       """Stop EPUB converter"""
-       self.stop_requested = True
-       self.append_log("❌ EPUB converter stop requested.")
-       self.append_log("⏳ Please wait... stopping after current operation completes.")
-       self.update_run_button()
+        """Stop EPUB converter"""
+        self.stop_requested = True
+        self.append_log("❌ EPUB converter stop requested.")
+        self.append_log("⏳ Please wait... stopping after current operation completes.")
+        
+        # Important: Reset the thread reference so button updates properly
+        if hasattr(self, 'epub_thread'):
+            self.epub_thread = None
+        
+        self.update_run_button()
 
     def stop_qa_scan(self):
         self.stop_requested = True
@@ -12879,7 +12900,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.6.1...")
+    print("🚀 Starting Glossarion v3.6.2...")
     
     # Initialize splash screen
     splash_manager = None
