@@ -3320,7 +3320,9 @@ class GlossaryManager:
                 ]
                 
                 try:
-                    response, _ = client.send(messages, temperature=0.3, max_tokens=4096)
+                    temperature = float(os.getenv("TEMPERATURE", "0.3"))
+                    max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "4096"))
+                    response, _ = client.send(messages, temperature=temperature, max_tokens=max_tokens)
                     
                     ai_extracted_terms = {}
                     
@@ -3854,7 +3856,9 @@ class GlossaryManager:
                 ]
                 
                 try:
-                    response, _ = client.send(messages, temperature=0.1, max_tokens=4096)
+                    temperature = float(os.getenv("TEMPERATURE", "0.3"))
+                    max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "4096"))
+                    response, _ = client.send(messages, temperature=temperature, max_tokens=max_tokens)
                     
                     batch_translations = self._parse_translation_response(response, batch)
                     all_translations.update(batch_translations)
