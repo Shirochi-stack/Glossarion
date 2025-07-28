@@ -3225,7 +3225,30 @@ Recent translations to summarize:
     def _force_retranslation_multiple_files(self):
         """Handle force retranslation when multiple files are selected - now uses shared logic"""
         
-        # Categorize selected files
+        # First, check if all selected files are images from the same folder
+        # This handles the case where folder selection results in individual file selections
+        if len(self.selected_files) > 1:
+            all_images = True
+            parent_dirs = set()
+            
+            image_extensions = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')
+            
+            for file_path in self.selected_files:
+                if os.path.isfile(file_path) and file_path.lower().endswith(image_extensions):
+                    parent_dirs.add(os.path.dirname(file_path))
+                else:
+                    all_images = False
+                    break
+            
+            # If all files are images from the same directory, treat it as a folder selection
+            if all_images and len(parent_dirs) == 1:
+                folder_path = parent_dirs.pop()
+                print(f"[DEBUG] Detected {len(self.selected_files)} images from same folder: {folder_path}")
+                print(f"[DEBUG] Treating as folder selection")
+                self._force_retranslation_images_folder(folder_path)
+                return
+        
+        # Otherwise, continue with normal categorization
         epub_files = []
         text_files = []
         image_files = []
@@ -3276,6 +3299,7 @@ Recent translations to summarize:
         
         # Track all tab data
         tab_data = []
+        tabs_created = False
         
         # Create tabs for EPUB/text files using shared logic
         for file_path in epub_files + text_files:
@@ -3289,6 +3313,7 @@ Recent translations to summarize:
             tab_frame = tk.Frame(notebook)
             tab_name = file_base[:20] + "..." if len(file_base) > 20 else file_base
             notebook.add(tab_frame, text=tab_name)
+            tabs_created = True
             
             # Use shared logic to populate the tab
             tab_result = self._force_retranslation_epub_or_text(
@@ -3309,9 +3334,124 @@ Recent translations to summarize:
             )
             if folder_result:
                 tab_data.append(folder_result)
+                tabs_created = True
+        
+        # If only individual image files selected and no tabs created yet
+        if image_files and not tabs_created:
+            # Create a single tab for all individual images
+            image_tab_result = self._create_individual_images_tab(
+                image_files,
+                notebook,
+                dialog
+            )
+            if image_tab_result:
+                tab_data.append(image_tab_result)
+                tabs_created = True
+        
+        # If no tabs were created, show error
+        if not tabs_created:
+            messagebox.showinfo("Info", 
+                "No translation output found for any of the selected files.\n\n"
+                "Make sure the output folders exist in your script directory.")
+            dialog.destroy()
+            return
         
         # Add unified button bar that works across all tabs
         self._add_multi_file_buttons(dialog, notebook, tab_data)
+
+
+    def _create_individual_images_tab(self, image_files, notebook, parent_dialog):
+        """Create a tab for individual image files"""
+        # Create tab
+        tab_frame = tk.Frame(notebook)
+        notebook.add(tab_frame, text="Individual Images")
+        
+        # Instructions
+        tk.Label(tab_frame, text=f"Selected {len(image_files)} individual image(s):", 
+                 font=('Arial', 11)).pack(pady=5)
+        
+        # Main frame
+        main_frame = tk.Frame(tab_frame)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Scrollbars and listbox
+        h_scrollbar = ttk.Scrollbar(main_frame, orient=tk.HORIZONTAL)
+        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        v_scrollbar = ttk.Scrollbar(main_frame, orient=tk.VERTICAL)
+        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        listbox = tk.Listbox(
+            main_frame,
+            selectmode=tk.MULTIPLE,
+            yscrollcommand=v_scrollbar.set,
+            xscrollcommand=h_scrollbar.set,
+            width=100
+        )
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        v_scrollbar.config(command=listbox.yview)
+        h_scrollbar.config(command=listbox.xview)
+        
+        # File info
+        file_info = []
+        script_dir = os.getcwd()
+        
+        # Check each image for translations
+        for img_path in sorted(image_files):
+            img_name = os.path.basename(img_path)
+            base_name = os.path.splitext(img_name)[0]
+            
+            # Look for translations in various possible locations
+            found_translations = []
+            
+            # Check in script directory with base name
+            possible_dirs = [
+                os.path.join(script_dir, base_name),
+                os.path.join(script_dir, f"{base_name}_translated"),
+                base_name,
+                f"{base_name}_translated"
+            ]
+            
+            for output_dir in possible_dirs:
+                if os.path.exists(output_dir) and os.path.isdir(output_dir):
+                    # Look for HTML files
+                    for file in os.listdir(output_dir):
+                        if file.endswith('.html') and base_name in file:
+                            found_translations.append((output_dir, file))
+            
+            if found_translations:
+                for output_dir, html_file in found_translations:
+                    display = f"📄 {img_name} → {html_file} | ✅ Translated"
+                    listbox.insert(tk.END, display)
+                    
+                    file_info.append({
+                        'type': 'translated',
+                        'source_image': img_path,
+                        'output_dir': output_dir,
+                        'file': html_file,
+                        'path': os.path.join(output_dir, html_file)
+                    })
+            else:
+                display = f"🖼️ {img_name} | ❌ No translation found"
+                listbox.insert(tk.END, display)
+        
+        # Selection count
+        selection_count_label = tk.Label(tab_frame, text="Selected: 0", font=('Arial', 9))
+        selection_count_label.pack(pady=2)
+        
+        def update_selection_count(*args):
+            count = len(listbox.curselection())
+            selection_count_label.config(text=f"Selected: {count}")
+        
+        listbox.bind('<<ListboxSelect>>', update_selection_count)
+        
+        return {
+            'type': 'individual_images',
+            'listbox': listbox,
+            'file_info': file_info,
+            'selection_count_label': selection_count_label
+        }
 
 
     def _create_image_folder_tab(self, folder_path, notebook, parent_dialog):
@@ -3407,201 +3547,419 @@ Recent translations to summarize:
         }
 
 
-    def _add_multi_file_buttons(self, dialog, notebook, tab_data):
-        """Add unified button bar for multi-file retranslation"""
+    def _force_retranslation_images_folder(self, folder_path):
+        """Handle force retranslation for image folders"""
+        folder_name = os.path.basename(folder_path)
         
+        # Look for output folder in the SCRIPT'S directory, not relative to the selected folder
+        script_dir = os.getcwd()  # Current working directory where the script is running
+        
+        # Check multiple possible output folder patterns IN THE SCRIPT DIRECTORY
+        possible_output_dirs = [
+            os.path.join(script_dir, folder_name),  # Script dir + folder name
+            os.path.join(script_dir, f"{folder_name}_translated"),  # Script dir + folder_translated
+            folder_name,  # Just the folder name in current directory
+            f"{folder_name}_translated",  # folder_translated in current directory
+        ]
+        
+        output_dir = None
+        for possible_dir in possible_output_dirs:
+            print(f"Checking: {possible_dir}")
+            if os.path.exists(possible_dir):
+                # Check if it has translation_progress.json or HTML files
+                if os.path.exists(os.path.join(possible_dir, "translation_progress.json")):
+                    output_dir = possible_dir
+                    print(f"Found output directory with progress tracker: {output_dir}")
+                    break
+                # Check if it has any HTML files
+                elif os.path.isdir(possible_dir):
+                    try:
+                        files = os.listdir(possible_dir)
+                        if any(f.endswith('.html') for f in files):
+                            output_dir = possible_dir
+                            print(f"Found output directory with HTML files: {output_dir}")
+                            break
+                    except:
+                        pass
+        
+        if not output_dir:
+            messagebox.showinfo("Info", 
+                f"No translation output found for '{folder_name}'.\n\n"
+                f"Selected folder: {folder_path}\n"
+                f"Script directory: {script_dir}\n\n"
+                f"Checked locations:\n" + "\n".join(f"- {d}" for d in possible_output_dirs))
+            return
+        
+        print(f"Using output directory: {output_dir}")
+        
+        # Check for progress tracking file
+        progress_file = os.path.join(output_dir, "translation_progress.json")
+        has_progress_tracking = os.path.exists(progress_file)
+        
+        print(f"Progress tracking: {has_progress_tracking} at {progress_file}")
+        
+        # Find all HTML files in the output directory
+        html_files = []
+        image_files = []
+        progress_data = None
+        
+        if has_progress_tracking:
+            # Load progress data for image translations
+            try:
+                with open(progress_file, 'r', encoding='utf-8') as f:
+                    progress_data = json.load(f)
+                    print(f"Loaded progress data with {len(progress_data)} entries")
+                    
+                # Extract files from progress data
+                # The structure appears to use hash keys at the root level
+                for key, value in progress_data.items():
+                    if isinstance(value, dict) and 'output_file' in value:
+                        output_file = value['output_file']
+                        # Handle both forward and backslashes in paths
+                        output_file = output_file.replace('\\', '/')
+                        if '/' in output_file:
+                            output_file = os.path.basename(output_file)
+                        html_files.append(output_file)
+                        print(f"Found tracked file: {output_file}")
+            except Exception as e:
+                print(f"Error loading progress file: {e}")
+                import traceback
+                traceback.print_exc()
+                has_progress_tracking = False
+        
+        # Also scan directory for any HTML files not in progress
+        try:
+            for file in os.listdir(output_dir):
+                file_path = os.path.join(output_dir, file)
+                if os.path.isfile(file_path) and file.endswith('.html') and file not in html_files:
+                    html_files.append(file)
+                    print(f"Found untracked HTML file: {file}")
+        except Exception as e:
+            print(f"Error scanning directory: {e}")
+        
+        # Check for images subdirectory (cover images)
+        images_dir = os.path.join(output_dir, "images")
+        if os.path.exists(images_dir):
+            try:
+                for file in os.listdir(images_dir):
+                    if file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')):
+                        image_files.append(file)
+            except Exception as e:
+                print(f"Error scanning images directory: {e}")
+        
+        print(f"Total files found: {len(html_files)} HTML, {len(image_files)} images")
+        
+        if not html_files and not image_files:
+            messagebox.showinfo("Info", 
+                f"No translated files found in: {output_dir}\n\n"
+                f"Progress tracking: {'Yes' if has_progress_tracking else 'No'}")
+            return
+        
+        # Create dialog
+        dialog = self.wm.create_simple_dialog(
+            self.master,
+            "Force Retranslation - Images",
+            width=800,
+            height=600
+        )
+        
+        # Add instructions with more detail
+        instruction_text = f"Output folder: {output_dir}\n"
+        instruction_text += f"Found {len(html_files)} translated images and {len(image_files)} cover images"
+        if has_progress_tracking:
+            instruction_text += " (with progress tracking)"
+        tk.Label(dialog, text=instruction_text, font=('Arial', 11), justify=tk.LEFT).pack(pady=10)
+        
+        # Create main frame for listbox and scrollbars
+        main_frame = tk.Frame(dialog)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        # Create scrollbars
+        h_scrollbar = ttk.Scrollbar(main_frame, orient=tk.HORIZONTAL)
+        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        v_scrollbar = ttk.Scrollbar(main_frame, orient=tk.VERTICAL)
+        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Create listbox
+        listbox = tk.Listbox(
+            main_frame, 
+            selectmode=tk.MULTIPLE, 
+            yscrollcommand=v_scrollbar.set,
+            xscrollcommand=h_scrollbar.set,
+            width=100
+        )
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Configure scrollbars
+        v_scrollbar.config(command=listbox.yview)
+        h_scrollbar.config(command=listbox.xview)
+        
+        # Keep track of file info
+        file_info = []
+        
+        # Add translated HTML files
+        for html_file in sorted(set(html_files)):  # Use set to avoid duplicates
+            # Extract original image name from HTML filename
+            # Expected format: response_001_imagename.html
+            match = re.match(r'response_(\d+)_(.+)\.html', html_file)
+            if match:
+                index = match.group(1)
+                base_name = match.group(2)
+                display = f"📄 Image {index} | {base_name} | ✅ Translated"
+            else:
+                display = f"📄 {html_file} | ✅ Translated"
+            
+            listbox.insert(tk.END, display)
+            
+            # Find the hash key for this file if progress tracking exists
+            hash_key = None
+            if progress_data:
+                for key, value in progress_data.items():
+                    if isinstance(value, dict) and 'output_file' in value:
+                        if html_file in value['output_file']:
+                            hash_key = key
+                            break
+            
+            file_info.append({
+                'type': 'translated',
+                'file': html_file,
+                'path': os.path.join(output_dir, html_file),
+                'hash_key': hash_key,
+                'output_dir': output_dir  # Store for later use
+            })
+        
+        # Add cover images
+        for img_file in sorted(image_files):
+            display = f"🖼️ Cover | {img_file} | ⏭️ Skipped (cover)"
+            listbox.insert(tk.END, display)
+            file_info.append({
+                'type': 'cover',
+                'file': img_file,
+                'path': os.path.join(images_dir, img_file),
+                'hash_key': None,
+                'output_dir': output_dir
+            })
+        
+        # Selection count label
+        selection_count_label = tk.Label(dialog, text="Selected: 0", font=('Arial', 10))
+        selection_count_label.pack(pady=(5, 10))
+        
+        def update_selection_count(*args):
+            count = len(listbox.curselection())
+            selection_count_label.config(text=f"Selected: {count}")
+        
+        listbox.bind('<<ListboxSelect>>', update_selection_count)
+        
+        # Button frame
         button_frame = tk.Frame(dialog)
-        button_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
+        button_frame.pack(pady=10)
         
-        # Configure grid
+        # Configure grid columns
         for i in range(4):
             button_frame.columnconfigure(i, weight=1)
         
-        # Helper to get current tab
-        def get_current_tab():
-            try:
-                current_idx = notebook.index("current")
-                if 0 <= current_idx < len(tab_data):
-                    return tab_data[current_idx]
-            except:
-                pass
-            return None
+        def select_all():
+            listbox.select_set(0, tk.END)
+            update_selection_count()
         
-        # Button functions that delegate to shared logic
-        def select_all_current():
-            tab = get_current_tab()
-            if tab and 'listbox' in tab:
-                tab['listbox'].select_set(0, tk.END)
-                if 'selection_count_label' in tab:
-                    count = tab['listbox'].size()
-                    tab['selection_count_label'].config(text=f"Selected: {count}")
+        def clear_selection():
+            listbox.select_clear(0, tk.END)
+            update_selection_count()
         
-        def clear_current():
-            tab = get_current_tab()
-            if tab and 'listbox' in tab:
-                tab['listbox'].select_clear(0, tk.END)
-                if 'selection_count_label' in tab:
-                    tab['selection_count_label'].config(text="Selected: 0")
+        def select_translated():
+            listbox.select_clear(0, tk.END)
+            for idx, info in enumerate(file_info):
+                if info['type'] == 'translated':
+                    listbox.select_set(idx)
+            update_selection_count()
         
-        def select_status_current(status):
-            tab = get_current_tab()
-            if tab and 'chapter_display_info' in tab:
-                # This is an EPUB/text tab
-                tab['listbox'].select_clear(0, tk.END)
-                for idx, info in enumerate(tab['chapter_display_info']):
-                    if status == 'failed':
-                        if info['status'] in ['failed', 'qa_failed']:
-                            tab['listbox'].select_set(idx)
-                    else:
-                        if info['status'] == status:
-                            tab['listbox'].select_set(idx)
-                
-                count = len(tab['listbox'].curselection())
-                tab['selection_count_label'].config(text=f"Selected: {count}")
-        
-        def remove_qa_marks():
-            tab = get_current_tab()
-            if not tab or 'chapter_display_info' not in tab:
-                messagebox.showinfo("Info", "This function only works on EPUB/text file tabs.")
-                return
-            
-            # Reuse the logic from single file
-            temp_data = {**tab, 'dialog': dialog}
-            self._add_retranslation_buttons({'dummy': True})  # Just to access the function
-            # Actually, let's inline the relevant parts...
-            
-            selected = tab['listbox'].curselection()
+        def mark_as_skipped():
+            """Move selected images to the images folder to be skipped"""
+            selected = listbox.curselection()
             if not selected:
-                messagebox.showwarning("No Selection", "Please select at least one chapter.")
+                messagebox.showwarning("No Selection", "Please select at least one image to mark as skipped.")
                 return
             
-            selected_chapters = [tab['chapter_display_info'][i] for i in selected]
-            qa_failed = [ch for ch in selected_chapters if ch['status'] == 'qa_failed']
+            # Get all selected items
+            selected_items = [(i, file_info[i]) for i in selected]
             
-            if not qa_failed:
-                messagebox.showwarning("No QA Failed", "No QA failed chapters selected.")
+            # Filter out items already in images folder (covers)
+            items_to_move = [(i, item) for i, item in selected_items if item['type'] != 'cover']
+            
+            if not items_to_move:
+                messagebox.showinfo("Info", "Selected items are already in the images folder (skipped).")
                 return
             
-            if messagebox.askyesno("Confirm", f"Remove QA mark from {len(qa_failed)} chapters?"):
-                for info in qa_failed:
-                    for key, _ in info['entries']:
-                        if key in tab['prog']["chapters"]:
-                            tab['prog']["chapters"][key]["status"] = "completed"
-                            for field in ["qa_issues", "qa_timestamp", "qa_issues_found", "duplicate_confidence"]:
-                                tab['prog']["chapters"][key].pop(field, None)
-                
-                with open(tab['progress_file'], 'w', encoding='utf-8') as f:
-                    json.dump(tab['prog'], f, ensure_ascii=False, indent=2)
-                
-                messagebox.showinfo("Success", f"Removed QA marks from {len(qa_failed)} chapters.")
-                dialog.destroy()
+            count = len(items_to_move)
+            if not messagebox.askyesno("Confirm Mark as Skipped", 
+                                      f"Move {count} translated image(s) to the images folder?\n\n"
+                                      "This will:\n"
+                                      "• Delete the translated HTML files\n"
+                                      "• Copy source images to the images folder\n"
+                                      "• Skip these images in future translations"):
+                return
+            
+            # Create images directory if it doesn't exist
+            images_dir = os.path.join(output_dir, "images")
+            os.makedirs(images_dir, exist_ok=True)
+            
+            moved_count = 0
+            failed_count = 0
+            
+            for idx, item in items_to_move:
+                try:
+                    # Extract the original image name from the HTML filename
+                    # Expected format: response_001_imagename.html
+                    html_file = item['file']
+                    match = re.match(r'response_\d+_(.+)\.html', html_file)
+                    
+                    if match:
+                        base_name = match.group(1)
+                        # Try to find the original image with common extensions
+                        original_found = False
+                        
+                        for ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']:
+                            # Check in the parent folder (where source images are)
+                            possible_source = os.path.join(folder_path, base_name + ext)
+                            if os.path.exists(possible_source):
+                                # Copy to images folder
+                                dest_path = os.path.join(images_dir, base_name + ext)
+                                if not os.path.exists(dest_path):
+                                    import shutil
+                                    shutil.copy2(possible_source, dest_path)
+                                    print(f"Copied {base_name + ext} to images folder")
+                                original_found = True
+                                break
+                        
+                        if not original_found:
+                            print(f"Warning: Could not find original image for {html_file}")
+                    
+                    # Delete the HTML translation file
+                    if os.path.exists(item['path']):
+                        os.remove(item['path'])
+                        print(f"Deleted translation: {item['path']}")
+                        
+                        # Remove from progress tracking if applicable
+                        if progress_data and item.get('hash_key') and item['hash_key'] in progress_data:
+                            del progress_data[item['hash_key']]
+                    
+                    # Update the listbox display
+                    display = f"🖼️ Skipped | {base_name if match else item['file']} | ⏭️ Moved to images folder"
+                    listbox.delete(idx)
+                    listbox.insert(idx, display)
+                    
+                    # Update file_info
+                    file_info[idx] = {
+                        'type': 'cover',  # Treat as cover type since it's in images folder
+                        'file': base_name + ext if match and original_found else item['file'],
+                        'path': os.path.join(images_dir, base_name + ext if match and original_found else item['file']),
+                        'hash_key': None,
+                        'output_dir': output_dir
+                    }
+                    
+                    moved_count += 1
+                    
+                except Exception as e:
+                    print(f"Failed to process {item['file']}: {e}")
+                    failed_count += 1
+            
+            # Save updated progress if modified
+            if progress_data:
+                try:
+                    with open(progress_file, 'w', encoding='utf-8') as f:
+                        json.dump(progress_data, f, ensure_ascii=False, indent=2)
+                    print(f"Updated progress tracking file")
+                except Exception as e:
+                    print(f"Failed to update progress file: {e}")
+            
+            # Update selection count
+            update_selection_count()
+            
+            # Show result
+            if failed_count > 0:
+                messagebox.showwarning("Partial Success", 
+                    f"Moved {moved_count} image(s) to be skipped.\n"
+                    f"Failed to process {failed_count} item(s).")
+            else:
+                messagebox.showinfo("Success", 
+                    f"Moved {moved_count} image(s) to the images folder.\n"
+                    "They will be skipped in future translations.")
         
-        def retranslate_all_selected():
-            # Collect from all tabs
-            all_items = []
-            
-            for tab in tab_data:
-                indices = tab['listbox'].curselection()
-                if not indices:
-                    continue
-                
-                if tab.get('type') == 'image_folder':
-                    for idx in indices:
-                        all_items.append({
-                            'type': 'image',
-                            'path': tab['file_info'][idx]['path']
-                        })
-                else:
-                    for idx in indices:
-                        info = tab['chapter_display_info'][idx]
-                        all_items.append({
-                            'type': 'chapter',
-                            'tab': tab,
-                            'info': info,
-                            'idx': idx
-                        })
-            
-            if not all_items:
-                messagebox.showwarning("No Selection", "No items selected across any tabs.")
+        def retranslate_selected():
+            selected = listbox.curselection()
+            if not selected:
+                messagebox.showwarning("No Selection", "Please select at least one file.")
                 return
             
-            # Confirm
-            chapter_count = sum(1 for x in all_items if x['type'] == 'chapter')
-            image_count = sum(1 for x in all_items if x['type'] == 'image')
+            # Count types
+            translated_count = sum(1 for i in selected if file_info[i]['type'] == 'translated')
+            cover_count = sum(1 for i in selected if file_info[i]['type'] == 'cover')
             
-            msg = f"Delete {chapter_count} chapter(s)" if chapter_count else ""
-            if image_count:
-                msg += f" and {image_count} image(s)" if msg else f"Delete {image_count} image(s)"
+            # Build confirmation message
+            msg_parts = []
+            if translated_count > 0:
+                msg_parts.append(f"{translated_count} translated image(s)")
+            if cover_count > 0:
+                msg_parts.append(f"{cover_count} cover image(s)")
             
-            if not messagebox.askyesno("Confirm", f"{msg} for retranslation?"):
+            confirm_msg = f"This will delete {' and '.join(msg_parts)}.\n\nContinue?"
+            
+            if not messagebox.askyesno("Confirm Deletion", confirm_msg):
                 return
             
-            # Process deletions
-            deleted = 0
-            modified_tabs = set()
+            # Delete selected files
+            deleted_count = 0
+            progress_updated = False
             
-            for item in all_items:
-                if item['type'] == 'image':
-                    try:
-                        if os.path.exists(item['path']):
-                            os.remove(item['path'])
-                            deleted += 1
-                    except Exception as e:
-                        print(f"Error deleting {item['path']}: {e}")
-                
-                elif item['type'] == 'chapter':
-                    tab = item['tab']
-                    info = item['info']
-                    
-                    # Delete file
-                    output_path = os.path.join(tab['output_dir'], info['output_file'])
-                    try:
-                        if os.path.exists(output_path):
-                            os.remove(output_path)
-                            deleted += 1
-                    except Exception as e:
-                        print(f"Error deleting {output_path}: {e}")
-                    
-                    # Update progress
-                    for key, _ in info['entries']:
-                        if key in tab['prog']["chapters"]:
-                            content_hash = tab['prog']["chapters"][key].get("content_hash")
-                            del tab['prog']["chapters"][key]
+            for idx in selected:
+                info = file_info[idx]
+                try:
+                    if os.path.exists(info['path']):
+                        os.remove(info['path'])
+                        deleted_count += 1
+                        print(f"Deleted: {info['path']}")
+                        
+                        # Remove from progress tracking if applicable
+                        if progress_data and info['hash_key'] and info['hash_key'] in progress_data:
+                            del progress_data[info['hash_key']]
+                            progress_updated = True
                             
-                            # Cleanup
-                            for collection in ["content_hashes", "chapter_chunks"]:
-                                if content_hash and content_hash in tab['prog'].get(collection, {}):
-                                    del tab['prog'][collection][content_hash]
-                    
-                    modified_tabs.add(id(tab))
+                except Exception as e:
+                    print(f"Failed to delete {info['path']}: {e}")
             
-            # Save all modified progress files
-            for tab in tab_data:
-                if id(tab) in modified_tabs and 'progress_file' in tab:
-                    with open(tab['progress_file'], 'w', encoding='utf-8') as f:
-                        json.dump(tab['prog'], f, ensure_ascii=False, indent=2)
+            # Save updated progress if modified
+            if progress_updated and progress_data:
+                try:
+                    with open(progress_file, 'w', encoding='utf-8') as f:
+                        json.dump(progress_data, f, ensure_ascii=False, indent=2)
+                    print(f"Updated progress tracking file")
+                except Exception as e:
+                    print(f"Failed to update progress file: {e}")
             
-            messagebox.showinfo("Success", f"Deleted {deleted} file(s) for retranslation.")
+            messagebox.showinfo("Success", 
+                f"Deleted {deleted_count} file(s).\n\n"
+                "They will be retranslated on the next run.")
+            
             dialog.destroy()
         
-        # Add buttons
-        tb.Button(button_frame, text="Select All", command=select_all_current, 
+        # Add buttons in grid layout (similar to EPUB/text retranslation)
+        # Row 0: Selection buttons
+        tb.Button(button_frame, text="Select All", command=select_all, 
                   bootstyle="info").grid(row=0, column=0, padx=5, pady=5, sticky="ew")
-        tb.Button(button_frame, text="Clear Selection", command=clear_current, 
+        tb.Button(button_frame, text="Clear Selection", command=clear_selection, 
                   bootstyle="secondary").grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-        tb.Button(button_frame, text="Select Completed", command=lambda: select_status_current('completed'), 
+        tb.Button(button_frame, text="Select Translated", command=select_translated, 
                   bootstyle="success").grid(row=0, column=2, padx=5, pady=5, sticky="ew")
-        tb.Button(button_frame, text="Select Failed", command=lambda: select_status_current('failed'), 
-                  bootstyle="danger").grid(row=0, column=3, padx=5, pady=5, sticky="ew")
+        tb.Button(button_frame, text="Mark as Skipped", command=mark_as_skipped, 
+                  bootstyle="warning").grid(row=0, column=3, padx=5, pady=5, sticky="ew")
         
-        tb.Button(button_frame, text="Retranslate Selected", command=retranslate_all_selected, 
-                  bootstyle="warning").grid(row=1, column=0, columnspan=2, padx=5, pady=10, sticky="ew")
-        tb.Button(button_frame, text="Remove QA Failed Mark", command=remove_qa_marks, 
-                  bootstyle="success").grid(row=1, column=2, columnspan=1, padx=5, pady=10, sticky="ew")
+        # Row 1: Action buttons
+        tb.Button(button_frame, text="Delete Selected", command=retranslate_selected, 
+                  bootstyle="danger").grid(row=1, column=0, columnspan=2, padx=5, pady=10, sticky="ew")
         tb.Button(button_frame, text="Cancel", command=dialog.destroy, 
-                  bootstyle="secondary").grid(row=1, column=3, columnspan=1, padx=5, pady=10, sticky="ew")
-
-    
+                  bootstyle="secondary").grid(row=1, column=2, columnspan=2, padx=5, pady=10, sticky="ew")
+        
     def glossary_manager(self):
        """Open comprehensive glossary management dialog"""
        # Create scrollable dialog (stays hidden)
@@ -5973,10 +6331,203 @@ Recent translations to summarize:
             self.master.after(0, self.update_run_button)
 
     def _process_image_file(self, image_path, combined_output_dir=None):
-        """Process a single image file using the direct image translation API"""
+        """Process a single image file using the direct image translation API with progress tracking"""
         try:
             import time
             import shutil
+            import hashlib
+            import os
+            import json
+            
+            # Determine output directory early for progress tracking
+            image_name = os.path.basename(image_path)
+            base_name = os.path.splitext(image_name)[0]
+            
+            if combined_output_dir:
+                output_dir = combined_output_dir
+            else:
+                output_dir = base_name
+            
+            # Initialize progress manager if not already done
+            if not hasattr(self, 'image_progress_manager'):
+                # Use the determined output directory
+                os.makedirs(output_dir, exist_ok=True)
+                
+                # Import or define a simplified ImageProgressManager
+                class ImageProgressManager:
+                    def __init__(self, output_dir=None):
+                        self.output_dir = output_dir
+                        if output_dir:
+                            self.PROGRESS_FILE = os.path.join(output_dir, "translation_progress.json")
+                            self.prog = self._init_or_load()
+                        else:
+                            self.PROGRESS_FILE = None
+                            self.prog = {"images": {}, "content_hashes": {}, "version": "1.0"}
+                    
+                    def set_output_dir(self, output_dir):
+                        """Set or update the output directory and load progress"""
+                        self.output_dir = output_dir
+                        self.PROGRESS_FILE = os.path.join(output_dir, "translation_progress.json")
+                        self.prog = self._init_or_load()
+                    
+                    def _init_or_load(self):
+                        """Initialize or load progress tracking"""
+                        if os.path.exists(self.PROGRESS_FILE):
+                            try:
+                                with open(self.PROGRESS_FILE, "r", encoding="utf-8") as pf:
+                                    return json.load(pf)
+                            except Exception as e:
+                                self.append_log(f"⚠️ Creating new progress file due to error: {e}")
+                                return {"images": {}, "content_hashes": {}, "version": "1.0"}
+                        else:
+                            return {"images": {}, "content_hashes": {}, "version": "1.0"}
+                    
+                    def save(self):
+                        """Save progress to file atomically"""
+                        if not self.PROGRESS_FILE:
+                            return
+                        try:
+                            # Ensure directory exists
+                            os.makedirs(os.path.dirname(self.PROGRESS_FILE), exist_ok=True)
+                            
+                            temp_file = self.PROGRESS_FILE + '.tmp'
+                            with open(temp_file, "w", encoding="utf-8") as pf:
+                                json.dump(self.prog, pf, ensure_ascii=False, indent=2)
+                            
+                            if os.path.exists(self.PROGRESS_FILE):
+                                os.remove(self.PROGRESS_FILE)
+                            os.rename(temp_file, self.PROGRESS_FILE)
+                        except Exception as e:
+                            if hasattr(self, 'append_log'):
+                                self.append_log(f"⚠️ Failed to save progress: {e}")
+                            else:
+                                print(f"⚠️ Failed to save progress: {e}")
+                    
+                    def get_content_hash(self, file_path):
+                        """Generate content hash for a file"""
+                        hasher = hashlib.sha256()
+                        with open(file_path, 'rb') as f:
+                            # Read in chunks to handle large files
+                            for chunk in iter(lambda: f.read(4096), b""):
+                                hasher.update(chunk)
+                        return hasher.hexdigest()
+                    
+                    def check_image_status(self, image_path, content_hash):
+                        """Check if an image needs translation"""
+                        image_name = os.path.basename(image_path)
+                        
+                        # NEW: Check for skip markers created by "Mark as Skipped" button
+                        skip_key = f"skip_{image_name}"
+                        if skip_key in self.prog:
+                            skip_info = self.prog[skip_key]
+                            if skip_info.get('status') == 'skipped':
+                                return False, f"Image marked as skipped", None
+                        
+                        # NEW: Check if image already exists in images folder (marked as skipped)
+                        if self.output_dir:
+                            images_dir = os.path.join(self.output_dir, "images")
+                            dest_image_path = os.path.join(images_dir, image_name)
+                            
+                            if os.path.exists(dest_image_path):
+                                return False, f"Image in skipped folder", None
+                        
+                        # Check if image has already been processed
+                        if content_hash in self.prog["images"]:
+                            image_info = self.prog["images"][content_hash]
+                            status = image_info.get("status")
+                            output_file = image_info.get("output_file")
+                            
+                            if status == "completed" and output_file:
+                                # Check if output file exists
+                                if output_file and os.path.exists(output_file):
+                                    return False, f"Image already translated: {output_file}", output_file
+                                else:
+                                    # Output file missing, mark for retranslation
+                                    image_info["status"] = "file_deleted"
+                                    image_info["deletion_detected"] = time.time()
+                                    self.save()
+                                    return True, None, None
+                            
+                            elif status == "skipped_cover":
+                                return False, "Cover image - skipped", None
+                            
+                            elif status == "error":
+                                # Previous error, retry
+                                return True, None, None
+                        
+                        # Check for duplicate content
+                        if content_hash in self.prog.get("content_hashes", {}):
+                            duplicate_info = self.prog["content_hashes"][content_hash]
+                            duplicate_output = duplicate_info.get("output_file")
+                            if duplicate_output and os.path.exists(duplicate_output):
+                                return False, f"Duplicate of {duplicate_info.get('original_name')}", duplicate_output
+                        
+                        return True, None, None
+                    
+                    def update(self, image_path, content_hash, output_file=None, status="in_progress", error=None):
+                        """Update progress for an image"""
+                        image_name = os.path.basename(image_path)
+                        
+                        image_info = {
+                            "name": image_name,
+                            "path": image_path,
+                            "content_hash": content_hash,
+                            "status": status,
+                            "last_updated": time.time()
+                        }
+                        
+                        if output_file:
+                            image_info["output_file"] = output_file
+                        
+                        if error:
+                            image_info["error"] = str(error)
+                        
+                        self.prog["images"][content_hash] = image_info
+                        
+                        # Update content hash index for duplicates
+                        if status == "completed" and output_file:
+                            self.prog["content_hashes"][content_hash] = {
+                                "original_name": image_name,
+                                "output_file": output_file
+                            }
+                        
+                        self.save()
+                
+                # Initialize the progress manager
+                self.image_progress_manager = ImageProgressManager(output_dir)
+                # Add append_log reference for the progress manager
+                self.image_progress_manager.append_log = self.append_log
+                self.append_log(f"📊 Progress tracking in: {os.path.join(output_dir, 'translation_progress.json')}")
+            
+            # Get content hash for the image
+            try:
+                content_hash = self.image_progress_manager.get_content_hash(image_path)
+            except Exception as e:
+                self.append_log(f"⚠️ Could not generate content hash: {e}")
+                # Fallback to using file path as identifier
+                content_hash = hashlib.sha256(image_path.encode()).hexdigest()
+            
+            # Check if image needs translation
+            needs_translation, skip_reason, existing_output = self.image_progress_manager.check_image_status(
+                image_path, content_hash
+            )
+            
+            if not needs_translation:
+                self.append_log(f"⏭️ {skip_reason}")
+                
+                # NEW: If image is marked as skipped but not in images folder yet, copy it there
+                if "marked as skipped" in skip_reason and combined_output_dir:
+                    images_dir = os.path.join(combined_output_dir, "images")
+                    os.makedirs(images_dir, exist_ok=True)
+                    dest_image = os.path.join(images_dir, image_name)
+                    if not os.path.exists(dest_image):
+                        shutil.copy2(image_path, dest_image)
+                        self.append_log(f"📁 Copied skipped image to: {dest_image}")
+                
+                return True
+            
+            # Update progress to "in_progress"
+            self.image_progress_manager.update(image_path, content_hash, status="in_progress")
             
             # Check if image translation is enabled
             if not hasattr(self, 'enable_image_translation_var') or not self.enable_image_translation_var.get():
@@ -5984,9 +6535,11 @@ Recent translations to summarize:
                 return False
             
             # Check for cover images
-            image_name = os.path.basename(image_path)
             if 'cover' in image_name.lower():
                 self.append_log(f"⏭️ Skipping cover image: {image_name}")
+                
+                # Update progress for cover
+                self.image_progress_manager.update(image_path, content_hash, status="skipped_cover")
                 
                 # Copy cover image to images folder if using combined output
                 if combined_output_dir:
@@ -6008,10 +6561,12 @@ Recent translations to summarize:
             
             if not api_key:
                 self.append_log("❌ Error: Please enter your API key.")
+                self.image_progress_manager.update(image_path, content_hash, status="error", error="No API key")
                 return False
             
             if not model:
                 self.append_log("❌ Error: Please select a model.")
+                self.image_progress_manager.update(image_path, content_hash, status="error", error="No model selected")
                 return False
             
             self.append_log(f"🖼️ Processing image: {os.path.basename(image_path)}")
@@ -6038,6 +6593,7 @@ Recent translations to summarize:
                 client = UnifiedClient(model=model, api_key=api_key)
             except Exception as e:
                 self.append_log(f"❌ Failed to initialize API client: {str(e)}")
+                self.image_progress_manager.update(image_path, content_hash, status="error", error=f"API client init failed: {e}")
                 return False
             
             # Read the image
@@ -6050,7 +6606,6 @@ Recent translations to summarize:
                 
                 # Convert to base64
                 import base64
-                import json
                 image_base64 = base64.b64encode(image_data).decode('utf-8')
                 
                 # Check image size
@@ -6059,6 +6614,7 @@ Recent translations to summarize:
                 
             except Exception as e:
                 self.append_log(f"❌ Failed to read image: {str(e)}")
+                self.image_progress_manager.update(image_path, content_hash, status="error", error=f"Failed to read image: {e}")
                 return False
             
             # Get system prompt from configuration
@@ -6182,22 +6738,15 @@ Recent translations to summarize:
                     if hasattr(response, 'error_details'):
                         self.append_log(f"   Error details: {response.error_details}")
                     
+                    self.image_progress_manager.update(image_path, content_hash, status="error", error="No text extracted")
                     return False
                 
                 if response_content:
                     self.append_log(f"✅ Received translation from API")
                     
-                    # Create output directory structure
-                    base_name = os.path.splitext(image_name)[0]
-                    
-                    # Use combined output directory if provided, otherwise create individual directory
-                    if combined_output_dir:
-                        output_dir = combined_output_dir
-                        # Don't copy non-cover images to images folder - only covers go there
-                    else:
-                        output_dir = base_name
-                        os.makedirs(output_dir, exist_ok=True)
-                        # Copy original image to the output directory
+                    # We already have output_dir defined at the top
+                    # Copy original image to the output directory if not using combined output
+                    if not combined_output_dir and not os.path.exists(os.path.join(output_dir, image_name)):
                         shutil.copy2(image_path, os.path.join(output_dir, image_name))
                     
                     # Get book title prompt for translating the filename
@@ -6273,6 +6822,9 @@ Recent translations to summarize:
                     if not combined_output_dir:
                         shutil.copy2(image_path, os.path.join(output_dir, image_name))
                     
+                    # Update progress to completed
+                    self.image_progress_manager.update(image_path, content_hash, output_file=html_file, status="completed")
+                    
                     # Show preview
                     if response_content and response_content.strip():
                         preview = response_content[:200] + "..." if len(response_content) > 200 else response_content
@@ -6289,12 +6841,14 @@ Recent translations to summarize:
                     self.append_log(f"❌ No translation received from API")
                     if finish_reason:
                         self.append_log(f"   Finish reason: {finish_reason}")
+                    self.image_progress_manager.update(image_path, content_hash, status="error", error="No response from API")
                     return False
                     
             except Exception as e:
                 self.append_log(f"❌ API call failed: {str(e)}")
                 import traceback
                 self.append_log(f"❌ Full error: {traceback.format_exc()}")
+                self.image_progress_manager.update(image_path, content_hash, status="error", error=f"API call failed: {e}")
                 return False
             
         except Exception as e:
