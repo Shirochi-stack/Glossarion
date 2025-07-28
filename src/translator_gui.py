@@ -3074,7 +3074,7 @@ Recent translations to summarize:
         }
         
         # If standalone (no parent), add buttons
-        if not parent_dialog and not tab_frame:
+        if not parent_dialog or tab_frame:
             self._add_retranslation_buttons(result)
         
         return result
@@ -3360,7 +3360,14 @@ Recent translations to summarize:
         # Add unified button bar that works across all tabs
         self._add_multi_file_buttons(dialog, notebook, tab_data)
 
-
+    def _add_multi_file_buttons(self, dialog, notebook, tab_data):
+        """Add a simple cancel button at the bottom of the dialog"""
+        button_frame = tk.Frame(dialog)
+        button_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=10)
+        
+        tb.Button(button_frame, text="Close All", command=dialog.destroy, 
+                  bootstyle="secondary").pack(side=tk.RIGHT, padx=5)
+              
     def _create_individual_images_tab(self, image_files, notebook, parent_dialog):
         """Create a tab for individual image files"""
         # Create tab
