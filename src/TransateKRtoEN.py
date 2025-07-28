@@ -489,38 +489,57 @@ class FileUtilities:
             
             # Check if decimal chapters are enabled for EPUBs
             enable_decimal = os.getenv('ENABLE_DECIMAL_CHAPTERS', '0') == '1'
+            #print(f"[DEBUG] Decimal detection enabled: {enable_decimal}")
             
             # For EPUBs, only check decimal patterns if the toggle is enabled
             if enable_decimal:
-                # Check for decimal chapter numbers (e.g., Chapter_1.1, 1.2.html)
+                # Check for standard decimal chapter numbers (e.g., Chapter_1.1, 1.2.html)
                 decimal_match = re.search(r'(\d+)\.(\d+)', basename)
                 if decimal_match:
                     # Return as float for decimal chapters
                     actual_num = float(f"{decimal_match.group(1)}.{decimal_match.group(2)}")
                     #print(f"[DEBUG] DECIMAL pattern matched: {decimal_match.group(0)} -> extracted {actual_num}")
                     return actual_num
+                
+                # Check for the XXXX_YY pattern where it represents X.YY decimal chapters
+                # This matches files like "0002_33_" or "0002_33_.xhtml" as chapter 2.33
+                decimal_prefix_match = re.match(r'^(\d{4})_(\d{1,2})(?:_|\.)?(?:x?html?)?$', basename)
+                if decimal_prefix_match:
+                    # Check if the second group could be a decimal part
+                    first_part = decimal_prefix_match.group(1)
+                    second_part = decimal_prefix_match.group(2)
+                    
+                    # If second part is 2 digits and > 9, treat as decimal
+                    # e.g., 0002_33 -> 2.33, 0005_66 -> 5.66
+                    if len(second_part) == 2 and int(second_part) > 9:
+                        # Extract the last digit from first part as chapter number
+                        chapter_num = int(first_part[-1])  # Last digit of 0002 is 2
+                        decimal_part = second_part          # The 33
+                        actual_num = float(f"{chapter_num}.{decimal_part}")
+                        #print(f"[DEBUG] DECIMAL PREFIX pattern matched: {basename} -> extracted {actual_num}")
+                        return actual_num
             
-            # NEW: Check for the XXXX_YY pattern where it represents X.YY decimal chapters
-            # This matches files like "0005_66_.xhtml" as chapter 5.66
-            decimal_prefix_match = re.match(r'^(\d{3})(\d)_(\d{2})_?\.?x?html?$', basename)
-            if decimal_prefix_match:
-                # Extract as decimal: last digit of first group + second group as decimal
-                chapter_num = int(decimal_prefix_match.group(2))  # The 5 from 0005
-                decimal_part = decimal_prefix_match.group(3)      # The 66
-                actual_num = float(f"{chapter_num}.{decimal_part}")
-                #print(f"[DEBUG] DECIMAL PREFIX pattern matched: {basename} -> extracted {actual_num}")
-                return actual_num
-            
-            # EXISTING: Check if this is a "XXXX_Y" format (like 0000_1, 0105_106)
-            # This pattern MUST be checked before any other pattern
+            # Standard XXXX_Y format handling
+            # When decimal is OFF: always extract number after underscore
+            # When decimal is ON: only for single digits or double digits <= 9
             prefix_suffix_match = re.match(r'^(\d+)_(\d+)', basename)
             if prefix_suffix_match:
-                # Extract the number AFTER the underscore
-                actual_num = int(prefix_suffix_match.group(2))
-                #print(f"[DEBUG] PREFIX_SUFFIX pattern matched: {prefix_suffix_match.group(0)} -> extracted {actual_num} (after underscore)")
-                return actual_num
+                second_part = prefix_suffix_match.group(2)
+                
+                # If decimal detection is OFF, always use standard extraction
+                if not enable_decimal:
+                    actual_num = int(second_part)
+                    #print(f"[DEBUG] PREFIX_SUFFIX pattern matched: {prefix_suffix_match.group(0)} -> extracted {actual_num} (after underscore)")
+                    return actual_num
+                else:
+                    # Decimal detection is ON - only use standard for non-decimal cases
+                    if len(second_part) == 1 or (len(second_part) == 2 and int(second_part) <= 9):
+                        actual_num = int(second_part)
+                        #print(f"[DEBUG] PREFIX_SUFFIX pattern matched (non-decimal): {prefix_suffix_match.group(0)} -> extracted {actual_num}")
+                        return actual_num
+                    # Otherwise fall through for decimal handling
             
-            # Only check other patterns if the prefix_suffix didn't match
+            # Check other patterns if no match yet
             for pattern in patterns:
                 # Skip patterns that would incorrectly match our XXXX_Y format
                 if pattern in [r'^(\d+)[_\.]', r'(\d{3,5})[_\.]', r'^(\d+)_']:
@@ -537,15 +556,24 @@ class FileUtilities:
             filename = chapter['filename']
             #print(f"[DEBUG] Checking filename: {filename}")
             
-            # NEW: Check decimal prefix pattern in filename too
-            decimal_prefix_match = re.match(r'^(\d{3})(\d)_(\d{2})_?\.?x?html?$', filename)
-            if decimal_prefix_match:
-                chapter_num = int(decimal_prefix_match.group(2))
-                decimal_part = decimal_prefix_match.group(3)
-                actual_num = float(f"{chapter_num}.{decimal_part}")
-                #print(f"[DEBUG] DECIMAL PREFIX pattern matched in filename: {filename} -> extracted {actual_num}")
-                return actual_num
+            # Re-check the enable_decimal setting for filename section
+            enable_decimal = os.getenv('ENABLE_DECIMAL_CHAPTERS', '0') == '1'
             
+            # Check decimal prefix pattern in filename (only if toggle is enabled)
+            if enable_decimal:
+                decimal_prefix_match = re.match(r'^(\d{4})_(\d{1,2})(?:_|\.)?(?:x?html?)?$', filename)
+                if decimal_prefix_match:
+                    first_part = decimal_prefix_match.group(1)
+                    second_part = decimal_prefix_match.group(2)
+                    
+                    if len(second_part) == 2 and int(second_part) > 9:
+                        chapter_num = int(first_part[-1])
+                        decimal_part = second_part
+                        actual_num = float(f"{chapter_num}.{decimal_part}")
+                        #print(f"[DEBUG] DECIMAL PREFIX pattern matched in filename: {filename} -> extracted {actual_num}")
+                        return actual_num
+            
+            # Standard pattern matching for filename
             for pattern in patterns:
                 # Skip the XXXX_Y patterns for filename
                 if pattern in [r'^\d{4}_(\d+)\.x?html?$', r'^\d+_(\d+)[_\.]', r'(\d{3,5})[_\.]', r'^(\d+)_']:
@@ -582,12 +610,14 @@ class FileUtilities:
                 else:
                     return f"response_{safe_title}.html"
         
-        # Check if decimal chapters are enabled and this is an EPUB with decimal chapter
+        # Check if decimal chapters are enabled
         enable_decimal = os.getenv('ENABLE_DECIMAL_CHAPTERS', '0') == '1'
         
         # For EPUBs with decimal detection enabled
         if enable_decimal and 'original_basename' in chapter and chapter['original_basename']:
             basename = chapter['original_basename']
+            
+            # Check for standard decimal pattern (e.g., Chapter_1.1)
             decimal_match = re.search(r'(\d+)\.(\d+)', basename)
             if decimal_match:
                 # Create a modified basename that preserves the decimal
@@ -599,6 +629,22 @@ class FileUtilities:
                     return f"response_{base}.txt"
                 else:
                     return f"response_{base}.html"
+            
+            # Check for the special XXXX_YY decimal pattern
+            decimal_prefix_match = re.match(r'^(\d{4})_(\d{1,2})(?:_|\.)?(?:x?html?)?$', basename)
+            if decimal_prefix_match:
+                first_part = decimal_prefix_match.group(1)
+                second_part = decimal_prefix_match.group(2)
+                
+                # If this matches our decimal pattern (e.g., 0002_33 -> 2.33)
+                if len(second_part) == 2 and int(second_part) > 9:
+                    chapter_num = int(first_part[-1])
+                    decimal_part = second_part
+                    # Create filename reflecting the decimal interpretation
+                    if is_text_file:
+                        return f"response_{chapter_num:04d}_{decimal_part}.txt"
+                    else:
+                        return f"response_{chapter_num:04d}_{decimal_part}.html"
         
         # Standard EPUB handling - use original basename
         if 'original_basename' in chapter and chapter['original_basename']:
@@ -625,7 +671,7 @@ class FileUtilities:
                 if is_text_file:
                     return f"response_{actual_num:04d}.txt"
                 else:
-                    return f"response_{actual_num:04d}.html"          
+                    return f"response_{actual_num:04d}.html"
 
 # =====================================================
 # UNIFIED PROGRESS MANAGER
