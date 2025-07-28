@@ -6687,82 +6687,101 @@ Recent translations to summarize:
             if hasattr(self, 'append_glossary_var'):
                 append_glossary = self.append_glossary_var.get()
             
+            # Check if automatic glossary is enabled
+            enable_auto_glossary = self.config.get('enable_auto_glossary', False)
+            if hasattr(self, 'enable_auto_glossary_var'):
+                enable_auto_glossary = self.enable_auto_glossary_var.get()
+            
             if append_glossary:
                 # Check for manual glossary
                 manual_glossary_path = os.getenv('MANUAL_GLOSSARY')
                 if not manual_glossary_path and hasattr(self, 'manual_glossary_path'):
                     manual_glossary_path = self.manual_glossary_path
                 
-                if manual_glossary_path and os.path.exists(manual_glossary_path):
-                    try:
-                        self.append_log(f"📑 Loading glossary for system prompt: {os.path.basename(manual_glossary_path)}")
-                        
-                        with open(manual_glossary_path, 'r', encoding='utf-8') as f:
-                            glossary_data = json.load(f)
-                            
-                        output_glossary_path = os.path.join(output_dir, "glossary.json")
-                        with open(output_glossary_path, 'w', encoding='utf-8') as f:
-                            json.dump(glossary_data, f, ensure_ascii=False, indent=2)
-                        self.append_log(f"💾 Saved glossary to output folder for auto-loading")
-                        
-                        # Format glossary for prompt
-                        formatted_entries = {}
-                        
-                        if isinstance(glossary_data, list):
-                            # List format (from glossary extractor)
-                            for char in glossary_data:
-                                if not isinstance(char, dict):
-                                    continue
-                                    
-                                original = char.get('original_name', '')
-                                translated = char.get('name', original)
-                                if original and translated:
-                                    formatted_entries[original] = translated
-                                
-                                # Include titles if present
-                                title = char.get('title')
-                                if title and original:
-                                    formatted_entries[f"{original} ({title})"] = f"{translated} ({title})"
-                                
-                                # Include reference mappings
-                                refer_map = char.get('how_they_refer_to_others', {})
-                                if isinstance(refer_map, dict):
-                                    for other_name, reference in refer_map.items():
-                                        if other_name and reference:
-                                            formatted_entries[f"{original} → {other_name}"] = f"{translated} → {reference}"
-                        
-                        elif isinstance(glossary_data, dict):
-                            # Dictionary format
-                            if "entries" in glossary_data and isinstance(glossary_data["entries"], dict):
-                                formatted_entries = glossary_data["entries"]
-                            else:
-                                # Direct dictionary, exclude metadata
-                                formatted_entries = {k: v for k, v in glossary_data.items() if k != "metadata"}
-                        
-                        # Append glossary to system prompt if we have entries
-                        if formatted_entries:
-                            glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
-                            
-                            # Add newlines if system prompt already has content
-                            if system_prompt:
-                                system_prompt += "\n\n"
-                            
-                            # Get custom glossary prompt or use default
-                            glossary_prompt = self.config.get('append_glossary_prompt', 
-                                "Character/Term Glossary (use these translations consistently):")
-                            
-                            system_prompt += f"{glossary_prompt}\n{glossary_block}"
-                            
-                            self.append_log(f"✅ Added {len(formatted_entries)} glossary entries to system prompt")
-                        else:
-                            self.append_log(f"⚠️ Glossary file has no valid entries")
-                            
-                    except Exception as e:
-                        self.append_log(f"⚠️ Failed to append glossary to prompt: {str(e)}")
+                # If automatic glossary is enabled and no manual glossary exists, defer appending
+                if enable_auto_glossary and (not manual_glossary_path or not os.path.exists(manual_glossary_path)):
+                    self.append_log(f"📑 Automatic glossary enabled - glossary will be appended after generation")
+                    # Set a flag to indicate deferred glossary appending
+                    os.environ['DEFER_GLOSSARY_APPEND'] = '1'
+                    # Store the append prompt for later use
+                    glossary_prompt = self.config.get('append_glossary_prompt', 
+                        "Character/Term Glossary (use these translations consistently):")
+                    os.environ['GLOSSARY_APPEND_PROMPT'] = glossary_prompt
                 else:
-                    self.append_log(f"ℹ️ No glossary file found to append to prompt")
+                    # Original behavior - append manual glossary immediately
+                    if manual_glossary_path and os.path.exists(manual_glossary_path):
+                        try:
+                            self.append_log(f"📑 Loading glossary for system prompt: {os.path.basename(manual_glossary_path)}")
+                            
+                            with open(manual_glossary_path, 'r', encoding='utf-8') as f:
+                                glossary_data = json.load(f)
+                                
+                            output_glossary_path = os.path.join(output_dir, "glossary.json")
+                            with open(output_glossary_path, 'w', encoding='utf-8') as f:
+                                json.dump(glossary_data, f, ensure_ascii=False, indent=2)
+                            self.append_log(f"💾 Saved glossary to output folder for auto-loading")
+                            
+                            # Format glossary for prompt
+                            formatted_entries = {}
+                            
+                            if isinstance(glossary_data, list):
+                                # List format (from glossary extractor)
+                                for char in glossary_data:
+                                    if not isinstance(char, dict):
+                                        continue
+                                        
+                                    original = char.get('original_name', '')
+                                    translated = char.get('name', original)
+                                    if original and translated:
+                                        formatted_entries[original] = translated
+                                    
+                                    # Include titles if present
+                                    title = char.get('title')
+                                    if title and original:
+                                        formatted_entries[f"{original} ({title})"] = f"{translated} ({title})"
+                                    
+                                    # Include reference mappings
+                                    refer_map = char.get('how_they_refer_to_others', {})
+                                    if isinstance(refer_map, dict):
+                                        for other_name, reference in refer_map.items():
+                                            if other_name and reference:
+                                                formatted_entries[f"{original} → {other_name}"] = f"{translated} → {reference}"
+                            
+                            elif isinstance(glossary_data, dict):
+                                # Dictionary format
+                                if "entries" in glossary_data and isinstance(glossary_data["entries"], dict):
+                                    formatted_entries = glossary_data["entries"]
+                                else:
+                                    # Direct dictionary, exclude metadata
+                                    formatted_entries = {k: v for k, v in glossary_data.items() if k != "metadata"}
+                            
+                            # Append glossary to system prompt if we have entries
+                            if formatted_entries:
+                                glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
+                                
+                                # Add newlines if system prompt already has content
+                                if system_prompt:
+                                    system_prompt += "\n\n"
+                                
+                                # Get custom glossary prompt or use default
+                                glossary_prompt = self.config.get('append_glossary_prompt', 
+                                    "Character/Term Glossary (use these translations consistently):")
+                                
+                                system_prompt += f"{glossary_prompt}\n{glossary_block}"
+                                
+                                self.append_log(f"✅ Added {len(formatted_entries)} glossary entries to system prompt")
+                            else:
+                                self.append_log(f"⚠️ Glossary file has no valid entries")
+                                
+                        except Exception as e:
+                            self.append_log(f"⚠️ Failed to append glossary to prompt: {str(e)}")
+                    else:
+                        self.append_log(f"ℹ️ No glossary file found to append to prompt")
             else:
                 self.append_log(f"ℹ️ Glossary appending disabled in settings")
+                # Clear any deferred append flag
+                if 'DEFER_GLOSSARY_APPEND' in os.environ:
+                    del os.environ['DEFER_GLOSSARY_APPEND']
             
             # Get temperature and max tokens from GUI
             temperature = float(self.temperature_entry.get()) if hasattr(self, 'temperature_entry') else 0.3
