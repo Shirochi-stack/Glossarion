@@ -6377,7 +6377,8 @@ Recent translations to summarize:
                                 with open(self.PROGRESS_FILE, "r", encoding="utf-8") as pf:
                                     return json.load(pf)
                             except Exception as e:
-                                self.append_log(f"⚠️ Creating new progress file due to error: {e}")
+                                if hasattr(self, 'append_log'):
+                                    self.append_log(f"⚠️ Creating new progress file due to error: {e}")
                                 return {"images": {}, "content_hashes": {}, "version": "1.0"}
                         else:
                             return {"images": {}, "content_hashes": {}, "version": "1.0"}
@@ -6390,13 +6391,34 @@ Recent translations to summarize:
                             # Ensure directory exists
                             os.makedirs(os.path.dirname(self.PROGRESS_FILE), exist_ok=True)
                             
-                            temp_file = self.PROGRESS_FILE + '.tmp'
+                            # PYINSTALLER FIX: Use absolute paths and handle temp directory
+                            temp_file = os.path.abspath(self.PROGRESS_FILE + '.tmp')
+                            progress_file = os.path.abspath(self.PROGRESS_FILE)
+                            
+                            # Write to temp file first
                             with open(temp_file, "w", encoding="utf-8") as pf:
                                 json.dump(self.prog, pf, ensure_ascii=False, indent=2)
                             
-                            if os.path.exists(self.PROGRESS_FILE):
-                                os.remove(self.PROGRESS_FILE)
-                            os.rename(temp_file, self.PROGRESS_FILE)
+                            # PYINSTALLER FIX: More robust file replacement
+                            try:
+                                # Try to remove existing file
+                                if os.path.exists(progress_file):
+                                    os.remove(progress_file)
+                            except Exception:
+                                # If removal fails, try to overwrite
+                                pass
+                            
+                            # Rename temp to final
+                            try:
+                                os.rename(temp_file, progress_file)
+                            except Exception:
+                                # If rename fails, copy and delete
+                                shutil.copy2(temp_file, progress_file)
+                                try:
+                                    os.remove(temp_file)
+                                except:
+                                    pass
+                                    
                         except Exception as e:
                             if hasattr(self, 'append_log'):
                                 self.append_log(f"⚠️ Failed to save progress: {e}")
@@ -6406,11 +6428,20 @@ Recent translations to summarize:
                     def get_content_hash(self, file_path):
                         """Generate content hash for a file"""
                         hasher = hashlib.sha256()
-                        with open(file_path, 'rb') as f:
-                            # Read in chunks to handle large files
-                            for chunk in iter(lambda: f.read(4096), b""):
-                                hasher.update(chunk)
-                        return hasher.hexdigest()
+                        try:
+                            # PYINSTALLER FIX: Use absolute path
+                            abs_path = os.path.abspath(file_path)
+                            with open(abs_path, 'rb') as f:
+                                # Read in chunks to handle large files
+                                for chunk in iter(lambda: f.read(4096), b""):
+                                    hasher.update(chunk)
+                            return hasher.hexdigest()
+                        except Exception as e:
+                            if hasattr(self, 'append_log'):
+                                self.append_log(f"⚠️ Error hashing file {file_path}: {e}")
+                            # Return a unique hash based on filename and timestamp
+                            fallback_data = f"{file_path}_{time.time()}".encode()
+                            return hashlib.sha256(fallback_data).hexdigest()
                     
                     def check_image_status(self, image_path, content_hash):
                         """Check if an image needs translation"""
@@ -6438,8 +6469,9 @@ Recent translations to summarize:
                             output_file = image_info.get("output_file")
                             
                             if status == "completed" and output_file:
-                                # Check if output file exists
-                                if output_file and os.path.exists(output_file):
+                                # PYINSTALLER FIX: Use absolute path for output file check
+                                abs_output = os.path.abspath(output_file) if output_file else None
+                                if abs_output and os.path.exists(abs_output):
                                     return False, f"Image already translated: {output_file}", output_file
                                 else:
                                     # Output file missing, mark for retranslation
@@ -6459,7 +6491,7 @@ Recent translations to summarize:
                         if content_hash in self.prog.get("content_hashes", {}):
                             duplicate_info = self.prog["content_hashes"][content_hash]
                             duplicate_output = duplicate_info.get("output_file")
-                            if duplicate_output and os.path.exists(duplicate_output):
+                            if duplicate_output and os.path.exists(os.path.abspath(duplicate_output)):
                                 return False, f"Duplicate of {duplicate_info.get('original_name')}", duplicate_output
                         
                         return True, None, None
@@ -6470,14 +6502,14 @@ Recent translations to summarize:
                         
                         image_info = {
                             "name": image_name,
-                            "path": image_path,
+                            "path": os.path.abspath(image_path),  # PYINSTALLER FIX: Store absolute path
                             "content_hash": content_hash,
                             "status": status,
                             "last_updated": time.time()
                         }
                         
                         if output_file:
-                            image_info["output_file"] = output_file
+                            image_info["output_file"] = os.path.abspath(output_file)  # PYINSTALLER FIX
                         
                         if error:
                             image_info["error"] = str(error)
@@ -6488,7 +6520,7 @@ Recent translations to summarize:
                         if status == "completed" and output_file:
                             self.prog["content_hashes"][content_hash] = {
                                 "original_name": image_name,
-                                "output_file": output_file
+                                "output_file": os.path.abspath(output_file)  # PYINSTALLER FIX
                             }
                         
                         self.save()
@@ -6499,6 +6531,7 @@ Recent translations to summarize:
                 self.image_progress_manager.append_log = self.append_log
                 self.append_log(f"📊 Progress tracking in: {os.path.join(output_dir, 'translation_progress.json')}")
             
+            # Rest of the method remains the same...
             # Get content hash for the image
             try:
                 content_hash = self.image_progress_manager.get_content_hash(image_path)
@@ -8081,6 +8114,10 @@ Recent translations to summarize:
                 self.master.after(0, lambda: messagebox.showerror("EPUB Converter Failed", f"Error: {error_str}"))
             else:
                 self.append_log("📋 Check the log above for details about what went wrong.")
+        
+        finally:
+            # CRITICAL FIX: Always update the button state when the thread finishes
+            self.master.after(0, self.update_run_button)
                 
     def run_qa_scan(self):
             """Run QA scan with mode selection and settings"""
