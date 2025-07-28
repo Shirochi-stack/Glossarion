@@ -8302,7 +8302,7 @@ Recent translations to summarize:
                     return False
                 
                 # Check if stopped
-                if self.stop_requested or (glossary_stop_flag and glossary_stop_flag()):
+                if self.stop_requested:
                     self.append_log("⏹️ Glossary extraction was stopped")
                     return False
                 
