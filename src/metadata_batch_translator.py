@@ -284,7 +284,7 @@ class MetadataBatchTranslatorUI:
             # Save all text widgets to config
             self._save_all_prompt_configs()
             self.gui.save_config()
-            messagebox.showinfo("Success", "All prompts saved!")
+            #messagebox.showinfo("Success", "All prompts saved!")
             dialog.destroy()
         
         def reset_all_prompts():
