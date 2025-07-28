@@ -1063,6 +1063,7 @@ class TranslatorGUI:
         self.manual_glossary_path = None
         self.auto_loaded_glossary_path = None
         self.auto_loaded_glossary_for_file = None
+        self.manual_glossary_manually_loaded = False
         
         self.master.protocol("WM_DELETE_WINDOW", self.on_close)
         
@@ -6220,6 +6221,16 @@ Recent translations to summarize:
                 self.append_log("❌ Failed to load translation modules")
                 return
 
+            # SET GLOSSARY IN ENVIRONMENT
+            if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path:
+                os.environ['MANUAL_GLOSSARY'] = self.manual_glossary_path
+                self.append_log(f"📑 Set glossary in environment: {os.path.basename(self.manual_glossary_path)}")
+            else:
+                # Clear any previous glossary from environment
+                if 'MANUAL_GLOSSARY' in os.environ:
+                    del os.environ['MANUAL_GLOSSARY']
+                self.append_log(f"ℹ️ No glossary loaded")
+
             # Process each file
             total_files = len(self.selected_files)
             successful = 0
@@ -6728,7 +6739,7 @@ Recent translations to summarize:
             self.append_log(f"🌐 Sending image to vision API...")
             self.append_log(f"   System prompt length: {len(system_prompt)} chars")
             self.append_log(f"   Temperature: {temperature}")
-            self.append_log(f"   Max tokens: {max_tokens}")
+            self.append_log(f"   Max tokens: {max_tokens}")          
             
             # Debug: Show first 200 chars of system prompt
             if system_prompt:
@@ -9817,18 +9828,29 @@ Recent translations to summarize:
 
     def auto_load_glossary_for_file(self, file_path):
         """Automatically load glossary if it exists in the output folder"""
-        # Clear previous auto-loaded glossary if switching files
-        if file_path != self.auto_loaded_glossary_for_file:
-            if self.auto_loaded_glossary_path and self.manual_glossary_path == self.auto_loaded_glossary_path:
-                self.manual_glossary_path = None
-                self.append_log("📑 Cleared auto-loaded glossary from previous novel")
-            self.auto_loaded_glossary_path = None
-            self.auto_loaded_glossary_for_file = None
         
+        # CHECK FOR EPUB FIRST - before any clearing logic!
         if not file_path or not os.path.isfile(file_path):
             return
         
         if not file_path.lower().endswith('.epub'):
+            return  # Exit early for non-EPUB files - don't touch glossaries!
+        
+        # Clear previous auto-loaded glossary if switching EPUB files
+        if file_path != self.auto_loaded_glossary_for_file:
+            # Only clear if the current glossary was auto-loaded AND not manually loaded
+            if (self.auto_loaded_glossary_path and 
+                self.manual_glossary_path == self.auto_loaded_glossary_path and
+                not getattr(self, 'manual_glossary_manually_loaded', False)):  # Check manual flag
+                self.manual_glossary_path = None
+                self.append_log("📑 Cleared auto-loaded glossary from previous novel")
+            
+            self.auto_loaded_glossary_path = None
+            self.auto_loaded_glossary_for_file = None
+        
+        # Don't override manually loaded glossaries
+        if getattr(self, 'manual_glossary_manually_loaded', False) and self.manual_glossary_path:
+            self.append_log(f"📑 Keeping manually loaded glossary: {os.path.basename(self.manual_glossary_path)}")
             return
         
         file_base = os.path.splitext(os.path.basename(file_path))[0]
@@ -9850,6 +9872,7 @@ Recent translations to summarize:
                         self.manual_glossary_path = glossary_path
                         self.auto_loaded_glossary_path = glossary_path
                         self.auto_loaded_glossary_for_file = file_path
+                        self.manual_glossary_manually_loaded = False  # This is auto-loaded
                         self.append_log(f"📑 Auto-loaded glossary for {file_base}: {os.path.basename(glossary_path)}")
                         return True
                 except Exception:
@@ -9984,7 +10007,7 @@ Recent translations to summarize:
             
             # Clear glossary for image files
             if hasattr(self, 'auto_loaded_glossary_path'):
-                self.manual_glossary_path = None
+                #self.manual_glossary_path = None
                 self.auto_loaded_glossary_path = None
                 self.auto_loaded_glossary_for_file = None
                 self.append_log("📑 Cleared glossary settings (image files selected)")
@@ -12156,6 +12179,19 @@ Recent translations to summarize:
             messagebox.showinfo("Exported", f"Profiles exported to {path}.")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to export profiles: {e}")
+            
+    def __setattr__(self, name, value):
+        """Debug method to track when manual_glossary_path gets cleared"""
+        if name == 'manual_glossary_path':
+            import traceback
+            if value is None and hasattr(self, 'manual_glossary_path') and self.manual_glossary_path is not None:
+                if hasattr(self, 'append_log'):
+                    self.append_log(f"[DEBUG] CLEARING manual_glossary_path from {self.manual_glossary_path} to None")
+                    self.append_log(f"[DEBUG] Stack trace: {''.join(traceback.format_stack()[-3:-1])}")
+                else:
+                    print(f"[DEBUG] CLEARING manual_glossary_path from {getattr(self, 'manual_glossary_path', 'unknown')} to None")
+                    print(f"[DEBUG] Stack trace: {''.join(traceback.format_stack()[-3:-1])}")
+        super().__setattr__(name, value)
 
     def load_glossary(self):
         """Let the user pick a glossary.json and remember its path."""
@@ -12277,6 +12313,7 @@ Recent translations to summarize:
         self.auto_loaded_glossary_for_file = None
         
         self.manual_glossary_path = path
+        self.manual_glossary_manually_loaded = True
         self.append_log(f"📑 Loaded manual glossary: {path}")
         
         self.append_glossary_var.set(True)
