@@ -7341,8 +7341,57 @@ Recent translations to summarize:
                     base_name = os.path.splitext(image_name)[0]  # Add base_name here
                     self.append_log(f"      📊 Image size: {size_mb:.2f} MB")
                     
-                    # Use the glossary prompt directly on the image
-                    messages = [{"role": "user", "content": self.manual_glossary_prompt}]
+                    # Build prompt exactly like extract_glossary_from_epub.py does
+                    # Check which fields are enabled via config
+                    field_settings = {
+                        'original_name': self.config.get('manual_extract_original_name', True),
+                        'name': self.config.get('manual_extract_name', True),
+                        'gender': self.config.get('manual_extract_gender', True),
+                        'title': self.config.get('manual_extract_title', True),
+                        'group_affiliation': self.config.get('manual_extract_group_affiliation', True),
+                        'traits': self.config.get('manual_extract_traits', True),
+                        'how_they_refer_to_others': self.config.get('manual_extract_how_they_refer_to_others', True),
+                        'locations': self.config.get('manual_extract_locations', True)
+                    }
+                    
+                    # Field descriptions (same as in extract_glossary_from_epub.py)
+                    field_descriptions = {
+                        'original_name': "- original_name: name in the original script",
+                        'name': "- name: English/romanized name",
+                        'gender': "- gender",
+                        'title': "- title (with romanized suffix)",
+                        'group_affiliation': "- group_affiliation",
+                        'traits': "- traits",
+                        'how_they_refer_to_others': "- how_they_refer_to_others (mapping with romanized suffix)",
+                        'locations': "- locations: list of place names mentioned (include the original language in brackets)"
+                    }
+                    
+                    # Build field list based on enabled fields
+                    fields = []
+                    for field_name, is_enabled in field_settings.items():
+                        if is_enabled:
+                            fields.append(field_descriptions[field_name])
+                    
+                    # Add custom fields
+                    if self.custom_glossary_fields:
+                        for field in self.custom_glossary_fields:
+                            fields.append(f"- {field}")
+                    
+                    # Build the prompt with placeholders replaced
+                    fields_str = '\n'.join(fields)
+                    prompt = self.manual_glossary_prompt
+                    
+                    # Replace placeholders (same logic as build_prompt)
+                    prompt = prompt.replace('{fields}', fields_str)
+                    prompt = prompt.replace('{chapter_text}', '')  # No chapter text for images
+                    
+                    # Also support alternative placeholder formats
+                    prompt = prompt.replace('{{fields}}', fields_str)
+                    prompt = prompt.replace('{{chapter_text}}', '')
+                    prompt = prompt.replace('{text}', '')
+                    prompt = prompt.replace('{{text}}', '')
+                    
+                    messages = [{"role": "user", "content": prompt}]
                     
                     # Save request payload
                     payloads_dir = "Payloads"
@@ -7359,7 +7408,9 @@ Recent translations to summarize:
                         "temperature": temperature,
                         "max_tokens": max_tokens,
                         "messages": messages,
-                        "prompt": self.manual_glossary_prompt
+                        "original_prompt_template": self.manual_glossary_prompt,
+                        "processed_prompt": prompt,
+                        "enabled_fields": [field for field, enabled in field_settings.items() if enabled]
                     }
                     
                     with open(payload_file, 'w', encoding='utf-8') as f:
@@ -7414,16 +7465,76 @@ Recent translations to summarize:
                             # Parse JSON
                             glossary_data = json.loads(glossary_json)
                             
+                            # Get the expected field names based on enabled settings
+                            expected_fields = set(['original_name', 'name', 'gender', 'title', 'group_affiliation', 
+                                                  'traits', 'how_they_refer_to_others', 'locations'])
+                            
+                            # Only keep fields that are enabled in settings
+                            enabled_fields = set()
+                            if self.config.get('manual_extract_original_name', True):
+                                enabled_fields.add('original_name')
+                            if self.config.get('manual_extract_name', True):
+                                enabled_fields.add('name')
+                            if self.config.get('manual_extract_gender', True):
+                                enabled_fields.add('gender')
+                            if self.config.get('manual_extract_title', True):
+                                enabled_fields.add('title')
+                            if self.config.get('manual_extract_group_affiliation', True):
+                                enabled_fields.add('group_affiliation')
+                            if self.config.get('manual_extract_traits', True):
+                                enabled_fields.add('traits')
+                            if self.config.get('manual_extract_how_they_refer_to_others', True):
+                                enabled_fields.add('how_they_refer_to_others')
+                            if self.config.get('manual_extract_locations', True):
+                                enabled_fields.add('locations')
+                            
+                            # Add custom fields
+                            if self.custom_glossary_fields:
+                                enabled_fields.update(self.custom_glossary_fields)
+                            
+                            # Function to clean entries - remove any fields not in enabled set
+                            def clean_entry(entry):
+                                if not isinstance(entry, dict):
+                                    return None
+                                
+                                cleaned = {}
+                                for field in enabled_fields:
+                                    if field in entry:
+                                        cleaned[field] = entry[field]
+                                
+                                # Check if entry has at least one valid identifier
+                                has_identifier = False
+                                if self.config.get('manual_extract_original_name', True) and 'original_name' in cleaned:
+                                    has_identifier = True
+                                elif not self.config.get('manual_extract_original_name', True) and 'name' in cleaned:
+                                    has_identifier = True
+                                
+                                # Return cleaned entry only if it has an identifier and at least one other field
+                                if has_identifier and len(cleaned) > 1:
+                                    return cleaned
+                                
+                                # Log skipped entries
+                                invalid_fields = set(entry.keys()) - enabled_fields
+                                if invalid_fields:
+                                    self.append_log(f"      ⚠️ Skipping entry with invalid fields: {', '.join(invalid_fields)}")
+                                    
+                                return None
+                            
                             # Handle different response formats
                             entries_for_this_image = []
                             if isinstance(glossary_data, list):
-                                # It's already a list of entries
-                                entries_for_this_image = glossary_data
-                                all_glossary_entries.extend(glossary_data)
+                                # Clean each entry
+                                for raw_entry in glossary_data:
+                                    cleaned_entry = clean_entry(raw_entry)
+                                    if cleaned_entry:
+                                        entries_for_this_image.append(cleaned_entry)
+                                        all_glossary_entries.append(cleaned_entry)
                                 
-                                # Show each entry with timing info
+                                # Show progress for valid entries only
                                 elapsed = time.time() - start_time
-                                for j, entry in enumerate(glossary_data):
+                                valid_count = len(entries_for_this_image)
+                                
+                                for j, entry in enumerate(entries_for_this_image):
                                     total_entries_extracted += 1
                                     
                                     # Calculate ETA
@@ -7432,46 +7543,45 @@ Recent translations to summarize:
                                     else:
                                         avg_time = elapsed / total_entries_extracted
                                         remaining_images = len(image_files) - (i + 1)
-                                        # Estimate 3 entries per image on average
                                         estimated_remaining_entries = remaining_images * 3
                                         eta = avg_time * estimated_remaining_entries
                                     
-                                    # Get entry name
-                                    entry_name = entry.get('original_name') or entry.get('name') or entry.get('english_name') or "?"
+                                    # Get entry name from correct fields only
+                                    entry_name = entry.get('original_name') or entry.get('name') or "?"
                                     
-                                    # Print in the same format as EPUB glossary extraction
-                                    self.append_log(f'[Image {i+1}/{len(image_files)}] [{j+1}/{len(glossary_data)}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → Entry "{entry_name}"')
-                                    
+                                    # Print progress
+                                    progress_msg = f'[Image {i+1}/{len(image_files)}] [{j+1}/{valid_count}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → Entry "{entry_name}"'
+                                    print(progress_msg)
+                                    self.append_log(progress_msg)
+                                
+                                self.append_log(f"      ✅ Extracted {valid_count} valid entries (skipped {len(glossary_data) - valid_count} with invalid fields)")
+                                
                             elif isinstance(glossary_data, dict):
                                 # It might have categories
-                                extracted_count = 0
                                 all_entries_this_image = []
                                 
-                                if 'characters' in glossary_data:
-                                    entries_for_this_image.extend(glossary_data['characters'])
-                                    all_glossary_entries.extend(glossary_data['characters'])
-                                    all_entries_this_image.extend(glossary_data['characters'])
-                                    extracted_count += len(glossary_data['characters'])
-                                if 'locations' in glossary_data:
-                                    entries_for_this_image.extend(glossary_data['locations'])
-                                    all_glossary_entries.extend(glossary_data['locations'])
-                                    all_entries_this_image.extend(glossary_data['locations'])
-                                    extracted_count += len(glossary_data['locations'])
-                                if 'terms' in glossary_data:
-                                    entries_for_this_image.extend(glossary_data['terms'])
-                                    all_glossary_entries.extend(glossary_data['terms'])
-                                    all_entries_this_image.extend(glossary_data['terms'])
-                                    extracted_count += len(glossary_data['terms'])
+                                # Process each category
+                                for category in ['characters', 'locations', 'terms']:
+                                    if category in glossary_data and isinstance(glossary_data[category], list):
+                                        for raw_entry in glossary_data[category]:
+                                            cleaned_entry = clean_entry(raw_entry)
+                                            if cleaned_entry:
+                                                entries_for_this_image.append(cleaned_entry)
+                                                all_glossary_entries.append(cleaned_entry)
+                                                all_entries_this_image.append(cleaned_entry)
                                 
-                                if extracted_count == 0:
-                                    # Maybe it's a single entry
-                                    entries_for_this_image = [glossary_data]
-                                    all_glossary_entries.append(glossary_data)
-                                    all_entries_this_image = [glossary_data]
-                                    extracted_count = 1
+                                # Or it might be a single entry
+                                if not all_entries_this_image:
+                                    cleaned_entry = clean_entry(glossary_data)
+                                    if cleaned_entry:
+                                        entries_for_this_image = [cleaned_entry]
+                                        all_glossary_entries.append(cleaned_entry)
+                                        all_entries_this_image = [cleaned_entry]
                                 
-                                # Show each entry with timing info
+                                # Show progress for valid entries
                                 elapsed = time.time() - start_time
+                                valid_count = len(all_entries_this_image)
+                                
                                 for j, entry in enumerate(all_entries_this_image):
                                     total_entries_extracted += 1
                                     
@@ -7481,15 +7591,21 @@ Recent translations to summarize:
                                     else:
                                         avg_time = elapsed / total_entries_extracted
                                         remaining_images = len(image_files) - (i + 1)
-                                        # Estimate 3 entries per image on average
                                         estimated_remaining_entries = remaining_images * 3
                                         eta = avg_time * estimated_remaining_entries
                                     
-                                    # Get entry name
-                                    entry_name = entry.get('original_name') or entry.get('name') or entry.get('english_name') or "?"
+                                    # Get entry name from correct fields only
+                                    entry_name = entry.get('original_name') or entry.get('name') or "?"
                                     
-                                    # Print in the same format as EPUB glossary extraction
-                                    self.append_log(f'[Image {i+1}/{len(image_files)}] [{j+1}/{extracted_count}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → Entry "{entry_name}"')
+                                    # Print progress
+                                    progress_msg = f'[Image {i+1}/{len(image_files)}] [{j+1}/{valid_count}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → Entry "{entry_name}"'
+                                    print(progress_msg)
+                                    self.append_log(progress_msg)
+                                
+                                if valid_count > 0:
+                                    self.append_log(f"      ✅ Extracted {valid_count} valid entries")
+                                else:
+                                    self.append_log(f"      ⚠️ No valid entries found")
                             
                             # Update progress with the extracted data
                             self.glossary_progress_manager.update(
