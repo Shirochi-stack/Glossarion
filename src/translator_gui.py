@@ -7118,55 +7118,512 @@ Recent translations to summarize:
            
        }
         print(f"[DEBUG] DISABLE_CHAPTER_MERGING = '{os.getenv('DISABLE_CHAPTER_MERGING', '0')}'")
+        
     def run_glossary_extraction_thread(self):
-       """Start glossary extraction in a separate thread"""
-       if not self._lazy_load_modules():
-           self.append_log("❌ Failed to load glossary modules")
-           return
-       
-       if glossary_main is None:
-           self.append_log("❌ Glossary extraction module is not available")
-           messagebox.showerror("Module Error", "Glossary extraction module is not available.")
-           return
-       
-       if hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive():
-           self.append_log("⚠️ Cannot run glossary extraction while translation is in progress.")
-           messagebox.showwarning("Process Running", "Please wait for translation to complete before extracting glossary.")
-           return
-       
-       if self.glossary_thread and self.glossary_thread.is_alive():
-           self.stop_glossary_extraction()
-           return
-       
-       self.stop_requested = False
-       if glossary_stop_flag:
-           glossary_stop_flag(False)
-       self.glossary_thread = threading.Thread(target=self.run_glossary_extraction_direct, daemon=True)
-       self.glossary_thread.start()
-       self.master.after(100, self.update_run_button)
+        """Start glossary extraction in a separate thread"""
+        if hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive():
+            self.append_log("⚠️ Cannot run glossary extraction while translation is in progress.")
+            messagebox.showwarning("Process Running", "Please wait for translation to complete before extracting glossary.")
+            return
+        
+        if self.glossary_thread and self.glossary_thread.is_alive():
+            self.stop_glossary_extraction()
+            return
+        
+        # Check if files are selected
+        if not hasattr(self, 'selected_files') or not self.selected_files:
+            # Try to get file from entry field (backward compatibility)
+            file_path = self.entry_epub.get().strip()
+            if not file_path or file_path.startswith("No file selected") or "files selected" in file_path:
+                messagebox.showerror("Error", "Please select file(s) to extract glossary from.")
+                return
+            self.selected_files = [file_path]
+        
+        self.stop_requested = False
+        if glossary_stop_flag:
+            glossary_stop_flag(False)
+        
+        self.glossary_thread = threading.Thread(target=self.run_glossary_extraction_direct, daemon=True)
+        self.glossary_thread.start()
+        self.master.after(100, self.update_run_button)
 
     def run_glossary_extraction_direct(self):
-        """Run glossary extraction directly without subprocess"""
+        """Run glossary extraction directly - handles multiple files and different file types"""
         try:
-            input_path = self.entry_epub.get()
-            if not input_path or not os.path.isfile(input_path):
-                self.append_log("❌ Error: Please select a valid EPUB or text file for glossary extraction.")
+            self.append_log("🔄 Loading glossary modules...")
+            if not self._lazy_load_modules():
+                self.append_log("❌ Failed to load glossary modules")
                 return
             
-            api_key = self.api_key_entry.get()
-            model = self.model_var.get()
+            if glossary_main is None:
+                self.append_log("❌ Glossary extraction module is not available")
+                return
+
+            # Process each file
+            total_files = len(self.selected_files)
+            successful = 0
+            failed = 0
             
-            # ADD THIS: Validate Vertex AI credentials
+            # Check if we're processing multiple files
+            if total_files > 1:
+                self.append_log(f"📚 Processing {total_files} files for glossary extraction")
+            
+            for i, file_path in enumerate(self.selected_files):
+                if self.stop_requested:
+                    self.append_log(f"⏹️ Glossary extraction stopped by user at file {i+1}/{total_files}")
+                    break
+                
+                self.current_file_index = i
+                
+                # Log progress for multiple files
+                if total_files > 1:
+                    self.append_log(f"\n{'='*60}")
+                    self.append_log(f"📄 Processing file {i+1}/{total_files}: {os.path.basename(file_path)}")
+                    progress_percent = ((i + 1) / total_files) * 100
+                    self.append_log(f"📊 Overall progress: {progress_percent:.1f}%")
+                    self.append_log(f"{'='*60}")
+                
+                if not os.path.exists(file_path):
+                    self.append_log(f"❌ File not found: {file_path}")
+                    failed += 1
+                    continue
+                
+                # Determine file type and process accordingly
+                ext = os.path.splitext(file_path)[1].lower()
+                image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
+                
+                try:
+                    if ext in image_extensions:
+                        # Process as image
+                        if self._extract_glossary_from_image(file_path):
+                            successful += 1
+                        else:
+                            failed += 1
+                    elif ext in {'.epub', '.txt'}:
+                        # Process as EPUB/TXT
+                        if self._extract_glossary_from_text_file(file_path):
+                            successful += 1
+                        else:
+                            failed += 1
+                    else:
+                        self.append_log(f"⚠️ Unsupported file type for glossary extraction: {ext}")
+                        failed += 1
+                        
+                except Exception as e:
+                    self.append_log(f"❌ Error processing {os.path.basename(file_path)}: {str(e)}")
+                    import traceback
+                    self.append_log(f"❌ Full error: {traceback.format_exc()}")
+                    failed += 1
+            
+            # Final summary
+            if total_files > 1:
+                self.append_log(f"\n{'='*60}")
+                self.append_log(f"📊 Glossary Extraction Summary:")
+                self.append_log(f"   ✅ Successful: {successful} files")
+                if failed > 0:
+                    self.append_log(f"   ❌ Failed: {failed} files")
+                self.append_log(f"   📁 Total: {total_files} files")
+                self.append_log(f"{'='*60}")
+            
+        except Exception as e:
+            self.append_log(f"❌ Glossary extraction setup error: {e}")
+            import traceback
+            self.append_log(f"❌ Full error: {traceback.format_exc()}")
+        
+        finally:
+            self.stop_requested = False
+            if glossary_stop_flag:
+                glossary_stop_flag(False)
+            self.glossary_thread = None
+            self.current_file_index = 0
+            self.master.after(0, self.update_run_button)
+
+    def _extract_glossary_from_image(self, image_path):
+        """Extract glossary from an image file using vision API with progress tracking"""
+        try:
+            import time
+            import hashlib
+            import os
+            import json
+            
+            # Get image name and base name
+            image_name = os.path.basename(image_path)
+            base_name = os.path.splitext(image_name)[0]
+            
+            # Initialize glossary progress manager if not already done
+            if not hasattr(self, 'glossary_progress_manager'):
+                # Define a simplified GlossaryProgressManager
+                class GlossaryProgressManager:
+                    def __init__(self):
+                        self.PROGRESS_FILE = "glossary_extraction_progress.json"
+                        self.prog = self._init_or_load()
+                    
+                    def _init_or_load(self):
+                        """Initialize or load progress tracking"""
+                        if os.path.exists(self.PROGRESS_FILE):
+                            try:
+                                with open(self.PROGRESS_FILE, "r", encoding="utf-8") as pf:
+                                    return json.load(pf)
+                            except Exception as e:
+                                self.append_log(f"⚠️ Creating new progress file due to error: {e}")
+                                return {"images": {}, "content_hashes": {}, "version": "1.0"}
+                        else:
+                            return {"images": {}, "content_hashes": {}, "version": "1.0"}
+                    
+                    def save(self):
+                        """Save progress to file atomically"""
+                        try:
+                            temp_file = self.PROGRESS_FILE + '.tmp'
+                            with open(temp_file, "w", encoding="utf-8") as pf:
+                                json.dump(self.prog, pf, ensure_ascii=False, indent=2)
+                            
+                            if os.path.exists(self.PROGRESS_FILE):
+                                os.remove(self.PROGRESS_FILE)
+                            os.rename(temp_file, self.PROGRESS_FILE)
+                        except Exception as e:
+                            if hasattr(self, 'append_log'):
+                                self.append_log(f"⚠️ Failed to save progress: {e}")
+                            else:
+                                print(f"⚠️ Failed to save progress: {e}")
+                    
+                    def get_content_hash(self, file_path):
+                        """Generate content hash for a file"""
+                        hasher = hashlib.sha256()
+                        with open(file_path, 'rb') as f:
+                            # Read in chunks to handle large files
+                            for chunk in iter(lambda: f.read(4096), b""):
+                                hasher.update(chunk)
+                        return hasher.hexdigest()
+                    
+                    def check_image_status(self, image_path, content_hash):
+                        """Check if an image needs glossary extraction"""
+                        image_name = os.path.basename(image_path)
+                        
+                        # Check for skip markers
+                        skip_key = f"skip_{image_name}"
+                        if skip_key in self.prog:
+                            skip_info = self.prog[skip_key]
+                            if skip_info.get('status') == 'skipped':
+                                return False, f"Image marked as skipped", None
+                        
+                        # Check if image has already been processed
+                        if content_hash in self.prog["images"]:
+                            image_info = self.prog["images"][content_hash]
+                            status = image_info.get("status")
+                            output_file = image_info.get("output_file")
+                            
+                            if status == "completed" and output_file:
+                                # Check if output file exists
+                                if output_file and os.path.exists(output_file):
+                                    return False, f"Glossary already extracted: {output_file}", output_file
+                                else:
+                                    # Output file missing, mark for re-extraction
+                                    image_info["status"] = "file_deleted"
+                                    image_info["deletion_detected"] = time.time()
+                                    self.save()
+                                    return True, None, None
+                            
+                            elif status == "skipped_cover":
+                                return False, "Cover image - skipped", None
+                            
+                            elif status == "error":
+                                # Previous error, retry
+                                return True, None, None
+                        
+                        # Check for duplicate content
+                        if content_hash in self.prog.get("content_hashes", {}):
+                            duplicate_info = self.prog["content_hashes"][content_hash]
+                            duplicate_output = duplicate_info.get("output_file")
+                            if duplicate_output and os.path.exists(duplicate_output):
+                                return False, f"Duplicate of {duplicate_info.get('original_name')}", duplicate_output
+                        
+                        return True, None, None
+                    
+                    def update(self, image_path, content_hash, output_file=None, status="in_progress", error=None):
+                        """Update progress for an image"""
+                        image_name = os.path.basename(image_path)
+                        
+                        image_info = {
+                            "name": image_name,
+                            "path": image_path,
+                            "content_hash": content_hash,
+                            "status": status,
+                            "last_updated": time.time()
+                        }
+                        
+                        if output_file:
+                            image_info["output_file"] = output_file
+                        
+                        if error:
+                            image_info["error"] = str(error)
+                        
+                        self.prog["images"][content_hash] = image_info
+                        
+                        # Update content hash index for duplicates
+                        if status == "completed" and output_file:
+                            self.prog["content_hashes"][content_hash] = {
+                                "original_name": image_name,
+                                "output_file": output_file
+                            }
+                        
+                        self.save()
+                
+                # Initialize the progress manager
+                self.glossary_progress_manager = GlossaryProgressManager()
+                # Add append_log reference for the progress manager
+                self.glossary_progress_manager.append_log = self.append_log
+                self.append_log(f"📊 Progress tracking in: glossary_extraction_progress.json")
+            
+            # Get content hash for the image
+            try:
+                content_hash = self.glossary_progress_manager.get_content_hash(image_path)
+            except Exception as e:
+                self.append_log(f"⚠️ Could not generate content hash: {e}")
+                # Fallback to using file path as identifier
+                content_hash = hashlib.sha256(image_path.encode()).hexdigest()
+            
+            # Check if image needs glossary extraction
+            needs_extraction, skip_reason, existing_output = self.glossary_progress_manager.check_image_status(
+                image_path, content_hash
+            )
+            
+            if not needs_extraction:
+                self.append_log(f"⏭️ {skip_reason}")
+                
+                # Load and show existing glossary stats if available
+                if existing_output and os.path.exists(existing_output):
+                    try:
+                        with open(existing_output, 'r', encoding='utf-8') as f:
+                            glossary_data = json.load(f)
+                        if isinstance(glossary_data, dict):
+                            chars = len(glossary_data.get('characters', []))
+                            locs = len(glossary_data.get('locations', []))
+                            terms = len(glossary_data.get('terms', []))
+                            self.append_log(f"   👥 Characters: {chars}, 📍 Locations: {locs}, 📚 Terms: {terms}")
+                    except:
+                        pass
+                
+                return True  # Return True for successful skip
+            
+            # Update progress to "in_progress"
+            self.glossary_progress_manager.update(image_path, content_hash, status="in_progress")
+            
+            # Check for cover images
+            if 'cover' in image_name.lower():
+                self.append_log(f"⏭️ Skipping cover image: {image_name}")
+                
+                # Update progress for cover
+                self.glossary_progress_manager.update(image_path, content_hash, status="skipped_cover")
+                
+                return True  # Return True for successful skip
+            
+            self.append_log(f"🖼️ Processing image for glossary: {os.path.basename(image_path)}")
+            
+            # Get API key and model
+            api_key = self.api_key_entry.get().strip()
+            model = self.model_var.get().strip()
+            
+            # Validate Vertex AI credentials if needed
             if '@' in model or model.startswith('vertex/'):
                 google_creds = self.config.get('google_cloud_credentials')
                 if not google_creds or not os.path.exists(google_creds):
                     self.append_log("❌ Error: Google Cloud credentials required for Vertex AI models.")
-                    messagebox.showerror(
-                        "Error", 
-                        "Google Cloud credentials required for Vertex AI models.\n\n" +
-                        "Please click 'GCloud Creds' to select your service account JSON file."
-                    )
-                    return
+                    self.glossary_progress_manager.update(image_path, content_hash, status="error", error="No Google credentials")
+                    return False
+                
+                os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_creds
+                self.append_log(f"🔑 Using Google Cloud credentials: {os.path.basename(google_creds)}")
+                
+                if not api_key:
+                    try:
+                        with open(google_creds, 'r') as f:
+                            creds_data = json.load(f)
+                            api_key = creds_data.get('project_id', 'vertex-ai-project')
+                    except:
+                        api_key = 'vertex-ai-project'
+            elif not api_key:
+                self.append_log("❌ Error: Please enter your API key.")
+                self.glossary_progress_manager.update(image_path, content_hash, status="error", error="No API key")
+                return False
+            
+            if not model:
+                self.append_log("❌ Error: Please select a model.")
+                self.glossary_progress_manager.update(image_path, content_hash, status="error", error="No model selected")
+                return False
+            
+            # Check if it's a vision-capable model
+            vision_models = [
+                'claude-opus-4-20250514', 'claude-sonnet-4-20250514',
+                'gpt-4-turbo', 'gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini',
+                'gpt-4-vision-preview',
+                'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-exp',
+                'gemini-2.5-pro', 'gemini-2.5-flash',
+                'llama-3.2-11b-vision', 'llama-3.2-90b-vision',
+                'eh/gemini-2.5-flash', 'eh/gemini-1.5-flash', 'eh/gpt-4o'
+            ]
+            
+            model_lower = model.lower()
+            if not any(vm in model_lower for vm in [m.lower() for m in vision_models]):
+                self.append_log(f"⚠️ Model '{model}' may not support vision. Trying anyway...")
+            
+            # Initialize API client
+            try:
+                from unified_api_client import UnifiedClient
+                client = UnifiedClient(model=model, api_key=api_key)
+            except Exception as e:
+                self.append_log(f"❌ Failed to initialize API client: {str(e)}")
+                self.glossary_progress_manager.update(image_path, content_hash, status="error", error=f"API client init failed: {e}")
+                return False
+            
+            # Read the image
+            try:
+                with open(image_path, 'rb') as img_file:
+                    image_data = img_file.read()
+                
+                import base64
+                image_base64 = base64.b64encode(image_data).decode('utf-8')
+                
+                size_mb = len(image_data) / (1024 * 1024)
+                self.append_log(f"📊 Image size: {size_mb:.2f} MB")
+                
+            except Exception as e:
+                self.append_log(f"❌ Failed to read image: {str(e)}")
+                self.glossary_progress_manager.update(image_path, content_hash, status="error", error=f"Failed to read image: {e}")
+                return False
+            
+            # Build glossary extraction prompt
+            glossary_prompt = self.manual_glossary_prompt or """Extract character names, titles, locations, and important terms from this image. 
+            Format the output as a JSON object with categories like:
+            {
+                "characters": [{"name": "...", "original_name": "...", "gender": "...", "title": "...", "traits": "..."}],
+                "locations": [{"name": "...", "original_name": "...", "description": "..."}],
+                "terms": [{"term": "...", "original_term": "...", "definition": "..."}]
+            }
+            
+            IMPORTANT: Output ONLY the JSON object, no other text or markdown formatting."""
+            
+            messages = [
+                {"role": "system", "content": glossary_prompt},
+                {"role": "user", "content": "Extract glossary terms from this image. Output only JSON."}
+            ]
+            
+            temperature = float(self.config.get('manual_glossary_temperature', 0.1))
+            max_tokens = int(self.max_output_tokens_var.get()) if hasattr(self, 'max_output_tokens_var') else 8192
+            
+            self.append_log(f"🌐 Sending image to vision API for glossary extraction...")
+            self.append_log(f"   Temperature: {temperature}")
+            self.append_log(f"   Max tokens: {max_tokens}")
+            
+            try:
+                # Create Payloads directory for API response tracking
+                payloads_dir = "Payloads"
+                os.makedirs(payloads_dir, exist_ok=True)
+                
+                # Create timestamp for unique filename
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                payload_file = os.path.join(payloads_dir, f"glossary_api_{timestamp}_{base_name}.json")
+                
+                # Make the API call
+                response = client.send_image(
+                    messages,
+                    image_base64,
+                    temperature=temperature,
+                    max_tokens=max_tokens
+                )
+                
+                # Extract content from response
+                response_content = None
+                if hasattr(response, 'content'):
+                    response_content = response.content
+                elif isinstance(response, tuple) and len(response) >= 2:
+                    response_content, _ = response
+                elif isinstance(response, str):
+                    response_content = response
+                
+                if response_content:
+                    # Try to parse as JSON
+                    glossary_data = None
+                    try:
+                        # Clean up response content
+                        response_content = response_content.strip()
+                        # Remove markdown code blocks if present
+                        if response_content.startswith('```'):
+                            response_content = response_content.split('```')[1]
+                            if response_content.startswith('json'):
+                                response_content = response_content[4:]
+                        response_content = response_content.strip()
+                        
+                        glossary_data = json.loads(response_content)
+                        self.append_log(f"✅ Extracted glossary from image")
+                        
+                        # Save glossary to file with image name
+                        glossary_file = f"{base_name}_glossary.json"
+                        with open(glossary_file, 'w', encoding='utf-8') as f:
+                            json.dump(glossary_data, f, ensure_ascii=False, indent=2)
+                        
+                        # Update progress to completed
+                        self.glossary_progress_manager.update(image_path, content_hash, output_file=glossary_file, status="completed")
+                        
+                        # Show summary
+                        if isinstance(glossary_data, dict):
+                            chars = len(glossary_data.get('characters', []))
+                            locs = len(glossary_data.get('locations', []))
+                            terms = len(glossary_data.get('terms', []))
+                            self.append_log(f"   👥 Characters: {chars}")
+                            self.append_log(f"   📍 Locations: {locs}")
+                            self.append_log(f"   📚 Terms: {terms}")
+                        
+                        self.append_log(f"✅ Glossary saved to: {glossary_file}")
+                        
+                        return True
+                        
+                    except json.JSONDecodeError as e:
+                        self.append_log(f"⚠️ Response is not valid JSON: {e}")
+                        self.append_log(f"   Attempting to parse as text...")
+                        # Attempt to extract structured data from non-JSON response
+                        glossary_data = self._parse_text_glossary(response_content)
+                        if glossary_data:
+                            # Save parsed glossary
+                            glossary_file = f"{base_name}_glossary.json"
+                            with open(glossary_file, 'w', encoding='utf-8') as f:
+                                json.dump(glossary_data, f, ensure_ascii=False, indent=2)
+                            
+                            self.glossary_progress_manager.update(image_path, content_hash, output_file=glossary_file, status="completed")
+                            self.append_log(f"✅ Parsed glossary saved to: {glossary_file}")
+                            return True
+                        else:
+                            self.glossary_progress_manager.update(image_path, content_hash, status="error", error="Failed to parse response")
+                            return False
+                else:
+                    self.append_log(f"❌ No glossary data extracted from image")
+                    self.glossary_progress_manager.update(image_path, content_hash, status="error", error="No response from API")
+                    return False
+                    
+            except Exception as e:
+                self.append_log(f"❌ API call failed: {str(e)}")
+                import traceback
+                self.append_log(f"❌ Full error: {traceback.format_exc()}")
+                self.glossary_progress_manager.update(image_path, content_hash, status="error", error=f"API call failed: {e}")
+                return False
+            
+        except Exception as e:
+            self.append_log(f"❌ Error extracting glossary from image: {str(e)}")
+            import traceback
+            self.append_log(f"❌ Full error: {traceback.format_exc()}")
+            return False
+
+    def _extract_glossary_from_text_file(self, file_path):
+        """Extract glossary from EPUB or TXT file using existing glossary extraction"""
+        try:
+            api_key = self.api_key_entry.get()
+            model = self.model_var.get()
+            
+            # Validate Vertex AI credentials if needed
+            if '@' in model or model.startswith('vertex/'):
+                google_creds = self.config.get('google_cloud_credentials')
+                if not google_creds or not os.path.exists(google_creds):
+                    self.append_log("❌ Error: Google Cloud credentials required for Vertex AI models.")
+                    return False
                 
                 os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_creds
                 self.append_log(f"🔑 Using Google Cloud credentials: {os.path.basename(google_creds)}")
@@ -7181,18 +7638,22 @@ Recent translations to summarize:
                         api_key = 'vertex-ai-project'
             elif not api_key:
                 self.append_log("❌ Error: Please enter your API key.")
-                return
+                return False
             
             old_argv = sys.argv
             old_env = dict(os.environ)
             
+            # Output file for this specific input
+            epub_base = os.path.splitext(os.path.basename(file_path))[0]
+            output_path = f"{epub_base}_glossary.json"
+            
             try:
-                # ADD THIS: Include Google Cloud env vars if using Vertex AI
+                # Set up environment variables
                 env_updates = {
                     'GLOSSARY_TEMPERATURE': str(self.config.get('manual_glossary_temperature', 0.1)),
                     'GLOSSARY_CONTEXT_LIMIT': str(self.config.get('manual_context_limit', 2)),
                     'MODEL': self.model_var.get(),
-                    'OPENAI_API_KEY': api_key,  # Changed to use the api_key variable
+                    'OPENAI_API_KEY': api_key,
                     'OPENAI_OR_Gemini_API_KEY': api_key,
                     'API_KEY': api_key,
                     'MAX_OUTPUT_TOKENS': str(self.max_output_tokens),
@@ -7212,10 +7673,10 @@ Recent translations to summarize:
                     'GLOSSARY_DUPLICATE_CUSTOM_FIELD': self.config.get('glossary_duplicate_custom_field', ''),
                     'SEND_INTERVAL_SECONDS': str(self.delay_entry.get()),
                     'CONTEXTUAL': '1' if self.contextual_var.get() else '0',
-                    'GOOGLE_APPLICATION_CREDENTIALS': os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),  # ADD THIS
+                    'GOOGLE_APPLICATION_CREDENTIALS': os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),
                 }
                 
-                # ADD THIS: Extract project ID for Vertex AI
+                # Add project ID for Vertex AI
                 if '@' in model or model.startswith('vertex/'):
                     google_creds = self.config.get('google_cloud_credentials')
                     if google_creds and os.path.exists(google_creds):
@@ -7248,42 +7709,135 @@ Recent translations to summarize:
                         os.environ['MAX_INPUT_TOKENS'] = '50000'
                         self.append_log(f"🎯 Input Token Limit: 50000 (default)")
                 
-                epub_base = os.path.splitext(os.path.basename(input_path))[0]
-                output_path = f"{epub_base}_glossary.json"
-                
                 sys.argv = [
                     'extract_glossary_from_epub.py',
-                    '--epub', input_path,
+                    '--epub', file_path,
                     '--output', output_path,
                     '--config', CONFIG_FILE
                 ]
                 
-                self.append_log("🚀 Starting glossary extraction...")
+                self.append_log(f"🚀 Extracting glossary from: {os.path.basename(file_path)}")
                 self.append_log(f"📤 Output Token Limit: {self.max_output_tokens}")
                 os.environ['MAX_OUTPUT_TOKENS'] = str(self.max_output_tokens)
                 
+                # Run glossary extraction
                 glossary_main(
                     log_callback=self.append_log,
                     stop_callback=lambda: self.stop_requested
                 )
                 
-                if not self.stop_requested:
-                    self.append_log("✅ Glossary extraction completed successfully!")
+                if not self.stop_requested and os.path.exists(output_path):
+                    self.append_log(f"✅ Glossary saved to: {output_path}")
+                    return True
+                else:
+                    return False
                 
             finally:
                 sys.argv = old_argv
                 os.environ.clear()
                 os.environ.update(old_env)
-        
+                
         except Exception as e:
-            self.append_log(f"❌ Glossary extraction error: {e}")
-        
-        finally:
-            self.stop_requested = False
-            if glossary_stop_flag:
-                glossary_stop_flag(False)
-            self.glossary_thread = None
-            self.master.after(0, self.update_run_button)
+            self.append_log(f"❌ Error extracting glossary from {os.path.basename(file_path)}: {e}")
+            return False
+
+    def _parse_text_glossary(self, text):
+        """Parse glossary data from unstructured text response"""
+        try:
+            glossary = {
+                "characters": [],
+                "locations": [],
+                "terms": []
+            }
+            
+            # More robust parsing logic
+            lines = text.split('\n')
+            current_section = None
+            current_entry = {}
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    # Save current entry if exists
+                    if current_entry and current_section:
+                        if current_section == 'characters' and 'name' in current_entry:
+                            glossary['characters'].append(current_entry)
+                        elif current_section == 'locations' and 'name' in current_entry:
+                            glossary['locations'].append(current_entry)
+                        elif current_section == 'terms' and 'term' in current_entry:
+                            glossary['terms'].append(current_entry)
+                        current_entry = {}
+                    continue
+                
+                # Detect sections
+                line_lower = line.lower()
+                if any(word in line_lower for word in ['character', 'person', 'people', '인물', 'キャラクター']):
+                    current_section = 'characters'
+                    current_entry = {}
+                elif any(word in line_lower for word in ['location', 'place', 'setting', '장소', '場所']):
+                    current_section = 'locations'
+                    current_entry = {}
+                elif any(word in line_lower for word in ['term', 'word', 'concept', '용어', '用語']):
+                    current_section = 'terms'
+                    current_entry = {}
+                elif current_section:
+                    # Try to parse as key:value or structured data
+                    if ':' in line:
+                        parts = line.split(':', 1)
+                        if len(parts) == 2:
+                            key = parts[0].strip().lower()
+                            value = parts[1].strip()
+                            
+                            # Map common keys
+                            if current_section == 'characters':
+                                if any(k in key for k in ['name', '이름', '名前']):
+                                    current_entry['name'] = value
+                                elif any(k in key for k in ['original', '원래', '원명', '原名']):
+                                    current_entry['original_name'] = value
+                                elif any(k in key for k in ['gender', '성별', '性別']):
+                                    current_entry['gender'] = value
+                                elif any(k in key for k in ['title', '직책', '称号']):
+                                    current_entry['title'] = value
+                                elif any(k in key for k in ['trait', '특성', '特徴']):
+                                    current_entry['traits'] = value
+                            elif current_section == 'locations':
+                                if any(k in key for k in ['name', '이름', '名前']):
+                                    current_entry['name'] = value
+                                elif any(k in key for k in ['original', '원래', '원명', '原名']):
+                                    current_entry['original_name'] = value
+                                elif any(k in key for k in ['description', '설명', '説明']):
+                                    current_entry['description'] = value
+                            elif current_section == 'terms':
+                                if any(k in key for k in ['term', '용어', '用語']):
+                                    current_entry['term'] = value
+                                elif any(k in key for k in ['original', '원래', '원어', '原語']):
+                                    current_entry['original_term'] = value
+                                elif any(k in key for k in ['definition', '정의', '定義', 'meaning']):
+                                    current_entry['definition'] = value
+                    elif '-' in line and current_section:
+                        # Handle bullet points
+                        content = line.lstrip('-').strip()
+                        if current_section == 'characters':
+                            glossary['characters'].append({"name": content})
+                        elif current_section == 'locations':
+                            glossary['locations'].append({"name": content})
+                        elif current_section == 'terms':
+                            glossary['terms'].append({"term": content})
+            
+            # Save last entry
+            if current_entry and current_section:
+                if current_section == 'characters' and 'name' in current_entry:
+                    glossary['characters'].append(current_entry)
+                elif current_section == 'locations' and 'name' in current_entry:
+                    glossary['locations'].append(current_entry)
+                elif current_section == 'terms' and 'term' in current_entry:
+                    glossary['terms'].append(current_entry)
+            
+            return glossary if any(glossary.values()) else None
+            
+        except Exception as e:
+            self.append_log(f"⚠️ Failed to parse text glossary: {e}")
+            return None
         
     def epub_converter(self):
        """Start EPUB converter in a separate thread"""
