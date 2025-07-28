@@ -5265,12 +5265,64 @@ def main(log_callback=None, stop_callback=None):
             instructions = ""
             glossary_manager.save_glossary(out, chapters, instructions)
             print("✅ Automatic glossary generation COMPLETED")
+            
+            # Handle deferred glossary appending
+            if os.getenv('DEFER_GLOSSARY_APPEND') == '1':
+                print("📑 Processing deferred glossary append to system prompt...")
+                
+                glossary_path = os.path.join(out, "glossary.json")
+                if os.path.exists(glossary_path):
+                    try:
+                        with open(glossary_path, 'r', encoding='utf-8') as f:
+                            glossary_data = json.load(f)
+                        
+                        # Format glossary for prompt
+                        formatted_entries = {}
+                        
+                        if isinstance(glossary_data, dict) and 'entries' in glossary_data:
+                            formatted_entries = glossary_data['entries']
+                        elif isinstance(glossary_data, dict):
+                            formatted_entries = {k: v for k, v in glossary_data.items() if k != "metadata"}
+                        
+                        if formatted_entries:
+                            glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
+                            
+                            # Get the stored append prompt
+                            glossary_prompt = os.getenv('GLOSSARY_APPEND_PROMPT', 
+                                "Character/Term Glossary (use these translations consistently):")
+                            
+                            # Update the system prompt in config
+                            current_prompt = config.PROMPT
+                            if current_prompt:
+                                current_prompt += "\n\n"
+                            current_prompt += f"{glossary_prompt}\n{glossary_block}"
+                            
+                            # Update the config with the new prompt
+                            config.PROMPT = current_prompt
+                            
+                            print(f"✅ Added {len(formatted_entries)} auto-generated glossary entries to system prompt")
+                            
+                            # Clear the deferred flag
+                            del os.environ['DEFER_GLOSSARY_APPEND']
+                            if 'GLOSSARY_APPEND_PROMPT' in os.environ:
+                                del os.environ['GLOSSARY_APPEND_PROMPT']
+                        else:
+                            print("⚠️ Auto-generated glossary has no entries - skipping append")
+                            # Still clear the deferred flag even if we don't append
+                            if 'DEFER_GLOSSARY_APPEND' in os.environ:
+                                del os.environ['DEFER_GLOSSARY_APPEND']
+                            if 'GLOSSARY_APPEND_PROMPT' in os.environ:
+                                del os.environ['GLOSSARY_APPEND_PROMPT']
+                    except Exception as e:
+                        print(f"⚠️ Failed to append auto-generated glossary: {e}")
+                else:
+                    print("⚠️ No glossary file found after automatic generation")
+            
         except Exception as e:
             print(f"❌ Glossary generation failed: {e}")
     else:
-        print("📑 Automatic glossary disabled - no glossary will be used")
-        with open(os.path.join(out, "glossary.json"), 'w', encoding='utf-8') as f:
-            json.dump({}, f, ensure_ascii=False, indent=2)
+        print("📑 Automatic glossary generation disabled")
+        # Don't create an empty glossary - let any existing manual glossary remain
 
     glossary_path = os.path.join(out, "glossary.json")
     if os.path.exists(glossary_path):
