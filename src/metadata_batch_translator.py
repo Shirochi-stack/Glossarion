@@ -34,6 +34,10 @@ class MetadataBatchTranslatorUI:
         if 'batch_header_prompt' not in self.gui.config:
             self.gui.config['batch_header_prompt'] = (
                 "Translate these chapter titles to English.\n"
+                "- For titles with parentheses containing Chinese/Japanese characters (like 終篇, 完結編, etc.), translate both the main title and the parenthetical text.\n"
+                "- Common markers: 終篇/終章 = 'Final Chapter', 完結編 = 'Final Arc/Volume', 後編 = 'Part 2', 前編 = 'Part 1'.\n"
+                "- Translate the meaning accurately - don't use overly dramatic words unless the original implies them.\n"
+                "- Preserve the chapter number format exactly as shown.\n"
                 "Return ONLY a JSON object with chapter numbers as keys.\n"
                 "Format: {\"1\": \"translated title\", \"2\": \"translated title\"}"
             )
@@ -42,18 +46,18 @@ class MetadataBatchTranslatorUI:
         if 'metadata_batch_prompt' not in self.gui.config:
             self.gui.config['metadata_batch_prompt'] = (
                 "Translate the following metadata fields to English.\n"
-                "Return ONLY a JSON object with the same field names as keys."
+                "Output ONLY a JSON object with the same field names as keys."
             )
         
         # Field-specific prompts
         if 'metadata_field_prompts' not in self.gui.config:
             self.gui.config['metadata_field_prompts'] = {
-                'creator': "Translate this author name to English (romanize if needed):",
-                'publisher': "Translate this publisher name to English:",
-                'subject': "Translate this book genre/subject to English:",
-                'description': "Translate this book description to English:",
-                'series': "Translate this series name to English:",
-                '_default': "Translate this text to English:"
+                'creator': "Translate this author name to English (romanize if needed). Do not output anything other than the translated text:",
+                'publisher': "Translate this publisher name to English. Do not output anything other than the translated text:",
+                'subject': "Translate this book genre/subject to English. Do not output anything other than the translated text:",
+                'description': "Translate this book description to English. Do not output anything other than the translated text:",
+                'series': "Translate this series name to English. Do not output anything other than the translated text:",
+                '_default': "Translate this text to English. Do not output anything other than the translated text:"
             }
             
     def configure_metadata_fields(self):
