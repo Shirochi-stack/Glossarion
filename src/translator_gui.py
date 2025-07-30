@@ -1944,11 +1944,12 @@ Recent translations to summarize:
                 messagebox.showerror("Error", f"Failed to load credentials: {str(e)}")
 
     def on_model_change(self, event=None):
-        """Handle model selection change"""
+        """Handle model selection change from dropdown or manual input"""
+        # Get the current model value (from dropdown or manually typed)
         model = self.model_var.get()
         
         # Show Google Cloud Credentials button for Vertex AI models
-        if '@' in model or model.startswith('vertex/'):
+        if '@' in model or model.startswith('vertex/') or model.startswith('vertex_ai/'):
             self.gcloud_button.config(state=tk.NORMAL)
             self.vertex_location_entry.grid() 
             
@@ -1988,6 +1989,16 @@ Recent translations to summarize:
             self.gcloud_status_label.config(text="")
             # Reset API key label if you changed it
             # self.api_key_label.config(text="API Key:")
+
+    # Also add this to bind manual typing events to the combobox
+    def setup_model_combobox_bindings(self):
+        """Setup bindings for manual model input in combobox"""
+        # Bind to key release events to detect manual typing
+        self.model_combo.bind('<KeyRelease>', self.on_model_change)
+        # Also bind to FocusOut to catch when user clicks away after typing
+        self.model_combo.bind('<FocusOut>', self.on_model_change)
+        # Keep the existing binding for dropdown selection
+        self.model_combo.bind('<<ComboboxSelected>>', self.on_model_change)
         
     def _create_model_section(self):
         """Create model selection section"""
@@ -2094,8 +2105,9 @@ Recent translations to summarize:
         self.model_combo.grid(row=1, column=1, columnspan=2, sticky=tk.EW, padx=5, pady=5)
         
         self.model_combo.bind('<<ComboboxSelected>>', self.on_model_change)
-        
+        self.setup_model_combobox_bindings()
         self.model_var.trace('w', self._check_poe_model)
+        self.on_model_change()
     
     def _create_profile_section(self):
         """Create profile/profile section"""
