@@ -1024,7 +1024,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.6.3"
+        __version__ = "3.6.5"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1397,7 +1397,17 @@ class TranslatorGUI:
                 "- Retain honorifics and onomatopoeia in Romaji.\n\n"
 
                 "IMPORTANT: Use both the visual context and text to create the most accurate and natural-sounding translation.\n"
-            ),             
+            ),   
+            "Glossary_Editor": (
+                "I have a messy character glossary from a Korean web novel that needs to be cleaned up and restructured. Please Output only JSON entries while creating a clean JSON glossary with the following requirements:\n"
+                "1. Merge duplicate character entries - Some characters appear multiple times (e.g., Noah, Ichinose family members).\n"
+                "2. Separate mixed character data - Some entries incorrectly combine multiple characters' information.\n"
+                "3. Use 'Korean = English' format - Replace all parentheses with equals signs (e.g., '이로한 = Lee Rohan' instead of '이로한 (Lee Rohan)').\n"
+                "4. Merge original_name fields - Combine original Korean names with English names in the name field.\n"
+                "5. Remove empty fields - Don't include empty arrays or objects.\n"
+                "6. Fix gender inconsistencies - Correct based on context from aliases.\n"
+
+            ),
             "Original": "Return everything exactly as seen on the source."
         }
 
@@ -1808,7 +1818,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.6.3 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.6.5 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def create_file_section(self):
@@ -1991,7 +2001,7 @@ Recent translations to summarize:
             "o1-preview", "o1-mini", "o3", "o4-mini",
             
             # Google Gemini Models
-            "gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash",
+            "gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash","gemini-2.0-flash-lite",
             "gemini-2.5-flash","gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-pro", "gemini-pro-vision",
             
             # Anthropic Claude Models
@@ -2014,16 +2024,17 @@ Recent translations to summarize:
 
             
             # Alternative format with vertex_ai prefix
-            "vertex_ai/claude-3-7-sonnet@20250219",
-            "vertex_ai/claude-3-5-sonnet@20240620",
-            "vertex_ai/claude-3-opus@20240229",
-            "vertex_ai/claude-4-opus@20250514",
-            "vertex_ai/claude-4-sonnet@20250514",
-            "vertex_ai/gemini-1.5-pro",
-            "vertex_ai/gemini-1.5-flash",
-            "vertex_ai/gemini-2.0-flash-exp",
-            "vertex_ai/gemini-2.5-pro",
-            "vertex_ai/gemini-2.5-flash",
+            "vertex/claude-3-7-sonnet@20250219",
+            "vertex/claude-3-5-sonnet@20240620",
+            "vertex/claude-3-opus@20240229",
+            "vertex/claude-4-opus@20250514",
+            "vertex/claude-4-sonnet@20250514",
+            "vertex/gemini-1.5-pro",
+            "vertex/gemini-1.5-flash",
+            "vertex/gemini-2.0-flash",
+            "vertex/gemini-2.5-pro",
+            "vertex/gemini-2.5-flash",
+            "vertex/gemini-2.5-flash-lite",
             
             # DeepSeek Models
             "deepseek-chat", "deepseek-coder", "deepseek-coder-33b-instruct",
@@ -8225,6 +8236,8 @@ Recent translations to summarize:
                     'OPENAI_OR_Gemini_API_KEY': api_key,
                     'API_KEY': api_key,
                     'MAX_OUTPUT_TOKENS': str(self.max_output_tokens),
+                    'BATCH_TRANSLATION': "1" if self.batch_translation_var.get() else "0",
+                    'BATCH_SIZE': str(self.batch_size_var.get()),
                     'GLOSSARY_SYSTEM_PROMPT': self.manual_glossary_prompt,
                     'CHAPTER_RANGE': self.chapter_range_entry.get().strip(),
                     'GLOSSARY_EXTRACT_ORIGINAL_NAME': '1' if self.config.get('manual_extract_original_name', True) else '0',
@@ -10191,9 +10204,9 @@ Recent translations to summarize:
         path = filedialog.askopenfilename(
             title="Select File",
             filetypes=[
-                ("Supported files", "*.epub;*.txt;*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp"),
+                ("Supported files", "*.epub;*.txt;*.json;*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp"),
                 ("EPUB files", "*.epub"),
-                ("Text files", "*.txt"),
+                ("Text files", "*.txt;*.json"),
                 ("Image files", "*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp"),
                 ("PNG files", "*.png"),
                 ("JPEG files", "*.jpg;*.jpeg"),
@@ -12930,7 +12943,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.6.3...")
+    print("🚀 Starting Glossarion v3.6.5...")
     
     # Initialize splash screen
     splash_manager = None
