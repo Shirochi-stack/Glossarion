@@ -830,6 +830,33 @@ class UnifiedClient:
             from google.auth.transport.requests import Request
             import google.auth.transport.requests
             import vertexai
+            import json
+            import os
+            import re
+            import traceback
+            import logging
+            
+            # Get logger
+            logger = logging.getLogger(__name__)
+            
+            # Import or define UnifiedClientError
+            try:
+                # Try to import from the module if it exists
+                from unified_api_client import UnifiedClientError, UnifiedResponse
+            except ImportError:
+                # Define them locally if import fails
+                class UnifiedClientError(Exception):
+                    def __init__(self, message, error_type=None):
+                        super().__init__(message)
+                        self.error_type = error_type
+                
+                from dataclasses import dataclass
+                @dataclass
+                class UnifiedResponse:
+                    content: str
+                    usage: dict = None
+                    finish_reason: str = 'stop'
+                    raw_response: object = None
             
             # Import your global stop check function
             try:
@@ -839,7 +866,7 @@ class UnifiedClient:
                 def is_stop_requested():
                     return self._cancelled
             
-            # Use the same credentials as Cloud Vision
+            # Use the same credentials as Cloud Vision (comes from GUI config)
             google_creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
             if not google_creds_path:
                 # Try to get from config
@@ -885,7 +912,7 @@ class UnifiedClient:
                 except ImportError:
                     raise UnifiedClientError("Anthropic SDK not installed. Run: pip install anthropic")
                 
-                # Use the region from environment variable
+                # Use the region from environment variable (which comes from GUI)
                 region = os.getenv('VERTEX_AI_LOCATION', 'us-east5')
                 
                 # CHECK STOP FLAG
@@ -1091,7 +1118,7 @@ class UnifiedClient:
                 )
             
             else:
-                # For Gemini models on Vertex AI, use standard Vertex AI SDK
+                # For Gemini models on Vertex AI, we need to use Vertex AI SDK
                 location = os.getenv('VERTEX_AI_LOCATION', 'us-east5')
                 
                 # Check stop flag before Gemini call
@@ -1099,10 +1126,166 @@ class UnifiedClient:
                     logger.info("Stop requested, cancelling Vertex AI Gemini request")
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 
+                # Initialize Vertex AI
                 vertexai.init(project=project_id, location=location, credentials=credentials)
                 
-                # Use the existing Gemini implementation
-                return self._send_gemini(messages, temperature, max_tokens, stop_sequences)
+                # Import GenerativeModel from vertexai
+                from vertexai.generative_models import GenerativeModel, GenerationConfig, HarmCategory, HarmBlockThreshold
+                
+                # Create model instance
+                vertex_model = GenerativeModel(model_name)
+                
+                # Format messages for Vertex AI Gemini
+                formatted_prompt = self._format_gemini_prompt_simple(messages)
+                
+                # Check if safety settings are disabled via config (from GUI)
+                disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
+                
+                # Get thinking budget from environment (though Vertex AI may not support it)
+                thinking_budget = int(os.getenv("THINKING_BUDGET", "-1"))
+                enable_thinking = os.getenv("ENABLE_GEMINI_THINKING", "0") == "1"
+                
+                # Log configuration
+                print(f"\n🔧 Vertex AI Gemini Configuration:")
+                print(f"   Model: {model_name}")
+                print(f"   Region: {location}")
+                print(f"   Project: {project_id}")
+                
+                # Configure generation parameters using passed parameters
+                generation_config_dict = {
+                    "temperature": temperature,
+                    "max_output_tokens": max_tokens or 8192,
+                }
+                
+                # Add user-configured anti-duplicate parameters if enabled
+                if os.getenv("ENABLE_ANTI_DUPLICATE", "0") == "1":
+                    # Get all anti-duplicate parameters from environment
+                    if os.getenv("TOP_P"):
+                        top_p = float(os.getenv("TOP_P", "1.0"))
+                        if top_p < 1.0:  # Only add if not default
+                            generation_config_dict["top_p"] = top_p
+                    
+                    if os.getenv("TOP_K"):
+                        top_k = int(os.getenv("TOP_K", "0"))
+                        if top_k > 0:  # Only add if not default
+                            generation_config_dict["top_k"] = top_k
+                    
+                    # Note: Vertex AI Gemini may not support all parameters like frequency_penalty
+                    # Add only supported parameters
+                    if os.getenv("CANDIDATE_COUNT"):
+                        candidate_count = int(os.getenv("CANDIDATE_COUNT", "1"))
+                        if candidate_count > 1:
+                            generation_config_dict["candidate_count"] = candidate_count
+                    
+                    # Add custom stop sequences if provided
+                    custom_stops = os.getenv("CUSTOM_STOP_SEQUENCES", "").strip()
+                    if custom_stops:
+                        additional_stops = [s.strip() for s in custom_stops.split(",") if s.strip()]
+                        if stop_sequences:
+                            stop_sequences.extend(additional_stops)
+                        else:
+                            stop_sequences = additional_stops
+                
+                if stop_sequences:
+                    generation_config_dict["stop_sequences"] = stop_sequences
+                
+                # Create generation config
+                generation_config = GenerationConfig(**generation_config_dict)
+                
+                # Configure safety settings based on GUI toggle
+                safety_settings = None
+                if disable_safety:
+                    safety_settings = {
+                        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+                        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                        HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY: HarmBlockThreshold.BLOCK_NONE,
+                        # Add any additional 2025 safety categories if they exist in Vertex AI
+                    }
+                    print(f"🔒 Vertex AI Gemini Safety Status: DISABLED - All categories set to BLOCK_NONE")
+                else:
+                    print(f"🔒 Vertex AI Gemini Safety Status: ENABLED - Using default Gemini safety settings")
+                # Retry logic with token reduction
+                BOOST_FACTOR = 1
+                attempts = 4
+                attempt = 0
+                result_text = ""
+                current_tokens = (max_tokens or 8192) * BOOST_FACTOR
+                
+                while attempt < attempts and not result_text:
+                    try:
+                        # Update max_output_tokens for this attempt
+                        generation_config_dict["max_output_tokens"] = current_tokens
+                        generation_config = GenerationConfig(**generation_config_dict)
+                        
+                        print(f"   📊 Temperature: {temperature}, Max tokens: {current_tokens}")
+                        
+                        # Generate content with optional safety settings
+                        if safety_settings:
+                            response = vertex_model.generate_content(
+                                formatted_prompt,
+                                generation_config=generation_config,
+                                safety_settings=safety_settings
+                            )
+                        else:
+                            response = vertex_model.generate_content(
+                                formatted_prompt,
+                                generation_config=generation_config
+                            )
+                        
+                        # Extract text from response
+                        if response.candidates:
+                            for candidate in response.candidates:
+                                if candidate.content and candidate.content.parts:
+                                    for part in candidate.content.parts:
+                                        if hasattr(part, 'text'):
+                                            result_text += part.text
+                        
+                        # Check if we got content
+                        if result_text and result_text.strip():
+                            break
+                        else:
+                            raise Exception("Empty response from Vertex AI")
+                            
+                    except Exception as e:
+                        print(f"Vertex AI Gemini attempt {attempt+1} failed: {e}")
+                        
+                        # Check for quota errors
+                        error_str = str(e)
+                        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                            raise UnifiedClientError(
+                                f"Quota exceeded for Vertex AI Gemini model: {model_name}\n\n"
+                                "Request quota increase in Google Cloud Console."
+                            )
+                        elif "404" in error_str or "NOT_FOUND" in error_str:
+                            raise UnifiedClientError(
+                                f"Model {model_name} not found in region {location}.\n\n"
+                                "Available Gemini models on Vertex AI:\n"
+                                "• gemini-1.5-flash-002\n"
+                                "• gemini-1.5-pro-002\n"
+                                "• gemini-1.0-pro-002"
+                            )
+                        
+                        # Reduce tokens and retry
+                        current_tokens = max(256, current_tokens // 2)
+                        attempt += 1
+                        if attempt < attempts:
+                            print(f"🔄 Retrying Vertex AI Gemini with reduced tokens: {current_tokens}")
+                    
+                # Check stop flag after response
+                if is_stop_requested():
+                    logger.info("Stop requested after Vertex AI Gemini response")
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                
+                if not result_text:
+                    raise UnifiedClientError("All Vertex AI Gemini attempts failed to produce content")
+                
+                return UnifiedResponse(
+                    content=result_text,
+                    finish_reason='stop',
+                    raw_response=response if 'response' in locals() else None
+                )
                 
         except UnifiedClientError:
             # Re-raise our own errors without modification
