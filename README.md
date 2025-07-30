@@ -215,6 +215,7 @@ Here's the updated API provider table based on the unified API client support:
 | **Mistral** | `mistral-*`, `open-mistral-*` | mistral-large, mistral-medium, open-mistral-7b |
 | **Cohere** | `command-*` | command-r, command-r-plus |
 | **ElectronHub** | `eh/*`, `electronhub/*` | eh/gpt-4, eh/claude-3-opus, eh/gemini-2.5-flash, eh/yi-large |
+| **VertexAI** | `vertex/*`, `vertex_ai/*` | vertex/gemini-2.5-flash, vertex/gemini-2.5-pro
 | **Groq** | `groq/*`, `llama-*`, `mixtral-*` | groq/llama-3.1-70b, groq/mixtral-8x7b |
 | **POE**        | [poe/*](https://github.com/Shirochi-stack/Glossarion/blob/main/docs/poeguide.md)     | poe/gemini-2.5-flash, poe/claude-3.5-instant, poe/anthropic-instant-v1 |
 | **Together AI** | `together/*`, `meta-llama/*` | together/llama-3-70b, meta-llama/Llama-3-70b |
