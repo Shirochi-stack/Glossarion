@@ -10224,9 +10224,9 @@ Recent translations to summarize:
         paths = filedialog.askopenfilenames(
             title="Select Multiple Files (Ctrl+Click or Shift+Click)",
             filetypes=[
-                ("Supported files", "*.epub;*.txt;*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp"),
+                ("Supported files", "*.epub;*.txt;*.json;*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp"),
                 ("EPUB files", "*.epub"),
-                ("Text files", "*.txt"),
+                ("Text files", "*.txt;*.json"),
                 ("Image files", "*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp"),
                 ("All files", "*.*")
             ]
@@ -10241,7 +10241,7 @@ Recent translations to summarize:
         )
         if folder_path:
             # Find all supported files in the folder
-            supported_extensions = {'.epub', '.txt', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
+            supported_extensions = {'.epub', '.txt', '.json', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
             files = []
             
             # Recursively find files if deep scan is enabled
@@ -10276,13 +10276,36 @@ Recent translations to summarize:
         self.current_file_index = 0
         self.append_log("🗑️ Cleared file selection")
 
+
     def _handle_file_selection(self, paths):
         """Common handler for file selection"""
         if not paths:
             return
         
-        # Store the list of selected files
-        self.selected_files = paths
+        # Initialize JSON conversion tracking if not exists
+        if not hasattr(self, 'json_conversions'):
+            self.json_conversions = {}  # Maps converted .txt paths to original .json paths
+        
+        # Process JSON files first - convert them to TXT
+        processed_paths = []
+        
+        for path in paths:
+            if path.lower().endswith('.json'):
+                # Convert JSON to TXT
+                txt_path = self._convert_json_to_txt(path)
+                if txt_path:
+                    processed_paths.append(txt_path)
+                    # Track the conversion for potential reverse conversion later
+                    self.json_conversions[txt_path] = path
+                    self.append_log(f"📄 Converted JSON to TXT: {os.path.basename(path)}")
+                else:
+                    self.append_log(f"❌ Failed to convert JSON: {os.path.basename(path)}")
+            else:
+                # Non-JSON files pass through unchanged
+                processed_paths.append(path)
+        
+        # Store the list of selected files (using processed paths)
+        self.selected_files = processed_paths
         self.current_file_index = 0
         
         # Update the entry field
@@ -10291,31 +10314,42 @@ Recent translations to summarize:
         # Define image extensions
         image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
         
-        if len(paths) == 1:
+        if len(processed_paths) == 1:
             # Single file - display full path
-            self.entry_epub.insert(0, paths[0])
-            self.file_path = paths[0]  # For backward compatibility
+            # Check if this was a JSON conversion
+            if processed_paths[0] in self.json_conversions:
+                # Show original JSON filename in parentheses
+                original_json = self.json_conversions[processed_paths[0]]
+                display_path = f"{processed_paths[0]} (from {os.path.basename(original_json)})"
+                self.entry_epub.insert(0, display_path)
+            else:
+                self.entry_epub.insert(0, processed_paths[0])
+            self.file_path = processed_paths[0]  # For backward compatibility
         else:
             # Multiple files - display count and summary
-            # Group by type
-            images = [p for p in paths if os.path.splitext(p)[1].lower() in image_extensions]
-            epubs = [p for p in paths if p.lower().endswith('.epub')]
-            txts = [p for p in paths if p.lower().endswith('.txt')]
+            # Group by type (count original types, not processed)
+            images = [p for p in processed_paths if os.path.splitext(p)[1].lower() in image_extensions]
+            epubs = [p for p in processed_paths if p.lower().endswith('.epub')]
+            txts = [p for p in processed_paths if p.lower().endswith('.txt') and p not in self.json_conversions]
+            jsons = [p for p in self.json_conversions.values()]  # Count original JSON files
+            converted_txts = [p for p in processed_paths if p in self.json_conversions]
             
             summary_parts = []
             if epubs:
                 summary_parts.append(f"{len(epubs)} EPUB")
             if txts:
                 summary_parts.append(f"{len(txts)} TXT")
+            if jsons:
+                summary_parts.append(f"{len(jsons)} JSON")
             if images:
                 summary_parts.append(f"{len(images)} images")
             
             display_text = f"{len(paths)} files selected ({', '.join(summary_parts)})"
             self.entry_epub.insert(0, display_text)
-            self.file_path = paths[0]  # Set first file as primary
+            self.file_path = processed_paths[0]  # Set first file as primary
         
         # Check if these are image files
-        image_files = [p for p in paths if os.path.splitext(p)[1].lower() in image_extensions]
+        image_files = [p for p in processed_paths if os.path.splitext(p)[1].lower() in image_extensions]
         
         if image_files:
             # Enable image translation if not already enabled
@@ -10331,7 +10365,7 @@ Recent translations to summarize:
                 self.append_log("📑 Cleared glossary settings (image files selected)")
         else:
             # Handle EPUB/TXT files
-            epub_files = [p for p in paths if p.lower().endswith('.epub')]
+            epub_files = [p for p in processed_paths if p.lower().endswith('.epub')]
             
             if len(epub_files) == 1:
                 # Single EPUB - auto-load glossary
@@ -10343,6 +10377,207 @@ Recent translations to summarize:
                     self.auto_loaded_glossary_path = None
                     self.auto_loaded_glossary_for_file = None
                     self.append_log("📑 Multiple files selected - glossary auto-loading disabled")
+
+    def _convert_json_to_txt(self, json_path):
+        """Convert a JSON file to TXT format for translation."""
+        try:
+            # Read JSON file
+            with open(json_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Parse JSON
+            try:
+                data = json.loads(content)
+            except json.JSONDecodeError as e:
+                self.append_log(f"⚠️ JSON parsing error: {str(e)}")
+                self.append_log("🔧 Attempting to fix JSON...")
+                fixed_content = self._comprehensive_json_fix(content)
+                data = json.loads(fixed_content)
+                self.append_log("✅ JSON fixed successfully")
+            
+            # Create output file
+            base_dir = os.path.dirname(json_path)
+            base_name = os.path.splitext(os.path.basename(json_path))[0]
+            txt_path = os.path.join(base_dir, f"{base_name}_json_temp.txt")
+            
+            # CHECK IF THIS IS A GLOSSARY - PUT EVERYTHING IN ONE CHAPTER
+            filename_lower = os.path.basename(json_path).lower()
+            is_glossary = any(term in filename_lower for term in ['glossary', 'dictionary', 'terms', 'characters', 'names'])
+            
+            # Also check structure
+            if not is_glossary and isinstance(data, dict):
+                # If it's a flat dictionary with many short entries, it's probably a glossary
+                if len(data) > 20:  # More than 20 entries
+                    values = list(data.values())[:10]  # Check first 10
+                    if all(isinstance(v, str) and len(v) < 500 for v in values):
+                        is_glossary = True
+                        self.append_log("📚 Detected glossary structure (many short entries)")
+                        self.append_log(f"🔍 Found {len(data)} dictionary entries with avg length < 500 chars")
+            
+            with open(txt_path, 'w', encoding='utf-8') as f:
+                # Add metadata header
+                f.write(f"[JSON_SOURCE: {os.path.basename(json_path)}]\n")
+                f.write(f"[JSON_STRUCTURE_TYPE: {type(data).__name__}]\n")
+                f.write(f"[JSON_CONVERSION_VERSION: 1.0]\n")
+                if is_glossary:
+                    f.write("[GLOSSARY_MODE: SINGLE_CHUNK]\n")
+                f.write("\n")
+                
+                if is_glossary:
+                    # PUT ENTIRE GLOSSARY IN ONE CHAPTER
+                    self.append_log(f"📚 Glossary mode: Creating single chapter for {len(data)} entries")
+                    self.append_log("🚫 CHUNK SPLITTING DISABLED for glossary file")
+                    self.append_log(f"📝 All {len(data)} entries will be processed in ONE API call")
+                    f.write("=== Chapter 1: Full Glossary ===\n\n")
+                    
+                    if isinstance(data, dict):
+                        for key, value in data.items():
+                            f.write(f"{key}: {value}\n\n")
+                    elif isinstance(data, list):
+                        for item in data:
+                            if isinstance(item, str):
+                                f.write(f"{item}\n\n")
+                            else:
+                                f.write(f"{json.dumps(item, ensure_ascii=False, indent=2)}\n\n")
+                    else:
+                        f.write(json.dumps(data, ensure_ascii=False, indent=2))
+                
+                else:
+                    # NORMAL PROCESSING - SEPARATE CHAPTERS
+                    if isinstance(data, dict):
+                        for idx, (key, value) in enumerate(data.items(), 1):
+                            f.write(f"\n=== Chapter {idx}: {key} ===\n\n")
+                            
+                            if isinstance(value, str):
+                                f.write(value)
+                            elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+                                for item in value:
+                                    f.write(f"{item}\n\n")
+                            else:
+                                f.write(json.dumps(value, ensure_ascii=False, indent=2))
+                            
+                            f.write("\n\n")
+                    
+                    elif isinstance(data, list):
+                        for idx, item in enumerate(data, 1):
+                            f.write(f"\n=== Chapter {idx} ===\n\n")
+                            
+                            if isinstance(item, str):
+                                f.write(item)
+                            else:
+                                f.write(json.dumps(item, ensure_ascii=False, indent=2))
+                            
+                            f.write("\n\n")
+                    
+                    else:
+                        f.write("=== Content ===\n\n")
+                        if isinstance(data, str):
+                            f.write(data)
+                        else:
+                            f.write(json.dumps(data, ensure_ascii=False, indent=2))
+            
+            return txt_path
+            
+        except Exception as e:
+            self.append_log(f"❌ Error converting JSON: {str(e)}")
+            import traceback
+            self.append_log(f"Debug: {traceback.format_exc()}")
+            return None
+
+    def convert_translated_to_json(self, translated_txt_path):
+        """Convert translated TXT back to JSON format if it was originally JSON."""
+        
+        # Check if this was a JSON conversion
+        original_json_path = None
+        for txt_path, json_path in self.json_conversions.items():
+            # Check if this is the translated version of a converted file
+            if translated_txt_path.replace("_translated", "_json_temp") == txt_path:
+                original_json_path = json_path
+                break
+            # Also check direct match
+            if txt_path.replace("_json_temp", "_translated") == translated_txt_path:
+                original_json_path = json_path
+                break
+        
+        if not original_json_path:
+            return None
+        
+        try:
+            # Read original JSON structure
+            with open(original_json_path, 'r', encoding='utf-8') as f:
+                original_data = json.load(f)
+            
+            # Read translated content
+            with open(translated_txt_path, 'r', encoding='utf-8') as f:
+                translated_content = f.read()
+            
+            # Remove metadata headers
+            lines = translated_content.split('\n')
+            content_start = 0
+            for i, line in enumerate(lines):
+                if line.strip() and not line.startswith('[JSON_'):
+                    content_start = i
+                    break
+            translated_content = '\n'.join(lines[content_start:])
+            
+            # Parse chapters from translated content
+            import re
+            chapter_pattern = r'=== Chapter \d+(?:: ([^=]+))? ==='
+            chapters = re.split(chapter_pattern, translated_content)
+            
+            # Clean up chapters
+            cleaned_chapters = []
+            for i, chapter in enumerate(chapters):
+                if chapter and chapter.strip() and not chapter.startswith('==='):
+                    cleaned_chapters.append(chapter.strip())
+            
+            # Rebuild JSON structure with translated content
+            if isinstance(original_data, dict):
+                result = {}
+                keys = list(original_data.keys())
+                
+                # Match chapters to original keys
+                for i, key in enumerate(keys):
+                    if i < len(cleaned_chapters):
+                        result[key] = cleaned_chapters[i]
+                    else:
+                        # Preserve original if no translation found
+                        result[key] = original_data[key]
+            
+            elif isinstance(original_data, list):
+                result = []
+                
+                for i, item in enumerate(original_data):
+                    if i < len(cleaned_chapters):
+                        if isinstance(item, dict) and 'content' in item:
+                            # Preserve structure for dictionary items
+                            new_item = item.copy()
+                            new_item['content'] = cleaned_chapters[i]
+                            result.append(new_item)
+                        else:
+                            # Direct replacement
+                            result.append(cleaned_chapters[i])
+                    else:
+                        # Preserve original if no translation found
+                        result.append(item)
+            
+            else:
+                # Single value
+                result = cleaned_chapters[0] if cleaned_chapters else original_data
+            
+            # Save as JSON
+            output_json_path = translated_txt_path.replace('.txt', '.json')
+            with open(output_json_path, 'w', encoding='utf-8') as f:
+                json.dump(result, f, ensure_ascii=False, indent=2)
+            
+            self.append_log(f"✅ Converted back to JSON: {os.path.basename(output_json_path)}")
+            return output_json_path
+            
+        except Exception as e:
+            self.append_log(f"❌ Error converting back to JSON: {str(e)}")
+            import traceback
+            self.append_log(f"Debug: {traceback.format_exc()}")
+            return None
 
     def toggle_api_visibility(self):
         show = self.api_key_entry.cget('show')
