@@ -11,6 +11,8 @@ import ebooklib
 import re
 from ebooklib import epub
 from chapter_splitter import ChapterSplitter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Dict, Tuple
 
 # Fix for PyInstaller - handle stdout reconfigure more carefully
 if sys.platform.startswith("win"):
@@ -46,8 +48,6 @@ def parse_glossary_token_limit():
     return 1000000, "1000000 (default)"
 
 MAX_GLOSSARY_TOKENS, GLOSSARY_LIMIT_STR = parse_glossary_token_limit()
-
-
 
 # Global stop flag for GUI integration
 _stop_requested = False
@@ -705,8 +705,159 @@ def merge_glossary_entries(glossary):
     
     return list(merged.values())
 
-# Update main function to log custom fields:
+# Batch processing functions
+def process_chapter_batch(chapters_batch: List[Tuple[int, str]], 
+                         client: UnifiedClient,
+                         config: Dict,
+                         contextual_enabled: bool,
+                         history: List[Dict],
+                         ctx_limit: int,
+                         rolling_window: bool,
+                         check_stop) -> List[Dict]:
+    """
+    Process a batch of chapters in parallel
+    
+    Returns:
+        List of results in format: {
+            'idx': chapter_index,
+            'data': extracted_data,
+            'resp': raw_response,
+            'chap': chapter_text,
+            'error': error_message (if any)
+        }
+    """
+    sys_prompt = config.get('system_prompt', 'You are a helpful assistant.')
+    temp = float(os.getenv("GLOSSARY_TEMPERATURE") or config.get('temperature', 0.1))
+    
+    env_max_output = os.getenv("MAX_OUTPUT_TOKENS")
+    if env_max_output and env_max_output.isdigit():
+        mtoks = int(env_max_output)
+    else:
+        mtoks = config.get('max_tokens', 4196)
+    
+    results = []
+    
+    with ThreadPoolExecutor(max_workers=len(chapters_batch)) as executor:
+        # Create futures for all chapters in batch
+        futures = {}
+        
+        for idx, chap in chapters_batch:
+            if check_stop():
+                break
+                
+            # Build messages for this chapter
+            if not contextual_enabled:
+                msgs = [{"role":"system","content":sys_prompt}] \
+                     + [{"role":"user","content":build_prompt(chap)}]
+            else:
+                msgs = [{"role":"system","content":sys_prompt}] \
+                     + trim_context_history(history, ctx_limit, rolling_window) \
+                     + [{"role":"user","content":build_prompt(chap)}]
+            
+            # Submit to thread pool
+            future = executor.submit(
+                process_single_chapter_api_call,
+                idx, chap, msgs, client, temp, mtoks
+            )
+            futures[future] = (idx, chap)
+        
+        # Collect results as they complete
+        for future in as_completed(futures):
+            if check_stop():
+                # Cancel remaining futures
+                for f in futures:
+                    f.cancel()
+                break
+                
+            idx, chap = futures[future]
+            try:
+                result = future.result()
+                result['chap'] = chap  # Add chapter text for context updates
+                results.append(result)
+            except Exception as e:
+                print(f"Error processing chapter {idx+1} in batch: {e}")
+                results.append({
+                    'idx': idx,
+                    'data': [],
+                    'resp': "",
+                    'chap': chap,
+                    'error': str(e)
+                })
+    
+    # Sort results by chapter index to maintain order
+    results.sort(key=lambda x: x['idx'])
+    return results
 
+def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict], 
+                                  client: UnifiedClient, temp: float, mtoks: int) -> Dict:
+    """Process a single chapter API call for batch processing"""
+    start_time = time.time()
+    print(f"[BATCH] Starting API call for Chapter {idx+1} at {time.strftime('%H:%M:%S')}")
+    
+    try:
+        # Make API call
+        raw = client.send(msgs, temperature=temp, max_tokens=mtoks, context='glossary')
+        resp = raw[0] if isinstance(raw, tuple) else raw
+        
+        # Save the raw response
+        os.makedirs("Payloads", exist_ok=True)
+        with open(f"Payloads/batch_response_chap{idx+1}.txt", "w", encoding="utf-8", errors="replace") as f:
+            f.write(resp)
+        
+        # Extract JSON
+        m = re.search(r"\[.*\]", resp, re.DOTALL)
+        if not m:
+            print(f"[Warning] Couldn't find JSON array in chapter {idx+1}")
+            return {
+                'idx': idx,
+                'data': [],
+                'resp': resp,
+                'error': "No JSON array found"
+            }
+        
+        json_str = m.group(0)
+        
+        # Parse JSON and validate entries
+        try:
+            data = json.loads(json_str)
+            
+            # Filter out invalid entries
+            valid_data = []
+            for entry in data:
+                if validate_extracted_entry(entry):
+                    valid_data.append(entry)
+                else:
+                    print(f"[Debug] Skipped invalid entry in chapter {idx+1}: {entry.get('original_name', 'unknown')}")
+            
+            elapsed = time.time() - start_time
+            print(f"[BATCH] Completed Chapter {idx+1} in {elapsed:.1f}s at {time.strftime('%H:%M:%S')} - Extracted {len(valid_data)} entries")
+            
+            return {
+                'idx': idx,
+                'data': valid_data,
+                'resp': resp,
+                'error': None
+            }
+            
+        except json.JSONDecodeError as e:
+            print(f"[Warning] JSON decode error chap {idx+1}: {e}")
+            return {
+                'idx': idx,
+                'data': [],
+                'resp': resp,
+                'error': f"JSON decode error: {e}"
+            }
+            
+    except Exception as e:
+        print(f"[Error] API call failed for chapter {idx+1}: {e}")
+        return {
+            'idx': idx,
+            'data': [],
+            'resp': "",
+            'error': str(e)
+        }
+
+# Update main function to support batch processing:
 def main(log_callback=None, stop_callback=None):
     """Modified main function that can accept a logging callback and stop callback"""
     if log_callback:
@@ -737,7 +888,6 @@ def main(log_callback=None, stop_callback=None):
         epub_path = os.getenv("EPUB_PATH", "")
         if not epub_path and len(sys.argv) > 1:
             epub_path = sys.argv[1]
-
 
     is_text_file = epub_path.lower().endswith('.txt')
     
@@ -784,6 +934,16 @@ def main(log_callback=None, stop_callback=None):
 
     # Use the variables we just retrieved
     client = UnifiedClient(api_key=api_key, model=model, output_dir=out)
+    
+    # Check for batch mode
+    batch_enabled = os.getenv("BATCH_TRANSLATION", "0") == "1"
+    batch_size = int(os.getenv("BATCH_SIZE", "5"))
+    
+    print(f"[DEBUG] BATCH_TRANSLATION = {os.getenv('BATCH_TRANSLATION')} (enabled: {batch_enabled})")
+    print(f"[DEBUG] BATCH_SIZE = {batch_size}")
+    
+    if batch_enabled:
+        print(f"🚀 Batch mode enabled with size: {batch_size}")
     
     #API call delay
     api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
@@ -856,11 +1016,6 @@ def main(log_callback=None, stop_callback=None):
     else:
         chapters = extract_chapters_from_epub(args.epub)
     
-    # The rest of the function remains exactly the same
-    if not chapters:
-        print("No chapters found. Exiting.")
-        return
-        
     if not chapters:
         print("No chapters found. Exiting.")
         return
@@ -873,189 +1028,78 @@ def main(log_callback=None, stop_callback=None):
     completed = prog['completed']
     glossary = prog['glossary']
     history = prog['context_history']
-    total_chapters = len(chapters) 
+    total_chapters = len(chapters)
+    
+    # Get both settings
+    contextual_enabled = os.getenv('CONTEXTUAL', '1') == '1'
+    rolling_window = os.getenv('GLOSSARY_HISTORY_ROLLING', '0') == '1'
     
     # Count chapters that will be processed with range filter
-    chapters_to_process = 0
+    chapters_to_process = []
     for idx, chap in enumerate(chapters):
         # Skip if chapter is outside the range
         if range_start is not None and range_end is not None:
-            # Get chapter number - assuming chapters have a 'num' field or use idx+1
             chapter_num = idx + 1  # 1-based chapter numbering
             if not (range_start <= chapter_num <= range_end):
                 continue
-        chapters_to_process += 1
+        if idx not in completed:
+            chapters_to_process.append((idx, chap))
     
-    if chapters_to_process < total_chapters:
-        print(f"📊 Processing {chapters_to_process} out of {total_chapters} chapters due to range filter")
+    if len(chapters_to_process) < total_chapters:
+        print(f"📊 Processing {len(chapters_to_process)} out of {total_chapters} chapters")
     
-    for idx, chap in enumerate(chapters):
-        # Check for stop at the beginning of each chapter
-        if check_stop():
-            print(f"❌ Glossary extraction stopped at chapter {idx+1}")
-            return
+    # Process chapters based on mode
+    if batch_enabled and len(chapters_to_process) > 0:
+        # BATCH MODE: Process in batches
+        total_batches = (len(chapters_to_process) + batch_size - 1) // batch_size
         
-        # Apply chapter range filter
-        if range_start is not None and range_end is not None:
-            chapter_num = idx + 1  # 1-based chapter numbering
-            if not (range_start <= chapter_num <= range_end):
-                # Check if this is from a text file
-                is_text_chapter = hasattr(chap, 'filename') and chap.get('filename', '').endswith('.txt')
-                terminology = "Section" if is_text_chapter else "Chapter"
-                print(f"[SKIP] {terminology} {chapter_num} - outside range filter")
-                continue
-            
-        if idx in completed:
-            # Check if processing text file chapters
-            is_text_chapter = hasattr(chap, 'filename') and chap.get('filename', '').endswith('.txt')
-            terminology = "section" if is_text_chapter else "chapter"
-            print(f"Skipping {terminology} {idx+1} (already processed)")
-            continue
-                
-        print(f"🔄 Processing Chapter {idx+1}/{total_chapters}")
-        # Get both settings
-        contextual_enabled = os.getenv('CONTEXTUAL', '1') == '1'
-        rolling_window = os.getenv('GLOSSARY_HISTORY_ROLLING', '0') == '1'
-
-        # Check if history will reset on this chapter
-        if contextual_enabled and len(history) >= ctx_limit and ctx_limit > 0 and not rolling_window:
-            print(f"  📌 Glossary context will reset after this chapter (current: {len(history)}/{ctx_limit} chapters)")        
-
-        try:
-            if not contextual_enabled:
-                # No context at all
-                msgs = [{"role":"system","content":sys_prompt}] \
-                     + [{"role":"user","content":build_prompt(chap)}]
-            else:
-                # Use context with trim_context_history handling the mode
-                msgs = [{"role":"system","content":sys_prompt}] \
-                     + trim_context_history(history, ctx_limit, rolling_window) \
-                     + [{"role":"user","content":build_prompt(chap)}]
-            
-            total_tokens = sum(count_tokens(m["content"]) for m in msgs)
-            
-            # READ THE TOKEN LIMIT
-            env_value = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
-            if not env_value or env_value == "":
-                token_limit = None
-                limit_str = "unlimited"
-            elif env_value.isdigit() and int(env_value) > 0:
-                token_limit = int(env_value)
-                limit_str = str(token_limit)
-            else:
-                token_limit = 1000000
-                limit_str = "1000000 (default)"
-            
-            print(f"[DEBUG] Glossary prompt tokens = {total_tokens} / {limit_str}")
-            
-            # Check if we're over the token limit and need to split
-            if token_limit is not None and total_tokens > token_limit:
-                print(f"⚠️ Chapter {idx+1} exceeds token limit: {total_tokens} > {token_limit}")
-                print(f"📄 Using ChapterSplitter to split into smaller chunks...")
-                
-                # Calculate available tokens for content
-                system_tokens = chapter_splitter.count_tokens(sys_prompt)
-                context_tokens = sum(chapter_splitter.count_tokens(m["content"]) for m in trim_context_history(history, ctx_limit, rolling_window))
-                safety_margin = 1000
-                available_tokens = token_limit - system_tokens - context_tokens - safety_margin
-                
-                # Since glossary extraction works with plain text, wrap it in a simple HTML structure
-                chapter_html = f"<html><body><p>{chap.replace(chr(10)+chr(10), '</p><p>')}</p></body></html>"
-                
-                # Use ChapterSplitter to split the chapter
-                chunks = chapter_splitter.split_chapter(chapter_html, available_tokens)
-                print(f"📄 Chapter split into {len(chunks)} chunks")
-                
-                # Process each chunk
-                for chunk_html, chunk_idx, total_chunks in chunks:
-                    print(f"🔄 Processing chunk {chunk_idx}/{total_chunks} of Chapter {idx+1}")
-                    
-                    # Extract text from the chunk HTML
-                    from bs4 import BeautifulSoup
-                    soup = BeautifulSoup(chunk_html, 'html.parser')
-                    chunk_text = soup.get_text(strip=True)
-            
-            # Check for stop before API call
+        for batch_num in range(total_batches):
+            # Check for stop at the beginning of each batch
             if check_stop():
-                print(f"❌ Glossary extraction stopped before API call for chapter {idx+1}")
+                print(f"❌ Glossary extraction stopped at batch {batch_num+1}")
                 return
             
-            # API call with stop checking
-            result_queue = queue.Queue()
-            api_error = None
+            # Get current batch
+            batch_start = batch_num * batch_size
+            batch_end = min(batch_start + batch_size, len(chapters_to_process))
+            current_batch = chapters_to_process[batch_start:batch_end]
             
-            def api_call():
-                try:
-                    result = client.send(msgs, temperature=temp, max_tokens=mtoks, context='glossary')
-                    result_queue.put(result)
-                except Exception as e:
-                    result_queue.put(e)
+            print(f"\n🔄 Processing Batch {batch_num+1}/{total_batches} (Chapters: {[idx+1 for idx, _ in current_batch]})")
+            print(f"[BATCH] Submitting {len(current_batch)} chapters for parallel processing...")
+            batch_start_time = time.time()
             
-            api_thread = threading.Thread(target=api_call)
-            api_thread.daemon = True
-            api_thread.start()
+            # Process batch in parallel
+            batch_results = process_chapter_batch(
+                current_batch, client, config, contextual_enabled,
+                history, ctx_limit, rolling_window, check_stop
+            )
             
-            # Check for stop while waiting for API
-            timeout = 300  # 5 minute total timeout
-            check_interval = 0.5
-            elapsed = 0
+            batch_elapsed = time.time() - batch_start_time
+            print(f"[BATCH] All {len(current_batch)} chapters completed in {batch_elapsed:.1f}s total")
+            avg_time = batch_elapsed / len(current_batch)
+            print(f"[BATCH] Average time per chapter: {avg_time:.1f}s (vs sequential: ~{api_delay + avg_time:.1f}s)")
             
-            while elapsed < timeout:
-                try:
-                    # Try to get result with short timeout
-                    result = result_queue.get(timeout=check_interval)
-                    if isinstance(result, Exception):
-                        raise result
-                    raw = result
-                    break
-                except queue.Empty:
-                    # No result yet, check if stop requested
-                    if check_stop():
-                        print(f"❌ Glossary extraction stopped during API call for chapter {idx+1}")
-                        return
-                    elapsed += check_interval
-            else:
-                # Timeout reached
-                print(f"⚠️ API call timed out after {timeout} seconds")
-                continue
+            # Process results from the batch
+            batch_glossary_entries = []
+            
+            for result in batch_results:
+                if check_stop():
+                    print(f"❌ Glossary extraction stopped during batch processing")
+                    return
                 
-            # Process response (rest of the code remains the same)
-            resp = raw[0] if isinstance(raw, tuple) else raw
-
-            # Save the raw response
-            os.makedirs("Payloads", exist_ok=True)
-            with open(f"Payloads/failed_response_chap{idx+1}.txt", "w", encoding="utf-8", errors="replace") as f:
-                f.write(resp)
-
-            # Extract JSON
-            m = re.search(r"\[.*\]", resp, re.DOTALL)
-            if not m:
-                print(f"[Warning] Couldn't find JSON array in chapter {idx+1}, saving raw…")
-                continue
-
-            json_str = m.group(0) if m else resp
-
-            # Parse JSON and validate entries
-            try:
-                data = json.loads(json_str)
+                idx = result['idx']
+                data = result['data']
+                resp = result['resp']
+                chap = result['chap']
+                error = result.get('error')
                 
-                # Filter out invalid entries
-                valid_data = []
-                for entry in data:
-                    if validate_extracted_entry(entry):
-                        valid_data.append(entry)
-                    else:
-                        print(f"[Debug] Skipped invalid entry: {entry.get('original_name', 'unknown')}")
-                
-                data = valid_data
-                total_ent = len(data)
+                if error:
+                    print(f"[Chapter {idx+1}] Error: {error}")
+                    continue
                 
                 # Log entries
+                total_ent = len(data)
                 for eidx, entry in enumerate(data, start=1):
-                    if check_stop():
-                        print(f"❌ Glossary extraction stopped during entry processing for chapter {idx+1}")
-                        return
-                        
                     elapsed = time.time() - start
                     if idx == 0 and eidx == 1:
                         eta = 0
@@ -1064,64 +1108,283 @@ def main(log_callback=None, stop_callback=None):
                         eta = avg * (total_chapters * 100 - ((idx * 100) + eidx))
                     name = entry.get("original_name","?")
                     print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → Entry "{name}"')
-            except json.JSONDecodeError as e:
-                print(f"[Warning] JSON decode error chap {idx+1}: {e}")
-                continue    
                 
-            # Merge and save
-            glossary.extend(data)
-            glossary[:] = merge_glossary_entries(glossary)
-            completed.append(idx)
-
-            # Only add to history if contextual is enabled
+                # Collect entries for batch merging
+                batch_glossary_entries.extend(data)
+                completed.append(idx)
+                
+                # Only add to history if contextual is enabled
+                if contextual_enabled:
+                    history.append({"user": build_prompt(chap), "assistant": resp})
+            
+            # Merge batch entries into main glossary
+            if batch_glossary_entries:
+                print(f"🔀 Merging {len(batch_glossary_entries)} entries from batch {batch_num+1}")
+                glossary.extend(batch_glossary_entries)
+                glossary[:] = merge_glossary_entries(glossary)
+            
+            # Save progress after each batch
+            save_progress(completed, glossary, history)
+            save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+            save_glossary_md(glossary, os.path.join(glossary_dir, os.path.basename(args.output).replace('.json', '.md')))
+            
+            # Handle context history
             if contextual_enabled:
-                history.append({"user": build_prompt(chap), "assistant": resp})
-                
                 # Reset history when limit reached without rolling window
                 if not rolling_window and len(history) >= ctx_limit and ctx_limit > 0:
                     print(f"🔄 Resetting glossary context (reached {ctx_limit} chapter limit)")
                     history = []
                     prog['context_history'] = []
-
-            save_progress(completed, glossary, history)
-            save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
-            save_glossary_md(glossary, os.path.join(glossary_dir, os.path.basename(args.output).replace('.json', '.md')))
             
-            # Add delay before next API call (but not after the last chapter)
-            if idx < len(chapters) - 1:
-                # Check if we're within the range or if there are more chapters to process
-                next_chapter_in_range = True
-                if range_start is not None and range_end is not None:
-                    next_chapter_num = idx + 2  # idx+1 is current, idx+2 is next
-                    next_chapter_in_range = (range_start <= next_chapter_num <= range_end)
-                else:
-                    # No range filter, check if next chapter is already completed
-                    next_chapter_in_range = (idx + 1) not in completed
+            # Add delay between batches (but not after the last batch)
+            if batch_num < total_batches - 1:
+                print(f"⏱️  Waiting {api_delay}s before next batch...")
                 
-                if next_chapter_in_range:
-                    print(f"⏱️  Waiting {api_delay}s before next chapter...")
+                # Use interruptible sleep
+                sleep_elapsed = 0
+                sleep_interval = 0.5
+                while sleep_elapsed < api_delay:
+                    if check_stop():
+                        print(f"❌ Glossary extraction stopped during delay")
+                        return
+                    time.sleep(min(sleep_interval, api_delay - sleep_elapsed))
+                    sleep_elapsed += sleep_interval
+    
+    else:
+        # SEQUENTIAL MODE: Original behavior
+        for idx, chap in enumerate(chapters):
+            # Check for stop at the beginning of each chapter
+            if check_stop():
+                print(f"❌ Glossary extraction stopped at chapter {idx+1}")
+                return
+            
+            # Apply chapter range filter
+            if range_start is not None and range_end is not None:
+                chapter_num = idx + 1  # 1-based chapter numbering
+                if not (range_start <= chapter_num <= range_end):
+                    # Check if this is from a text file
+                    is_text_chapter = hasattr(chap, 'filename') and chap.get('filename', '').endswith('.txt')
+                    terminology = "Section" if is_text_chapter else "Chapter"
+                    print(f"[SKIP] {terminology} {chapter_num} - outside range filter")
+                    continue
+                
+            if idx in completed:
+                # Check if processing text file chapters
+                is_text_chapter = hasattr(chap, 'filename') and chap.get('filename', '').endswith('.txt')
+                terminology = "section" if is_text_chapter else "chapter"
+                print(f"Skipping {terminology} {idx+1} (already processed)")
+                continue
                     
-                    # Use interruptible sleep
-                    sleep_elapsed = 0
-                    sleep_interval = 0.5
-                    while sleep_elapsed < api_delay:
-                        if check_stop():
-                            print(f"❌ Glossary extraction stopped during delay")
-                            return
-                        time.sleep(min(sleep_interval, api_delay - sleep_elapsed))
-                        sleep_elapsed += sleep_interval
-                        
-            # Check for stop after processing chapter
-            if check_stop():
-                print(f"❌ Glossary extraction stopped after processing chapter {idx+1}")
-                return
+            print(f"🔄 Processing Chapter {idx+1}/{total_chapters}")
+            
+            # Check if history will reset on this chapter
+            if contextual_enabled and len(history) >= ctx_limit and ctx_limit > 0 and not rolling_window:
+                print(f"  📌 Glossary context will reset after this chapter (current: {len(history)}/{ctx_limit} chapters)")        
 
-        except Exception as e:
-            print(f"Error at chapter {idx+1}: {e}")
-            # Check for stop even after error
-            if check_stop():
-                print(f"❌ Glossary extraction stopped after error in chapter {idx+1}")
-                return
+            try:
+                if not contextual_enabled:
+                    # No context at all
+                    msgs = [{"role":"system","content":sys_prompt}] \
+                         + [{"role":"user","content":build_prompt(chap)}]
+                else:
+                    # Use context with trim_context_history handling the mode
+                    msgs = [{"role":"system","content":sys_prompt}] \
+                         + trim_context_history(history, ctx_limit, rolling_window) \
+                         + [{"role":"user","content":build_prompt(chap)}]
+                
+                total_tokens = sum(count_tokens(m["content"]) for m in msgs)
+                
+                # READ THE TOKEN LIMIT
+                env_value = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
+                if not env_value or env_value == "":
+                    token_limit = None
+                    limit_str = "unlimited"
+                elif env_value.isdigit() and int(env_value) > 0:
+                    token_limit = int(env_value)
+                    limit_str = str(token_limit)
+                else:
+                    token_limit = 1000000
+                    limit_str = "1000000 (default)"
+                
+                print(f"[DEBUG] Glossary prompt tokens = {total_tokens} / {limit_str}")
+                
+                # Check if we're over the token limit and need to split
+                if token_limit is not None and total_tokens > token_limit:
+                    print(f"⚠️ Chapter {idx+1} exceeds token limit: {total_tokens} > {token_limit}")
+                    print(f"📄 Using ChapterSplitter to split into smaller chunks...")
+                    
+                    # Calculate available tokens for content
+                    system_tokens = chapter_splitter.count_tokens(sys_prompt)
+                    context_tokens = sum(chapter_splitter.count_tokens(m["content"]) for m in trim_context_history(history, ctx_limit, rolling_window))
+                    safety_margin = 1000
+                    available_tokens = token_limit - system_tokens - context_tokens - safety_margin
+                    
+                    # Since glossary extraction works with plain text, wrap it in a simple HTML structure
+                    chapter_html = f"<html><body><p>{chap.replace(chr(10)+chr(10), '</p><p>')}</p></body></html>"
+                    
+                    # Use ChapterSplitter to split the chapter
+                    chunks = chapter_splitter.split_chapter(chapter_html, available_tokens)
+                    print(f"📄 Chapter split into {len(chunks)} chunks")
+                    
+                    # Process each chunk
+                    for chunk_html, chunk_idx, total_chunks in chunks:
+                        print(f"🔄 Processing chunk {chunk_idx}/{total_chunks} of Chapter {idx+1}")
+                        
+                        # Extract text from the chunk HTML
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(chunk_html, 'html.parser')
+                        chunk_text = soup.get_text(strip=True)
+                        
+                        # Continue with processing using chunk_text instead of chap
+                        # ... rest of the processing logic for the chunk
+                
+                # Check for stop before API call
+                if check_stop():
+                    print(f"❌ Glossary extraction stopped before API call for chapter {idx+1}")
+                    return
+                
+                # API call with stop checking
+                result_queue = queue.Queue()
+                api_error = None
+                
+                def api_call():
+                    try:
+                        result = client.send(msgs, temperature=temp, max_tokens=mtoks, context='glossary')
+                        result_queue.put(result)
+                    except Exception as e:
+                        result_queue.put(e)
+                
+                api_thread = threading.Thread(target=api_call)
+                api_thread.daemon = True
+                api_thread.start()
+                
+                # Check for stop while waiting for API
+                timeout = 300  # 5 minute total timeout
+                check_interval = 0.5
+                elapsed = 0
+                
+                while elapsed < timeout:
+                    try:
+                        # Try to get result with short timeout
+                        result = result_queue.get(timeout=check_interval)
+                        if isinstance(result, Exception):
+                            raise result
+                        raw = result
+                        break
+                    except queue.Empty:
+                        # No result yet, check if stop requested
+                        if check_stop():
+                            print(f"❌ Glossary extraction stopped during API call for chapter {idx+1}")
+                            return
+                        elapsed += check_interval
+                else:
+                    # Timeout reached
+                    print(f"⚠️ API call timed out after {timeout} seconds")
+                    continue
+                    
+                # Process response
+                resp = raw[0] if isinstance(raw, tuple) else raw
+
+                # Save the raw response
+                os.makedirs("Payloads", exist_ok=True)
+                with open(f"Payloads/failed_response_chap{idx+1}.txt", "w", encoding="utf-8", errors="replace") as f:
+                    f.write(resp)
+
+                # Extract JSON
+                m = re.search(r"\[.*\]", resp, re.DOTALL)
+                if not m:
+                    print(f"[Warning] Couldn't find JSON array in chapter {idx+1}, saving raw…")
+                    continue
+
+                json_str = m.group(0) if m else resp
+
+                # Parse JSON and validate entries
+                try:
+                    data = json.loads(json_str)
+                    
+                    # Filter out invalid entries
+                    valid_data = []
+                    for entry in data:
+                        if validate_extracted_entry(entry):
+                            valid_data.append(entry)
+                        else:
+                            print(f"[Debug] Skipped invalid entry: {entry.get('original_name', 'unknown')}")
+                    
+                    data = valid_data
+                    total_ent = len(data)
+                    
+                    # Log entries
+                    for eidx, entry in enumerate(data, start=1):
+                        if check_stop():
+                            print(f"❌ Glossary extraction stopped during entry processing for chapter {idx+1}")
+                            return
+                            
+                        elapsed = time.time() - start
+                        if idx == 0 and eidx == 1:
+                            eta = 0
+                        else:
+                            avg = elapsed / ((idx * 100) + eidx)
+                            eta = avg * (total_chapters * 100 - ((idx * 100) + eidx))
+                        name = entry.get("original_name","?")
+                        print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → Entry "{name}"')
+                except json.JSONDecodeError as e:
+                    print(f"[Warning] JSON decode error chap {idx+1}: {e}")
+                    continue    
+                    
+                # Merge and save (original behavior for sequential mode)
+                glossary.extend(data)
+                glossary[:] = merge_glossary_entries(glossary)
+                completed.append(idx)
+
+                # Only add to history if contextual is enabled
+                if contextual_enabled:
+                    history.append({"user": build_prompt(chap), "assistant": resp})
+                    
+                    # Reset history when limit reached without rolling window
+                    if not rolling_window and len(history) >= ctx_limit and ctx_limit > 0:
+                        print(f"🔄 Resetting glossary context (reached {ctx_limit} chapter limit)")
+                        history = []
+                        prog['context_history'] = []
+
+                save_progress(completed, glossary, history)
+                save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                save_glossary_md(glossary, os.path.join(glossary_dir, os.path.basename(args.output).replace('.json', '.md')))
+                
+                # Add delay before next API call (but not after the last chapter)
+                if idx < len(chapters) - 1:
+                    # Check if we're within the range or if there are more chapters to process
+                    next_chapter_in_range = True
+                    if range_start is not None and range_end is not None:
+                        next_chapter_num = idx + 2  # idx+1 is current, idx+2 is next
+                        next_chapter_in_range = (range_start <= next_chapter_num <= range_end)
+                    else:
+                        # No range filter, check if next chapter is already completed
+                        next_chapter_in_range = (idx + 1) not in completed
+                    
+                    if next_chapter_in_range:
+                        print(f"⏱️  Waiting {api_delay}s before next chapter...")
+                        
+                        # Use interruptible sleep
+                        sleep_elapsed = 0
+                        sleep_interval = 0.5
+                        while sleep_elapsed < api_delay:
+                            if check_stop():
+                                print(f"❌ Glossary extraction stopped during delay")
+                                return
+                            time.sleep(min(sleep_interval, api_delay - sleep_elapsed))
+                            sleep_elapsed += sleep_interval
+                            
+                # Check for stop after processing chapter
+                if check_stop():
+                    print(f"❌ Glossary extraction stopped after processing chapter {idx+1}")
+                    return
+
+            except Exception as e:
+                print(f"Error at chapter {idx+1}: {e}")
+                # Check for stop even after error
+                if check_stop():
+                    print(f"❌ Glossary extraction stopped after error in chapter {idx+1}")
+                    return
 
     print(f"Done. Glossary saved to {args.output}")
 
