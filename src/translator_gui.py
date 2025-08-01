@@ -1024,7 +1024,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.6.61"
+        __version__ = "3.6.7"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1818,7 +1818,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.6.61 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.6.7 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def create_file_section(self):
@@ -7127,11 +7127,30 @@ Recent translations to summarize:
             old_argv = sys.argv
             old_env = dict(os.environ)
             
+
             try:
                 # Set up environment (same as original)
                 self.append_log(f"🔧 Setting up environment variables...")
                 self.append_log(f"📖 File: {os.path.basename(file_path)}")
                 self.append_log(f"🤖 Model: {self.model_var.get()}")
+                
+                # Get the system prompt and log first 100 characters
+                system_prompt = self.prompt_text.get("1.0", "end").strip()
+                prompt_preview = system_prompt[:100] + "..." if len(system_prompt) > 100 else system_prompt
+                self.append_log(f"📝 System prompt preview: {prompt_preview}")
+                self.append_log(f"📏 System prompt length: {len(system_prompt)} characters")
+                
+                # Check if glossary info is in the system prompt
+                if "glossary" in system_prompt.lower() or "character entry" in system_prompt.lower():
+                    self.append_log(f"📚 ✅ Glossary appears to be included in system prompt")
+                else:
+                    self.append_log(f"📚 ⚠️ No glossary detected in system prompt")
+                
+                # Log glossary status
+                if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path:
+                    self.append_log(f"📑 Manual glossary loaded: {os.path.basename(self.manual_glossary_path)}")
+                else:
+                    self.append_log(f"📑 No manual glossary loaded")
                 
                 # IMPORTANT: Set IS_TEXT_FILE_TRANSLATION flag for text files
                 if file_path.lower().endswith('.txt'):
@@ -7251,7 +7270,7 @@ Recent translations to summarize:
             'TRANSLATION_HISTORY_LIMIT': str(self.trans_history.get()),
             'EPUB_OUTPUT_DIR': os.getcwd(),
             'DISABLE_AUTO_GLOSSARY': "0" if self.enable_auto_glossary_var.get() else "1",
-            'DISABLE_GLOSSARY_TRANSLATION': "0" if self.enable_auto_glossary_var.get() else "1",
+            'DISABLE_GLOSSARY_TRANSLATION': "0",
             'APPEND_GLOSSARY': "1" if self.append_glossary_var.get() else "0",
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt,
             'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var.get() else "0",
@@ -13190,7 +13209,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.6.61...")
+    print("🚀 Starting Glossarion v3.6.7...")
     
     # Initialize splash screen
     splash_manager = None
