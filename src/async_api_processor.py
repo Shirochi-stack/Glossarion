@@ -2806,7 +2806,7 @@ class AsyncProcessingDialog:
         # Log the system prompt (first 200 chars)
         logger.info(f"Using system prompt: {system_prompt[:200]}...")
         
-        # Add glossary if enabled (fixed the env var checks)
+        # Add glossary if enabled
         if (env_vars.get('MANUAL_GLOSSARY') and 
             env_vars.get('APPEND_GLOSSARY') == '1' and 
             env_vars.get('DISABLE_GLOSSARY_TRANSLATION') != '1'):
@@ -2815,8 +2815,8 @@ class AsyncProcessingDialog:
                 with open(glossary_path, 'r', encoding='utf-8') as f:
                     glossary_data = json.load(f)
                 
-                # Format glossary for prompt
-                glossary_text = self._format_glossary_for_prompt(glossary_data)
+                # By default, just convert to JSON string
+                glossary_text = json.dumps(glossary_data, ensure_ascii=False, indent=2)
                 
                 # Use the append prompt format if provided
                 append_prompt = env_vars.get('APPEND_GLOSSARY_PROMPT', '')
@@ -2828,15 +2828,17 @@ class AsyncProcessingDialog:
                         glossary_section = f"{append_prompt}\n{glossary_text}"
                     system_prompt = f"{system_prompt}\n\n{glossary_section}"
                 else:
-                    # Default format
+                    # Default format - just append the JSON
                     system_prompt = f"{system_prompt}\n\nGlossary:\n{glossary_text}"
                 
                 logger.info(f"Glossary appended to system prompt ({len(glossary_text)} chars)")
                 
-                # Log first few glossary entries for debugging
-                entries = glossary_text.split('\n')[:5]
-                logger.info(f"Sample glossary entries: {entries}")
-                
+                # Log preview for debugging
+                if len(glossary_text) > 200:
+                    logger.info(f"Glossary preview: {glossary_text[:200]}...")
+                else:
+                    logger.info(f"Glossary: {glossary_text}")
+                    
             except FileNotFoundError:
                 print(f"Glossary file not found: {env_vars.get('MANUAL_GLOSSARY')}")
             except json.JSONDecodeError:
@@ -2870,22 +2872,6 @@ class AsyncProcessingDialog:
         })
         
         return messages
-
-    def _format_glossary_for_prompt(self, glossary_data):
-        """Format glossary data for inclusion in prompt"""
-        if isinstance(glossary_data, list):
-            # List format
-            lines = []
-            for entry in glossary_data:
-                if 'original_name' in entry and 'name' in entry:
-                    lines.append(f"{entry['original_name']} = {entry['name']}")
-            return '\n'.join(lines)
-        else:
-            # Dictionary format
-            lines = []
-            for orig, trans in list(glossary_data.items()):
-                lines.append(f"{orig} = {trans}")
-            return '\n'.join(lines)
 
     def _submit_batch_sync(self, batch_data, model, api_key):
         """Submit batch synchronously (wrapper for async method)"""
