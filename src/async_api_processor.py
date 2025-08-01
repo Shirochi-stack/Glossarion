@@ -2815,50 +2815,29 @@ class AsyncProcessingDialog:
                 with open(glossary_path, 'r', encoding='utf-8') as f:
                     glossary_data = json.load(f)
                 
-                # BRUTE FORCE EXTRACTION - GRAB ALL STRINGS
-                glossary_lines = []
+                # TRUE BRUTE FORCE: Just dump the entire JSON
+                glossary_text = json.dumps(glossary_data, ensure_ascii=False, indent=2)
                 
-                def extract_all_strings(obj):
-                    """Recursively extract ALL string values from any data structure"""
-                    if isinstance(obj, dict):
-                        for key, value in obj.items():
-                            if key == 'metadata':  # Only skip metadata
-                                continue
-                            extract_all_strings(value)
-                    elif isinstance(obj, list):
-                        for item in obj:
-                            extract_all_strings(item)
-                    elif isinstance(obj, str) and obj.strip():  # It's a non-empty string
-                        glossary_lines.append(obj)
-                    # Ignore numbers, booleans, None, etc.
-                
-                # Extract everything
-                extract_all_strings(glossary_data)
-                
-                # Format glossary text
-                glossary_text = '\n'.join(glossary_lines)
-                
-                if glossary_text:
-                    # Use the append prompt format if provided
-                    append_prompt = env_vars.get('APPEND_GLOSSARY_PROMPT', '')
-                    if append_prompt:
-                        # Replace placeholder with actual glossary
-                        if '{glossary}' in append_prompt:
-                            glossary_section = append_prompt.replace('{glossary}', glossary_text)
-                        else:
-                            glossary_section = f"{append_prompt}\n{glossary_text}"
-                        system_prompt = f"{system_prompt}\n\n{glossary_section}"
+                # Use the append prompt format if provided
+                append_prompt = env_vars.get('APPEND_GLOSSARY_PROMPT', '')
+                if append_prompt:
+                    # Replace placeholder with actual glossary
+                    if '{glossary}' in append_prompt:
+                        glossary_section = append_prompt.replace('{glossary}', glossary_text)
                     else:
-                        # Default format
-                        system_prompt = f"{system_prompt}\n\nGlossary:\n{glossary_text}"
-                    
-                    logger.info(f"Glossary appended: {len(glossary_lines)} entries ({len(glossary_text)} chars)")
-                    
-                    # Log first few entries for debugging
-                    preview_entries = glossary_lines[:5]
-                    logger.info(f"Sample glossary entries: {preview_entries}")
-                    if len(glossary_lines) > 5:
-                        logger.info(f"... and {len(glossary_lines) - 5} more entries")
+                        glossary_section = f"{append_prompt}\n{glossary_text}"
+                    system_prompt = f"{system_prompt}\n\n{glossary_section}"
+                else:
+                    # Default format
+                    system_prompt = f"{system_prompt}\n\nGlossary:\n{glossary_text}"
+                
+                logger.info(f"Glossary appended to system prompt ({len(glossary_text)} chars)")
+                
+                # Log preview for debugging
+                if len(glossary_text) > 200:
+                    logger.info(f"Glossary preview: {glossary_text[:200]}...")
+                else:
+                    logger.info(f"Glossary: {glossary_text}")
                         
             except FileNotFoundError:
                 print(f"Glossary file not found: {env_vars.get('MANUAL_GLOSSARY')}")
@@ -2866,8 +2845,6 @@ class AsyncProcessingDialog:
                 print(f"Invalid JSON in glossary file")
             except Exception as e:
                 print(f"Failed to load glossary: {e}")
-                import traceback
-                logger.error(f"Glossary error traceback: {traceback.format_exc()}")
         else:
             # Log why glossary wasn't added
             if not env_vars.get('MANUAL_GLOSSARY'):
