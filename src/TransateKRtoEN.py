@@ -4824,49 +4824,52 @@ def parse_token_limit(env_value):
     return 1000000, "1000000 (default)"
 
 def build_system_prompt(user_prompt, glossary_path=None):
-    """Build the system prompt with glossary - ACTUAL BRUTE FORCE VERSION"""
+    """Build the system prompt with glossary - TRUE BRUTE FORCE VERSION"""
     append_glossary = os.getenv("APPEND_GLOSSARY", "1") == "1"
+    actual_glossary_path = glossary_path
+    
+    print(f"[DEBUG] build_system_prompt called with glossary_path: {glossary_path}")
+    print(f"[DEBUG] APPEND_GLOSSARY: {os.getenv('APPEND_GLOSSARY', '1')}")
+    print(f"[DEBUG] append_glossary boolean: {append_glossary}")
+    
     system = user_prompt if user_prompt else ""
     
-    if append_glossary and glossary_path and os.path.exists(glossary_path):
+    if append_glossary and actual_glossary_path and os.path.exists(actual_glossary_path):
         try:
-            with open(glossary_path, "r", encoding="utf-8") as gf:
+            print(f"[DEBUG] ✅ Loading glossary from: {os.path.abspath(actual_glossary_path)}")
+            
+            with open(actual_glossary_path, "r", encoding="utf-8") as gf:
                 glossary_data = json.load(gf)
             
-            glossary_lines = []
+            # TRUE BRUTE FORCE: Just dump the entire JSON
+            glossary_text = json.dumps(glossary_data, ensure_ascii=False, indent=2)
             
-            # RECURSIVE BRUTE FORCE EXTRACTOR
-            def extract_everything(obj, prefix=""):
-                if isinstance(obj, dict):
-                    for key, value in obj.items():
-                        if key == 'metadata':  # Only skip metadata
-                            continue
-                        extract_everything(value, prefix)
-                elif isinstance(obj, list):
-                    for item in obj:
-                        extract_everything(item, prefix)
-                elif isinstance(obj, str):
-                    # IT'S A STRING? ADD IT. PERIOD.
-                    glossary_lines.append(obj)
-                # Ignore numbers, booleans, etc.
+            if system:
+                system += "\n\n"
             
-            # EXTRACT EVERYTHING
-            extract_everything(glossary_data)
+            custom_prompt = os.getenv("APPEND_GLOSSARY_PROMPT", "Character/Term Glossary (use these translations consistently):").strip()
+            if not custom_prompt:
+                custom_prompt = "Character/Term Glossary (use these translations consistently):"
             
-            # Build the glossary text
-            glossary_text = '\n'.join(glossary_lines)
+            system += f"{custom_prompt}\n{glossary_text}"
             
-            if glossary_text.strip():
-                if system:
-                    system += "\n\n"
-                
-                custom_prompt = os.getenv("APPEND_GLOSSARY_PROMPT", "Character/Term Glossary (use these translations consistently):").strip()
-                system += f"{custom_prompt}\n{glossary_text}"
-                
-                print(f"[DEBUG] ✅ BRUTE FORCE: {len(glossary_lines)} entries extracted!")
+            print(f"[DEBUG] ✅ BRUTE FORCE: Entire glossary JSON appended!")
+            print(f"[DEBUG] Glossary text length: {len(glossary_text)} characters")
+            print(f"[DEBUG] Final system prompt length: {len(system)} characters")
                 
         except Exception as e:
-            print(f"[ERROR] Glossary load failed: {e}")
+            print(f"[ERROR] Could not load glossary: {e}")
+            import traceback
+            print(f"[ERROR] Full traceback: {traceback.format_exc()}")
+    else:
+        if not append_glossary:
+            print(f"[DEBUG] ❌ Glossary append disabled")
+        elif not actual_glossary_path:
+            print(f"[DEBUG] ❌ No glossary path provided")
+        elif not os.path.exists(actual_glossary_path):
+            print(f"[DEBUG] ❌ Glossary file does not exist: {actual_glossary_path}")
+    
+    print(f"[DEBUG] 🎯 FINAL SYSTEM PROMPT LENGTH: {len(system)} characters")
     
     return system
 
