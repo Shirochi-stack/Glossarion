@@ -4824,90 +4824,49 @@ def parse_token_limit(env_value):
     return 1000000, "1000000 (default)"
 
 def build_system_prompt(user_prompt, glossary_path=None):
-    """Build the system prompt with glossary - BRUTE FORCE VERSION"""
+    """Build the system prompt with glossary - ACTUAL BRUTE FORCE VERSION"""
     append_glossary = os.getenv("APPEND_GLOSSARY", "1") == "1"
-    actual_glossary_path = glossary_path
-    
-    print(f"[DEBUG] build_system_prompt called with glossary_path: {glossary_path}")
-    print(f"[DEBUG] APPEND_GLOSSARY: {os.getenv('APPEND_GLOSSARY', '1')}")
-    print(f"[DEBUG] append_glossary boolean: {append_glossary}")
-    
     system = user_prompt if user_prompt else ""
     
-    if append_glossary and actual_glossary_path and os.path.exists(actual_glossary_path):
+    if append_glossary and glossary_path and os.path.exists(glossary_path):
         try:
-            print(f"[DEBUG] ✅ Loading glossary from: {os.path.abspath(actual_glossary_path)}")
-            
-            with open(actual_glossary_path, "r", encoding="utf-8") as gf:
+            with open(glossary_path, "r", encoding="utf-8") as gf:
                 glossary_data = json.load(gf)
             
-            print(f"[DEBUG] Raw glossary data type: {type(glossary_data)}")
-            print(f"[DEBUG] Raw glossary data length: {len(glossary_data) if hasattr(glossary_data, '__len__') else 'N/A'}")
+            glossary_lines = []
             
-            # ===== BRUTE FORCE: JUST SEND THE RAW DATA =====
-            # Convert whatever format to a simple string representation
-            if isinstance(glossary_data, list):
-                # List format - extract all the name fields and send them
-                glossary_lines = []
-                for i, entry in enumerate(glossary_data):
-                    if isinstance(entry, dict):
-                        name = entry.get('name', '')
-                        if name:
-                            glossary_lines.append(name)
-                        # Also try other possible fields
-                        for field in ['original_name', 'character', 'term']:
-                            if field in entry and entry[field]:
-                                glossary_lines.append(f"{field}: {entry[field]}")
-                
-                glossary_text = '\n'.join(glossary_lines)
-                
-            elif isinstance(glossary_data, dict):
-                # Dict format - just dump it as key: value pairs
-                glossary_lines = []
-                for key, value in glossary_data.items():
-                    if key != 'metadata':  # Skip metadata
-                        glossary_lines.append(f"{key}: {value}")
-                
-                glossary_text = '\n'.join(glossary_lines)
+            # RECURSIVE BRUTE FORCE EXTRACTOR
+            def extract_everything(obj, prefix=""):
+                if isinstance(obj, dict):
+                    for key, value in obj.items():
+                        if key == 'metadata':  # Only skip metadata
+                            continue
+                        extract_everything(value, prefix)
+                elif isinstance(obj, list):
+                    for item in obj:
+                        extract_everything(item, prefix)
+                elif isinstance(obj, str):
+                    # IT'S A STRING? ADD IT. PERIOD.
+                    glossary_lines.append(obj)
+                # Ignore numbers, booleans, etc.
             
-            else:
-                # Unknown format - just convert to string
-                glossary_text = str(glossary_data)
+            # EXTRACT EVERYTHING
+            extract_everything(glossary_data)
             
-            # ===== APPEND TO SYSTEM PROMPT NO MATTER WHAT =====
-            if glossary_text.strip():  # Only if we have some content
+            # Build the glossary text
+            glossary_text = '\n'.join(glossary_lines)
+            
+            if glossary_text.strip():
                 if system:
                     system += "\n\n"
                 
                 custom_prompt = os.getenv("APPEND_GLOSSARY_PROMPT", "Character/Term Glossary (use these translations consistently):").strip()
-                if not custom_prompt:
-                    custom_prompt = "Character/Term Glossary (use these translations consistently):"
-                
                 system += f"{custom_prompt}\n{glossary_text}"
                 
-                print(f"[DEBUG] ✅ BRUTE FORCE: Glossary appended!")
-                print(f"[DEBUG] Glossary text length: {len(glossary_text)} characters")
-                print(f"[DEBUG] Final system prompt length: {len(system)} characters")
-                
-                # Show first few lines
-                lines = glossary_text.split('\n')[:5]
-                print(f"[DEBUG] First few glossary lines: {lines}")
-            else:
-                print(f"[DEBUG] ❌ No glossary text generated")
+                print(f"[DEBUG] ✅ BRUTE FORCE: {len(glossary_lines)} entries extracted!")
                 
         except Exception as e:
-            print(f"[ERROR] Could not load glossary: {e}")
-            import traceback
-            print(f"[ERROR] Full traceback: {traceback.format_exc()}")
-    else:
-        if not append_glossary:
-            print(f"[DEBUG] ❌ Glossary append disabled")
-        elif not actual_glossary_path:
-            print(f"[DEBUG] ❌ No glossary path provided")
-        elif not os.path.exists(actual_glossary_path):
-            print(f"[DEBUG] ❌ Glossary file does not exist: {actual_glossary_path}")
-    
-    print(f"[DEBUG] 🎯 FINAL SYSTEM PROMPT LENGTH: {len(system)} characters")
+            print(f"[ERROR] Glossary load failed: {e}")
     
     return system
 
