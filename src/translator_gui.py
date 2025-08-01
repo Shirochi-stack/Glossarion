@@ -6235,9 +6235,18 @@ Recent translations to summarize:
                 return
             self.selected_files = [file_path]
         
+        # Reset stop flags
         self.stop_requested = False
         if translation_stop_flag:
             translation_stop_flag(False)
+        
+        # Also reset the module's internal stop flag
+        try:
+            if hasattr(self, '_main_module') and self._main_module:
+                if hasattr(self._main_module, 'set_stop_flag'):
+                    self._main_module.set_stop_flag(False)
+        except:
+            pass
         
         self.translation_thread = threading.Thread(target=self.run_translation_direct, daemon=True)
         self.translation_thread.start()
@@ -6246,9 +6255,17 @@ Recent translations to summarize:
     def run_translation_direct(self):
         """Run translation directly - handles multiple files and different file types"""
         try:
+            # Check stop at the very beginning
+            if self.stop_requested:
+                return
+                
             self.append_log("🔄 Loading translation modules...")
             if not self._lazy_load_modules():
                 self.append_log("❌ Failed to load translation modules")
+                return
+
+            # Check stop after loading modules
+            if self.stop_requested:
                 return
 
             # SET GLOSSARY IN ENVIRONMENT
@@ -6272,6 +6289,10 @@ Recent translations to summarize:
             
             combined_image_output_dir = None
             if len(image_files) > 1:
+                # Check stop before creating directories
+                if self.stop_requested:
+                    return
+                    
                 # Get the common parent directory name or use timestamp
                 parent_dir = os.path.dirname(self.selected_files[0])
                 folder_name = os.path.basename(parent_dir) if parent_dir else f"translated_images_{int(time.time())}"
@@ -6330,6 +6351,11 @@ Recent translations to summarize:
                     self.append_log(f"❌ Full error: {traceback.format_exc()}")
                     failed += 1
             
+            # Check stop before final summary
+            if self.stop_requested:
+                self.append_log(f"\n⏹️ Translation stopped - processed {successful} of {total_files} files")
+                return
+                
             # Final summary
             if total_files > 1:
                 self.append_log(f"\n{'='*60}")
@@ -6367,6 +6393,15 @@ Recent translations to summarize:
             self.stop_requested = False
             if translation_stop_flag:
                 translation_stop_flag(False)
+                
+            # Also reset the module's internal stop flag
+            try:
+                if hasattr(self, '_main_module') and self._main_module:
+                    if hasattr(self._main_module, 'set_stop_flag'):
+                        self._main_module.set_stop_flag(False)
+            except:
+                pass
+                
             self.translation_thread = None
             self.current_file_index = 0
             self.master.after(0, self.update_run_button)
@@ -7393,9 +7428,17 @@ Recent translations to summarize:
                 return
             self.selected_files = [file_path]
         
+        # Reset stop flags
         self.stop_requested = False
         if glossary_stop_flag:
             glossary_stop_flag(False)
+        
+        # IMPORTANT: Also reset the module's internal stop flag
+        try:
+            import extract_glossary_from_epub
+            extract_glossary_from_epub.set_stop_flag(False)
+        except:
+            pass
         
         self.glossary_thread = threading.Thread(target=self.run_glossary_extraction_direct, daemon=True)
         self.glossary_thread.start()
@@ -7499,6 +7542,14 @@ Recent translations to summarize:
             self.stop_requested = False
             if glossary_stop_flag:
                 glossary_stop_flag(False)
+            
+            # IMPORTANT: Also reset the module's internal stop flag
+            try:
+                import extract_glossary_from_epub
+                extract_glossary_from_epub.set_stop_flag(False)
+            except:
+                pass
+                
             self.glossary_thread = None
             self.current_file_index = 0
             self.master.after(0, self.update_run_button)
