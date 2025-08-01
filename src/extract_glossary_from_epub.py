@@ -29,6 +29,60 @@ if sys.platform.startswith("win"):
 
 MODEL = os.getenv("MODEL", "gemini-1.5-flash")
 
+def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None):
+    """Send API request with interrupt capability and optional timeout retry"""
+    result_queue = queue.Queue()
+    
+    def api_call():
+        try:
+            start_time = time.time()
+            result = client.send(messages, temperature=temperature, max_tokens=max_tokens, context='glossary')
+            elapsed = time.time() - start_time
+            result_queue.put((result, elapsed))
+        except Exception as e:
+            result_queue.put(e)
+    
+    api_thread = threading.Thread(target=api_call)
+    api_thread.daemon = True
+    api_thread.start()
+    
+    timeout = chunk_timeout if chunk_timeout is not None else 86400
+    check_interval = 0.5
+    elapsed = 0
+    
+    while elapsed < timeout:
+        try:
+            result = result_queue.get(timeout=check_interval)
+            if isinstance(result, Exception):
+                raise result
+            if isinstance(result, tuple):
+                api_result, api_time = result
+                if chunk_timeout and api_time > chunk_timeout:
+                    # Set cleanup flag when chunk timeout occurs
+                    if hasattr(client, '_in_cleanup'):
+                        client._in_cleanup = True
+                    if hasattr(client, 'cancel_current_operation'):
+                        client.cancel_current_operation()
+                    raise UnifiedClientError(f"API call took {api_time:.1f}s (timeout: {chunk_timeout}s)")
+                return api_result
+            return result
+        except queue.Empty:
+            if stop_check_fn():
+                # Set cleanup flag when user stops
+                if hasattr(client, '_in_cleanup'):
+                    client._in_cleanup = True
+                if hasattr(client, 'cancel_current_operation'):
+                    client.cancel_current_operation()
+                raise UnifiedClientError("Glossary extraction stopped by user")
+            elapsed += check_interval
+    
+    # Set cleanup flag when timeout occurs
+    if hasattr(client, '_in_cleanup'):
+        client._in_cleanup = True
+    if hasattr(client, 'cancel_current_operation'):
+        client.cancel_current_operation()
+    raise UnifiedClientError(f"API call timed out after {timeout} seconds")
+    
 # Parse token limit from environment variable (same logic as translation)
 def parse_glossary_token_limit():
     """Parse token limit from environment variable"""
@@ -713,18 +767,10 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
                          history: List[Dict],
                          ctx_limit: int,
                          rolling_window: bool,
-                         check_stop) -> List[Dict]:
+                         check_stop,
+                         chunk_timeout: int = None) -> List[Dict]:
     """
-    Process a batch of chapters in parallel
-    
-    Returns:
-        List of results in format: {
-            'idx': chapter_index,
-            'data': extracted_data,
-            'resp': raw_response,
-            'chap': chapter_text,
-            'error': error_message (if any)
-        }
+    Process a batch of chapters in parallel with interrupt support
     """
     sys_prompt = config.get('system_prompt', 'You are a helpful assistant.')
     temp = float(os.getenv("GLOSSARY_TEMPERATURE") or config.get('temperature', 0.1))
@@ -754,10 +800,10 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
                      + trim_context_history(history, ctx_limit, rolling_window) \
                      + [{"role":"user","content":build_prompt(chap)}]
             
-            # Submit to thread pool
+            # Submit to thread pool with interrupt support
             future = executor.submit(
                 process_single_chapter_api_call,
-                idx, chap, msgs, client, temp, mtoks
+                idx, chap, msgs, client, temp, mtoks, check_stop, chunk_timeout
             )
             futures[future] = (idx, chap)
         
@@ -789,14 +835,23 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
     return results
 
 def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict], 
-                                  client: UnifiedClient, temp: float, mtoks: int) -> Dict:
-    """Process a single chapter API call for batch processing"""
+                                  client: UnifiedClient, temp: float, mtoks: int,
+                                  stop_check_fn, chunk_timeout: int = None) -> Dict:
+    """Process a single chapter API call for batch processing with interrupt support"""
     start_time = time.time()
     print(f"[BATCH] Starting API call for Chapter {idx+1} at {time.strftime('%H:%M:%S')}")
     
     try:
-        # Make API call
-        raw = client.send(msgs, temperature=temp, max_tokens=mtoks, context='glossary')
+        # Use send_with_interrupt instead of direct client.send
+        raw = send_with_interrupt(
+            messages=msgs,
+            client=client, 
+            temperature=temp,
+            max_tokens=mtoks,
+            stop_check_fn=stop_check_fn,
+            chunk_timeout=chunk_timeout
+        )
+        
         resp = raw[0] if isinstance(raw, tuple) else raw
         
         # Save the raw response
@@ -848,14 +903,23 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
                 'error': f"JSON decode error: {e}"
             }
             
-    except Exception as e:
-        print(f"[Error] API call failed for chapter {idx+1}: {e}")
+    except UnifiedClientError as e:
+        print(f"[Error] API call interrupted/failed for chapter {idx+1}: {e}")
         return {
             'idx': idx,
             'data': [],
             'resp': "",
             'error': str(e)
         }
+    except Exception as e:
+        print(f"[Error] Unexpected error for chapter {idx+1}: {e}")
+        return {
+            'idx': idx,
+            'data': [],
+            'resp': "",
+            'error': str(e)
+        }
+
 
 # Update main function to support batch processing:
 def main(log_callback=None, stop_callback=None):
@@ -1227,7 +1291,13 @@ def main(log_callback=None, stop_callback=None):
                     print(f"📄 Chapter split into {len(chunks)} chunks")
                     
                     # Process each chunk
+                    chapter_glossary_data = []  # Collect data from all chunks
+                    
                     for chunk_html, chunk_idx, total_chunks in chunks:
+                        if check_stop():
+                            print(f"❌ Glossary extraction stopped during chunk {chunk_idx} of chapter {idx+1}")
+                            return
+                            
                         print(f"🔄 Processing chunk {chunk_idx}/{total_chunks} of Chapter {idx+1}")
                         
                         # Extract text from the chunk HTML
@@ -1235,51 +1305,126 @@ def main(log_callback=None, stop_callback=None):
                         soup = BeautifulSoup(chunk_html, 'html.parser')
                         chunk_text = soup.get_text(strip=True)
                         
-                        # Continue with processing using chunk_text instead of chap
-                        # ... rest of the processing logic for the chunk
-                
-                # Check for stop before API call
-                if check_stop():
-                    print(f"❌ Glossary extraction stopped before API call for chapter {idx+1}")
-                    return
-                
-                # API call with stop checking
-                result_queue = queue.Queue()
-                api_error = None
-                
-                def api_call():
-                    try:
-                        result = client.send(msgs, temperature=temp, max_tokens=mtoks, context='glossary')
-                        result_queue.put(result)
-                    except Exception as e:
-                        result_queue.put(e)
-                
-                api_thread = threading.Thread(target=api_call)
-                api_thread.daemon = True
-                api_thread.start()
-                
-                # Check for stop while waiting for API
-                timeout = 300  # 5 minute total timeout
-                check_interval = 0.5
-                elapsed = 0
-                
-                while elapsed < timeout:
-                    try:
-                        # Try to get result with short timeout
-                        result = result_queue.get(timeout=check_interval)
-                        if isinstance(result, Exception):
-                            raise result
-                        raw = result
-                        break
-                    except queue.Empty:
-                        # No result yet, check if stop requested
-                        if check_stop():
-                            print(f"❌ Glossary extraction stopped during API call for chapter {idx+1}")
-                            return
-                        elapsed += check_interval
+                        # Build messages for this chunk (same logic as main chapter)
+                        if not contextual_enabled:
+                            chunk_msgs = [{"role":"system","content":sys_prompt}] \
+                                        + [{"role":"user","content":build_prompt(chunk_text)}]
+                        else:
+                            chunk_msgs = [{"role":"system","content":sys_prompt}] \
+                                        + trim_context_history(history, ctx_limit, rolling_window) \
+                                        + [{"role":"user","content":build_prompt(chunk_text)}]
+                        
+                        # API call for chunk
+                        try:
+                            chunk_raw = send_with_interrupt(
+                                messages=chunk_msgs,
+                                client=client,
+                                temperature=temp,
+                                max_tokens=mtoks,
+                                stop_check_fn=check_stop,
+                                chunk_timeout=chunk_timeout
+                            )
+                        except UnifiedClientError as e:
+                            if "stopped by user" in str(e).lower():
+                                print(f"❌ Glossary extraction stopped during chunk {chunk_idx} API call")
+                                return
+                            elif "timeout" in str(e).lower():
+                                print(f"⚠️ Chunk {chunk_idx} API call timed out: {e}")
+                                continue  # Skip this chunk
+                            else:
+                                print(f"❌ Chunk {chunk_idx} API error: {e}")
+                                continue  # Skip this chunk
+                        except Exception as e:
+                            print(f"❌ Unexpected error in chunk {chunk_idx}: {e}")
+                            continue  # Skip this chunk
+                        
+                        # Process chunk response
+                        chunk_resp = chunk_raw[0] if isinstance(chunk_raw, tuple) else chunk_raw
+                        
+                        # Save chunk response
+                        os.makedirs("Payloads", exist_ok=True)
+                        with open(f"Payloads/chunk_response_chap{idx+1}_chunk{chunk_idx}.txt", "w", encoding="utf-8", errors="replace") as f:
+                            f.write(chunk_resp)
+                        
+                        # Extract JSON from chunk
+                        chunk_m = re.search(r"\[.*\]", chunk_resp, re.DOTALL)
+                        if not chunk_m:
+                            print(f"[Warning] No JSON found in chunk {chunk_idx}, skipping...")
+                            continue
+                        
+                        chunk_json_str = chunk_m.group(0)
+                        
+                        # Parse chunk JSON
+                        try:
+                            chunk_data = json.loads(chunk_json_str)
+                            
+                            # Filter out invalid entries
+                            valid_chunk_data = []
+                            for entry in chunk_data:
+                                if validate_extracted_entry(entry):
+                                    valid_chunk_data.append(entry)
+                                else:
+                                    print(f"[Debug] Skipped invalid entry in chunk {chunk_idx}: {entry.get('original_name', 'unknown')}")
+                            
+                            chapter_glossary_data.extend(valid_chunk_data)
+                            print(f"✅ Chunk {chunk_idx}/{total_chunks}: extracted {len(valid_chunk_data)} entries")
+                            
+                            # Add chunk to history if contextual
+                            if contextual_enabled:
+                                history.append({"user": build_prompt(chunk_text), "assistant": chunk_resp})
+                                
+                        except json.JSONDecodeError as e:
+                            print(f"[Warning] JSON decode error in chunk {chunk_idx}: {e}")
+                            continue
+                        
+                        # Add delay between chunks (but not after last chunk)
+                        if chunk_idx < total_chunks:
+                            print(f"⏱️  Waiting {api_delay}s before next chunk...")
+                            sleep_elapsed = 0
+                            sleep_interval = 0.5
+                            while sleep_elapsed < api_delay:
+                                if check_stop():
+                                    print(f"❌ Glossary extraction stopped during chunk delay")
+                                    return
+                                time.sleep(min(sleep_interval, api_delay - sleep_elapsed))
+                                sleep_elapsed += sleep_interval
+                    
+                    # Use the collected data from all chunks
+                    data = chapter_glossary_data
+                    print(f"✅ Chapter {idx+1} processed in {len(chunks)} chunks, total entries: {len(data)}")
+                    
                 else:
-                    # Timeout reached
-                    print(f"⚠️ API call timed out after {timeout} seconds")
+                    # Original single-chapter processing (your existing logic)
+                    # Check for stop before API call
+                    if check_stop():
+                        print(f"❌ Glossary extraction stopped before API call for chapter {idx+1}")
+                        return
+                    
+                    # Get chunk timeout from environment (same as main translation)
+                    chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "900"))  # 15 minutes default
+                
+                try:
+                    # Use send_with_interrupt for API call
+                    raw = send_with_interrupt(
+                        messages=msgs,
+                        client=client,
+                        temperature=temp,
+                        max_tokens=mtoks,
+                        stop_check_fn=check_stop,
+                        chunk_timeout=chunk_timeout
+                    )
+                except UnifiedClientError as e:
+                    if "stopped by user" in str(e).lower():
+                        print(f"❌ Glossary extraction stopped during API call for chapter {idx+1}")
+                        return
+                    elif "timeout" in str(e).lower():
+                        print(f"⚠️ API call timed out for chapter {idx+1}: {e}")
+                        continue
+                    else:
+                        print(f"❌ API error for chapter {idx+1}: {e}")
+                        continue
+                except Exception as e:
+                    print(f"❌ Unexpected error for chapter {idx+1}: {e}")
                     continue
                     
                 # Process response
