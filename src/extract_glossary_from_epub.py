@@ -13,6 +13,7 @@ from ebooklib import epub
 from chapter_splitter import ChapterSplitter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Tuple
+from unified_api_client import UnifiedClient, UnifiedClientError
 
 # Fix for PyInstaller - handle stdout reconfigure more carefully
 if sys.platform.startswith("win"):
@@ -29,6 +30,26 @@ if sys.platform.startswith("win"):
 
 MODEL = os.getenv("MODEL", "gemini-1.5-flash")
 
+def interruptible_sleep(duration, check_stop_fn, interval=0.1):
+    """Sleep that can be interrupted by stop request"""
+    elapsed = 0
+    while elapsed < duration:
+        if check_stop_fn():
+            return False  # Interrupted
+        sleep_time = min(interval, duration - elapsed)
+        time.sleep(sleep_time)
+        elapsed += sleep_time
+    return True  # Completed normally
+
+def cancel_all_futures(futures):
+    """Cancel all pending futures immediately"""
+    cancelled_count = 0
+    for future in futures:
+        if not future.done() and future.cancel():
+            cancelled_count += 1
+    return cancelled_count
+
+# Replace your existing send_with_interrupt function with this improved version:
 def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None):
     """Send API request with interrupt capability and optional timeout retry"""
     result_queue = queue.Queue()
@@ -47,18 +68,18 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     api_thread.start()
     
     timeout = chunk_timeout if chunk_timeout is not None else 86400
-    check_interval = 0.5
+    check_interval = 0.1  # Reduced from 0.5 to 0.1 for faster response
     elapsed = 0
     
     while elapsed < timeout:
         try:
+            # Check for results with shorter timeout
             result = result_queue.get(timeout=check_interval)
             if isinstance(result, Exception):
                 raise result
             if isinstance(result, tuple):
                 api_result, api_time = result
                 if chunk_timeout and api_time > chunk_timeout:
-                    # Set cleanup flag when chunk timeout occurs
                     if hasattr(client, '_in_cleanup'):
                         client._in_cleanup = True
                     if hasattr(client, 'cancel_current_operation'):
@@ -68,20 +89,29 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             return result
         except queue.Empty:
             if stop_check_fn():
-                # Set cleanup flag when user stops
+                # More aggressive cancellation
+                print("🛑 Stop requested - cancelling API call immediately...")
+                
+                # Set cleanup flag
                 if hasattr(client, '_in_cleanup'):
                     client._in_cleanup = True
+                
+                # Try to cancel the operation
                 if hasattr(client, 'cancel_current_operation'):
                     client.cancel_current_operation()
+                
+                # Don't wait for the thread to finish - just raise immediately
                 raise UnifiedClientError("Glossary extraction stopped by user")
+            
             elapsed += check_interval
     
-    # Set cleanup flag when timeout occurs
+    # Timeout occurred
     if hasattr(client, '_in_cleanup'):
         client._in_cleanup = True
     if hasattr(client, 'cancel_current_operation'):
         client.cancel_current_operation()
     raise UnifiedClientError(f"API call timed out after {timeout} seconds")
+
     
 # Parse token limit from environment variable (same logic as translation)
 def parse_glossary_token_limit():
@@ -219,6 +249,10 @@ def extract_chapters_from_epub(epub_path: str) -> List[str]:
         return False
     
     try:
+        # Add stop check before reading
+        if is_stop_requested():
+            return []
+            
         book = epub.read_epub(epub_path)
         # Replace the problematic line with media type checking
         items = [item for item in book.get_items() if is_html_document(item)]
@@ -228,6 +262,10 @@ def extract_chapters_from_epub(epub_path: str) -> List[str]:
             with zipfile.ZipFile(epub_path, 'r') as zf:
                 names = [n for n in zf.namelist() if n.lower().endswith(('.html', '.xhtml'))]
                 for name in names:
+                    # Add stop check in loop
+                    if is_stop_requested():
+                        return chapters
+                        
                     try:
                         data = zf.read(name)
                         items.append(type('X', (), {
@@ -242,6 +280,10 @@ def extract_chapters_from_epub(epub_path: str) -> List[str]:
             return chapters
             
     for item in items:
+        # Add stop check before processing each chapter
+        if is_stop_requested():
+            return chapters
+            
         try:
             raw = item.get_content()
             soup = BeautifulSoup(raw, 'html.parser')
@@ -770,7 +812,7 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
                          check_stop,
                          chunk_timeout: int = None) -> List[Dict]:
     """
-    Process a batch of chapters in parallel with interrupt support
+    Process a batch of chapters in parallel with improved interrupt support
     """
     sys_prompt = config.get('system_prompt', 'You are a helpful assistant.')
     temp = float(os.getenv("GLOSSARY_TEMPERATURE") or config.get('temperature', 0.1))
@@ -784,7 +826,6 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
     results = []
     
     with ThreadPoolExecutor(max_workers=len(chapters_batch)) as executor:
-        # Create futures for all chapters in batch
         futures = {}
         
         for idx, chap in chapters_batch:
@@ -800,37 +841,56 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
                      + trim_context_history(history, ctx_limit, rolling_window) \
                      + [{"role":"user","content":build_prompt(chap)}]
             
-            # Submit to thread pool with interrupt support
+            # Submit to thread pool
             future = executor.submit(
                 process_single_chapter_api_call,
                 idx, chap, msgs, client, temp, mtoks, check_stop, chunk_timeout
             )
             futures[future] = (idx, chap)
         
-        # Collect results as they complete
-        for future in as_completed(futures):
-            if check_stop():
-                # Cancel remaining futures
-                for f in futures:
-                    f.cancel()
-                break
-                
-            idx, chap = futures[future]
-            try:
-                result = future.result()
-                result['chap'] = chap  # Add chapter text for context updates
-                results.append(result)
-            except Exception as e:
-                print(f"Error processing chapter {idx+1} in batch: {e}")
-                results.append({
-                    'idx': idx,
-                    'data': [],
-                    'resp': "",
-                    'chap': chap,
-                    'error': str(e)
-                })
+        # Process results with better cancellation
+        try:
+            for future in as_completed(futures, timeout=1):  # Add timeout to as_completed
+                if check_stop():
+                    print("🛑 Stop detected - cancelling all pending operations...")
+                    # Cancel all pending futures immediately
+                    cancelled = cancel_all_futures(list(futures.keys()))
+                    if cancelled > 0:
+                        print(f"✅ Cancelled {cancelled} pending API calls")
+                    # Shutdown executor immediately
+                    executor.shutdown(wait=False)
+                    break
+                    
+                idx, chap = futures[future]
+                try:
+                    result = future.result(timeout=0.5)  # Short timeout on result retrieval
+                    result['chap'] = chap
+                    results.append(result)
+                except Exception as e:
+                    if "stopped by user" in str(e).lower():
+                        print(f"✅ Chapter {idx+1} stopped by user")
+                    else:
+                        print(f"Error processing chapter {idx+1}: {e}")
+                    results.append({
+                        'idx': idx,
+                        'data': [],
+                        'resp': "",
+                        'chap': chap,
+                        'error': str(e)
+                    })
+        except TimeoutError:
+            # Check for stop more frequently during processing
+            while any(not f.done() for f in futures):
+                if check_stop():
+                    print("🛑 Stop detected during batch processing...")
+                    cancelled = cancel_all_futures(list(futures.keys()))
+                    if cancelled > 0:
+                        print(f"✅ Cancelled {cancelled} pending API calls")
+                    executor.shutdown(wait=False)
+                    break
+                time.sleep(0.1)  # Short sleep to check frequently
     
-    # Sort results by chapter index to maintain order
+    # Sort results by chapter index
     results.sort(key=lambda x: x['idx'])
     return results
 
@@ -1112,6 +1172,9 @@ def main(log_callback=None, stop_callback=None):
     if len(chapters_to_process) < total_chapters:
         print(f"📊 Processing {len(chapters_to_process)} out of {total_chapters} chapters")
     
+    # Get chunk timeout from environment  
+    chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "900"))  # 15 minutes default
+    
     # Process chapters based on mode
     if batch_enabled and len(chapters_to_process) > 0:
         # BATCH MODE: Process in batches
@@ -1135,7 +1198,7 @@ def main(log_callback=None, stop_callback=None):
             # Process batch in parallel
             batch_results = process_chapter_batch(
                 current_batch, client, config, contextual_enabled,
-                history, ctx_limit, rolling_window, check_stop
+                history, ctx_limit, rolling_window, check_stop, chunk_timeout
             )
             
             batch_elapsed = time.time() - batch_start_time
@@ -1203,16 +1266,9 @@ def main(log_callback=None, stop_callback=None):
             # Add delay between batches (but not after the last batch)
             if batch_num < total_batches - 1:
                 print(f"⏱️  Waiting {api_delay}s before next batch...")
-                
-                # Use interruptible sleep
-                sleep_elapsed = 0
-                sleep_interval = 0.5
-                while sleep_elapsed < api_delay:
-                    if check_stop():
-                        print(f"❌ Glossary extraction stopped during delay")
-                        return
-                    time.sleep(min(sleep_interval, api_delay - sleep_elapsed))
-                    sleep_elapsed += sleep_interval
+                if not interruptible_sleep(api_delay, check_stop, 0.1):
+                    print(f"❌ Glossary extraction stopped during delay")
+                    return
     
     else:
         # SEQUENTIAL MODE: Original behavior
@@ -1380,14 +1436,9 @@ def main(log_callback=None, stop_callback=None):
                         # Add delay between chunks (but not after last chunk)
                         if chunk_idx < total_chunks:
                             print(f"⏱️  Waiting {api_delay}s before next chunk...")
-                            sleep_elapsed = 0
-                            sleep_interval = 0.5
-                            while sleep_elapsed < api_delay:
-                                if check_stop():
-                                    print(f"❌ Glossary extraction stopped during chunk delay")
-                                    return
-                                time.sleep(min(sleep_interval, api_delay - sleep_elapsed))
-                                sleep_elapsed += sleep_interval
+                            if not interruptible_sleep(api_delay, check_stop, 0.1):
+                                print(f"❌ Glossary extraction stopped during chunk delay")
+                                return
                     
                     # Use the collected data from all chunks
                     data = chapter_glossary_data
@@ -1399,82 +1450,79 @@ def main(log_callback=None, stop_callback=None):
                     if check_stop():
                         print(f"❌ Glossary extraction stopped before API call for chapter {idx+1}")
                         return
-                    
-                    # Get chunk timeout from environment (same as main translation)
-                    chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "900"))  # 15 minutes default
                 
-                try:
-                    # Use send_with_interrupt for API call
-                    raw = send_with_interrupt(
-                        messages=msgs,
-                        client=client,
-                        temperature=temp,
-                        max_tokens=mtoks,
-                        stop_check_fn=check_stop,
-                        chunk_timeout=chunk_timeout
-                    )
-                except UnifiedClientError as e:
-                    if "stopped by user" in str(e).lower():
-                        print(f"❌ Glossary extraction stopped during API call for chapter {idx+1}")
-                        return
-                    elif "timeout" in str(e).lower():
-                        print(f"⚠️ API call timed out for chapter {idx+1}: {e}")
-                        continue
-                    else:
-                        print(f"❌ API error for chapter {idx+1}: {e}")
-                        continue
-                except Exception as e:
-                    print(f"❌ Unexpected error for chapter {idx+1}: {e}")
-                    continue
-                    
-                # Process response
-                resp = raw[0] if isinstance(raw, tuple) else raw
-
-                # Save the raw response
-                os.makedirs("Payloads", exist_ok=True)
-                with open(f"Payloads/failed_response_chap{idx+1}.txt", "w", encoding="utf-8", errors="replace") as f:
-                    f.write(resp)
-
-                # Extract JSON
-                m = re.search(r"\[.*\]", resp, re.DOTALL)
-                if not m:
-                    print(f"[Warning] Couldn't find JSON array in chapter {idx+1}, saving raw…")
-                    continue
-
-                json_str = m.group(0) if m else resp
-
-                # Parse JSON and validate entries
-                try:
-                    data = json.loads(json_str)
-                    
-                    # Filter out invalid entries
-                    valid_data = []
-                    for entry in data:
-                        if validate_extracted_entry(entry):
-                            valid_data.append(entry)
-                        else:
-                            print(f"[Debug] Skipped invalid entry: {entry.get('original_name', 'unknown')}")
-                    
-                    data = valid_data
-                    total_ent = len(data)
-                    
-                    # Log entries
-                    for eidx, entry in enumerate(data, start=1):
-                        if check_stop():
-                            print(f"❌ Glossary extraction stopped during entry processing for chapter {idx+1}")
+                    try:
+                        # Use send_with_interrupt for API call
+                        raw = send_with_interrupt(
+                            messages=msgs,
+                            client=client,
+                            temperature=temp,
+                            max_tokens=mtoks,
+                            stop_check_fn=check_stop,
+                            chunk_timeout=chunk_timeout
+                        )
+                    except UnifiedClientError as e:
+                        if "stopped by user" in str(e).lower():
+                            print(f"❌ Glossary extraction stopped during API call for chapter {idx+1}")
                             return
-                            
-                        elapsed = time.time() - start
-                        if idx == 0 and eidx == 1:
-                            eta = 0
+                        elif "timeout" in str(e).lower():
+                            print(f"⚠️ API call timed out for chapter {idx+1}: {e}")
+                            continue
                         else:
-                            avg = elapsed / ((idx * 100) + eidx)
-                            eta = avg * (total_chapters * 100 - ((idx * 100) + eidx))
-                        name = entry.get("original_name","?")
-                        print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → Entry "{name}"')
-                except json.JSONDecodeError as e:
-                    print(f"[Warning] JSON decode error chap {idx+1}: {e}")
-                    continue    
+                            print(f"❌ API error for chapter {idx+1}: {e}")
+                            continue
+                    except Exception as e:
+                        print(f"❌ Unexpected error for chapter {idx+1}: {e}")
+                        continue
+                    
+                    # Process response
+                    resp = raw[0] if isinstance(raw, tuple) else raw
+
+                    # Save the raw response
+                    os.makedirs("Payloads", exist_ok=True)
+                    with open(f"Payloads/failed_response_chap{idx+1}.txt", "w", encoding="utf-8", errors="replace") as f:
+                        f.write(resp)
+
+                    # Extract JSON
+                    m = re.search(r"\[.*\]", resp, re.DOTALL)
+                    if not m:
+                        print(f"[Warning] Couldn't find JSON array in chapter {idx+1}, saving raw…")
+                        continue
+
+                    json_str = m.group(0) if m else resp
+
+                    # Parse JSON and validate entries
+                    try:
+                        data = json.loads(json_str)
+                        
+                        # Filter out invalid entries
+                        valid_data = []
+                        for entry in data:
+                            if validate_extracted_entry(entry):
+                                valid_data.append(entry)
+                            else:
+                                print(f"[Debug] Skipped invalid entry: {entry.get('original_name', 'unknown')}")
+                        
+                        data = valid_data
+                        total_ent = len(data)
+                        
+                        # Log entries
+                        for eidx, entry in enumerate(data, start=1):
+                            if check_stop():
+                                print(f"❌ Glossary extraction stopped during entry processing for chapter {idx+1}")
+                                return
+                                
+                            elapsed = time.time() - start
+                            if idx == 0 and eidx == 1:
+                                eta = 0
+                            else:
+                                avg = elapsed / ((idx * 100) + eidx)
+                                eta = avg * (total_chapters * 100 - ((idx * 100) + eidx))
+                            name = entry.get("original_name","?")
+                            print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → Entry "{name}"')
+                    except json.JSONDecodeError as e:
+                        print(f"[Warning] JSON decode error chap {idx+1}: {e}")
+                        continue    
                     
                 # Merge and save (original behavior for sequential mode)
                 glossary.extend(data)
@@ -1508,16 +1556,9 @@ def main(log_callback=None, stop_callback=None):
                     
                     if next_chapter_in_range:
                         print(f"⏱️  Waiting {api_delay}s before next chapter...")
-                        
-                        # Use interruptible sleep
-                        sleep_elapsed = 0
-                        sleep_interval = 0.5
-                        while sleep_elapsed < api_delay:
-                            if check_stop():
-                                print(f"❌ Glossary extraction stopped during delay")
-                                return
-                            time.sleep(min(sleep_interval, api_delay - sleep_elapsed))
-                            sleep_elapsed += sleep_interval
+                        if not interruptible_sleep(api_delay, check_stop, 0.1):
+                            print(f"❌ Glossary extraction stopped during delay")
+                            return
                             
                 # Check for stop after processing chapter
                 if check_stop():
