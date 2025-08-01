@@ -4773,70 +4773,91 @@ def parse_token_limit(env_value):
     
     return 1000000, "1000000 (default)"
 
-def build_system_prompt(user_prompt, glossary_path):
-    """Build the system prompt with glossary - NO FALLBACK"""
+def build_system_prompt(user_prompt, glossary_path=None):
+    """Build the system prompt with glossary - BRUTE FORCE VERSION"""
     append_glossary = os.getenv("APPEND_GLOSSARY", "1") == "1"
+    actual_glossary_path = glossary_path
+    
+    print(f"[DEBUG] build_system_prompt called with glossary_path: {glossary_path}")
+    print(f"[DEBUG] APPEND_GLOSSARY: {os.getenv('APPEND_GLOSSARY', '1')}")
+    print(f"[DEBUG] append_glossary boolean: {append_glossary}")
     
     system = user_prompt if user_prompt else ""
     
-    def format_glossary_for_prompt(glossary_data):
-        """Convert various glossary formats into a unified prompt format"""
-        formatted_entries = {}
-        
+    if append_glossary and actual_glossary_path and os.path.exists(actual_glossary_path):
         try:
-            if isinstance(glossary_data, list):
-                for char in glossary_data:
-                    if not isinstance(char, dict):
-                        continue
-                        
-                    original = char.get('original_name', '')
-                    translated = char.get('name', original)
-                    if original and translated:
-                        formatted_entries[original] = translated
-                    
-                    title = char.get('title')
-                    if title and original:
-                        formatted_entries[f"{original} ({title})"] = f"{translated} ({title})"
-                    
-                    refer_map = char.get('how_they_refer_to_others', {})
-                    if isinstance(refer_map, dict):
-                        for other_name, reference in refer_map.items():
-                            if other_name and reference:
-                                formatted_entries[f"{original} → {other_name}"] = f"{translated} → {reference}"
+            print(f"[DEBUG] ✅ Loading glossary from: {os.path.abspath(actual_glossary_path)}")
             
-            elif isinstance(glossary_data, dict):
-                if "entries" in glossary_data and isinstance(glossary_data["entries"], dict):
-                    formatted_entries = glossary_data["entries"]
-                elif all(isinstance(k, str) and isinstance(v, str) for k, v in glossary_data.items() if k != "metadata"):
-                    formatted_entries = {k: v for k, v in glossary_data.items() if k != "metadata"}
-            
-            return formatted_entries
-            
-        except Exception as e:
-            print(f"Warning: Error formatting glossary: {e}")
-            return {}
-    
-    if append_glossary and glossary_path and os.path.exists(glossary_path):
-        try:
-            with open(glossary_path, "r", encoding="utf-8") as gf:
+            with open(actual_glossary_path, "r", encoding="utf-8") as gf:
                 glossary_data = json.load(gf)
             
-            formatted_entries = format_glossary_for_prompt(glossary_data)
+            print(f"[DEBUG] Raw glossary data type: {type(glossary_data)}")
+            print(f"[DEBUG] Raw glossary data length: {len(glossary_data) if hasattr(glossary_data, '__len__') else 'N/A'}")
             
-            if formatted_entries:
-                glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
+            # ===== BRUTE FORCE: JUST SEND THE RAW DATA =====
+            # Convert whatever format to a simple string representation
+            if isinstance(glossary_data, list):
+                # List format - extract all the name fields and send them
+                glossary_lines = []
+                for i, entry in enumerate(glossary_data):
+                    if isinstance(entry, dict):
+                        name = entry.get('name', '')
+                        if name:
+                            glossary_lines.append(name)
+                        # Also try other possible fields
+                        for field in ['original_name', 'character', 'term']:
+                            if field in entry and entry[field]:
+                                glossary_lines.append(f"{field}: {entry[field]}")
+                
+                glossary_text = '\n'.join(glossary_lines)
+                
+            elif isinstance(glossary_data, dict):
+                # Dict format - just dump it as key: value pairs
+                glossary_lines = []
+                for key, value in glossary_data.items():
+                    if key != 'metadata':  # Skip metadata
+                        glossary_lines.append(f"{key}: {value}")
+                
+                glossary_text = '\n'.join(glossary_lines)
+            
+            else:
+                # Unknown format - just convert to string
+                glossary_text = str(glossary_data)
+            
+            # ===== APPEND TO SYSTEM PROMPT NO MATTER WHAT =====
+            if glossary_text.strip():  # Only if we have some content
                 if system:
                     system += "\n\n"
                 
-                # Get custom prompt, fallback to default if empty
                 custom_prompt = os.getenv("APPEND_GLOSSARY_PROMPT", "Character/Term Glossary (use these translations consistently):").strip()
                 if not custom_prompt:
                     custom_prompt = "Character/Term Glossary (use these translations consistently):"
                 
-                system += f"{custom_prompt}\n{glossary_block}"
-                    
+                system += f"{custom_prompt}\n{glossary_text}"
+                
+                print(f"[DEBUG] ✅ BRUTE FORCE: Glossary appended!")
+                print(f"[DEBUG] Glossary text length: {len(glossary_text)} characters")
+                print(f"[DEBUG] Final system prompt length: {len(system)} characters")
+                
+                # Show first few lines
+                lines = glossary_text.split('\n')[:5]
+                print(f"[DEBUG] First few glossary lines: {lines}")
+            else:
+                print(f"[DEBUG] ❌ No glossary text generated")
+                
         except Exception as e:
-            print(f"Warning: Could not load glossary: {e}")
+            print(f"[ERROR] Could not load glossary: {e}")
+            import traceback
+            print(f"[ERROR] Full traceback: {traceback.format_exc()}")
+    else:
+        if not append_glossary:
+            print(f"[DEBUG] ❌ Glossary append disabled")
+        elif not actual_glossary_path:
+            print(f"[DEBUG] ❌ No glossary path provided")
+        elif not os.path.exists(actual_glossary_path):
+            print(f"[DEBUG] ❌ Glossary file does not exist: {actual_glossary_path}")
+    
+    print(f"[DEBUG] 🎯 FINAL SYSTEM PROMPT LENGTH: {len(system)} characters")
     
     return system
 
