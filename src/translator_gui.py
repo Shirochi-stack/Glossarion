@@ -7171,7 +7171,7 @@ Recent translations to summarize:
                 
                 # Get the system prompt and log first 100 characters
                 system_prompt = self.prompt_text.get("1.0", "end").strip()
-                prompt_preview = system_prompt[:100] + "..." if len(system_prompt) > 100 else system_prompt
+                prompt_preview = system_prompt[:200] + "..." if len(system_prompt) > 100 else system_prompt
                 self.append_log(f"📝 System prompt preview: {prompt_preview}")
                 self.append_log(f"📏 System prompt length: {len(system_prompt)} characters")
                 
