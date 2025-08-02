@@ -187,7 +187,7 @@ class UIHelper:
             
             def undo(self):
                 """Perform undo"""
-                print(f"[DEBUG] Undo called. Stack size: {len(self.undo_stack)}, Redo stack: {len(self.redo_stack)}")
+                #print(f"[DEBUG] Undo called. Stack size: {len(self.undo_stack)}, Redo stack: {len(self.redo_stack)}")
                 if len(self.undo_stack) > 1:
                     self.is_undoing = True
                     self.last_action_was_undo = True
@@ -211,7 +211,7 @@ class UIHelper:
                         except:
                             text_widget.mark_set(tk.INSERT, "1.0")
                             
-                        print(f"[DEBUG] Undo complete. New redo stack size: {len(self.redo_stack)}")
+                        #print(f"[DEBUG] Undo complete. New redo stack size: {len(self.redo_stack)}")
                     finally:
                         self.is_undoing = False
                 return "break"
@@ -1024,7 +1024,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.6.72"
+        __version__ = "3.7.1"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1175,7 +1175,23 @@ class TranslatorGUI:
         self.async_wait_for_completion_var = tk.BooleanVar(value=False)
         self.async_poll_interval_var = tk.IntVar(value=60)
         
+         # Enhanced filtering level
+        if not hasattr(self, 'enhanced_filtering_var'):
+            self.enhanced_filtering_var = tk.StringVar(
+                value=self.config.get('enhanced_filtering', 'smart')
+            )
         
+        # Preserve structure toggle
+        if not hasattr(self, 'enhanced_preserve_structure_var'):
+            self.enhanced_preserve_structure_var = tk.BooleanVar(
+                value=self.config.get('enhanced_preserve_structure', True)
+            )
+        
+        # Fallback enabled toggle
+        if not hasattr(self, 'enhanced_fallback_enabled_var'):
+            self.enhanced_fallback_enabled_var = tk.BooleanVar(
+                value=self.config.get('enhanced_fallback_enabled', True)
+            )       
         # Initialize update manager AFTER config is loaded
         try:
             from update_manager import UpdateManager
@@ -1818,7 +1834,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.6.72 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.7.1 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def create_file_section(self):
@@ -6248,7 +6264,8 @@ Recent translations to summarize:
         except:
             pass
         
-        self.translation_thread = threading.Thread(target=self.run_translation_direct, daemon=True)
+        thread_name = f"TranslationThread_{int(time.time())}"
+        self.translation_thread = threading.Thread(target=self.run_translation_direct, name=thread_name, daemon=True)
         self.translation_thread.start()
         self.master.after(100, self.update_run_button)
 
@@ -7278,6 +7295,26 @@ Recent translations to summarize:
                 except:
                     pass
                     
+        # Handle extraction mode - check which variables exist
+        if hasattr(self, 'text_extraction_method_var'):
+            # New cleaner UI variables
+            extraction_method = self.text_extraction_method_var.get()
+            filtering_level = self.file_filtering_level_var.get()
+            
+            if extraction_method == 'enhanced':
+                extraction_mode = 'enhanced'
+                enhanced_filtering = filtering_level
+            else:
+                extraction_mode = filtering_level
+                enhanced_filtering = 'smart'  # default
+        else:
+            # Old UI variables
+            extraction_mode = self.extraction_mode_var.get()
+            if extraction_mode == 'enhanced':
+                enhanced_filtering = getattr(self, 'enhanced_filtering_var', tk.StringVar(value='smart')).get()
+            else:
+                enhanced_filtering = 'smart'
+                    
         return {
             'EPUB_PATH': epub_path,
             'MODEL': self.model_var.get(),
@@ -7333,7 +7370,15 @@ Recent translations to summarize:
             'BATCH_SIZE': self.batch_size_var.get(),
             'DISABLE_ZERO_DETECTION': "1" if self.disable_zero_detection_var.get() else "0",
             'TRANSLATION_HISTORY_ROLLING': "1" if self.translation_history_rolling_var.get() else "0",
-            'EXTRACTION_MODE': self.extraction_mode_var.get(),
+            # Extraction settings
+            "EXTRACTION_MODE": extraction_mode,
+            "ENHANCED_FILTERING": enhanced_filtering,
+            "ENHANCED_PRESERVE_STRUCTURE": "1" if getattr(self, 'enhanced_preserve_structure_var', tk.BooleanVar(value=True)).get() else "0",
+            "ENHANCED_FALLBACK_ENABLED": "1" if getattr(self, 'enhanced_fallback_enabled_var', tk.BooleanVar(value=True)).get() else "0",
+            
+            # For new UI (if available)
+            "TEXT_EXTRACTION_METHOD": extraction_method if hasattr(self, 'text_extraction_method_var') else ('enhanced' if extraction_mode == 'enhanced' else 'standard'),
+            "FILE_FILTERING_LEVEL": filtering_level if hasattr(self, 'file_filtering_level_var') else extraction_mode,
             'DISABLE_CHAPTER_MERGING': '1' if self.disable_chapter_merging_var.get() else '0',
             'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var.get() else "0",
             'DUPLICATE_DETECTION_MODE': self.duplicate_detection_mode_var.get(),
@@ -7440,7 +7485,8 @@ Recent translations to summarize:
         except:
             pass
         
-        self.glossary_thread = threading.Thread(target=self.run_glossary_extraction_direct, daemon=True)
+        thread_name = f"GlossaryThread_{int(time.time())}"
+        self.glossary_thread = threading.Thread(target=self.run_glossary_extraction_direct, name=thread_name, daemon=True)
         self.glossary_thread.start()
         self.master.after(100, self.update_run_button)
 
@@ -11377,9 +11423,9 @@ Recent translations to summarize:
                           bootstyle="round-toggle").pack(anchor=tk.W)
         retry_frame = tk.Frame(section_frame)
         retry_frame.pack(anchor=tk.W, padx=20, pady=(5, 5))
-        tk.Label(retry_frame, text="Max retry tokens:").pack(side=tk.LEFT)
+        tk.Label(retry_frame, text="Token constraint:").pack(side=tk.LEFT)
         tb.Entry(retry_frame, width=8, textvariable=self.max_retry_tokens_var).pack(side=tk.LEFT, padx=5)
-        tk.Label(section_frame, text="Automatically retry when API response\nis cut off due to token limits",
+        tk.Label(section_frame, text="Retry when truncated. Acts as min/max constraint:\nbelow value = minimum, above value = maximum",
                    font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
         # Compression Factor
         # Add separator line for clarity
@@ -11705,47 +11751,127 @@ Recent translations to summarize:
         tk.Label(section_frame, text="Automatically retry failed/deleted chapters\non each translation run",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
         
-        # NEW: Replace comprehensive extraction checkbox with radio buttons
-        extraction_frame = tk.LabelFrame(section_frame, text="Chapter Extraction Mode", padx=10, pady=5)
+        # === CHAPTER EXTRACTION SETTINGS ===
+        # Main extraction frame
+        extraction_frame = tk.LabelFrame(section_frame, text="Chapter Extraction Settings", padx=10, pady=5)
         extraction_frame.pack(fill=tk.X, pady=(0, 10))
         
-        # Initialize extraction_mode_var if not exists
-        if not hasattr(self, 'extraction_mode_var'):
-            self.extraction_mode_var = tk.StringVar(
-                value=self.config.get('extraction_mode', 'smart')
+        # Initialize variables if not exists
+        if not hasattr(self, 'text_extraction_method_var'):
+            # Check if using old enhanced mode
+            if self.config.get('extraction_mode') == 'enhanced':
+                self.text_extraction_method_var = tk.StringVar(value='enhanced')
+                # Set filtering from enhanced_filtering or default to smart
+                self.file_filtering_level_var = tk.StringVar(
+                    value=self.config.get('enhanced_filtering', 'smart')
+                )
+            else:
+                self.text_extraction_method_var = tk.StringVar(value='standard')
+                self.file_filtering_level_var = tk.StringVar(
+                    value=self.config.get('extraction_mode', 'smart')
+                )
+        
+        if not hasattr(self, 'enhanced_preserve_structure_var'):
+            self.enhanced_preserve_structure_var = tk.BooleanVar(
+                value=self.config.get('enhanced_preserve_structure', True)
+            )
+        if not hasattr(self, 'enhanced_fallback_enabled_var'):
+            self.enhanced_fallback_enabled_var = tk.BooleanVar(
+                value=self.config.get('enhanced_fallback_enabled', True)
             )
         
-        tb.Radiobutton(extraction_frame, text="Smart Extraction", 
-                      variable=self.extraction_mode_var, value="smart",
-                      bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+        # --- Text Extraction Method Section ---
+        method_frame = tk.Frame(extraction_frame)
+        method_frame.pack(fill=tk.X, pady=(0, 15))
         
-        tk.Label(extraction_frame, text="Filters navigation/metadata, \nuses intelligent chapter detection",
+        tk.Label(method_frame, text="Text Extraction Method:", 
+                font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(0, 5))
+        
+        # Standard extraction
+        tb.Radiobutton(method_frame, text="Standard (BeautifulSoup)", 
+                      variable=self.text_extraction_method_var, value="standard",
+                      bootstyle="round-toggle",
+                      command=self.on_extraction_method_change).pack(anchor=tk.W, pady=2)
+        
+        tk.Label(method_frame, text="Traditional HTML parsing - fast and reliable",
                 font=('TkDefaultFont', 9), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
         
-        tb.Radiobutton(extraction_frame, text="Comprehensive Extraction", 
-                      variable=self.extraction_mode_var, value="comprehensive",
+        # Enhanced extraction
+        tb.Radiobutton(method_frame, text="🚀 Enhanced (html2text)", 
+                      variable=self.text_extraction_method_var, value="enhanced",
+                      bootstyle="success-round-toggle",
+                      command=self.on_extraction_method_change).pack(anchor=tk.W, pady=2)
+
+        tk.Label(method_frame, text="Superior Unicode handling, cleaner text extraction",
+                font=('TkDefaultFont', 9), fg='dark green', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
+        
+        # Enhanced options (shown when enhanced is selected)
+        self.enhanced_options_frame = tk.Frame(method_frame)
+        self.enhanced_options_frame.pack(fill=tk.X, padx=20, pady=(5, 0))
+        
+        # Structure preservation
+        tb.Checkbutton(self.enhanced_options_frame, text="Preserve Markdown Structure", 
+                      variable=self.enhanced_preserve_structure_var,
                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
         
-        tk.Label(extraction_frame, text="Moderate filtering, extracts most content files,\nsimpler chapter numbering",
-                font=('TkDefaultFont', 9), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
+        tk.Label(self.enhanced_options_frame, text="Keep formatting (bold, headers, lists) for better AI context",
+                font=('TkDefaultFont', 8), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 3))
         
-        tb.Radiobutton(extraction_frame, text="Full Extraction", 
-                      variable=self.extraction_mode_var, value="full",
+        # Fallback option
+        tb.Checkbutton(self.enhanced_options_frame, text="Enable Fallback to Standard", 
+                      variable=self.enhanced_fallback_enabled_var,
                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
         
-        tk.Label(extraction_frame, text="NO filtering - extracts ALL HTML/XHTML files,\npreserves complete HTML structure",
+        tk.Label(self.enhanced_options_frame, text="Use standard extraction if html2text fails",
+                font=('TkDefaultFont', 8), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
+        
+        # Requirements note
+        requirements_frame = tk.Frame(self.enhanced_options_frame)
+        requirements_frame.pack(anchor=tk.W, pady=(5, 0))
+        
+        # Separator
+        ttk.Separator(method_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
+        
+        # --- File Filtering Level Section ---
+        filtering_frame = tk.Frame(extraction_frame)
+        filtering_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(filtering_frame, text="File Filtering Level:", 
+                font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(0, 5))
+        
+        # Smart filtering
+        tb.Radiobutton(filtering_frame, text="Smart (Aggressive Filtering)", 
+                      variable=self.file_filtering_level_var, value="smart",
+                      bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+        
+        tk.Label(filtering_frame, text="Skips navigation, TOC, copyright files\nBest for clean EPUBs with clear chapter structure",
                 font=('TkDefaultFont', 9), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
         
-        # NEW: Add separator before merge toggle
+        # Comprehensive filtering
+        tb.Radiobutton(filtering_frame, text="Comprehensive (Moderate Filtering)", 
+                      variable=self.file_filtering_level_var, value="comprehensive",
+                      bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+        
+        tk.Label(filtering_frame, text="Only skips obvious navigation files\nGood when Smart mode misses chapters",
+                font=('TkDefaultFont', 9), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
+        
+        # Full extraction
+        tb.Radiobutton(filtering_frame, text="Full (No Filtering)", 
+                      variable=self.file_filtering_level_var, value="full",
+                      bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
+        
+        tk.Label(filtering_frame, text="Extracts ALL HTML/XHTML files\nUse when other modes skip important content",
+                font=('TkDefaultFont', 9), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
+        
+        # Chapter merging option
         ttk.Separator(extraction_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
         
-        # NEW: Initialize disable_chapter_merging_var if not exists
+        # Initialize disable_chapter_merging_var if not exists
         if not hasattr(self, 'disable_chapter_merging_var'):
             self.disable_chapter_merging_var = tk.BooleanVar(
                 value=self.config.get('disable_chapter_merging', False)
             )
         
-        # NEW: Add disable chapter merging toggle
         tb.Checkbutton(extraction_frame, text="Disable Chapter Merging", 
                       variable=self.disable_chapter_merging_var,
                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
@@ -11753,6 +11879,7 @@ Recent translations to summarize:
         tk.Label(extraction_frame, text="Disable automatic merging of Section/Chapter pairs.\nEach file will be treated as a separate chapter.",
                 font=('TkDefaultFont', 9), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
         
+        # === REMAINING OPTIONS ===
         tb.Checkbutton(section_frame, text="Disable Image Gallery in EPUB", 
                       variable=self.disable_epub_gallery_var,
                       bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
@@ -11774,8 +11901,7 @@ Recent translations to summarize:
         tk.Label(section_frame, text="Use chapter headers/titles as output filenames",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
                 
-
-         # Chapter number offset
+        # Chapter number offset
         ttk.Separator(section_frame, orient='horizontal').pack(fill=tk.X, pady=(10, 10))
         
         offset_frame = tk.Frame(section_frame)
@@ -11835,8 +11961,18 @@ Recent translations to summarize:
             fg='gray',
             justify=tk.LEFT
         ).pack(anchor=tk.W, padx=(20, 0))
-     
+        
+        # Initial state - show/hide enhanced options
+        self.on_extraction_method_change()
 
+    def on_extraction_method_change(self):
+        """Handle extraction method changes and show/hide Enhanced options"""
+        if hasattr(self, 'text_extraction_method_var') and hasattr(self, 'enhanced_options_frame'):
+            if self.text_extraction_method_var.get() == 'enhanced':
+                self.enhanced_options_frame.pack(fill=tk.X, padx=20, pady=(5, 0))
+            else:
+                self.enhanced_options_frame.pack_forget()
+                
     def _create_image_translation_section(self, parent):
         """Create image translation section"""
         section_frame = tk.LabelFrame(parent, text="Image Translation", padx=10, pady=8)
@@ -11961,7 +12097,22 @@ Recent translations to summarize:
         
         # Call once to set initial state
         toggle_watermark_options()
-
+        
+    def on_extraction_mode_change(self):
+        """Handle extraction mode changes and show/hide Enhanced options"""
+        if self.extraction_mode_var.get() == 'enhanced':
+            # Show enhanced options
+            if hasattr(self, 'enhanced_options_separator'):
+                self.enhanced_options_separator.pack(fill=tk.X, pady=(5, 5))
+            if hasattr(self, 'enhanced_options_frame'):
+                self.enhanced_options_frame.pack(fill=tk.X, padx=20)
+        else:
+            # Hide enhanced options
+            if hasattr(self, 'enhanced_options_separator'):
+                self.enhanced_options_separator.pack_forget()
+            if hasattr(self, 'enhanced_options_frame'):
+                self.enhanced_options_frame.pack_forget()
+                
     def _create_anti_duplicate_section(self, parent):
         """Create comprehensive anti-duplicate parameter controls with tabs"""
         # Anti-Duplicate Parameters section
@@ -12519,7 +12670,6 @@ Recent translations to summarize:
                         "Translate this book title to English while retaining any acronyms:"),
                     'emergency_paragraph_restore': self.emergency_restore_var.get(),
                     'reset_failed_chapters': self.reset_failed_chapters_var.get(),
-                    'extraction_mode': self.extraction_mode_var.get(),
                     'disable_chapter_merging': self.disable_chapter_merging_var.get(),
                     'disable_epub_gallery': self.disable_epub_gallery_var.get(),
                     'disable_zero_detection': self.disable_zero_detection_var.get(),
@@ -12540,7 +12690,10 @@ Recent translations to summarize:
                     'groq_base_url': self.groq_base_url_var.get() if hasattr(self, 'groq_base_url_var') else '',
                     'fireworks_base_url': self.fireworks_base_url_var.get() if hasattr(self, 'fireworks_base_url_var') else '',
                     'use_custom_openai_endpoint': self.use_custom_openai_endpoint_var.get(),
-
+                    'text_extraction_method': self.text_extraction_method_var.get() if hasattr(self, 'text_extraction_method_var') else 'standard',
+                    'file_filtering_level': self.file_filtering_level_var.get() if hasattr(self, 'file_filtering_level_var') else 'smart',
+                    'extraction_mode': 'enhanced' if self.text_extraction_method_var.get() == 'enhanced' else self.file_filtering_level_var.get(), 
+                    'enhanced_filtering': self.file_filtering_level_var.get() if self.text_extraction_method_var.get() == 'enhanced' else 'smart', 
                     
                     # ALL Anti-duplicate parameters (moved below other settings)
                     'enable_anti_duplicate': getattr(self, 'enable_anti_duplicate_var', type('', (), {'get': lambda: False})).get(),
@@ -12600,7 +12753,6 @@ Recent translations to summarize:
                     "BOOK_TITLE_PROMPT": self.book_title_prompt,
                     "EMERGENCY_PARAGRAPH_RESTORE": "1" if self.emergency_restore_var.get() else "0",
                     "RESET_FAILED_CHAPTERS": "1" if self.reset_failed_chapters_var.get() else "0",
-                    "EXTRACTION_MODE": self.extraction_mode_var.get(),
                     'DISABLE_CHAPTER_MERGING': '1' if self.disable_chapter_merging_var.get() else '0',
                     "ENABLE_IMAGE_TRANSLATION": "1" if self.enable_image_translation_var.get() else "0",
                     "PROCESS_WEBNOVEL_IMAGES": "1" if self.process_webnovel_images_var.get() else "0",
@@ -12650,6 +12802,11 @@ Recent translations to summarize:
                     'HEADERS_PER_BATCH': str(self.config.get('headers_per_batch', 400)),
                     'UPDATE_HTML_HEADERS': "1" if self.update_html_headers_var.get() else "0",
                     'SAVE_HEADER_TRANSLATIONS': "1" if self.save_header_translations_var.get() else "0",
+                    # EXTRACTION_MODE:
+                    "TEXT_EXTRACTION_METHOD": self.text_extraction_method_var.get() if hasattr(self, 'text_extraction_method_var') else 'standard',
+                    "FILE_FILTERING_LEVEL": self.file_filtering_level_var.get() if hasattr(self, 'file_filtering_level_var') else 'smart',
+                    "EXTRACTION_MODE": 'enhanced' if self.text_extraction_method_var.get() == 'enhanced' else self.file_filtering_level_var.get(), 
+                    "ENHANCED_FILTERING": self.file_filtering_level_var.get() if self.text_extraction_method_var.get() == 'enhanced' else 'smart', 
                     
                     # ALL Anti-duplicate environment variables (moved below other settings)
                     'ENABLE_ANTI_DUPLICATE': '1' if hasattr(self, 'enable_anti_duplicate_var') and self.enable_anti_duplicate_var.get() else '0',
@@ -13158,7 +13315,6 @@ Recent translations to summarize:
             self.config['save_cleaned_images'] = self.save_cleaned_images_var.get()
             self.config['advanced_watermark_removal'] = self.advanced_watermark_removal_var.get()
             self.config['compression_factor'] = self.compression_factor_var.get()
-            self.config['extraction_mode'] = self.extraction_mode_var.get()
             self.config['translation_chunk_prompt'] = self.translation_chunk_prompt
             self.config['image_chunk_prompt'] = self.image_chunk_prompt
             self.config['force_ncx_only'] = self.force_ncx_only_var.get()
@@ -13174,6 +13330,25 @@ Recent translations to summarize:
             self.config['fireworks_base_url'] = self.fireworks_base_url_var.get()
             self.config['use_custom_openai_endpoint'] = self.use_custom_openai_endpoint_var.get()
             self.config['disable_chapter_merging'] = self.disable_chapter_merging_var.get()
+            # New cleaner UI variables
+            if hasattr(self, 'text_extraction_method_var'):
+                self.config['text_extraction_method'] = self.text_extraction_method_var.get()
+                self.config['file_filtering_level'] = self.file_filtering_level_var.get()
+                
+                # Update extraction_mode for backwards compatibility
+                if self.text_extraction_method_var.get() == 'enhanced':
+                    self.config['extraction_mode'] = 'enhanced'
+                    self.config['enhanced_filtering'] = self.file_filtering_level_var.get()
+                else:
+                    self.config['extraction_mode'] = self.file_filtering_level_var.get()
+            else:
+                # Fallback for old UI - keep existing behavior
+                self.config['extraction_mode'] = self.extraction_mode_var.get()
+
+            # Enhanced mode settings (these already exist in your code but ensure they're saved)
+            self.config['enhanced_filtering'] = getattr(self, 'enhanced_filtering_var', tk.StringVar(value='smart')).get()
+            self.config['enhanced_preserve_structure'] = getattr(self, 'enhanced_preserve_structure_var', tk.BooleanVar(value=True)).get()
+            self.config['enhanced_fallback_enabled'] = getattr(self, 'enhanced_fallback_enabled_var', tk.BooleanVar(value=True)).get()
 
 
 
@@ -13260,7 +13435,7 @@ Recent translations to summarize:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.6.72...")
+    print("🚀 Starting Glossarion v3.7.1...")
     
     # Initialize splash screen
     splash_manager = None
