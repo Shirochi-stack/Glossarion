@@ -123,6 +123,7 @@ from datetime import datetime
 import traceback
 import hashlib
 import html
+import threading
 
 # IMPORTANT: This client respects GUI settings via environment variables:
 # - SEND_INTERVAL_SECONDS: Delay between API calls (set by GUI)
@@ -714,8 +715,20 @@ class UnifiedClient:
         return payload_name, response_name
     
     def _save_payload(self, messages, filename):
+        
+         # Thread isolation
+        thread_name = threading.current_thread().name
+        if 'Translation' in thread_name:
+            context = 'translation'
+        elif 'Glossary' in thread_name:
+            context = 'glossary'
+        else:
+            context = 'general'
+        
+        thread_dir = os.path.join("Payloads", context, f"{thread_name}_{threading.current_thread().ident}")
+        os.makedirs(thread_dir, exist_ok=True)
         """Save request payload for debugging"""
-        filepath = os.path.join("Payloads", filename)
+        filepath = os.path.join(thread_dir, filename)
         try:
             # Include debug info about system prompt
             debug_info = {
@@ -757,17 +770,28 @@ class UnifiedClient:
         if not filename.endswith('.json'):
             logger.debug(f"Skipping HTML response save to Payloads: {filename}")
             return
+        
+        # ADD: Thread isolation
+        thread_name = threading.current_thread().name
+        if 'Translation' in thread_name:
+            context = 'translation'
+        elif 'Glossary' in thread_name:
+            context = 'glossary'
+        else:
+            context = 'general'
+        
+        thread_dir = os.path.join("Payloads", context, f"{thread_name}_{threading.current_thread().ident}")
+        os.makedirs(thread_dir, exist_ok=True)
             
         try:
-            # Ensure Payloads directory exists
-            os.makedirs("Payloads", exist_ok=True)
-            
+            # REST OF YOUR CODE STAYS EXACTLY THE SAME
             # Use forward slashes for consistency
             safe_filename = filename.replace("\\", "/")
             if "/" in safe_filename:
                 safe_filename = safe_filename.split("/")[-1]
             
-            filepath = os.path.join("Payloads", safe_filename)
+            # CHANGE: Use thread directory instead of "Payloads"
+            filepath = os.path.join(thread_dir, safe_filename)  # CHANGED from: os.path.join("Payloads", safe_filename)
             
             # For JSON responses, ensure proper formatting
             try:
@@ -1267,11 +1291,11 @@ class UnifiedClient:
                                 "• gemini-1.0-pro-002"
                             )
                         
-                        # Reduce tokens and retry
-                        current_tokens = max(256, current_tokens // 2)
+                        # No automatic retry - let higher level handle retries
                         attempt += 1
                         if attempt < attempts:
-                            print(f"🔄 Retrying Vertex AI Gemini with reduced tokens: {current_tokens}")
+                            print(f"❌ Gemini attempt {attempt} failed, no automatic retry")
+                            break  # Exit the retry loop
                     
                 # Check stop flag after response
                 if is_stop_requested():
@@ -2382,6 +2406,36 @@ class UnifiedClient:
         print(f"   ❌ Failed to extract any text from response")
         return result, finish_reason
 
+    def _get_thread_directory(self):
+        """Get thread-specific directory for payload storage"""
+        thread_name = threading.current_thread().name
+        if 'Translation' in thread_name:
+            context = 'translation'
+        elif 'Glossary' in thread_name:
+            context = 'glossary'
+        else:
+            context = 'general'
+        
+        thread_dir = os.path.join("Payloads", context, f"{thread_name}_{threading.current_thread().ident}")
+        os.makedirs(thread_dir, exist_ok=True)
+        return thread_dir
+
+    def _save_gemini_safety_config(self, config_data: dict, response_name: str):
+        """Save Gemini safety configuration with thread isolation"""
+        if not os.getenv("SAVE_PAYLOAD", "1") == "1":
+            return
+            
+        thread_dir = self._get_thread_directory()
+        config_filename = f"gemini_safety_{response_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        config_path = os.path.join(thread_dir, config_filename)
+        
+        try:
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(config_data, f, indent=2, ensure_ascii=False)
+            logger.debug(f"Saved Gemini safety config to: {config_path}")
+        except Exception as e:
+            print(f"Failed to save Gemini safety config: {e}")
+
     def _send_gemini(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to Gemini API with support for both text and multi-image messages"""
         
@@ -2495,17 +2549,9 @@ class UnifiedClient:
             "thinking_budget": thinking_budget if supports_thinking else None,
             "timestamp": datetime.now().isoformat(),
         }
-        
-        # Save to Payloads folder
-        os.makedirs("Payloads", exist_ok=True)
-        config_filename = f"gemini_safety_{response_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        config_path = os.path.join("Payloads", config_filename)
-        
-        try:
-            with open(config_path, 'w', encoding='utf-8') as f:
-                json.dump(config_data, f, indent=2)
-        except Exception as e:
-            print(f"Could not save safety config: {e}")
+
+        # Save configuration to file with thread isolation
+        self._save_gemini_safety_config(config_data, response_name)
                
         while attempt < attempts:
             try:
@@ -2616,12 +2662,11 @@ class UnifiedClient:
                 print(f"Gemini attempt {attempt+1} failed: {e}")
                 error_details[f'attempt_{attempt+1}'] = str(e)
             
-            # Reduce tokens and retry
-            current_tokens = max(256, current_tokens // 2)
+            # No automatic retry - let higher level handle retries
             attempt += 1
             if attempt < attempts:
-                logger.info(f"Retrying with max_output_tokens={current_tokens}")
-                print(f"🔄 Retrying Gemini with reduced tokens: {current_tokens}")
+                print(f"❌ Gemini attempt {attempt} failed, no automatic retry")
+                break  # Exit the retry loop
                 
         # After getting the response, use the enhanced extraction method
         result, finish_reason = self._extract_gemini_response_text(
