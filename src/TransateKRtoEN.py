@@ -851,6 +851,9 @@ class ProgressManager:
         # Handle file_deleted status - always needs retranslation
         if status == "file_deleted":
             return True, None, None
+
+        if status == "qa_failed":
+            return True, f"Chapter {actual_num} needs retranslation (QA failed: API response failure)", None
         
         # Check various conditions for skipping
         if status == "completed" and output_file:
@@ -1457,15 +1460,301 @@ class ChapterExtractor:
         return extracted_resources
     
     def _extract_chapters_universal(self, zf, extraction_mode="smart"):
-        """Universal chapter extraction with three modes: smart, comprehensive, full
+        """Universal chapter extraction with four modes: smart, comprehensive, full, enhanced
         
         All modes now properly merge Section/Chapter pairs
+        Enhanced mode uses html2text for superior text processing
         """
         # Check stop at the beginning
         if is_stop_requested():
             print("❌ Chapter extraction stopped by user")
             return [], 'unknown'
+        
+        # Initialize enhanced extractor if using enhanced mode
+        enhanced_extractor = None
+        enhanced_filtering = extraction_mode  # Default fallback
+        preserve_structure = True
+        fallback_enabled = True
+        
+        if extraction_mode == "enhanced":
+            print("🚀 Initializing Enhanced extraction mode with html2text...")
             
+            # Get enhanced mode configuration from environment
+            enhanced_filtering = os.getenv("ENHANCED_FILTERING", "smart")
+            preserve_structure = os.getenv("ENHANCED_PRESERVE_STRUCTURE", "1") == "1"
+            fallback_enabled = os.getenv("ENHANCED_FALLBACK_ENABLED", "1") == "1"
+            
+            print(f"  • Base filtering level: {enhanced_filtering}")
+            print(f"  • Preserve structure: {preserve_structure}")
+            print(f"  • Fallback enabled: {fallback_enabled}")
+            
+            # Try to initialize enhanced extractor
+            try:
+                # Import here to avoid dependency issues if html2text not installed
+                import html2text
+                
+                # Import our enhanced extractor (assume it's in the same directory or importable)
+                try:
+                    from enhanced_text_extractor import EnhancedTextExtractor
+                    enhanced_extractor = EnhancedTextExtractor(
+                        fallback_enabled=fallback_enabled,
+                        preserve_structure=preserve_structure
+                    )
+                    print("✅ Enhanced text extractor initialized successfully")
+                except ImportError:
+                    print("⚠️ Enhanced text extractor module not found, using html2text directly")
+                    # Create a simple wrapper using html2text directly
+                    class SimpleEnhancedExtractor:
+                        def __init__(self, fallback_enabled, preserve_structure):
+                            self.fallback_enabled = fallback_enabled
+                            self.preserve_structure = preserve_structure
+                            self.h2t = None
+                            self._configure_html2text()
+                        
+                        def _configure_html2text(self):
+                            import html2text
+                            self.h2t = html2text.HTML2Text()
+                            
+                            # Basic configuration
+                            self.h2t.ignore_links = True
+                            self.h2t.ignore_images = False
+                            self.h2t.body_width = 0  # Don't wrap lines
+                            
+                            # CRITICAL UNICODE SETTINGS - Fixed
+                            self.h2t.unicode_snob = True  # Use unicode characters
+                            self.h2t.escape_snob = True   # Don't escape special chars
+                            
+                            # Additional unicode preservation settings
+                            self.h2t.use_automatic_links = False  # Don't convert URLs
+                            self.h2t.skip_internal_links = True   # Skip anchor links
+                            
+                            # IMPORTANT: Disable character reference conversion
+                            # This prevents html2text from converting unicode characters
+                            self.h2t.ignore_emphasis = False  # Keep emphasis markers
+                            self.h2t.ignore_tables = False   # Keep table structure
+                            
+                            # Single line breaks for better text flow
+                            self.h2t.single_line_break = True
+                            self.h2t.ignore_anchors = True
+                            
+                            # Preserve quotes and special characters
+                            self.h2t.protect_links = True  # Protects content that looks like links
+                            self.h2t.wrap_links = False    # Don't wrap links
+                            self.h2t.wrap_list_items = False  # Don't wrap list items
+                            
+                            if self.preserve_structure:
+                                # Keep formatting when preserve_structure is True
+                                self.h2t.bypass_tables = False
+                                self.h2t.mark_code = True
+                                self.h2t.ul_item_mark = '-'
+                                self.h2t.emphasis_mark = '*'
+                                self.h2t.strong_mark = '**'
+                            else:
+                                # Strip formatting when preserve_structure is False
+                                self.h2t.bypass_tables = True
+                                self.h2t.mark_code = False
+                        
+                        def _preprocess_html(self, html_content):
+                            """Preprocess HTML to preserve unicode characters before html2text conversion"""
+                            from bs4 import BeautifulSoup
+                            import html
+                            
+                            # First, decode any HTML entities to their unicode equivalents
+                            # This ensures quotes like &ldquo; become actual unicode characters
+                            html_content = html.unescape(html_content)
+                            
+                            # Parse with BeautifulSoup to clean up the HTML
+                            soup = BeautifulSoup(html_content, 'html.parser')
+                            
+                            # Convert back to string, preserving unicode
+                            return str(soup)
+                        
+                        def extract_chapter_content(self, html_content, extraction_mode):
+                            """Extract content from HTML with proper unicode handling"""
+                            try:
+                                from bs4 import BeautifulSoup
+                                import html
+                                import re
+                                
+                                # Preprocess HTML to ensure unicode is preserved
+                                html_content = self._preprocess_html(html_content)
+                                
+                                # Parse with BeautifulSoup to extract metadata
+                                soup = BeautifulSoup(html_content, 'html.parser')
+                                
+                                # Extract title from various sources
+                                chapter_title = None
+                                if soup.title and soup.title.string:
+                                    chapter_title = soup.title.string.strip()
+                                
+                                # Check headers if no title found
+                                if not chapter_title:
+                                    for header_tag in ['h1', 'h2', 'h3']:
+                                        header = soup.find(header_tag)
+                                        if header:
+                                            chapter_title = header.get_text(strip=True)
+                                            break
+                                
+                                # Determine what HTML to convert based on extraction mode
+                                if extraction_mode == "full":
+                                    html_to_convert = html_content
+                                else:
+                                    # Try to get body content
+                                    if soup.body:
+                                        # Get body HTML while preserving structure and unicode
+                                        body_parts = []
+                                        for element in soup.body.children:
+                                            if hasattr(element, 'name'):
+                                                # For HTML elements, convert to string
+                                                element_str = str(element)
+                                                # Ensure any remaining entities are decoded
+                                                element_str = html.unescape(element_str)
+                                                body_parts.append(element_str)
+                                            else:
+                                                # For text nodes, preserve as-is
+                                                text = str(element).strip()
+                                                if text:
+                                                    body_parts.append(text)
+                                        html_to_convert = '\n'.join(body_parts)
+                                    else:
+                                        html_to_convert = html_content
+                                
+                                # Convert to text using html2text
+                                # The html2text library should now preserve unicode characters
+                                clean_text = self.h2t.handle(html_to_convert)
+                                
+                                # Post-process to ensure unicode quotation marks are preserved
+                                # Common replacements that might have been lost
+                                unicode_replacements = {
+                                    '"': '"',  # If straight quotes were used, keep them
+                                    "'": "'",  # If straight apostrophes were used, keep them
+
+                                    # The following should already be preserved, but just in case:
+                                    '&ldquo;': '“',
+                                    '&rdquo;': '”',
+                                    '&lsquo;': '‘',
+                                    '&rsquo;': '’',
+                                    '&quot;': '"',
+                                    '&apos;': "'",
+
+                                    # Fix any double-encoded entities
+                                    '&amp;ldquo;': '“',
+                                    '&amp;rdquo;': '”',
+                                    '&amp;lsquo;': '‘',
+                                    '&amp;rsquo;': '’',
+                                }
+
+                                
+                                for old, new in unicode_replacements.items():
+                                    clean_text = clean_text.replace(old, new)
+                                
+                                # Clean up based on preserve_structure setting
+                                if not self.preserve_structure:
+                                    # More aggressive cleanup when not preserving structure
+                                    # Remove markdown headers
+                                    clean_text = re.sub(r'^#+\s*', '', clean_text, flags=re.MULTILINE)
+                                    # Remove emphasis markers but preserve content
+                                    clean_text = re.sub(r'\*\*(.*?)\*\*', r'\1', clean_text)
+                                    clean_text = re.sub(r'\*(.*?)\*', r'\1', clean_text)
+                                    clean_text = re.sub(r'__(.*?)__', r'\1', clean_text)
+                                    clean_text = re.sub(r'_(.*?)_', r'\1', clean_text)
+                                    # Remove links but keep link text
+                                    clean_text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', clean_text)
+                                    # Remove images
+                                    clean_text = re.sub(r'!\[([^\]]*)\]\([^)]+\)', '', clean_text)
+                                    # Remove code blocks
+                                    clean_text = re.sub(r'```[^`]*```', '', clean_text)
+                                    clean_text = re.sub(r'`([^`]+)`', r'\1', clean_text)
+                                    # Remove list markers
+                                    clean_text = re.sub(r'^[-*+]\s+', '', clean_text, flags=re.MULTILINE)
+                                    clean_text = re.sub(r'^\d+\.\s+', '', clean_text, flags=re.MULTILINE)
+                                    # Remove blockquotes
+                                    clean_text = re.sub(r'^>\s+', '', clean_text, flags=re.MULTILINE)
+                                    # Remove horizontal rules
+                                    clean_text = re.sub(r'^-{3,}$', '', clean_text, flags=re.MULTILINE)
+                                    clean_text = re.sub(r'^_{3,}$', '', clean_text, flags=re.MULTILINE)
+                                    clean_text = re.sub(r'^\*{3,}$', '', clean_text, flags=re.MULTILINE)
+                                    # Clean up excessive whitespace
+                                    clean_text = re.sub(r'\n{3,}', '\n\n', clean_text)
+                                    clean_text = re.sub(r' {2,}', ' ', clean_text)
+                                else:
+                                    # Light cleanup when preserving structure
+                                    # Just clean up excessive blank lines
+                                    clean_text = re.sub(r'\n{4,}', '\n\n\n', clean_text)
+                                
+                                # Always trim leading/trailing whitespace
+                                clean_text = clean_text.strip()
+                                
+                                # IMPORTANT: Return plain text for translation
+                                # The AI will translate the plain text with unicode preserved
+                                return clean_text, clean_text, chapter_title
+                                
+                            except Exception as e:
+                                if self.fallback_enabled:
+                                    print(f"    ⚠️ html2text conversion failed: {e}")
+                                    print(f"    🔄 Using BeautifulSoup fallback")
+                                    # Fallback to BeautifulSoup
+                                    from bs4 import BeautifulSoup
+                                    import html
+                                    
+                                    # Decode entities first
+                                    html_content = html.unescape(html_content)
+                                    soup = BeautifulSoup(html_content, 'html.parser')
+                                    
+                                    # Extract content based on mode
+                                    if extraction_mode == "full":
+                                        content_html = html_content
+                                        content_text = soup.get_text(strip=True)
+                                    else:
+                                        if soup.body:
+                                            content_html = str(soup.body)
+                                            content_text = soup.body.get_text(strip=True)
+                                        else:
+                                            content_html = html_content
+                                            content_text = soup.get_text(strip=True)
+                                    
+                                    # Extract title
+                                    chapter_title = None
+                                    if soup.title and soup.title.string:
+                                        chapter_title = soup.title.string.strip()
+                                    elif soup.h1:
+                                        chapter_title = soup.h1.get_text(strip=True)
+                                    elif soup.h2:
+                                        chapter_title = soup.h2.get_text(strip=True)
+                                    
+                                    # For fallback, return HTML as first value (maintaining original behavior)
+                                    return content_html, content_text, chapter_title
+                                else:
+                                    # Re-raise if fallback is disabled
+                                    raise e
+                    
+                    enhanced_extractor = SimpleEnhancedExtractor(fallback_enabled, preserve_structure)
+                    print("✅ Simple enhanced extractor created using html2text directly")
+                    
+            except ImportError as e:
+                print(f"⚠️ html2text not available: {e}")
+                if fallback_enabled:
+                    print(f"🔄 Falling back to {enhanced_filtering} mode with BeautifulSoup")
+                    extraction_mode = enhanced_filtering  # Fall back to specified filtering mode
+                    enhanced_extractor = None
+                else:
+                    print("❌ Fallback is DISABLED - Cannot continue without html2text")
+                    print("   Please install html2text: pip install html2text>=2020.1.16")
+                    # Return empty results or raise exception
+                    return [], 'unknown'
+                    
+            except Exception as e:
+                print(f"⚠️ Enhanced extractor initialization failed: {e}")
+                if fallback_enabled:
+                    print(f"🔄 Falling back to {enhanced_filtering} mode with BeautifulSoup")
+                    extraction_mode = enhanced_filtering
+                    enhanced_extractor = None
+                else:
+                    print("❌ Fallback is DISABLED - Cannot continue with enhanced mode")
+                    print(f"   Error: {e}")
+                    # Return empty results or raise exception
+                    return [], 'unknown'
+        
         chapters = []
         sample_texts = []
         
@@ -1482,8 +1771,11 @@ class ChapterExtractor:
                 if basename in ['cover.html', 'cover.xhtml', 'cover.htm']:
                     print(f"[SKIP] Cover file excluded from all modes: {name}")
                     continue
-                    
-                if extraction_mode == "smart":
+                
+                # Apply filtering based on the actual extraction mode (or enhanced_filtering for enhanced mode)
+                current_filtering = enhanced_filtering if extraction_mode == "enhanced" else extraction_mode
+                
+                if current_filtering == "smart":
                     # Smart mode: aggressive filtering
                     lower_name = name.lower()
                     if any(skip in lower_name for skip in [
@@ -1491,7 +1783,7 @@ class ChapterExtractor:
                         'copyright', 'acknowledgment', 'dedication'
                     ]):
                         continue
-                elif extraction_mode == "comprehensive":
+                elif current_filtering == "comprehensive":
                     # Comprehensive mode: moderate filtering
                     skip_keywords = ['nav.', 'toc.', 'contents.', 'copyright.']
                     basename = os.path.basename(name.lower())
@@ -1507,10 +1799,12 @@ class ChapterExtractor:
                 
                 html_files.append(name)
         
+        # Update mode description to include enhanced mode
         mode_description = {
             "smart": "potential content files",
-            "comprehensive": "HTML files",
-            "full": "ALL HTML/XHTML files (no filtering)"
+            "comprehensive": "HTML files", 
+            "full": "ALL HTML/XHTML files (no filtering)",
+            "enhanced": f"files (enhanced with {enhanced_filtering} filtering)"
         }
         print(f"📚 Found {len(html_files)} {mode_description.get(extraction_mode, 'files')} in EPUB")
         
@@ -1591,6 +1885,9 @@ class ChapterExtractor:
         candidate_chapters = []  # Store potential chapters for smart mode
         actual_chapter_num = 1  # Track real chapter numbers
         processed_count = 0  # Track actually processed chapters
+        
+        # Keep track of enhanced extraction success/failure per file
+        enhanced_failed_files = set()
         
         for idx, file_path in enumerate(html_files):
             # Check stop in main processing loop
@@ -1677,34 +1974,57 @@ class ChapterExtractor:
                     except Exception as e:
                         print(f"[WARNING] Failed to merge {file_path}: {e}")
                 
-                # Parse the (possibly merged) content
-                soup = BeautifulSoup(html_content, 'html.parser')
+                # === ENHANCED EXTRACTION POINT ===
+                # Initialize variables that will be set by extraction
+                content_html = None
+                content_text = None
+                chapter_title = None
+                enhanced_extraction_used = False
                 
-                # In full mode, keep the entire HTML structure
-                if extraction_mode == "full":
-                    content_html = html_content  # Keep EVERYTHING
-                    content_text = soup.get_text(strip=True)
-                else:
-                    # Smart and comprehensive modes extract body content
-                    if soup.body:
-                        content_html = str(soup.body)
-                        content_text = soup.body.get_text(strip=True)
-                    else:
-                        content_html = html_content
-                        content_text = soup.get_text(strip=True)
+                # Use enhanced extractor if available and not previously failed for this file type
+                if enhanced_extractor and extraction_mode == "enhanced" and file_path not in enhanced_failed_files:
+                    try:
+                        print(f"🚀 Using enhanced extraction for: {os.path.basename(file_path)}")
+                        # Get clean text from html2text
+                        clean_content, _, chapter_title = enhanced_extractor.extract_chapter_content(
+                            html_content, enhanced_filtering
+                        )
+                        enhanced_extraction_used = True
+                        print(f"✅ Enhanced extraction complete: {len(clean_content)} chars")
+                        
+                        # For enhanced mode, use clean text as the body
+                        content_html = clean_content  # This is PLAIN TEXT from html2text
+                        content_text = clean_content  # Same clean text for both
+                        
+                    except Exception as e:
+                        print(f"⚠️ Enhanced extraction failed for {file_path}: {e}")
+                        print("🔄 Falling back to BeautifulSoup method for this file")
+                        enhanced_failed_files.add(file_path)
+                        # Don't set enhanced_extractor to None - just mark this file as failed
+                        # Fall through to BeautifulSoup method below
                 
-                # Skip truly empty files in smart mode
-                # BUT: Never skip anything when merging is disabled (to ensure section files are processed)
-                if extraction_mode == "smart" and not disable_merging and len(content_text.strip()) < 10:
-                    print(f"[SKIP] Nearly empty file: {file_path} ({len(content_text)} chars)")
-                    continue
-                
-                # Mode-specific logic
-                if extraction_mode == "comprehensive" or extraction_mode == "full":
-                    # For comprehensive/full mode, use sequential numbering
-                    chapter_num = processed_count
-                    actual_chapter_num += 1
+                # BeautifulSoup method (original or fallback)
+                if not enhanced_extraction_used:
+                    # Parse the (possibly merged) content
+                    soup = BeautifulSoup(html_content, 'html.parser')
                     
+                    # Get effective mode for filtering
+                    effective_filtering = enhanced_filtering if extraction_mode == "enhanced" else extraction_mode
+                    
+                    # In full mode, keep the entire HTML structure
+                    if effective_filtering == "full":
+                        content_html = html_content  # Keep EVERYTHING
+                        content_text = soup.get_text(strip=True)
+                    else:
+                        # Smart and comprehensive modes extract body content
+                        if soup.body:
+                            content_html = str(soup.body)
+                            content_text = soup.body.get_text(strip=True)
+                        else:
+                            content_html = html_content
+                            content_text = soup.get_text(strip=True)
+                    
+                    # Extract title
                     chapter_title = None
                     if soup.title and soup.title.string:
                         chapter_title = soup.title.string.strip()
@@ -1718,30 +2038,40 @@ class ChapterExtractor:
                     
                     if not chapter_title:
                         chapter_title = os.path.splitext(os.path.basename(file_path))[0]
+                
+                # Get the effective extraction mode for processing logic
+                effective_mode = enhanced_filtering if extraction_mode == "enhanced" else extraction_mode
+                
+                # Skip truly empty files in smart mode
+                # BUT: Never skip anything when merging is disabled (to ensure section files are processed)
+                if effective_mode == "smart" and not disable_merging and len(content_text.strip()) < 10:
+                    print(f"[SKIP] Nearly empty file: {file_path} ({len(content_text)} chars)")
+                    continue
+                
+                # Mode-specific logic
+                if effective_mode == "comprehensive" or effective_mode == "full":
+                    # For comprehensive/full mode, use sequential numbering
+                    chapter_num = processed_count
+                    actual_chapter_num += 1
                     
-                    detection_method = f"{extraction_mode}_sequential"
+                    if not chapter_title:
+                        chapter_title = os.path.splitext(os.path.basename(file_path))[0]
                     
-                elif extraction_mode == "smart":
+                    detection_method = f"{extraction_mode}_sequential" if extraction_mode == "enhanced" else f"{effective_mode}_sequential"
+                    
+                elif effective_mode == "smart":
                     # For smart mode, when merging is disabled, use sequential numbering
                     if disable_merging:
                         chapter_num = processed_count
-                        chapter_title = None
-                        if soup.title and soup.title.string:
-                            chapter_title = soup.title.string.strip()
-                        
-                        if not chapter_title:
-                            for header_tag in ['h1', 'h2', 'h3']:
-                                header = soup.find(header_tag)
-                                if header:
-                                    chapter_title = header.get_text(strip=True)
-                                    break
                         
                         if not chapter_title:
                             chapter_title = os.path.splitext(os.path.basename(file_path))[0]
                         
-                        detection_method = "sequential_no_merge"
+                        detection_method = f"{extraction_mode}_sequential_no_merge" if extraction_mode == "enhanced" else "sequential_no_merge"
                     else:
                         # When merging is enabled, try to extract chapter info
+                        soup = BeautifulSoup(html_content, 'html.parser')
+                        
                         h1_tags = soup.find_all('h1')
                         h2_tags = soup.find_all('h2')
                         if h1_tags:
@@ -1750,16 +2080,22 @@ class ChapterExtractor:
                             h2_count += 1
                         
                         # Try to extract chapter number and title
-                        chapter_num, chapter_title, detection_method = self._extract_chapter_info(
+                        chapter_num, extracted_title, detection_method = self._extract_chapter_info(
                             soup, file_path, content_text, html_content
                         )
+                        
+                        # Use extracted title if we don't have one
+                        if extracted_title and not chapter_title:
+                            chapter_title = extracted_title
                         
                         # For hash-based filenames, chapter_num might be None
                         if chapter_num is None:
                             chapter_num = processed_count  # Use actual chapter count
-                            detection_method = "sequential_fallback"
+                            detection_method = f"{extraction_mode}_sequential_fallback" if extraction_mode == "enhanced" else "sequential_fallback"
                             print(f"[DEBUG] No chapter number found in {file_path}, assigning: {chapter_num}")
                 
+                # Process images and metadata (same for all modes)
+                soup = BeautifulSoup(html_content, 'html.parser')
                 images = soup.find_all('img')
                 has_images = len(images) > 0
                 is_image_only_chapter = has_images and len(content_text.strip()) < 500
@@ -1770,7 +2106,7 @@ class ChapterExtractor:
                 content_hash = ContentProcessor.get_content_hash(content_html)
                 
                 # Collect file size groups for smart mode
-                if extraction_mode == "smart":
+                if effective_mode == "smart":
                     file_size = len(content_text)
                     if file_size not in file_size_groups:
                         file_size_groups[file_size] = []
@@ -1801,12 +2137,18 @@ class ChapterExtractor:
                     "file_index": idx  # Store original file index for sorting
                 }
                 
+                # Add enhanced extraction info if used
+                if enhanced_extraction_used:
+                    chapter_info["enhanced_extraction"] = True
+                    chapter_info["enhanced_filtering"] = enhanced_filtering
+                    chapter_info["preserve_structure"] = preserve_structure
+                
                 # Add merge info if applicable
                 if not disable_merging and file_path in merge_candidates:
                     chapter_info["was_merged"] = True
                     chapter_info["merged_with"] = merge_candidates[file_path]
                 
-                if extraction_mode == "smart":
+                if effective_mode == "smart":
                     chapter_info["language_sample"] = content_text[:500]
                     # Debug for section files
                     if 'section' in chapter_info['original_basename'].lower():
@@ -1814,12 +2156,12 @@ class ChapterExtractor:
                 
                 # For smart mode when merging is enabled, collect candidates
                 # Otherwise, add directly to chapters
-                if extraction_mode == "smart" and not disable_merging:
+                if effective_mode == "smart" and not disable_merging:
                     candidate_chapters.append(chapter_info)
                 else:
                     # For comprehensive/full mode, or smart mode with merging disabled
                     chapters.append(chapter_info)
-                        
+                    
             except Exception as e:
                 print(f"[ERROR] Failed to process {file_path}: {e}")
                 import traceback
@@ -1827,7 +2169,8 @@ class ChapterExtractor:
                 continue
         
         # Post-process smart mode candidates (only when merging is enabled)
-        if extraction_mode == "smart" and candidate_chapters and not disable_merging:
+        effective_mode = enhanced_filtering if extraction_mode == "enhanced" else extraction_mode
+        if effective_mode == "smart" and candidate_chapters and not disable_merging:
             # Check stop before post-processing
             if is_stop_requested():
                 print("❌ Chapter post-processing stopped by user")
@@ -1870,7 +2213,7 @@ class ChapterExtractor:
                 # Assign sequential numbers
                 for i, chapter in enumerate(unnumbered_chapters, 1):
                     chapter["num"] = i
-                    chapter["detection_method"] = "hash_filename_sequential"
+                    chapter["detection_method"] = f"{extraction_mode}_hash_filename_sequential" if extraction_mode == "enhanced" else "hash_filename_sequential"
                     if not chapter["title"] or chapter["title"] == chapter["original_basename"]:
                         chapter["title"] = f"Chapter {i}"
                 
@@ -1911,7 +2254,7 @@ class ChapterExtractor:
                         # Otherwise, add as appendix
                         max_num += 1
                         chapter["num"] = max_num
-                        chapter["detection_method"] = "appendix_sequential"
+                        chapter["detection_method"] = f"{extraction_mode}_appendix_sequential" if extraction_mode == "enhanced" else "appendix_sequential"
                         if not chapter["title"] or chapter["title"] == chapter["original_basename"]:
                             chapter["title"] = f"Appendix {max_num}"
                         chapters.append(chapter)
@@ -1931,6 +2274,21 @@ class ChapterExtractor:
             print(f"\n✅ Final chapter count: {len(chapters)}")
             print(f"   • Chapter range: {chapters[0]['num']} - {chapters[-1]['num']}")
             
+            # Enhanced mode summary
+            if extraction_mode == "enhanced":
+                enhanced_count = sum(1 for c in chapters if c.get('enhanced_extraction', False))
+                print(f"   🚀 Enhanced extraction used: {enhanced_count}/{len(chapters)} chapters")
+                if enhanced_count < len(chapters):
+                    print(f"   🔄 BeautifulSoup fallback used: {len(chapters) - enhanced_count} chapters")
+                
+                # Show which files failed enhanced extraction
+                if enhanced_failed_files:
+                    print(f"   ⚠️ Files that failed enhanced extraction: {len(enhanced_failed_files)}")
+                    for failed_file in list(enhanced_failed_files)[:5]:  # Show first 5
+                        print(f"      - {os.path.basename(failed_file)}")
+                    if len(enhanced_failed_files) > 5:
+                        print(f"      ... and {len(enhanced_failed_files) - 5} more")
+            
             # Check for gaps
             chapter_nums = [c["num"] for c in chapters]
             expected_nums = list(range(min(chapter_nums), max(chapter_nums) + 1))
@@ -1939,14 +2297,14 @@ class ChapterExtractor:
                 print(f"   ⚠️ Missing chapter numbers: {sorted(missing)}")
         
         # Language detection
-        combined_sample = ' '.join(sample_texts) if extraction_mode == "smart" else ''
+        combined_sample = ' '.join(sample_texts) if effective_mode == "smart" else ''
         detected_language = self._detect_content_language(combined_sample) if combined_sample else 'unknown'
         
         if chapters:
             self._print_extraction_summary(chapters, detected_language, extraction_mode, 
-                                         h1_count if extraction_mode == "smart" else 0, 
-                                         h2_count if extraction_mode == "smart" else 0,
-                                         file_size_groups if extraction_mode == "smart" else {})
+                                         h1_count if effective_mode == "smart" else 0, 
+                                         h2_count if effective_mode == "smart" else 0,
+                                         file_size_groups if effective_mode == "smart" else {})
         
         return chapters, detected_language
     
@@ -2982,12 +3340,33 @@ class TranslationProcessor:
                 retry_reason = ""
                 is_duplicate_retry = False
                 
+                # debug logging to verify the toggle state
+                #print(f"    DEBUG: RETRY_TRUNCATED = {self.config.RETRY_TRUNCATED}, finish_reason = {finish_reason}")
+                #print(f"    DEBUG: Current tokens = {self.config.MAX_OUTPUT_TOKENS}, Min retry tokens = {self.config.MAX_RETRY_TOKENS}")
+                    
                 if finish_reason == "length" and self.config.RETRY_TRUNCATED:
                     if retry_count < max_retries:
-                        retry_needed = True
-                        retry_reason = "truncated output"
-                        self.config.MAX_OUTPUT_TOKENS = min(self.config.MAX_OUTPUT_TOKENS * 2, self.config.MAX_RETRY_TOKENS)
-                        retry_count += 1
+                        # For truncated responses, ensure we never go below the minimum retry tokens
+                        proposed_limit = self.config.MAX_OUTPUT_TOKENS * 2
+                        
+                        # Always enforce minimum - never retry with tokens below the constraint
+                        new_token_limit = max(proposed_limit, self.config.MAX_RETRY_TOKENS)
+                        
+                        if new_token_limit != self.config.MAX_OUTPUT_TOKENS:
+                            retry_needed = True
+                            retry_reason = "truncated output"
+                            old_limit = self.config.MAX_OUTPUT_TOKENS
+                            self.config.MAX_OUTPUT_TOKENS = new_token_limit
+                            retry_count += 1
+                            
+                            if old_limit < self.config.MAX_RETRY_TOKENS:
+                                print(f"    🔄 Boosting tokens: {old_limit} → {new_token_limit} (enforcing minimum: {self.config.MAX_RETRY_TOKENS})")
+                            else:
+                                print(f"    🔄 Doubling tokens: {old_limit} → {new_token_limit} (above minimum: {self.config.MAX_RETRY_TOKENS})")
+                        else:
+                            print(f"    ⚠️ Token adjustment not needed: already at {self.config.MAX_OUTPUT_TOKENS}")
+                elif finish_reason == "length" and not self.config.RETRY_TRUNCATED:
+                    print(f"    ⏭️ Auto-retry is DISABLED - accepting truncated response")
                 
                 if not retry_needed:
                     # Force re-read the environment variable to ensure we have current setting
@@ -3223,7 +3602,9 @@ class BatchTranslationProcessor:
                 result = ContentProcessor.clean_ai_artifacts(result, True)
                 
             result = ContentProcessor.clean_memory_artifacts(result)
-            
+            if chapter.get("enhanced_extraction", False):
+                print(f"🔄 Converting enhanced mode plain text back to HTML...")
+                result = convert_enhanced_text_to_html(result)            
             if self.config.EMERGENCY_RESTORE:
                 result = ContentProcessor.emergency_restore_paragraphs(result, chapter_body)
             
@@ -3270,7 +3651,15 @@ class BatchTranslationProcessor:
                     f.write(cleaned)
                 
                 with self.progress_lock:
-                    self.update_progress_fn(idx, actual_num, content_hash, fname, status="completed", ai_features=ai_features)
+                    # Check for QA failures with comprehensive detection
+                    if is_qa_failed_response(cleaned):
+                        chapter_status = "qa_failed"
+                        failure_reason = get_failure_reason(cleaned)
+                        print(f"⚠️ Batch: Chapter {actual_num} marked as qa_failed: {failure_reason}")
+                    else:
+                        chapter_status = "completed"
+
+                    self.update_progress_fn(idx, actual_num, content_hash, fname, status=chapter_status, ai_features=ai_features)
                     self.save_progress_fn()            
             
             with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
@@ -3295,7 +3684,15 @@ class BatchTranslationProcessor:
                     print(f"    ⚠️ Failed to extract AI features: {e}")
             
             with self.progress_lock:
-                self.update_progress_fn(idx, actual_num, content_hash, fname, status="completed", ai_features=ai_features)
+                # Check for QA failures with comprehensive detection
+                if is_qa_failed_response(cleaned):
+                    chapter_status = "qa_failed"
+                    failure_reason = get_failure_reason(cleaned)
+                    print(f"⚠️ Batch: Chapter {actual_num} marked as qa_failed: {failure_reason}")
+                else:
+                    chapter_status = "completed"
+
+                self.update_progress_fn(idx, actual_num, content_hash, fname, status=chapter_status, ai_features=ai_features)
                 self.save_progress_fn()
                 
                 self.chapters_completed += 1
@@ -4934,6 +5331,361 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
         return title
 
 # =====================================================
+# FAILURE RESPONSES
+# =====================================================
+def is_qa_failed_response(content):
+    """
+    Comprehensive check for API failure markers based on research of major AI providers
+    (OpenAI, Anthropic, Google Gemini, Azure OpenAI, etc.)
+    """
+    if not content:
+        return True
+    
+    content_str = str(content).strip()
+    content_lower = content_str.lower()
+    
+    # 1. EXPLICIT FAILURE MARKERS from unified_api_client fallback responses
+    explicit_failures = [
+        "[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]",
+        "[IMAGE TRANSLATION FAILED]",
+        "API response unavailable",
+        "[]",  # Empty JSON response from glossary context
+        "[API_ERROR]",
+        "[TIMEOUT]",
+        "[RATE_LIMIT_EXCEEDED]"
+    ]
+    
+    for marker in explicit_failures:
+        if marker in content_str:
+            return True
+    
+    # 2. HTTP ERROR STATUS MESSAGES
+    http_errors = [
+        "400 - invalid_request_error",
+        "401 - authentication_error", 
+        "403 - permission_error",
+        "404 - not_found_error",
+        "413 - request_too_large",
+        "429 - rate_limit_error",
+        "500 - api_error",
+        "529 - overloaded_error",
+        "invalid x-api-key",
+        "authentication_error",
+        "permission_error",
+        "rate_limit_error",
+        "api_error",
+        "overloaded_error"
+    ]
+    
+    for error in http_errors:
+        if error in content_lower:
+            return True
+    
+    # 3. CONTENT FILTERING / SAFETY BLOCKS
+    content_filter_markers = [
+        "content_filter",  # OpenAI finish_reason
+        "content was blocked",
+        "response was blocked",
+        "safety filter",
+        "content policy",
+        "harmful content",
+        "content filtering",
+        "blocked by safety",
+        "harm_category_harassment",
+        "harm_category_hate_speech", 
+        "harm_category_sexually_explicit",
+        "harm_category_dangerous_content",
+        "block_low_and_above",
+        "block_medium_and_above",
+        "block_only_high"
+    ]
+    
+    for marker in content_filter_markers:
+        if marker in content_lower:
+            return True
+    
+    # 4. TIMEOUT AND NETWORK ERRORS
+    timeout_markers = [
+        "timeout",
+        "timed out",
+        "request timeout",
+        "connection timeout",
+        "read timeout",
+        "apitimeouterror",
+        "network error",
+        "connection refused",
+        "connection reset",
+        "socket timeout"
+    ]
+    
+    for marker in timeout_markers:
+        if marker in content_lower:
+            return True
+    
+    # 5. RATE LIMITING AND QUOTA ERRORS
+    rate_limit_markers = [
+        "rate limit exceeded",
+        "quota exceeded",
+        "too many requests",
+        "rate limited",
+        "api quota",
+        "usage limit",
+        "billing error",
+        "insufficient quota"
+    ]
+    
+    for marker in rate_limit_markers:
+        if marker in content_lower:
+            return True
+    
+    # 6. EMPTY OR MINIMAL RESPONSES INDICATING FAILURE
+    if len(content_str) <= 10:
+        # Very short responses that are likely errors
+        short_error_indicators = [
+            "error", "fail", "null", "none", "empty", 
+            "unavailable", "timeout", "blocked", "denied"
+        ]
+        if any(indicator in content_lower for indicator in short_error_indicators):
+            return True
+    
+    # 7. COMMON REFUSAL PATTERNS (AI refusing to generate content)
+    refusal_patterns = [
+        "i cannot",
+        "i can't", 
+        "i'm unable to",
+        "i am unable to",
+        "i apologize, but i cannot",
+        "i'm sorry, but i cannot",
+        "i don't have the ability to",
+        "i'm not able to",
+        "this request cannot be",
+        "unable to process",
+        "cannot complete",
+        "cannot generate",
+        "not available",
+        "service unavailable",
+        "temporarily unavailable"
+    ]
+    
+    # Only check refusal patterns for relatively short responses (likely to be refusals)
+    if len(content_str) < 500:
+        for pattern in refusal_patterns:
+            if pattern in content_lower:
+                return True
+    
+    # 8. JSON ERROR RESPONSES
+    json_error_patterns = [
+        '{"error"',
+        '{"type":"error"',
+        '"error_type"',
+        '"error_message"',
+        '"error_code"',
+        '"message":"error"',
+        '"status":"error"',
+        '"success":false'
+    ]
+    
+    for pattern in json_error_patterns:
+        if pattern in content_lower:
+            return True
+    
+    # 9. GEMINI-SPECIFIC ERRORS
+    gemini_errors = [
+        "finish_reason: safety",
+        "finish_reason: other", 
+        "finish_reason: recitation",
+        "candidate.content field",  # Voided content field
+        "safety_ratings",
+        "probability_score",
+        "severity_score"
+    ]
+    
+    for error in gemini_errors:
+        if error in content_lower:
+            return True
+    
+    # 10. ANTHROPIC-SPECIFIC ERRORS  
+    anthropic_errors = [
+        "invalid_request_error",
+        "authentication_error",
+        "permission_error", 
+        "not_found_error",
+        "request_too_large",
+        "rate_limit_error",
+        "api_error",
+        "overloaded_error"
+    ]
+    
+    for error in anthropic_errors:
+        if error in content_lower:
+            return True
+    
+    # 11. OPENAI-SPECIFIC ERRORS
+    openai_errors = [
+        "finish_reason: content_filter",
+        "finish_reason: length",  # Only if very short content
+        "insufficient_quota",
+        "invalid_api_key",
+        "model_not_found",
+        "context_length_exceeded"
+    ]
+    
+    for error in openai_errors:
+        if error in content_lower:
+            return True
+    
+    # 12. EMPTY RESPONSE PATTERNS
+    empty_patterns = [
+        "choices: [ { text: '', index: 0",  # OpenAI empty response pattern
+        '"text": ""',
+        '"content": ""',
+        '"content": null',
+        "text: ''",
+        "content: ''"
+    ]
+    
+    for pattern in empty_patterns:
+        if pattern in content_lower:
+            return True
+    
+    # 13. PROVIDER-AGNOSTIC ERROR MESSAGES
+    generic_errors = [
+        "internal server error",
+        "service error", 
+        "server error",
+        "bad gateway",
+        "service temporarily unavailable",
+        "upstream error",
+        "proxy error",
+        "gateway timeout",
+        "connection error",
+        "network failure",
+        "service degraded",
+        "maintenance mode"
+    ]
+    
+    for error in generic_errors:
+        if error in content_lower:
+            return True
+    
+    # 14. SPECIAL CASE: Check for responses that are just original text
+    # (indicating translation completely failed and fallback was used)
+    if content_str.startswith("[") and content_str.endswith("]") and "FAILED" in content_str:
+        return True
+    
+    # 15. FINAL CHECK: Very short responses with error indicators
+    if len(content_str) < 100:
+        final_error_check = [
+            "error", "failed", "timeout", "blocked", "denied", 
+            "refused", "rejected", "unavailable", "invalid", 
+            "forbidden", "unauthorized", "limit", "quota"
+        ]
+        
+        # Count how many error indicators are present
+        error_count = sum(1 for word in final_error_check if word in content_lower)
+        
+        # If multiple error indicators in short response, likely a failure
+        if error_count >= 2:
+            return True
+        
+        # Single strong error indicator in very short response
+        if len(content_str) < 50 and error_count >= 1:
+            return True
+    
+    return False
+
+
+# Additional helper function for debugging
+def get_failure_reason(content):
+    """
+    Returns the specific reason why content was marked as qa_failed
+    Useful for debugging and logging
+    """
+    if not content:
+        return "Empty content"
+    
+    content_str = str(content).strip()
+    content_lower = content_str.lower()
+    
+    # Check each category and return the first match
+    failure_categories = {
+        "Explicit Failure Marker": [
+            "[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]",
+            "[IMAGE TRANSLATION FAILED]", 
+            "API response unavailable",
+            "[]"
+        ],
+        "HTTP Error": [
+            "authentication_error", "rate_limit_error", "api_error"
+        ],
+        "Content Filter": [
+            "content_filter", "safety filter", "blocked by safety"
+        ],
+        "Timeout": [
+            "timeout", "timed out", "apitimeouterror"
+        ],
+        "Rate Limit": [
+            "rate limit exceeded", "quota exceeded", "too many requests"
+        ],
+        "Refusal Pattern": [
+            "i cannot", "i can't", "unable to process"
+        ],
+        "Empty Response": [
+            '"text": ""', "choices: [ { text: ''"
+        ]
+    }
+    
+    for category, markers in failure_categories.items():
+        for marker in markers:
+            if marker in content_str or marker in content_lower:
+                return f"{category}: {marker}"
+    
+    if len(content_str) < 50:
+        return f"Short response with error indicators: {content_str[:30]}..."
+    
+    return "Unknown failure pattern"
+    
+def convert_enhanced_text_to_html(plain_text):
+    """Convert plain text back to HTML after translation (for enhanced mode)"""
+    import re
+    
+    # Remove any HTML that the AI might have added despite instructions
+    plain_text = re.sub(r'<[^>]+>', '', plain_text)
+    
+    # Split into paragraphs (double newline separated)
+    paragraphs = plain_text.split('\n\n')
+    html_parts = []
+    
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+        
+        # Check if it looks like a header (common patterns)
+        # Korean: 제1장, 제1화, Chapter 1, etc.
+        if re.match(r'^(제\s*\d+\s*[장화]|Chapter\s+\d+|Part\s+\d+|제\s*\d+\s*부)', para, re.IGNORECASE):
+            # Chapter/Part header
+            html_parts.append(f'<h2>{para}</h2>')
+        # Check for numbered headers like "1.", "1)", "1:"
+        elif re.match(r'^\d+[\.\)\:]\s+\S', para):
+            html_parts.append(f'<h3>{para}</h3>')
+        # Check for section headers (short lines without ending punctuation)
+        elif len(para) < 100 and not re.search(r'[.!?。！？]$', para):
+            # Might be a header
+            html_parts.append(f'<h3>{para}</h3>')
+        # Check for scene breaks (usually symbols or short repeated characters)
+        elif re.match(r'^[\*\-\=\~\#]{3,}$', para) or para == '***':
+            html_parts.append('<hr/>')
+        else:
+            # Regular paragraph
+            # Handle single newlines within paragraphs as spaces
+            para = para.replace('\n', ' ')
+            # Clean up multiple spaces
+            para = re.sub(r'\s+', ' ', para)
+            html_parts.append(f'<p>{para}</p>')
+    
+    return '\n\n'.join(html_parts)
+# =====================================================
 # MAIN TRANSLATION FUNCTION
 # =====================================================
 def main(log_callback=None, stop_callback=None):
@@ -6490,9 +7242,15 @@ def main(log_callback=None, stop_callback=None):
                 final_title = c['title'] or make_safe_filename(c['title'], actual_num)
                 print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
                 
-    
-            
-            progress_manager.update(idx, actual_num, content_hash, fname, status="completed")
+            # Determine status based on comprehensive failure detection
+            if is_qa_failed_response(cleaned):
+                chapter_status = "qa_failed"
+                failure_reason = get_failure_reason(cleaned)
+                print(f"⚠️ Chapter {actual_num} marked as qa_failed: {failure_reason}")
+            else:
+                chapter_status = "completed"
+
+            progress_manager.update(idx, actual_num, content_hash, fname, status=chapter_status)
             progress_manager.save()
             
             chapters_completed += 1
