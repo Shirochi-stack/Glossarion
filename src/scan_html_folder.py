@@ -198,6 +198,8 @@ def extract_text_from_html(file_path):
     # in the scan function rather than always returning a tuple
     return text
 
+import re
+
 def check_html_structure(file_path):
     """Check if an HTML file has proper HTML tags"""
     if not file_path.lower().endswith('.html'):
@@ -2483,6 +2485,17 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         issues.append("insufficient_paragraph_tags")
                     elif issue == 'unwrapped_text_content':
                         issues.append("unwrapped_text_content")
+                    elif issue == 'unclosed_html_tags':
+                        issues.append("unclosed_html_tags")  # ADD THIS
+                    elif issue == 'incomplete_html_structure':
+                        issues.append("incomplete_html_structure")  # ADD THIS
+                    elif issue == 'invalid_nesting':
+                        issues.append("invalid_nesting")  # ADD THIS
+                    elif issue == 'malformed_html':
+                        issues.append("malformed_html")  # ADD THIS
+                    else:
+                        # Fallback for any new issue types
+                        issues.append(issue)  # ADD THIS AS SAFETY NET
                 
                 # Log the issues found
                 log(f"   → Found HTML structure issues in {filename}: {', '.join(html_issues)}")
@@ -2675,7 +2688,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
 
 def check_html_structure_issues(file_path, log=print):
     """
-    Check for HTML structure problems including unwrapped text.
+    Check for HTML structure problems including unwrapped text and unclosed tags.
     
     Returns:
         tuple: (has_issues, issue_types) where issue_types is a list of specific issues found
@@ -2722,12 +2735,136 @@ def check_html_structure_issues(file_path, log=print):
         except Exception as e:
             log(f"   Warning: Could not parse HTML structure: {e}")
         
+        # Check 4: Unclosed HTML tags
+        import re
+        
+        # Track key structural tags for later validation
+        content_lower = content.lower()
+        html_open_exists = bool(re.search(r'<html[^>]*>', content_lower))
+        html_close_exists = bool(re.search(r'</html>', content_lower))
+        body_open_exists = bool(re.search(r'<body[^>]*>', content_lower))
+        body_close_exists = bool(re.search(r'</body>', content_lower))
+        
+        # Tags that require closing tags (not self-closing)
+        # Include html and body explicitly in this check
+        paired_tags = [
+            'html', 'body', 'head', 'title', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+            'p', 'div', 'span', 'a', 'ul', 'ol', 'li', 'table', 'tr', 'td', 'th',
+            'form', 'button', 'script', 'style', 'nav', 'header', 'footer', 'main',
+            'article', 'section', 'aside', 'strong', 'em', 'b', 'i', 'u', 'small',
+            'blockquote', 'pre', 'code', 'kbd', 'var', 'samp', 'cite', 'q', 'mark',
+            'time', 'address', 'figcaption', 'figure', 'label', 'select', 'option',
+            'textarea', 'fieldset', 'legend', 'details', 'summary', 'dialog'
+        ]
+        
+        unclosed_tags = []
+        
+        for tag in paired_tags:
+            # Count opening tags (including those with attributes)
+            open_pattern = rf'<{tag}(?:\s+[^>]*)?>'
+            close_pattern = rf'</{tag}>'
+            
+            # Also check for self-closing tags like <tag />
+            self_closing_pattern = rf'<{tag}(?:\s+[^>]*)?/>'
+            
+            open_count = len(re.findall(open_pattern, content_lower, re.IGNORECASE))
+            close_count = len(re.findall(close_pattern, content_lower, re.IGNORECASE))
+            self_closing_count = len(re.findall(self_closing_pattern, content_lower, re.IGNORECASE))
+            
+            # Adjust open count by removing self-closing tags
+            effective_open_count = open_count - self_closing_count
+            
+            if effective_open_count > close_count:
+                unclosed_tags.append(f"{tag} ({effective_open_count - close_count} unclosed)")
+            elif close_count > effective_open_count:
+                unclosed_tags.append(f"{tag} ({close_count - effective_open_count} extra closing tags)")
+        
+        if unclosed_tags:
+            issues.append('unclosed_html_tags')
+            log(f"   Found unclosed/mismatched tags: {', '.join(unclosed_tags[:5])}" + 
+                (" ..." if len(unclosed_tags) > 5 else ""))
+        
+        # Check 5: Basic HTML structure validation - only check for consistency, not completeness
+        # Note: Variables like html_open_exists are already defined in Check 4
+        head_open_exists = bool(re.search(r'<head[^>]*>', content_lower))
+        head_close_exists = bool(re.search(r'</head>', content_lower))
+        
+        missing_structure = []
+        
+        # Only flag if tags are opened but not closed (or vice versa)
+        if html_open_exists and not html_close_exists:
+            missing_structure.append('closing </html>')
+        elif html_close_exists and not html_open_exists:
+            missing_structure.append('opening <html>')
+            
+        if head_open_exists and not head_close_exists:
+            missing_structure.append('closing </head>')
+        elif head_close_exists and not head_open_exists:
+            missing_structure.append('opening <head>')
+            
+        if body_open_exists and not body_close_exists:
+            missing_structure.append('closing </body>')
+        elif body_close_exists and not body_open_exists:
+            missing_structure.append('opening <body>')
+        
+        # Only flag as incomplete if there are actual mismatches
+        if missing_structure:
+            issues.append('incomplete_html_structure')
+            log(f"   Mismatched HTML structure tags: {', '.join(missing_structure)}")
+        
+        # Check 6: Nested tag validation using BeautifulSoup's parser errors
+        try:
+            # Parse with html.parser which is more strict
+            soup_strict = BeautifulSoup(content, 'html.parser')
+            
+            # Check for common nesting issues
+            # For example, p tags shouldn't contain div tags
+            invalid_nesting = []
+            
+            # Check for p tags containing block elements
+            for p_tag in soup_strict.find_all('p'):
+                block_elements = p_tag.find_all(['div', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 
+                                                'ul', 'ol', 'li', 'blockquote', 'pre', 'table'])
+                if block_elements:
+                    invalid_nesting.append(f"<p> contains block elements: {[el.name for el in block_elements[:3]]}")
+            
+            # Check for list items outside of lists
+            all_li = soup_strict.find_all('li')
+            for li in all_li:
+                parent = li.parent
+                if parent and parent.name not in ['ul', 'ol']:
+                    invalid_nesting.append(f"<li> not inside <ul> or <ol>")
+                    break  # Only report once
+            
+            if invalid_nesting:
+                issues.append('invalid_nesting')
+                log(f"   Found invalid tag nesting: {'; '.join(invalid_nesting[:3])}" + 
+                    (" ..." if len(invalid_nesting) > 3 else ""))
+                    
+        except Exception as e:
+            # BeautifulSoup might throw exceptions for severely malformed HTML
+            log(f"   Warning: HTML parsing error (possible malformed structure): {str(e)[:100]}")
+            issues.append('malformed_html')
+        
+        # Check 7: Final validation for critical mismatched tags
+        # Only flag if we have opening tags without closing tags (not missing both)
+        if html_open_exists and not html_close_exists:
+            if 'incomplete_html_structure' not in issues:
+                issues.append('incomplete_html_structure')
+            if 'unclosed_html_tags' not in issues:
+                issues.append('unclosed_html_tags')
+                log(f"   Critical: Found opening <html> tag but missing closing </html> tag")
+        
+        if body_open_exists and not body_close_exists:
+            if 'unclosed_html_tags' not in issues:
+                issues.append('unclosed_html_tags')
+                log(f"   Critical: Found opening <body> tag but missing closing </body> tag")
+        
         return len(issues) > 0, issues
         
     except Exception as e:
         log(f"Error checking HTML structure for {file_path}: {e}")
         return False, []
-
 
 def check_insufficient_paragraph_tags(html_content, threshold=0.3):
     """
