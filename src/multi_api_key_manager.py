@@ -228,6 +228,35 @@ class APIKeyPool:
         """Get all keys in the pool"""
         with self.lock:
             return self.keys.copy()
+            
+    def add_key(self, key_entry: APIKeyEntry):
+        """Add a new key to the pool"""
+        with self.lock:
+            self.keys.append(key_entry)
+            logger.info(f"Added key for model {key_entry.model} to pool")
+
+    def remove_key(self, index: int):
+        """Remove a key from the pool by index"""
+        with self.lock:
+            if 0 <= index < len(self.keys):
+                removed_key = self.keys.pop(index)
+                # Clean up any thread assignments for this key
+                threads_to_remove = []
+                for thread_id, (key_index, _) in self._thread_assignments.items():
+                    if key_index == index:
+                        threads_to_remove.append(thread_id)
+                    elif key_index > index:
+                        # Adjust indices for keys after the removed one
+                        self._thread_assignments[thread_id] = (key_index - 1, self._thread_assignments[thread_id][1])
+                
+                for thread_id in threads_to_remove:
+                    del self._thread_assignments[thread_id]
+                
+                # Reset rotation index if needed
+                if self._rotation_index >= len(self.keys) and len(self.keys) > 0:
+                    self._rotation_index = 0
+                
+                logger.info(f"Removed key for model {removed_key.model} from pool")
 
 class MultiAPIKeyDialog:
     """Dialog for managing multiple API keys"""
