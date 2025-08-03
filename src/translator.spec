@@ -416,7 +416,18 @@ text_modules = [
     'tiktoken.registry',
     'tiktoken.load',
     'tiktoken.model',
-    
+	
+	# Markdown2
+	'markdown2',
+    'markdown2.extras',
+
+    # HTML to text conversion
+    'html2text',
+    'html2text.__init__',
+    'html2text.config',
+    'html2text.compat',
+    'html2text.utils',
+ 
     # AI Hunter (Datasketch)
     'datasketch',
     'datasketch.minhash',
