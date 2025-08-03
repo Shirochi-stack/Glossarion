@@ -4038,10 +4038,7 @@ Recent translations to summarize:
        
        def save_glossary_settings():
            try:
-               # Manual glossary fields
-               for field, var in self.manual_field_vars.items():
-                   self.config[f'manual_extract_{field}'] = var.get()
-               
+               # Save custom fields
                self.config['custom_glossary_fields'] = self.custom_glossary_fields
                
                # Prompts
@@ -4063,18 +4060,15 @@ Recent translations to summarize:
                        "Please enter valid numbers for temperature and context limit")
                    return
                
+               # Honorifics filter toggle
+               self.config['glossary_disable_honorifics_filter'] = self.disable_honorifics_var.get()
+               
                # Update environment variables
                os.environ['GLOSSARY_SYSTEM_PROMPT'] = self.manual_glossary_prompt
                os.environ['AUTO_GLOSSARY_PROMPT'] = self.auto_glossary_prompt
+               os.environ['GLOSSARY_DISABLE_HONORIFICS_FILTER'] = '1' if self.disable_honorifics_var.get() else '0'
                
-               # Set field extraction flags
-               enabled_fields = []
-               for field, var in self.manual_field_vars.items():
-                   env_key = f'GLOSSARY_EXTRACT_{field.upper()}'
-                   os.environ[env_key] = '1' if var.get() else '0'
-                   if var.get():
-                       enabled_fields.append(field)
-               
+               # Set custom fields
                if self.custom_glossary_fields:
                    os.environ['GLOSSARY_CUSTOM_FIELDS'] = json.dumps(self.custom_glossary_fields)
                
@@ -4118,64 +4112,51 @@ Recent translations to summarize:
                       lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
 
     def _setup_manual_glossary_tab(self, parent):
-       """Setup manual glossary tab"""
+       """Setup manual glossary tab - simplified for new format"""
        manual_container = tk.Frame(parent)
        manual_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
        
-       fields_frame = tk.LabelFrame(manual_container, text="Extraction Fields", padx=10, pady=10)
-       fields_frame.pack(fill=tk.X, pady=(0, 10))
+       # Format info frame
+       format_frame = tk.LabelFrame(manual_container, text="Glossary Format", padx=10, pady=10)
+       format_frame.pack(fill=tk.X, pady=(0, 10))
        
-       if not hasattr(self, 'manual_field_vars'):
-           self.manual_field_vars = {
-               'original_name': tk.BooleanVar(value=self.config.get('manual_extract_original_name', True)),
-               'name': tk.BooleanVar(value=self.config.get('manual_extract_name', True)),
-               'gender': tk.BooleanVar(value=self.config.get('manual_extract_gender', True)),
-               'title': tk.BooleanVar(value=self.config.get('manual_extract_title', True)),
-               'group_affiliation': tk.BooleanVar(value=self.config.get('manual_extract_group_affiliation', True)),
-               'traits': tk.BooleanVar(value=self.config.get('manual_extract_traits', True)),
-               'how_they_refer_to_others': tk.BooleanVar(value=self.config.get('manual_extract_how_they_refer_to_others', True)),
-               'locations': tk.BooleanVar(value=self.config.get('manual_extract_locations', True))
-           }
+       tk.Label(format_frame, text="The glossary will be extracted in the following format:",
+               font=('TkDefaultFont', 10)).pack(anchor=tk.W, pady=(0, 5))
        
-       field_info = {
-           'original_name': "Original name in source language",
-           'name': "English/romanized name translation",
-           'gender': "Character gender",
-           'title': "Title or rank (with romanized suffix)",
-           'group_affiliation': "Organization/group membership",
-           'traits': "Character traits and descriptions",
-           'how_they_refer_to_others': "How they address other characters",
-           'locations': "Place names mentioned"
-       }
+       # Show format examples
+       format_text = """For characters:
+   type,raw_name,translated_name,gender
+   character,김솔음,Kim Sol-eum,Male
+
+For terms/locations:
+   type,raw_name,translated_name,
+   term,어둠탐사기록,Dark Exploration Records,"""
        
-       fields_grid = tk.Frame(fields_frame)
-       fields_grid.pack(fill=tk.X)
+       format_display = tk.Text(format_frame, height=6, width=60, wrap=tk.NONE)
+       format_display.pack(fill=tk.X, pady=5)
+       format_display.insert('1.0', format_text)
+       format_display.config(state='disabled', font=('Consolas', 9))
        
-       for row, (field, var) in enumerate(self.manual_field_vars.items()):
-           cb = tb.Checkbutton(fields_grid, text=field.replace('_', ' ').title(), 
-                              variable=var, bootstyle="round-toggle")
-           cb.grid(row=row, column=0, sticky=tk.W, padx=5, pady=2)
-           
-           desc = tk.Label(fields_grid, text=field_info[field], 
-                         font=('TkDefaultFont', 9), fg='gray')
-           desc.grid(row=row, column=1, sticky=tk.W, padx=20, pady=2)
-       
-       # Custom fields
+       # Custom fields section
        custom_frame = tk.LabelFrame(manual_container, text="Custom Fields", padx=10, pady=10)
        custom_frame.pack(fill=tk.X, pady=(0, 10))
        
        custom_list_frame = tk.Frame(custom_frame)
        custom_list_frame.pack(fill=tk.X)
        
-       tk.Label(custom_list_frame, text="Additional fields to extract:").pack(anchor=tk.W)
+       tk.Label(custom_list_frame, text="Additional fields to extract (will be added as extra columns):").pack(anchor=tk.W)
        
        custom_scroll = ttk.Scrollbar(custom_list_frame)
        custom_scroll.pack(side=tk.RIGHT, fill=tk.Y)
        
-       self.custom_fields_listbox = tk.Listbox(custom_list_frame, height=5, 
+       self.custom_fields_listbox = tk.Listbox(custom_list_frame, height=4, 
                                               yscrollcommand=custom_scroll.set)
        self.custom_fields_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
        custom_scroll.config(command=self.custom_fields_listbox.yview)
+       
+       # Initialize custom_glossary_fields if not exists
+       if not hasattr(self, 'custom_glossary_fields'):
+           self.custom_glossary_fields = self.config.get('custom_glossary_fields', [])
        
        for field in self.custom_glossary_fields:
            self.custom_fields_listbox.insert(tk.END, field)
@@ -4204,17 +4185,51 @@ Recent translations to summarize:
        tb.Button(custom_controls, text="Add", command=add_custom_field, width=10).pack(side=tk.LEFT, padx=2)
        tb.Button(custom_controls, text="Remove", command=remove_custom_field, width=10).pack(side=tk.LEFT, padx=2)
        
+       # Honorifics filter toggle
+       honorifics_frame = tk.LabelFrame(manual_container, text="Honorifics Handling", padx=10, pady=10)
+       honorifics_frame.pack(fill=tk.X, pady=(0, 10))
+       
+       if not hasattr(self, 'disable_honorifics_var'):
+           self.disable_honorifics_var = tk.BooleanVar(value=self.config.get('glossary_disable_honorifics_filter', False))
+       
+       tb.Checkbutton(honorifics_frame, text="Disable honorifics filtering", 
+                     variable=self.disable_honorifics_var,
+                     bootstyle="round-toggle").pack(anchor=tk.W)
+       
+       tk.Label(honorifics_frame, text="When enabled, honorifics (님, さん, 先生, etc.) will NOT be removed from raw names",
+               font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, padx=20, pady=(0, 5))
+       
        # Prompt section
-       prompt_frame = tk.LabelFrame(manual_container, text="Extraction Prompt Template", padx=10, pady=10)
+       prompt_frame = tk.LabelFrame(manual_container, text="Extraction Prompt", padx=10, pady=10)
        prompt_frame.pack(fill=tk.BOTH, expand=True)
        
        tk.Label(prompt_frame, text="Use {fields} for field list and {chapter_text} for content placeholder",
                font=('TkDefaultFont', 9), fg='blue').pack(anchor=tk.W, pady=(0, 5))
        
+       tk.Label(prompt_frame, text="The {fields} placeholder will be replaced with the format specification",
+               font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(0, 5))
+       
        self.manual_prompt_text = self.ui.setup_scrollable_text(
            prompt_frame, height=12, wrap=tk.WORD
        )
        self.manual_prompt_text.pack(fill=tk.BOTH, expand=True)
+       
+       # Set default prompt if not already set
+       if not hasattr(self, 'manual_glossary_prompt') or not self.manual_glossary_prompt:
+           self.manual_glossary_prompt = """Extract character names and important terms from the following text.
+
+Output format:
+{fields}
+
+Rules:
+- Output ONLY CSV lines in the exact format shown above
+- No headers, no extra text, no JSON
+- One entry per line
+- Leave gender empty for terms (just end with comma)
+
+Text:
+{chapter_text}"""
+       
        self.manual_prompt_text.insert('1.0', self.manual_glossary_prompt)
        self.manual_prompt_text.edit_reset()
        
@@ -4224,7 +4239,20 @@ Recent translations to summarize:
        def reset_manual_prompt():
            if messagebox.askyesno("Reset Prompt", "Reset manual glossary prompt to default?"):
                self.manual_prompt_text.delete('1.0', tk.END)
-               self.manual_prompt_text.insert('1.0', self.default_manual_glossary_prompt)
+               default_prompt = """Extract character names and important terms from the following text.
+
+Output format:
+{fields}
+
+Rules:
+- Output ONLY CSV lines in the exact format shown above
+- No headers, no extra text, no JSON
+- One entry per line
+- Leave gender empty for terms (just end with comma)
+
+Text:
+{chapter_text}"""
+               self.manual_prompt_text.insert('1.0', default_prompt)
        
        tb.Button(prompt_controls, text="Reset to Default", command=reset_manual_prompt, 
                 bootstyle="warning").pack(side=tk.LEFT, padx=5)
@@ -4407,7 +4435,6 @@ Recent translations to summarize:
         self.enable_auto_glossary_var.trace('w', lambda *args: update_auto_glossary_state())
         self.append_glossary_var.trace('w', lambda *args: update_append_prompt_state())
 
-
     def _setup_glossary_editor_tab(self, parent):
         """Set up the glossary editor/trimmer tab"""
         container = tk.Frame(parent)
@@ -4419,7 +4446,6 @@ Recent translations to summarize:
         tk.Label(file_frame, text="Glossary File:").pack(side=tk.LEFT, padx=(0, 5))
         self.editor_file_var = tk.StringVar()
         tb.Entry(file_frame, textvariable=self.editor_file_var, state='readonly').pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-
 
         stats_frame = tk.Frame(container)
         stats_frame.pack(fill=tk.X, pady=(0, 5))
@@ -4461,46 +4487,78 @@ Recent translations to summarize:
                return
            
            try:
-               with open(path, 'r', encoding='utf-8') as f:
-                   data = json.load(f)
-               
-               entries = []
-               all_fields = set()
-               
-               if isinstance(data, dict):
-                   if 'entries' in data:
-                       self.current_glossary_data = data
-                       self.current_glossary_format = 'dict'
-                       for original, translated in data['entries'].items():
-                           entry = {'original': original, 'translated': translated}
-                           entries.append(entry)
-                           all_fields.update(entry.keys())
-                   else:
-                       self.current_glossary_data = {'entries': data}
-                       self.current_glossary_format = 'dict'
-                       for original, translated in data.items():
-                           entry = {'original': original, 'translated': translated}
-                           entries.append(entry)
-                           all_fields.update(entry.keys())
-               
-               elif isinstance(data, list):
-                   self.current_glossary_data = data
+               # Try CSV first
+               if path.endswith('.csv'):
+                   import csv
+                   entries = []
+                   with open(path, 'r', encoding='utf-8') as f:
+                       reader = csv.reader(f)
+                       for row in reader:
+                           if len(row) >= 3:
+                               entry = {
+                                   'type': row[0],
+                                   'raw_name': row[1],
+                                   'translated_name': row[2]
+                               }
+                               if row[0] == 'character' and len(row) > 3:
+                                   entry['gender'] = row[3]
+                               entries.append(entry)
+                   self.current_glossary_data = entries
                    self.current_glossary_format = 'list'
-                   for item in data:
-                       all_fields.update(item.keys())
-                       entries.append(item)
+               else:
+                   # JSON format
+                   with open(path, 'r', encoding='utf-8') as f:
+                       data = json.load(f)
+                   
+                   entries = []
+                   all_fields = set()
+                   
+                   if isinstance(data, dict):
+                       if 'entries' in data:
+                           self.current_glossary_data = data
+                           self.current_glossary_format = 'dict'
+                           for original, translated in data['entries'].items():
+                               entry = {'original': original, 'translated': translated}
+                               entries.append(entry)
+                               all_fields.update(entry.keys())
+                       else:
+                           self.current_glossary_data = {'entries': data}
+                           self.current_glossary_format = 'dict'
+                           for original, translated in data.items():
+                               entry = {'original': original, 'translated': translated}
+                               entries.append(entry)
+                               all_fields.update(entry.keys())
+                   
+                   elif isinstance(data, list):
+                       self.current_glossary_data = data
+                       self.current_glossary_format = 'list'
+                       for item in data:
+                           all_fields.update(item.keys())
+                           entries.append(item)
                
-               standard_fields = ['original_name', 'name', 'original', 'translated', 'gender', 
-                                'title', 'group_affiliation', 'traits', 'how_they_refer_to_others', 
-                                'locations']
-               
-               column_fields = []
-               for field in standard_fields:
-                   if field in all_fields:
-                       column_fields.append(field)
-               
-               custom_fields = sorted(all_fields - set(standard_fields))
-               column_fields.extend(custom_fields)
+               # Set up columns based on new format
+               if self.current_glossary_format == 'list' and entries and 'type' in entries[0]:
+                   # New simple format
+                   column_fields = ['type', 'raw_name', 'translated_name', 'gender']
+                   
+                   # Check for any custom fields
+                   for entry in entries:
+                       for field in entry.keys():
+                           if field not in column_fields:
+                               column_fields.append(field)
+               else:
+                   # Old format compatibility
+                   standard_fields = ['original_name', 'name', 'original', 'translated', 'gender', 
+                                    'title', 'group_affiliation', 'traits', 'how_they_refer_to_others', 
+                                    'locations']
+                   
+                   column_fields = []
+                   for field in standard_fields:
+                       if field in all_fields:
+                           column_fields.append(field)
+                   
+                   custom_fields = sorted(all_fields - set(standard_fields))
+                   column_fields.extend(custom_fields)
                
                self.glossary_tree.delete(*self.glossary_tree.get_children())
                self.glossary_tree['columns'] = column_fields
@@ -4512,7 +4570,7 @@ Recent translations to summarize:
                    display_name = field.replace('_', ' ').title()
                    self.glossary_tree.heading(field, text=display_name)
                    
-                   if field in ['original_name', 'name', 'original', 'translated']:
+                   if field in ['raw_name', 'translated_name', 'original_name', 'name', 'original', 'translated']:
                        width = 150
                    elif field in ['traits', 'locations', 'how_they_refer_to_others']:
                        width = 200
@@ -4535,9 +4593,17 @@ Recent translations to summarize:
                    
                    self.glossary_tree.insert('', 'end', text=str(idx + 1), values=values)
                
+               # Update stats
                stats = []
                stats.append(f"Total entries: {len(entries)}")
-               if self.current_glossary_format == 'list':
+               
+               if self.current_glossary_format == 'list' and entries and 'type' in entries[0]:
+                   # New format stats
+                   characters = sum(1 for e in entries if e.get('type') == 'character')
+                   terms = sum(1 for e in entries if e.get('type') == 'term')
+                   stats.append(f"Characters: {characters}, Terms: {terms}")
+               elif self.current_glossary_format == 'list':
+                   # Old format stats
                    chars = sum(1 for e in entries if 'original_name' in e or 'name' in e)
                    locs = sum(1 for e in entries if 'locations' in e and e['locations'])
                    stats.append(f"Characters: {chars}, Locations: {locs}")
@@ -4551,8 +4617,8 @@ Recent translations to summarize:
        
         def browse_glossary():
            path = filedialog.askopenfilename(
-               title="Select glossary.json",
-               filetypes=[("JSON files", "*.json")]
+               title="Select glossary file",
+               filetypes=[("Glossary files", "*.json *.csv"), ("JSON files", "*.json"), ("CSV files", "*.csv")]
            )
            if path:
                self.editor_file_var.set(path)
@@ -4564,8 +4630,22 @@ Recent translations to summarize:
            if not path or not self.current_glossary_data:
                return False
            try:
-               with open(path, 'w', encoding='utf-8') as f:
-                   json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
+               if path.endswith('.csv'):
+                   # Save as CSV
+                   import csv
+                   with open(path, 'w', encoding='utf-8', newline='') as f:
+                       writer = csv.writer(f)
+                       for entry in self.current_glossary_data:
+                           if entry.get('type') == 'character':
+                               writer.writerow([entry.get('type', ''), entry.get('raw_name', ''), 
+                                              entry.get('translated_name', ''), entry.get('gender', '')])
+                           else:
+                               writer.writerow([entry.get('type', ''), entry.get('raw_name', ''), 
+                                              entry.get('translated_name', ''), ''])
+               else:
+                   # Save as JSON
+                   with open(path, 'w', encoding='utf-8') as f:
+                       json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
                return True
            except Exception as e:
                messagebox.showerror("Error", f"Failed to save: {e}")
@@ -4577,7 +4657,7 @@ Recent translations to summarize:
                 return
             
             if self.current_glossary_format == 'list':
-                # First, check if there are any empty fields
+                # Check if there are any empty fields
                 empty_fields_found = False
                 fields_cleaned = {}
                 
@@ -4659,396 +4739,61 @@ Recent translations to summarize:
                 return
             
             if self.current_glossary_format == 'list':
-                # Import for fuzzy matching
-                from difflib import SequenceMatcher
-                
-                # Check if original_name extraction is enabled
-                extract_original_name = os.getenv('GLOSSARY_EXTRACT_ORIGINAL_NAME', '1') == '1'
-                
-                # Get duplicate detection mode from config first, then environment
-                duplicate_key_mode = self.config.get('glossary_duplicate_key_mode',
-                                                   os.getenv('GLOSSARY_DUPLICATE_KEY_MODE', 'auto'))
-                
-                # Debug logging
-                self.append_log(f"🔍 Duplicate detection mode: {duplicate_key_mode}")
-                self.append_log(f"🔍 Original name extraction enabled: {extract_original_name}")
-                
-                # Group entries by their key to find duplicates
-                entry_groups = {}
-                fuzzy_threshold = float(self.config.get('glossary_fuzzy_threshold',
-                                                       os.getenv('GLOSSARY_FUZZY_THRESHOLD', '85'))) / 100.0
-                
-                for i, entry in enumerate(self.current_glossary_data):
-                    # Determine which field to use as the key based on mode
-                    key = None
+                # Import the skip function from the updated script
+                try:
+                    from extract_glossary_from_epub import skip_duplicate_entries, remove_honorifics
                     
-                    if duplicate_key_mode == 'original_name':
-                        key = entry.get('original_name')
-                    elif duplicate_key_mode == 'name':
-                        key = entry.get('name')
-                    elif duplicate_key_mode == 'custom':
-                        custom_field = self.config.get('glossary_duplicate_custom_field',
-                                                      os.getenv('GLOSSARY_DUPLICATE_CUSTOM_FIELD', ''))
-                        if custom_field:
-                            key = entry.get(custom_field)
-                        else:
-                            key = entry.get('original_name') or entry.get('name')
-                    elif duplicate_key_mode == 'auto':
-                        if extract_original_name and 'original_name' in entry:
-                            key = entry['original_name']
-                        elif not extract_original_name and 'name' in entry:
-                            key = entry['name']
-                        else:
-                            key = entry.get('original_name') or entry.get('name')
-                    elif duplicate_key_mode == 'fuzzy':
-                        if extract_original_name and 'original_name' in entry:
-                            key = entry['original_name']
-                        else:
-                            key = entry.get('original_name') or entry.get('name')
+                    # Set environment variable for honorifics toggle
+                    os.environ['GLOSSARY_DISABLE_HONORIFICS_FILTER'] = '1' if self.config.get('glossary_disable_honorifics_filter', False) else '0'
                     
-                    # Normalize the key for comparison
-                    if key:
-                        key = str(key).strip()
+                    original_count = len(self.current_glossary_data)
+                    self.current_glossary_data = skip_duplicate_entries(self.current_glossary_data)
+                    duplicates_removed = original_count - len(self.current_glossary_data)
                     
-                    # Debug first few entries
-                    if i < 5:
-                        self.append_log(f"   Entry {i+1}: key='{key}', original_name='{entry.get('original_name', '')}', name='{entry.get('name', '')}'")
-                    
-                    if not key:
-                        continue
+                    if duplicates_removed > 0:
+                        if self.config.get('glossary_auto_backup', False):
+                            self.create_glossary_backup(f"before_remove_{duplicates_removed}_dupes")
                         
-                    # For fuzzy matching, find the best matching group
-                    if duplicate_key_mode == 'fuzzy':
-                        best_match_key = None
-                        best_similarity = 0
-                        
-                        for existing_key in entry_groups.keys():
-                            similarity = SequenceMatcher(None, key, existing_key).ratio()
-                            if similarity >= fuzzy_threshold and similarity > best_similarity:
-                                best_similarity = similarity
-                                best_match_key = existing_key
-                        
-                        if best_match_key:
-                            entry_groups[best_match_key].append((i, entry))
-                            if i < 10:  # Log details for first few
-                                self.append_log(f"   → Fuzzy match: '{key}' ≈ '{best_match_key}' (similarity: {best_similarity:.1%})")
-                        else:
-                            entry_groups[key] = [(i, entry)]
+                        if save_current_glossary():
+                            load_glossary_for_editing()
+                            messagebox.showinfo("Success", f"Removed {duplicates_removed} duplicate entries")
+                            self.append_log(f"🗑️ Removed {duplicates_removed} duplicates based on raw_name")
                     else:
-                        # Exact matching
-                        if key in entry_groups:
-                            entry_groups[key].append((i, entry))
-                        else:
-                            entry_groups[key] = [(i, entry)]
-                
-                # Function to calculate entry completeness score
-                def calculate_entry_score(entry):
-                    """Calculate a score based on how complete/detailed an entry is"""
-                    score = 0
-                    
-                    # Count non-empty fields
-                    for field, value in entry.items():
-                        if value:
-                            if isinstance(value, str):
-                                # String fields: score based on length
-                                score += min(len(value.strip()), 100)  # Cap at 100 per field
-                            elif isinstance(value, list):
-                                # List fields: score based on items and their content
-                                score += len(value) * 10
-                                for item in value:
-                                    if isinstance(item, str):
-                                        score += min(len(item.strip()), 50)
-                            elif isinstance(value, dict):
-                                # Dict fields: score based on keys
-                                score += len(value) * 20
-                            else:
-                                # Other fields just add a base score
-                                score += 10
-                    
-                    # Bonus for important fields
-                    if entry.get('name'):
-                        score += 50
-                    if entry.get('title'):
-                        score += 30
-                    if entry.get('group_affiliation'):
-                        score += 40
-                    if entry.get('locations'):
-                        score += 30 * len(entry.get('locations', []))
-                    
-                    return score
-                
-                # Now process duplicates, keeping the most complete entry
-                unique_entries = []
-                indices_to_keep = set()
-                duplicates = 0
-                duplicate_details = []
-                
-                for key, group in entry_groups.items():
-                    if len(group) > 1:
-                        # Found duplicates - sort by completeness score (highest first)
-                        scored_group = [(idx, entry, calculate_entry_score(entry)) for idx, entry in group]
-                        scored_group.sort(key=lambda x: x[2], reverse=True)
+                        messagebox.showinfo("Info", "No duplicates found")
                         
-                        # Keep the most complete entry
-                        keeper_idx, keeper_entry, keeper_score = scored_group[0]
-                        indices_to_keep.add(keeper_idx)
-                        
-                        # Log what we're removing
-                        for idx, entry, score in scored_group[1:]:
+                except ImportError:
+                    # Fallback implementation
+                    seen_raw_names = set()
+                    unique_entries = []
+                    duplicates = 0
+                    
+                    for entry in self.current_glossary_data:
+                        raw_name = entry.get('raw_name', '').lower().strip()
+                        if raw_name and raw_name not in seen_raw_names:
+                            seen_raw_names.add(raw_name)
+                            unique_entries.append(entry)
+                        elif raw_name:
                             duplicates += 1
-                            duplicate_details.append({
-                                'key': key,
-                                'original_name': entry.get('original_name', ''),
-                                'name': entry.get('name', ''),
-                                'index': idx + 1,
-                                'score': score,
-                                'keeper_score': keeper_score,
-                                'keeper_index': keeper_idx + 1
-                            })
-                        
-                        if len(group) <= 5:  # Log details for small groups
-                            self.append_log(f"   Duplicate group '{key}': keeping entry #{keeper_idx+1} (score: {keeper_score})")
-                            for idx, entry, score in scored_group[1:]:
-                                self.append_log(f"     → Removing entry #{idx+1} (score: {score})")
+                    
+                    if duplicates > 0:
+                        self.current_glossary_data = unique_entries
+                        if save_current_glossary():
+                            load_glossary_for_editing()
+                            messagebox.showinfo("Success", f"Removed {duplicates} duplicate entries")
                     else:
-                        # No duplicates for this key
-                        indices_to_keep.add(group[0][0])
-                
-                # Build the final list keeping original order
-                for i, entry in enumerate(self.current_glossary_data):
-                    if i in indices_to_keep:
-                        unique_entries.append(entry)
-                
-                self.current_glossary_data[:] = unique_entries
-                
-                if duplicates > 0:
-                    # Create backup before saving if enabled
-                    if self.config.get('glossary_auto_backup', False):
-                        self.create_glossary_backup(f"before_remove_{duplicates}_dupes")
-                    
-                    if save_current_glossary():
-                        load_glossary_for_editing()
-                    
-                    # Provide detailed feedback
-                    msg = f"Removed {duplicates} duplicate entries"
-                    if duplicate_key_mode == 'auto':
-                        if extract_original_name:
-                            msg += " (using original_name as key)"
-                        else:
-                            msg += " (using name as key)"
-                    elif duplicate_key_mode == 'custom':
-                        custom_field = self.config.get('glossary_duplicate_custom_field',
-                                                     os.getenv('GLOSSARY_DUPLICATE_CUSTOM_FIELD', ''))
-                        msg += f" (using {custom_field} as key)"
-                    elif duplicate_key_mode == 'fuzzy':
-                        msg += f" (fuzzy matching at {int(fuzzy_threshold * 100)}% similarity)"
-                    else:
-                        msg += f" (using {duplicate_key_mode} as key)"
-                    
-                    messagebox.showinfo("Success", msg)
-                    
-                    # Log details
-                    self.append_log(f"🗑️ {msg}")
-                    self.append_log(f"   Strategy: Kept entries with more complete information")
-                    if duplicates <= 20:  # Show more details since we have scoring info
-                        for detail in duplicate_details:
-                            if duplicate_key_mode == 'fuzzy':
-                                self.append_log(f"   • Removed #{detail['index']} (score: {detail['score']}) - kept #{detail['keeper_index']} (score: {detail['keeper_score']})")
-                            else:
-                                self.append_log(f"   • Removed #{detail['index']}: {detail['key']} (score: {detail['score']}) - kept better entry")
-                else:
-                    self.append_log("ℹ️ No duplicates found")
-                    self.append_log(f"   Checked {len(self.current_glossary_data)} entries using '{duplicate_key_mode}' mode")
-                    if duplicate_key_mode == 'fuzzy':
-                        self.append_log(f"   Fuzzy threshold: {int(fuzzy_threshold * 100)}%")
-                    messagebox.showinfo("Info", "No duplicates found")
+                        messagebox.showinfo("Info", "No duplicates found")
 
         # dialog function for configuring duplicate detection mode
         def duplicate_detection_settings():
-            """Show dialog for configuring duplicate detection settings"""
-            # Use setup_scrollable with custom ratios
-            dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
-                self.master,
-                "Duplicate Detection Settings",
-                width=600,
-                height=None,
-                max_width_ratio=0.5,
-                max_height_ratio=0.6
+            """Show info about duplicate detection (simplified for new format)"""
+            messagebox.showinfo(
+                "Duplicate Detection", 
+                "Duplicate detection is based on the raw_name field.\n\n"
+                "• Entries with identical raw_name values are considered duplicates\n"
+                "• The first occurrence is kept, later ones are removed\n"
+                "• Honorifics filtering can be toggled in the Manual Glossary tab\n\n"
+                "When honorifics filtering is enabled, names are compared after removing honorifics."
             )
-            
-            # Main frame (use scrollable_frame instead of dialog)
-            main_frame = ttk.Frame(scrollable_frame, padding="20")
-            main_frame.pack(fill=tk.BOTH, expand=True)
-            
-            # Title
-            ttk.Label(main_frame, text="Duplicate Detection Settings", 
-                      font=('TkDefaultFont', 12, 'bold')).pack(pady=(0, 20))
-            
-            # Current mode and custom field from config first, then env as fallback
-            current_mode = self.config.get('glossary_duplicate_key_mode', 
-                                           os.getenv('GLOSSARY_DUPLICATE_KEY_MODE', 'auto'))
-            custom_field = self.config.get('glossary_duplicate_custom_field',
-                                           os.getenv('GLOSSARY_DUPLICATE_CUSTOM_FIELD', ''))
-            fuzzy_threshold = self.config.get('glossary_fuzzy_threshold',
-                                             os.getenv('GLOSSARY_FUZZY_THRESHOLD', '85'))
-            
-            mode_var = tk.StringVar(value=current_mode)
-            custom_field_var = tk.StringVar(value=custom_field)
-            
-            # Radio buttons for mode selection
-            modes = [
-                ('auto', 'Automatic', 'Use original_name if extraction is enabled, otherwise use name'),
-                ('original_name', 'Original Name Only', 'Always use original_name field (entries without it will be kept)'),
-                ('name', 'Name Only', 'Always use name field (for manually edited glossaries)'),
-                ('custom', 'Custom Field', 'Use a custom field for duplicate detection'),
-                ('fuzzy', 'Fuzzy Matching', 'Detect near-duplicates with similarity threshold')
-            ]
-            
-            # Frame for custom field input
-            custom_field_frame = None
-            fuzzy_threshold_frame = None
-            
-            def toggle_mode_options(*args):
-                mode = mode_var.get()
-                if mode == 'custom':
-                    custom_field_frame.pack(fill=tk.X, pady=(0, 10), after=radio_frames[-2])
-                    fuzzy_threshold_frame.pack_forget()
-                    custom_field_entry.focus_set()
-                elif mode == 'fuzzy':
-                    fuzzy_threshold_frame.pack(fill=tk.X, pady=(0, 10), after=radio_frames[-1])
-                    custom_field_frame.pack_forget()
-                else:
-                    custom_field_frame.pack_forget()
-                    fuzzy_threshold_frame.pack_forget()
-            
-            radio_frames = []
-            for value, label, description in modes:
-                frame = ttk.Frame(main_frame)
-                frame.pack(fill=tk.X, pady=5)
-                radio_frames.append(frame)
-                
-                ttk.Radiobutton(frame, text=label, variable=mode_var, 
-                                value=value, command=toggle_mode_options).pack(anchor=tk.W)
-                ttk.Label(frame, text=description, 
-                          font=('TkDefaultFont', 9), 
-                          foreground='gray').pack(anchor=tk.W, padx=(20, 0))
-            
-            # Custom field input frame
-            custom_field_frame = ttk.Frame(main_frame)
-            
-            custom_inner_frame = ttk.Frame(custom_field_frame)
-            custom_inner_frame.pack(fill=tk.X, padx=(20, 0))
-            
-            ttk.Label(custom_inner_frame, text="Field name:").pack(side=tk.LEFT, padx=(0, 10))
-            custom_field_entry = ttk.Entry(custom_inner_frame, textvariable=custom_field_var, width=30)
-            custom_field_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-            
-            # Help text for custom fields
-            help_text = ttk.Label(custom_field_frame, 
-                                 text="Enter the exact field name (e.g., 'title', 'role', or any custom field you've added)",
-                                 font=('TkDefaultFont', 8), 
-                                 foreground='gray')
-            help_text.pack(anchor=tk.W, padx=(20, 0), pady=(5, 0))
-            
-            # Fuzzy threshold frame
-            fuzzy_threshold_frame = ttk.Frame(main_frame)
-            fuzzy_threshold_var = tk.DoubleVar(value=float(fuzzy_threshold))
-            
-            fuzzy_inner_frame = ttk.Frame(fuzzy_threshold_frame)
-            fuzzy_inner_frame.pack(fill=tk.X, padx=(20, 0))
-            
-            ttk.Label(fuzzy_inner_frame, text="Similarity threshold (%):").pack(side=tk.LEFT, padx=(0, 10))
-            fuzzy_scale = ttk.Scale(fuzzy_inner_frame, from_=50, to=100, orient=tk.HORIZONTAL, 
-                                   variable=fuzzy_threshold_var, length=200)
-            fuzzy_scale.pack(side=tk.LEFT, padx=(0, 10))
-            fuzzy_label = ttk.Label(fuzzy_inner_frame, text=f"{int(fuzzy_threshold_var.get())}%")
-            fuzzy_label.pack(side=tk.LEFT)
-            
-            def update_fuzzy_label(*args):
-                fuzzy_label.config(text=f"{int(fuzzy_threshold_var.get())}%")
-            
-            fuzzy_threshold_var.trace('w', update_fuzzy_label)
-            
-            fuzzy_help = ttk.Label(fuzzy_threshold_frame,
-                                  text="Lower values will catch more variations but may create false positives",
-                                  font=('TkDefaultFont', 8),
-                                  foreground='gray')
-            fuzzy_help.pack(anchor=tk.W, padx=(20, 0), pady=(5, 0))
-            
-            # Show/hide frames based on initial mode
-            if current_mode == 'custom':
-                custom_field_frame.pack(fill=tk.X, pady=(0, 10), after=radio_frames[-2])
-            elif current_mode == 'fuzzy':
-                fuzzy_threshold_frame.pack(fill=tk.X, pady=(0, 10), after=radio_frames[-1])
-            
-            # Separator
-            ttk.Separator(main_frame, orient='horizontal').pack(fill=tk.X, pady=(20, 10))
-            
-            # Info section
-            info_frame = ttk.Frame(main_frame)
-            info_frame.pack(fill=tk.X, pady=(0, 10))
-            
-            info_label = ttk.Label(info_frame, text="ℹ️ Note: Duplicate detection affects both extraction merging and manual removal.",
-                                  font=('TkDefaultFont', 9), foreground='#0066cc')
-            info_label.pack(anchor=tk.W)
-            
-            # Buttons
-            button_frame = ttk.Frame(main_frame)
-            button_frame.pack(fill=tk.X, pady=(20, 0))
-            
-            # Inner frame for centering buttons
-            button_inner_frame = ttk.Frame(button_frame)
-            button_inner_frame.pack(anchor=tk.CENTER)
-            
-            def save_settings():
-                selected_mode = mode_var.get()
-                
-                # Validate custom field if selected
-                if selected_mode == 'custom':
-                    custom_field_name = custom_field_var.get().strip()
-                    if not custom_field_name:
-                        messagebox.showerror("Error", "Please enter a field name for custom mode")
-                        custom_field_entry.focus_set()
-                        return
-                    os.environ['GLOSSARY_DUPLICATE_CUSTOM_FIELD'] = custom_field_name
-                    self.config['glossary_duplicate_custom_field'] = custom_field_name
-                elif selected_mode == 'fuzzy':
-                    os.environ['GLOSSARY_FUZZY_THRESHOLD'] = str(int(fuzzy_threshold_var.get()))
-                    self.config['glossary_fuzzy_threshold'] = str(int(fuzzy_threshold_var.get()))
-                
-                os.environ['GLOSSARY_DUPLICATE_KEY_MODE'] = selected_mode
-                self.config['glossary_duplicate_key_mode'] = selected_mode
-                
-                # Save to config file
-                with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(self.config, f, ensure_ascii=False, indent=2)
-                
-                # Show what will be used
-                if selected_mode == 'custom':
-                    msg = f"Duplicate detection will use the '{custom_field_name}' field"
-                elif selected_mode == 'fuzzy':
-                    msg = f"Duplicate detection set to fuzzy matching at {int(fuzzy_threshold_var.get())}% similarity"
-                else:
-                    msg = f"Duplicate detection mode set to: {selected_mode}"
-                
-                messagebox.showinfo("Success", msg)
-                dialog.destroy()
-                
-                # Refresh the glossary display if it's loaded
-                if hasattr(self, 'current_glossary_data') and self.current_glossary_data:
-                    try:
-                        # Just refresh the tree view without reloading the file
-                        self._refresh_glossary_tree_view()
-                    except:
-                        pass
-            
-            tb.Button(button_inner_frame, text="Save", command=save_settings, 
-                      bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
-            tb.Button(button_inner_frame, text="Cancel", command=dialog.destroy,
-                      bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
-            
-            # Auto-resize and show
-            self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.5, max_height_ratio=0.55)
 
         def backup_settings_dialog():
             """Show dialog for configuring automatic backup settings"""
@@ -5126,7 +4871,7 @@ Recent translations to summarize:
             
             if self.editor_file_var.get():
                 glossary_dir = os.path.dirname(self.editor_file_var.get())
-                backup_path = "Backups"  # <-- Fixed this line
+                backup_path = "Backups"
                 full_path = os.path.join(glossary_dir, "Backups")
                 
                 path_label = ttk.Label(location_frame, 
@@ -5144,7 +4889,7 @@ Recent translations to summarize:
                              foreground='gray').pack(anchor=tk.W, padx=(10, 0))
             else:
                 ttk.Label(location_frame, 
-                         text="Backups",  # <-- Also fix this line
+                         text="Backups",
                          font=('TkDefaultFont', 9),
                          foreground='gray').pack(anchor=tk.W, padx=(10, 0))
             
@@ -5212,7 +4957,7 @@ Recent translations to summarize:
                 self.master,
                 "Smart Trim Glossary",
                 width=600,
-                height=None,  # Will use default height calculation
+                height=None,
                 max_width_ratio=0.9,
                 max_height_ratio=0.85
             )
@@ -5223,31 +4968,8 @@ Recent translations to summarize:
             tk.Label(main_frame, text="Smart Glossary Trimming", 
                     font=('TkDefaultFont', 14, 'bold')).pack(pady=(20, 5))
             
-            tk.Label(main_frame, text="Optimize your glossary by removing unnecessary data and limiting field sizes",
+            tk.Label(main_frame, text="Limit the number of entries in your glossary",
                     font=('TkDefaultFont', 10), fg='gray', wraplength=550).pack(pady=(0, 15))
-            
-            # Analyze current glossary to detect all fields
-            all_fields = set()
-            list_fields = set()
-            standard_list_fields = ['traits', 'locations', 'group_affiliation']
-            
-            if self.current_glossary_format == 'list':
-                for entry in self.current_glossary_data:
-                    for field, value in entry.items():
-                        all_fields.add(field)
-                        if isinstance(value, list):
-                            list_fields.add(field)
-            elif self.current_glossary_format == 'dict':
-                for key, entry in self.current_glossary_data.get('entries', {}).items():
-                    for field, value in entry.items():
-                        all_fields.add(field)
-                        if isinstance(value, list):
-                            list_fields.add(field)
-            
-            # Detect custom fields
-            standard_fields = {'original_name', 'name', 'gender', 'title', 'group_affiliation', 
-                              'traits', 'how_they_refer_to_others', 'locations'}
-            custom_fields = all_fields - standard_fields
             
             # Display current glossary stats
             stats_frame = tk.LabelFrame(main_frame, text="Current Glossary Statistics", padx=15, pady=10)
@@ -5255,161 +4977,47 @@ Recent translations to summarize:
             
             entry_count = len(self.current_glossary_data) if self.current_glossary_format == 'list' else len(self.current_glossary_data.get('entries', {}))
             tk.Label(stats_frame, text=f"Total entries: {entry_count}", font=('TkDefaultFont', 10)).pack(anchor=tk.W)
-            tk.Label(stats_frame, text=f"Total fields detected: {len(all_fields)}", font=('TkDefaultFont', 10)).pack(anchor=tk.W)
-            if custom_fields:
-                tk.Label(stats_frame, text=f"Custom fields: {', '.join(sorted(custom_fields))}", 
-                        font=('TkDefaultFont', 10), fg='blue').pack(anchor=tk.W)
+            
+            # For new format, show type breakdown
+            if self.current_glossary_format == 'list' and self.current_glossary_data and 'type' in self.current_glossary_data[0]:
+                characters = sum(1 for e in self.current_glossary_data if e.get('type') == 'character')
+                terms = sum(1 for e in self.current_glossary_data if e.get('type') == 'term')
+                tk.Label(stats_frame, text=f"Characters: {characters}, Terms: {terms}", font=('TkDefaultFont', 10)).pack(anchor=tk.W)
             
             # Entry limit section
             limit_frame = tk.LabelFrame(main_frame, text="Entry Limit", padx=15, pady=10)
             limit_frame.pack(fill=tk.X, pady=(0, 15), padx=20)
             
-            tk.Label(limit_frame, text="Limit the total number of glossary entries to reduce size and improve performance",
+            tk.Label(limit_frame, text="Keep only the first N entries to reduce glossary size",
                     font=('TkDefaultFont', 9), fg='gray', wraplength=520).pack(anchor=tk.W, pady=(0, 10))
             
             top_frame = tk.Frame(limit_frame)
             top_frame.pack(fill=tk.X, pady=5)
-            tk.Label(top_frame, text="Keep top").pack(side=tk.LEFT)
+            tk.Label(top_frame, text="Keep first").pack(side=tk.LEFT)
             top_var = tk.StringVar(value=str(min(100, entry_count)))
             tb.Entry(top_frame, textvariable=top_var, width=10).pack(side=tk.LEFT, padx=5)
             tk.Label(top_frame, text=f"entries (out of {entry_count})").pack(side=tk.LEFT)
-            
-            # Field-specific limits section
-            field_limit_frame = tk.LabelFrame(main_frame, text="List Field Limits", padx=15, pady=10)
-            field_limit_frame.pack(fill=tk.X, pady=(0, 15), padx=20)
-            
-            tk.Label(field_limit_frame, text="Limit the number of items in list fields to reduce redundancy",
-                    font=('TkDefaultFont', 9), fg='gray', wraplength=520).pack(anchor=tk.W, pady=(0, 10))
-            
-            field_vars = {}
-            
-            # Standard list fields
-            if any(field in list_fields for field in standard_list_fields):
-                tk.Label(field_limit_frame, text="Standard Fields:", 
-                        font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(5, 5))
-                
-                standard_field_defaults = {
-                    'traits': ("Character traits", "5"),
-                    'locations': ("Associated locations", "10"),
-                    'group_affiliation': ("Group affiliation", "3")
-                }
-                
-                for field, (description, default) in standard_field_defaults.items():
-                    if field in list_fields:
-                        frame = tk.Frame(field_limit_frame)
-                        frame.pack(fill=tk.X, pady=2, padx=(20, 0))
-                        tk.Label(frame, text=f"{description}:", width=25, anchor=tk.W).pack(side=tk.LEFT)
-                        var = tk.StringVar(value=default)
-                        tb.Entry(frame, textvariable=var, width=10).pack(side=tk.LEFT, padx=5)
-                        tk.Label(frame, text="items max", font=('TkDefaultFont', 9), fg='gray').pack(side=tk.LEFT)
-                        field_vars[field] = var
-            
-            # Custom list fields
-            custom_list_fields = [f for f in custom_fields if f in list_fields]
-            if custom_list_fields:
-                tk.Label(field_limit_frame, text="Custom Fields:", 
-                        font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(10, 5))
-                
-                for field in sorted(custom_list_fields):
-                    frame = tk.Frame(field_limit_frame)
-                    frame.pack(fill=tk.X, pady=2, padx=(20, 0))
-                    tk.Label(frame, text=f"{field}:", width=25, anchor=tk.W).pack(side=tk.LEFT)
-                    var = tk.StringVar(value="5")  # Default limit for custom fields
-                    tb.Entry(frame, textvariable=var, width=10).pack(side=tk.LEFT, padx=5)
-                    tk.Label(frame, text="items max", font=('TkDefaultFont', 9), fg='gray').pack(side=tk.LEFT)
-                    field_vars[field] = var
-            
-            if not field_vars:
-                tk.Label(field_limit_frame, text="No list fields detected in the glossary",
-                        font=('TkDefaultFont', 10, 'italic'), fg='gray').pack(pady=10)
-            
-            # Remove fields section
-            remove_frame = tk.LabelFrame(main_frame, text="Remove Fields", padx=15, pady=10)
-            remove_frame.pack(fill=tk.X, pady=(0, 15), padx=20)
-            
-            tk.Label(remove_frame, text="Remove entire fields from all entries to reduce glossary size",
-                    font=('TkDefaultFont', 9), fg='gray', wraplength=520).pack(anchor=tk.W, pady=(0, 10))
-            
-            remove_vars = {}
-            
-            # Group fields by type for better organization
-            if all_fields:
-                # Standard fields that are commonly removed
-                removable_standard = ['title', 'how_they_refer_to_others', 'gender']
-                existing_removable = [f for f in removable_standard if f in all_fields]
-                
-                if existing_removable:
-                    tk.Label(remove_frame, text="Commonly Removed Fields:", 
-                            font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(5, 5))
-                    
-                    for field in existing_removable:
-                        var = tk.BooleanVar(value=False)
-                        cb = tb.Checkbutton(remove_frame, text=f"Remove {field.replace('_', ' ')}", 
-                                          variable=var)
-                        cb.pack(anchor=tk.W, padx=20, pady=1)
-                        remove_vars[field] = var
-                
-                # Other standard fields
-                other_standard = [f for f in all_fields if f in standard_fields and f not in removable_standard]
-                if other_standard:
-                    tk.Label(remove_frame, text="Other Standard Fields:", 
-                            font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(10, 5))
-                    
-                    for field in sorted(other_standard):
-                        var = tk.BooleanVar(value=False)
-                        cb = tb.Checkbutton(remove_frame, text=f"Remove {field.replace('_', ' ')}", 
-                                          variable=var)
-                        cb.pack(anchor=tk.W, padx=20, pady=1)
-                        remove_vars[field] = var
-                
-                # Custom fields
-                if custom_fields:
-                    tk.Label(remove_frame, text="Custom Fields:", 
-                            font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(10, 5))
-                    
-                    for field in sorted(custom_fields):
-                        var = tk.BooleanVar(value=False)
-                        cb = tb.Checkbutton(remove_frame, text=f"Remove {field}", 
-                                          variable=var)
-                        cb.pack(anchor=tk.W, padx=20, pady=1)
-                        remove_vars[field] = var
             
             # Preview section
             preview_frame = tk.LabelFrame(main_frame, text="Preview", padx=15, pady=10)
             preview_frame.pack(fill=tk.X, pady=(0, 15), padx=20)
             
-            preview_label = tk.Label(preview_frame, text="Click 'Preview Changes' to see the effect of your settings",
+            preview_label = tk.Label(preview_frame, text="Click 'Preview Changes' to see the effect",
                                    font=('TkDefaultFont', 10), fg='gray')
             preview_label.pack(pady=5)
             
             def preview_changes():
                 try:
-                    # Count changes
                     top_n = int(top_var.get())
                     entries_to_remove = max(0, entry_count - top_n)
                     
-                    fields_to_remove = sum(1 for var in remove_vars.values() if var.get())
-                    
-                    # Calculate approximate size reduction
-                    items_to_trim = 0
-                    for field, var in field_vars.items():
-                        limit = int(var.get())
-                        if self.current_glossary_format == 'list':
-                            for entry in self.current_glossary_data[:top_n]:
-                                if field in entry and isinstance(entry[field], list):
-                                    items_to_trim += max(0, len(entry[field]) - limit)
-                        
                     preview_text = f"Preview of changes:\n"
                     preview_text += f"• Entries: {entry_count} → {top_n} ({entries_to_remove} removed)\n"
-                    if fields_to_remove > 0:
-                        preview_text += f"• Fields to remove: {fields_to_remove}\n"
-                    if items_to_trim > 0:
-                        preview_text += f"• List items to trim: ~{items_to_trim}\n"
                     
                     preview_label.config(text=preview_text, fg='blue')
                     
                 except ValueError:
-                    preview_label.config(text="Please enter valid numbers", fg='red')
+                    preview_label.config(text="Please enter a valid number", fg='red')
             
             tb.Button(preview_frame, text="Preview Changes", command=preview_changes,
                      bootstyle="info").pack()
@@ -5432,58 +5040,17 @@ Recent translations to summarize:
                         # Keep only top N entries
                         if top_n < len(self.current_glossary_data):
                             self.current_glossary_data = self.current_glossary_data[:top_n]
-                        
-                        # Apply field limits
-                        for entry in self.current_glossary_data:
-                            # Limit list fields
-                            for field, var in field_vars.items():
-                                if field in entry and isinstance(entry[field], list):
-                                    limit = int(var.get())
-                                    if len(entry[field]) > limit:
-                                        entry[field] = entry[field][:limit]
-                            
-                            # Remove selected fields
-                            for field, var in remove_vars.items():
-                                if var.get() and field in entry:
-                                    entry.pop(field)
                     
                     elif self.current_glossary_format == 'dict':
                         # For dict format, only support entry limit
                         entries = list(self.current_glossary_data['entries'].items())
                         if top_n < len(entries):
                             self.current_glossary_data['entries'] = dict(entries[:top_n])
-                        
-                        # Apply field operations to dict entries
-                        for key, entry in self.current_glossary_data['entries'].items():
-                            # Limit list fields
-                            for field, var in field_vars.items():
-                                if field in entry and isinstance(entry[field], list):
-                                    limit = int(var.get())
-                                    if len(entry[field]) > limit:
-                                        entry[field] = entry[field][:limit]
-                            
-                            # Remove selected fields
-                            for field, var in remove_vars.items():
-                                if var.get() and field in entry:
-                                    entry.pop(field)
                     
                     if save_current_glossary():
                         load_glossary_for_editing()
                         
-                        # Generate summary of changes
-                        summary = "Smart trim applied successfully!\n\n"
-                        summary += f"• Kept top {top_n} entries\n"
-                        
-                        if field_vars:
-                            summary += "• Applied list limits:\n"
-                            for field, var in field_vars.items():
-                                summary += f"  - {field}: max {var.get()} items\n"
-                        
-                        removed_fields = [field for field, var in remove_vars.items() if var.get()]
-                        if removed_fields:
-                            summary += f"• Removed fields: {', '.join(removed_fields)}\n"
-                        
-                        messagebox.showinfo("Success", summary)
+                        messagebox.showinfo("Success", f"Trimmed glossary to {top_n} entries")
                         dialog.destroy()
                         
                 except ValueError:
@@ -5491,9 +5058,8 @@ Recent translations to summarize:
 
             # Create inner frame for buttons
             button_inner_frame = tk.Frame(button_frame)
-            button_inner_frame.pack()  # This centers it
+            button_inner_frame.pack()
 
-            # Now pack the buttons in the inner frame
             tb.Button(button_inner_frame, text="Apply Trim", command=apply_smart_trim,
                  bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
             tb.Button(button_inner_frame, text="Cancel", command=dialog.destroy,
@@ -5503,12 +5069,11 @@ Recent translations to summarize:
             info_frame = tk.Frame(main_frame)
             info_frame.pack(fill=tk.X, pady=(0, 20), padx=20)
 
-            tk.Label(info_frame, text="💡 Tip: Always backup your glossary before applying major changes!",
+            tk.Label(info_frame, text="💡 Tip: Entries are kept in their original order",
                 font=('TkDefaultFont', 9, 'italic'), fg='#666').pack()
 
             # Auto-resize the dialog to fit content
             self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.2)
-       
        
         def filter_entries_dialog():
             if not self.current_glossary_data:
@@ -5520,7 +5085,7 @@ Recent translations to summarize:
                 self.master,
                 "Filter Entries",
                 width=600,
-                height=None,  # Will use default height calculation
+                height=None,
                 max_width_ratio=0.9,
                 max_height_ratio=0.85
             )
@@ -5531,46 +5096,8 @@ Recent translations to summarize:
             tk.Label(main_frame, text="Filter Glossary Entries", 
                     font=('TkDefaultFont', 14, 'bold')).pack(pady=(20, 5))
             
-            tk.Label(main_frame, text="Create complex filters to find specific entries in your glossary",
+            tk.Label(main_frame, text="Filter entries by type or content",
                     font=('TkDefaultFont', 10), fg='gray', wraplength=550).pack(pady=(0, 15))
-            
-            # Analyze current glossary to detect all fields
-            all_fields = set()
-            field_types = {}  # Track field types: 'text', 'list', 'dict'
-            field_samples = {}  # Store sample values for each field
-            
-            if self.current_glossary_format == 'list':
-                for entry in self.current_glossary_data:
-                    for field, value in entry.items():
-                        all_fields.add(field)
-                        if isinstance(value, list):
-                            field_types[field] = 'list'
-                        elif isinstance(value, dict):
-                            field_types[field] = 'dict'
-                        else:
-                            field_types[field] = 'text'
-                        
-                        # Store sample values for text fields
-                        if field_types[field] == 'text' and value and field not in field_samples:
-                            field_samples[field] = str(value)[:50]  # First 50 chars
-            elif self.current_glossary_format == 'dict':
-                for key, entry in self.current_glossary_data.get('entries', {}).items():
-                    for field, value in entry.items():
-                        all_fields.add(field)
-                        if isinstance(value, list):
-                            field_types[field] = 'list'
-                        elif isinstance(value, dict):
-                            field_types[field] = 'dict'
-                        else:
-                            field_types[field] = 'text'
-                        
-                        if field_types[field] == 'text' and value and field not in field_samples:
-                            field_samples[field] = str(value)[:50]
-            
-            # Separate standard and custom fields
-            standard_fields = {'original_name', 'name', 'gender', 'title', 'group_affiliation', 
-                              'traits', 'how_they_refer_to_others', 'locations'}
-            custom_fields = all_fields - standard_fields
             
             # Current stats
             entry_count = len(self.current_glossary_data) if self.current_glossary_format == 'list' else len(self.current_glossary_data.get('entries', {}))
@@ -5578,156 +5105,48 @@ Recent translations to summarize:
             stats_frame = tk.LabelFrame(main_frame, text="Current Status", padx=15, pady=10)
             stats_frame.pack(fill=tk.X, pady=(0, 15), padx=20)
             tk.Label(stats_frame, text=f"Total entries: {entry_count}", font=('TkDefaultFont', 10)).pack(anchor=tk.W)
-            tk.Label(stats_frame, text=f"Available fields: {len(all_fields)}", font=('TkDefaultFont', 10)).pack(anchor=tk.W)
             
-            # Filter type selection
-            filter_type_frame = tk.LabelFrame(main_frame, text="Filter Mode", padx=15, pady=10)
-            filter_type_frame.pack(fill=tk.X, pady=(0, 15), padx=20)
-            
-            filter_mode = tk.StringVar(value="all")
-            tk.Radiobutton(filter_type_frame, text="Match ALL conditions (AND)", 
-                          variable=filter_mode, value="all").pack(anchor=tk.W)
-            tk.Radiobutton(filter_type_frame, text="Match ANY condition (OR)", 
-                          variable=filter_mode, value="any").pack(anchor=tk.W)
+            # Check if new format
+            is_new_format = (self.current_glossary_format == 'list' and 
+                           self.current_glossary_data and 
+                           'type' in self.current_glossary_data[0])
             
             # Filter conditions
             conditions_frame = tk.LabelFrame(main_frame, text="Filter Conditions", padx=15, pady=10)
             conditions_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15), padx=20)
             
-            tk.Label(conditions_frame, text="Select which entries to keep based on field conditions:",
-                    font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(0, 10))
-            
-            # Store filter conditions
-            filter_conditions = []
-            
-            # Presence filters (check if field exists and has content)
-            presence_frame = tk.LabelFrame(conditions_frame, text="Field Presence Filters", padx=10, pady=10)
-            presence_frame.pack(fill=tk.X, pady=(0, 10))
-            
-            presence_vars = {}
-            
-            # Common presence checks
-            common_checks = [
-                ('has_name', "Has name or original_name", True),
-                ('has_translation', "Has English translation (name field)", False),
-                ('has_both_names', "Has BOTH original_name AND name", False),
-            ]
-            
-            for key, label, default in common_checks:
-                var = tk.BooleanVar(value=default)
-                tb.Checkbutton(presence_frame, text=label, variable=var).pack(anchor=tk.W)
-                presence_vars[key] = var
-            
-            # Field-specific presence checks
-            if all_fields:
-                tk.Label(presence_frame, text="Must have these fields:", 
-                        font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(10, 5))
+            # Type filter for new format
+            type_vars = {}
+            if is_new_format:
+                type_frame = tk.LabelFrame(conditions_frame, text="Entry Type", padx=10, pady=10)
+                type_frame.pack(fill=tk.X, pady=(0, 10))
                 
-                # Group by standard/custom
-                if standard_fields.intersection(all_fields):
-                    tk.Label(presence_frame, text="Standard Fields:", 
-                            font=('TkDefaultFont', 9, 'italic')).pack(anchor=tk.W, padx=20)
-                    
-                    field_presence_frame = tk.Frame(presence_frame)
-                    field_presence_frame.pack(fill=tk.X, padx=20)
-                    
-                    col = 0
-                    row = 0
-                    for field in sorted(standard_fields.intersection(all_fields)):
-                        if field not in ['name', 'original_name']:  # Already handled above
-                            var = tk.BooleanVar(value=False)
-                            cb = tb.Checkbutton(field_presence_frame, text=field.replace('_', ' '), 
-                                              variable=var)
-                            cb.grid(row=row, column=col, sticky=tk.W, padx=5, pady=1)
-                            presence_vars[f'has_{field}'] = var
-                            
-                            col += 1
-                            if col > 2:
-                                col = 0
-                                row += 1
+                type_vars['character'] = tk.BooleanVar(value=True)
+                type_vars['term'] = tk.BooleanVar(value=True)
                 
-                if custom_fields:
-                    tk.Label(presence_frame, text="Custom Fields:", 
-                            font=('TkDefaultFont', 9, 'italic')).pack(anchor=tk.W, padx=20, pady=(5, 0))
-                    
-                    custom_presence_frame = tk.Frame(presence_frame)
-                    custom_presence_frame.pack(fill=tk.X, padx=20)
-                    
-                    col = 0
-                    row = 0
-                    for field in sorted(custom_fields):
-                        var = tk.BooleanVar(value=False)
-                        cb = tb.Checkbutton(custom_presence_frame, text=field, variable=var)
-                        cb.grid(row=row, column=col, sticky=tk.W, padx=5, pady=1)
-                        presence_vars[f'has_{field}'] = var
-                        
-                        col += 1
-                        if col > 2:
-                            col = 0
-                            row += 1
+                tb.Checkbutton(type_frame, text="Keep characters", variable=type_vars['character']).pack(anchor=tk.W)
+                tb.Checkbutton(type_frame, text="Keep terms/locations", variable=type_vars['term']).pack(anchor=tk.W)
             
-            # Text content filters
-            text_filter_frame = tk.LabelFrame(conditions_frame, text="Text Content Filters", padx=10, pady=10)
+            # Text content filter
+            text_filter_frame = tk.LabelFrame(conditions_frame, text="Text Content Filter", padx=10, pady=10)
             text_filter_frame.pack(fill=tk.X, pady=(0, 10))
             
-            tk.Label(text_filter_frame, text="Filter by text content (case-insensitive):",
+            tk.Label(text_filter_frame, text="Keep entries containing text (case-insensitive):",
                     font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(0, 5))
             
-            text_filters = {}
-            text_fields = [f for f in all_fields if field_types.get(f) == 'text']
+            search_var = tk.StringVar()
+            tb.Entry(text_filter_frame, textvariable=search_var, width=40).pack(fill=tk.X, pady=5)
             
-            if text_fields:
-                for field in sorted(text_fields):
-                    frame = tk.Frame(text_filter_frame)
-                    frame.pack(fill=tk.X, pady=2)
-                    
-                    tk.Label(frame, text=f"{field}:", width=20, anchor=tk.W).pack(side=tk.LEFT)
-                    
-                    contains_var = tk.StringVar()
-                    entry = tb.Entry(frame, textvariable=contains_var, width=30)
-                    entry.pack(side=tk.LEFT, padx=5)
-                    
-                    if field in field_samples:
-                        tk.Label(frame, text=f"(e.g., {field_samples[field][:20]}...)", 
-                                font=('TkDefaultFont', 8), fg='gray').pack(side=tk.LEFT)
-                    
-                    text_filters[field] = contains_var
-            else:
-                tk.Label(text_filter_frame, text="No text fields found",
-                        font=('TkDefaultFont', 10, 'italic'), fg='gray').pack(pady=10)
-            
-            # List size filters
-            list_filter_frame = tk.LabelFrame(conditions_frame, text="List Size Filters", padx=10, pady=10)
-            list_filter_frame.pack(fill=tk.X, pady=(0, 10))
-            
-            list_size_filters = {}
-            list_fields = [f for f in all_fields if field_types.get(f) == 'list']
-            
-            if list_fields:
-                tk.Label(list_filter_frame, text="Filter by number of items in list fields:",
-                        font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(0, 5))
+            # Gender filter for new format
+            gender_var = tk.StringVar(value="all")
+            if is_new_format:
+                gender_frame = tk.LabelFrame(conditions_frame, text="Gender Filter (Characters Only)", padx=10, pady=10)
+                gender_frame.pack(fill=tk.X, pady=(0, 10))
                 
-                for field in sorted(list_fields):
-                    frame = tk.Frame(list_filter_frame)
-                    frame.pack(fill=tk.X, pady=2)
-                    
-                    tk.Label(frame, text=f"{field}:", width=20, anchor=tk.W).pack(side=tk.LEFT)
-                    tk.Label(frame, text="Min:").pack(side=tk.LEFT)
-                    
-                    min_var = tk.StringVar()
-                    tb.Entry(frame, textvariable=min_var, width=5).pack(side=tk.LEFT, padx=2)
-                    
-                    tk.Label(frame, text="Max:").pack(side=tk.LEFT, padx=(10, 0))
-                    
-                    max_var = tk.StringVar()
-                    tb.Entry(frame, textvariable=max_var, width=5).pack(side=tk.LEFT, padx=2)
-                    
-                    tk.Label(frame, text="items", font=('TkDefaultFont', 9), fg='gray').pack(side=tk.LEFT, padx=5)
-                    
-                    list_size_filters[field] = (min_var, max_var)
-            else:
-                tk.Label(list_filter_frame, text="No list fields found",
-                        font=('TkDefaultFont', 10, 'italic'), fg='gray').pack(pady=10)
+                tk.Radiobutton(gender_frame, text="All genders", variable=gender_var, value="all").pack(anchor=tk.W)
+                tk.Radiobutton(gender_frame, text="Male only", variable=gender_var, value="Male").pack(anchor=tk.W)
+                tk.Radiobutton(gender_frame, text="Female only", variable=gender_var, value="Female").pack(anchor=tk.W)
+                tk.Radiobutton(gender_frame, text="Unknown only", variable=gender_var, value="Unknown").pack(anchor=tk.W)
             
             # Preview section
             preview_frame = tk.LabelFrame(main_frame, text="Preview", padx=15, pady=10)
@@ -5739,57 +5158,25 @@ Recent translations to summarize:
             
             def check_entry_matches(entry):
                 """Check if an entry matches the filter conditions"""
-                matches = []
+                # Type filter
+                if is_new_format and entry.get('type'):
+                    if not type_vars.get(entry['type'], tk.BooleanVar(value=True)).get():
+                        return False
                 
-                # Check presence conditions
-                if presence_vars['has_name'].get():
-                    matches.append(bool(entry.get('name') or entry.get('original_name')))
+                # Text filter
+                search_text = search_var.get().strip().lower()
+                if search_text:
+                    # Search in all text fields
+                    entry_text = ' '.join(str(v) for v in entry.values() if isinstance(v, str)).lower()
+                    if search_text not in entry_text:
+                        return False
                 
-                if presence_vars['has_translation'].get():
-                    matches.append(bool(entry.get('name')))
+                # Gender filter
+                if is_new_format and gender_var.get() != "all":
+                    if entry.get('type') == 'character' and entry.get('gender') != gender_var.get():
+                        return False
                 
-                if presence_vars['has_both_names'].get():
-                    matches.append(bool(entry.get('name') and entry.get('original_name')))
-                
-                # Check field-specific presence
-                for key, var in presence_vars.items():
-                    if key.startswith('has_') and key not in ['has_name', 'has_translation', 'has_both_names']:
-                        if var.get():
-                            field = key[4:]  # Remove 'has_' prefix
-                            matches.append(bool(entry.get(field)))
-                
-                # Check text content filters
-                for field, var in text_filters.items():
-                    search_text = var.get().strip().lower()
-                    if search_text:
-                        field_value = str(entry.get(field, '')).lower()
-                        matches.append(search_text in field_value)
-                
-                # Check list size filters
-                for field, (min_var, max_var) in list_size_filters.items():
-                    try:
-                        field_list = entry.get(field, [])
-                        if isinstance(field_list, list):
-                            list_len = len(field_list)
-                            
-                            if min_var.get():
-                                min_size = int(min_var.get())
-                                matches.append(list_len >= min_size)
-                            
-                            if max_var.get():
-                                max_size = int(max_var.get())
-                                matches.append(list_len <= max_size)
-                    except ValueError:
-                        pass
-                
-                # Apply filter mode
-                if not matches:
-                    return True  # No conditions set, keep all
-                
-                if filter_mode.get() == "all":
-                    return all(matches)
-                else:  # "any"
-                    return any(matches)
+                return True
             
             def preview_filter():
                 """Preview the filter results"""
@@ -5826,7 +5213,6 @@ Recent translations to summarize:
                     
                     removed = len(self.current_glossary_data) - len(filtered)
                     
-                    # Add backup before modifying data (only if entries will be removed)
                     if removed > 0:
                         if not self.create_glossary_backup(f"before_filter_remove_{removed}"):
                             return
@@ -5838,71 +5224,15 @@ Recent translations to summarize:
                         messagebox.showinfo("Success", 
                             f"Filter applied!\n\nKept: {len(filtered)} entries\nRemoved: {removed} entries")
                         dialog.destroy()
-                
-                elif self.current_glossary_format == 'dict':
-                    filtered_entries = {}
-                    for key, entry in self.current_glossary_data.get('entries', {}).items():
-                        if check_entry_matches(entry):
-                            filtered_entries[key] = entry
-                    
-                    removed = len(self.current_glossary_data.get('entries', {})) - len(filtered_entries)
-                    
-                    # Add backup before modifying data (only if entries will be removed)
-                    if removed > 0:
-                        if not self.create_glossary_backup(f"before_filter_remove_{removed}"):
-                            return
-                    
-                    self.current_glossary_data['entries'] = filtered_entries
-                    
-                    if save_current_glossary():
-                        load_glossary_for_editing()
-                        messagebox.showinfo("Success", 
-                            f"Filter applied!\n\nKept: {len(filtered_entries)} entries\nRemoved: {removed} entries")
-                        dialog.destroy()
-        
-            def invert_filter():
-                """Apply inverted filter (remove matching entries instead of keeping them)"""
-                if messagebox.askyesno("Invert Filter", 
-                                      "This will REMOVE matching entries instead of keeping them. Continue?"):
-                    if self.current_glossary_format == 'list':
-                        filtered = []
-                        for entry in self.current_glossary_data:
-                            if not check_entry_matches(entry):  # Inverted logic
-                                filtered.append(entry)
-                        
-                        removed = len(self.current_glossary_data) - len(filtered)
-                        
-                        # Only create backup if entries will be removed
-                        if removed > 0:
-                            if not self.create_glossary_backup(f"before_invert_filter_remove_{removed}"):
-                                return
-                        
-                        self.current_glossary_data[:] = filtered
-                        
-                        if save_current_glossary():
-                            load_glossary_for_editing()
-                            messagebox.showinfo("Success", 
-                                f"Inverted filter applied!\n\nKept: {len(filtered)} entries\nRemoved: {removed} entries")
-                            dialog.destroy()
             
             # Create inner frame for buttons
             button_inner_frame = tk.Frame(button_frame)
-            button_inner_frame.pack()  # This centers it
+            button_inner_frame.pack()
 
-            # Now pack the buttons in the inner frame
             tb.Button(button_inner_frame, text="Apply Filter", command=apply_filter,
                      bootstyle="success", width=15).pack(side=tk.LEFT, padx=5)
-            tb.Button(button_inner_frame, text="Invert Filter", command=invert_filter,
-                     bootstyle="warning", width=15).pack(side=tk.LEFT, padx=5)
             tb.Button(button_inner_frame, text="Cancel", command=dialog.destroy,
                      bootstyle="secondary", width=15).pack(side=tk.LEFT, padx=5)
-            
-            # Info section
-            info_frame = tk.Frame(main_frame)
-            info_frame.pack(fill=tk.X, pady=(0, 20), padx=20)
-            
-            tk.Label(info_frame, text="💡 Tip: Use text filters to find specific characters or content patterns",
-                    font=('TkDefaultFont', 9, 'italic'), fg='#666').pack()
             
             # Auto-resize the dialog to fit content
             self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.49)
@@ -5916,7 +5246,7 @@ Recent translations to summarize:
            path = filedialog.asksaveasfilename(
                title="Export Selected Entries",
                defaultextension=".json",
-               filetypes=[("JSON files", "*.json")]
+               filetypes=[("JSON files", "*.json"), ("CSV files", "*.csv")]
            )
            
            if not path:
@@ -5930,8 +5260,22 @@ Recent translations to summarize:
                        if 0 <= idx < len(self.current_glossary_data):
                            exported.append(self.current_glossary_data[idx])
                    
-                   with open(path, 'w', encoding='utf-8') as f:
-                       json.dump(exported, f, ensure_ascii=False, indent=2)
+                   if path.endswith('.csv'):
+                       # Export as CSV
+                       import csv
+                       with open(path, 'w', encoding='utf-8', newline='') as f:
+                           writer = csv.writer(f)
+                           for entry in exported:
+                               if entry.get('type') == 'character':
+                                   writer.writerow([entry.get('type', ''), entry.get('raw_name', ''), 
+                                                  entry.get('translated_name', ''), entry.get('gender', '')])
+                               else:
+                                   writer.writerow([entry.get('type', ''), entry.get('raw_name', ''), 
+                                                  entry.get('translated_name', ''), ''])
+                   else:
+                       # Export as JSON
+                       with open(path, 'w', encoding='utf-8') as f:
+                           json.dump(exported, f, ensure_ascii=False, indent=2)
                
                else:
                    exported = {}
@@ -5963,15 +5307,30 @@ Recent translations to summarize:
            path = filedialog.asksaveasfilename(
                title="Save Glossary As",
                defaultextension=".json",
-               filetypes=[("JSON files", "*.json")]
+               filetypes=[("JSON files", "*.json"), ("CSV files", "*.csv")]
            )
            
            if not path:
                return
            
            try:
-               with open(path, 'w', encoding='utf-8') as f:
-                   json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
+               if path.endswith('.csv'):
+                   # Save as CSV
+                   import csv
+                   with open(path, 'w', encoding='utf-8', newline='') as f:
+                       writer = csv.writer(f)
+                       if self.current_glossary_format == 'list':
+                           for entry in self.current_glossary_data:
+                               if entry.get('type') == 'character':
+                                   writer.writerow([entry.get('type', ''), entry.get('raw_name', ''), 
+                                                  entry.get('translated_name', ''), entry.get('gender', '')])
+                               else:
+                                   writer.writerow([entry.get('type', ''), entry.get('raw_name', ''), 
+                                                  entry.get('translated_name', ''), ''])
+               else:
+                   # Save as JSON
+                   with open(path, 'w', encoding='utf-8') as f:
+                       json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
                
                self.editor_file_var.set(path)
                messagebox.showinfo("Success", f"Glossary saved to {os.path.basename(path)}")
@@ -6007,12 +5366,11 @@ Recent translations to summarize:
         row2.pack(fill=tk.X, pady=2)
 
         buttons_row2 = [
-           ("Smart Trim", smart_trim_dialog, "primary"),
+           ("Trim Entries", smart_trim_dialog, "primary"),
            ("Filter Entries", filter_entries_dialog, "primary"),
-           ("Aggregate Locations", lambda: self._aggregate_locations(load_glossary_for_editing), "info"),
+           ("Convert Format", lambda: self._convert_glossary_format(load_glossary_for_editing), "info"),
            ("Export Selection", export_selection, "secondary"),
-           ("Duplicate Settings", duplicate_detection_settings, "info")
-
+           ("About Format", duplicate_detection_settings, "info")
         ]
 
         for text, cmd, style in buttons_row2:
@@ -6060,25 +5418,15 @@ Recent translations to summarize:
        
        tk.Label(frame, text=f"Edit {col_name.replace('_', ' ').title()}:").pack(anchor=tk.W)
        
-       if col_name in ['traits', 'locations', 'group_affiliation'] or ',' in str(current_value):
-           text_widget = tk.Text(frame, height=4, width=50)
-           text_widget.pack(fill=tk.BOTH, expand=True, pady=5)
-           text_widget.insert('1.0', current_value)
-           
-           def get_value():
-               return text_widget.get('1.0', tk.END).strip()
-       else:
-           var = tk.StringVar(value=current_value)
-           entry = tb.Entry(frame, textvariable=var, width=50)
-           entry.pack(fill=tk.X, pady=5)
-           entry.focus()
-           entry.select_range(0, tk.END)
-           
-           def get_value():
-               return var.get()
+       # Simple entry for new format fields
+       var = tk.StringVar(value=current_value)
+       entry = tb.Entry(frame, textvariable=var, width=50)
+       entry.pack(fill=tk.X, pady=5)
+       entry.focus()
+       entry.select_range(0, tk.END)
        
        def save_edit():
-           new_value = get_value()
+           new_value = var.get()
            
            new_values = list(values)
            new_values[col_idx] = new_value
@@ -6090,16 +5438,10 @@ Recent translations to summarize:
                if 0 <= row_idx < len(self.current_glossary_data):
                    entry = self.current_glossary_data[row_idx]
                    
-                   if col_name in ['traits', 'locations', 'group_affiliation']:
-                       if new_value:
-                           entry[col_name] = [v.strip() for v in new_value.split(',') if v.strip()]
-                       else:
-                           entry.pop(col_name, None)
+                   if new_value:
+                       entry[col_name] = new_value
                    else:
-                       if new_value:
-                           entry[col_name] = new_value
-                       else:
-                           entry.pop(col_name, None)
+                       entry.pop(col_name, None)
            
            dialog.destroy()
        
@@ -6116,50 +5458,81 @@ Recent translations to summarize:
        
        dialog.deiconify()
 
-    def _aggregate_locations(self, reload_callback):
-        """Aggregate all location entries into a single entry"""
+    def _convert_glossary_format(self, reload_callback):
+        """Convert between old and new glossary formats"""
         if not self.current_glossary_data:
             messagebox.showerror("Error", "No glossary loaded")
             return
         
-
-        if not self.create_glossary_backup("before_aggregate"):
+        # Create backup before conversion
+        if not self.create_glossary_backup("before_convert"):
             return
         
-        if isinstance(self.current_glossary_data, list):
-            all_locs = []
-            for char in self.current_glossary_data:
-                locs = char.get('locations', [])
-                if isinstance(locs, list):
-                   all_locs.extend(locs)
-                char.pop('locations', None)
-
-            seen = set()
-            unique_locs = []
-            for loc in all_locs:
-               if loc not in seen:
-                   seen.add(loc)
-                   unique_locs.append(loc)
-
-            self.current_glossary_data = [
-               entry for entry in self.current_glossary_data 
-               if entry.get('original_name') != "📍 Location Summary"
-            ]
-
-            self.current_glossary_data.append({
-               "original_name": "📍 Location Summary",
-               "name": "Location Summary",
-               "locations": unique_locs
-            })
-
-            path = self.editor_file_var.get()
-            with open(path, 'w', encoding='utf-8') as f:
-               json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
-
-            messagebox.showinfo("Success", f"Aggregated {len(unique_locs)} unique locations")
-            reload_callback()
+        if isinstance(self.current_glossary_data, list) and self.current_glossary_data:
+            # Check current format
+            if 'type' in self.current_glossary_data[0]:
+                # Convert from new format to old format
+                if messagebox.askyesno("Convert Format", 
+                    "Convert from simple format to old format?\n\n"
+                    "This will convert:\n"
+                    "type/raw_name/translated_name → original_name/name"):
+                    
+                    converted = []
+                    for entry in self.current_glossary_data:
+                        new_entry = {
+                            'original_name': entry.get('raw_name', ''),
+                            'name': entry.get('translated_name', '')
+                        }
+                        if entry.get('type') == 'character' and 'gender' in entry:
+                            new_entry['gender'] = entry['gender']
+                        converted.append(new_entry)
+                    
+                    self.current_glossary_data = converted
+                    
+                    path = self.editor_file_var.get()
+                    with open(path, 'w', encoding='utf-8') as f:
+                        json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
+                    
+                    messagebox.showinfo("Success", "Converted to old format")
+                    reload_callback()
+            else:
+                # Convert from old format to new format
+                if messagebox.askyesno("Convert Format", 
+                    "Convert from old format to simple format?\n\n"
+                    "This will convert:\n"
+                    "original_name/name → type/raw_name/translated_name"):
+                    
+                    converted = []
+                    for entry in self.current_glossary_data:
+                        # Determine type based on content
+                        is_location = False
+                        if 'locations' in entry and entry['locations']:
+                            is_location = True
+                        elif 'title' in entry and any(term in str(entry.get('title', '')).lower() 
+                                                     for term in ['location', 'place', 'city', 'region']):
+                            is_location = True
+                        
+                        new_entry = {
+                            'type': 'term' if is_location else 'character',
+                            'raw_name': entry.get('original_name', entry.get('original', '')),
+                            'translated_name': entry.get('name', entry.get('translated', ''))
+                        }
+                        
+                        if new_entry['type'] == 'character':
+                            new_entry['gender'] = entry.get('gender', 'Unknown')
+                        
+                        converted.append(new_entry)
+                    
+                    self.current_glossary_data = converted
+                    
+                    path = self.editor_file_var.get()
+                    with open(path, 'w', encoding='utf-8') as f:
+                        json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
+                    
+                    messagebox.showinfo("Success", "Converted to simple format")
+                    reload_callback()
         else:
-            messagebox.showinfo("Info", "Location aggregation only works with manual glossary format")
+            messagebox.showinfo("Info", "Format conversion only works with list-based glossaries")
 
     def _make_bottom_toolbar(self):
         """Create the bottom toolbar with all action buttons"""
@@ -7604,7 +6977,7 @@ Recent translations to summarize:
             self.master.after(0, self.update_run_button)
 
     def _process_image_folder_for_glossary(self, folder_name, image_files):
-        """Process all images from a folder and create a combined glossary"""
+        """Process all images from a folder and create a combined glossary with new format"""
         try:
             import hashlib
             from unified_api_client import UnifiedClient, UnifiedClientError
@@ -7644,10 +7017,24 @@ Recent translations to summarize:
             self.append_log(f"   Temperature: {temperature}")
             self.append_log(f"   Max tokens: {max_tokens}")
             self.append_log(f"   API delay: {api_delay}s")
+            self.append_log(f"   Format: Simple (type, raw_name, translated_name, gender)")
+            
+            # Check honorifics filter toggle
+            honorifics_disabled = self.config.get('glossary_disable_honorifics_filter', False)
+            if honorifics_disabled:
+                self.append_log(f"   Honorifics Filter: ❌ DISABLED")
+            else:
+                self.append_log(f"   Honorifics Filter: ✅ ENABLED")
             
             # Track timing for ETA calculation
             start_time = time.time()
             total_entries_extracted = 0
+            
+            # Set up thread-safe payload directory
+            thread_name = threading.current_thread().name
+            thread_id = threading.current_thread().ident
+            thread_dir = os.path.join("Payloads", "glossary", f"{thread_name}_{thread_id}")
+            os.makedirs(thread_dir, exist_ok=True)
             
             # Process each image
             for i, image_path in enumerate(image_files):
@@ -7696,64 +7083,64 @@ Recent translations to summarize:
                     base_name = os.path.splitext(image_name)[0]
                     self.append_log(f"      📊 Image size: {size_mb:.2f} MB")
                     
-                    # Build prompt exactly like extract_glossary_from_epub.py does
-                    # Check which fields are enabled via config
-                    field_settings = {
-                        'original_name': self.config.get('manual_extract_original_name', True),
-                        'name': self.config.get('manual_extract_name', True),
-                        'gender': self.config.get('manual_extract_gender', True),
-                        'title': self.config.get('manual_extract_title', True),
-                        'group_affiliation': self.config.get('manual_extract_group_affiliation', True),
-                        'traits': self.config.get('manual_extract_traits', True),
-                        'how_they_refer_to_others': self.config.get('manual_extract_how_they_refer_to_others', True),
-                        'locations': self.config.get('manual_extract_locations', True)
-                    }
+                    # Build prompt for new format
+                    custom_fields_json = self.config.get('manual_custom_fields', '[]')
+                    try:
+                        custom_fields = json.loads(custom_fields_json) if isinstance(custom_fields_json, str) else custom_fields_json
+                    except:
+                        custom_fields = []
                     
-                    # Field descriptions (same as in extract_glossary_from_epub.py)
-                    field_descriptions = {
-                        'original_name': "- original_name: name in the original script",
-                        'name': "- name: English/romanized name",
-                        'gender': "- gender",
-                        'title': "- title (with romanized suffix)",
-                        'group_affiliation': "- group_affiliation",
-                        'traits': "- traits",
-                        'how_they_refer_to_others': "- how_they_refer_to_others (mapping with romanized suffix)",
-                        'locations': "- locations: list of place names mentioned (include the original language in brackets)"
-                    }
+                    # Build honorifics instruction based on toggle
+                    honorifics_instruction = ""
+                    if not honorifics_disabled:
+                        honorifics_instruction = "- Do NOT include honorifics (님, 씨, さん, 様, etc.) in raw_name\n"
                     
-                    # Build field list based on enabled fields
-                    fields = []
-                    for field_name, is_enabled in field_settings.items():
-                        if is_enabled:
-                            fields.append(field_descriptions[field_name])
-                    
-                    # Add custom fields
-                    if self.custom_glossary_fields:
-                        for field in self.custom_glossary_fields:
-                            fields.append(f"- {field}")
-                    
-                    # Build the prompt with placeholders replaced
-                    fields_str = '\n'.join(fields)
-                    prompt = self.manual_glossary_prompt
-                    
-                    # Replace placeholders (same logic as build_prompt)
-                    prompt = prompt.replace('{fields}', fields_str)
-                    prompt = prompt.replace('{chapter_text}', '')  # No chapter text for images
-                    
-                    # Also support alternative placeholder formats
-                    prompt = prompt.replace('{{fields}}', fields_str)
-                    prompt = prompt.replace('{{chapter_text}}', '')
-                    prompt = prompt.replace('{text}', '')
-                    prompt = prompt.replace('{{text}}', '')
+                    if self.manual_glossary_prompt:
+                        prompt = self.manual_glossary_prompt
+                        
+                        # Build fields description
+                        fields_str = """- type: "character" for people/beings or "term" for locations/objects/concepts
+- raw_name: name in the original language/script  
+- translated_name: English/romanized translation
+- gender: (for characters only) Male/Female/Unknown"""
+                        
+                        if custom_fields:
+                            for field in custom_fields:
+                                fields_str += f"\n- {field}: custom field"
+                        
+                        # Replace placeholders
+                        prompt = prompt.replace('{fields}', fields_str)
+                        prompt = prompt.replace('{chapter_text}', '')
+                        prompt = prompt.replace('{{fields}}', fields_str)
+                        prompt = prompt.replace('{{chapter_text}}', '')
+                        prompt = prompt.replace('{text}', '')
+                        prompt = prompt.replace('{{text}}', '')
+                    else:
+                        # Default prompt
+                        fields_str = """For each entity, provide JSON with these fields:
+- type: "character" for people/beings or "term" for locations/objects/concepts
+- raw_name: name in the original language/script
+- translated_name: English/romanized translation
+- gender: (for characters only) Male/Female/Unknown"""
+                        
+                        if custom_fields:
+                            fields_str += "\nAdditional custom fields:"
+                            for field in custom_fields:
+                                fields_str += f"\n- {field}"
+                        
+                        prompt = f"""Extract all characters and important terms from this image.
+
+{fields_str}
+
+Important rules:
+{honorifics_instruction}- Romanize names appropriately
+- Output ONLY a JSON array"""
                     
                     messages = [{"role": "user", "content": prompt}]
                     
-                    # Save request payload
-                    payloads_dir = "Payloads"
-                    os.makedirs(payloads_dir, exist_ok=True)
-                    
+                    # Save request payload in thread-safe location
                     timestamp = time.strftime("%Y%m%d_%H%M%S")
-                    payload_file = os.path.join(payloads_dir, f"glossary_image_{timestamp}_{base_name}.json")
+                    payload_file = os.path.join(thread_dir, f"image_{timestamp}_{base_name}_request.json")
                     
                     request_payload = {
                         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -7763,9 +7150,8 @@ Recent translations to summarize:
                         "temperature": temperature,
                         "max_tokens": max_tokens,
                         "messages": messages,
-                        "original_prompt_template": self.manual_glossary_prompt,
                         "processed_prompt": prompt,
-                        "enabled_fields": [field for field, enabled in field_settings.items() if enabled]
+                        "honorifics_filter_enabled": not honorifics_disabled
                     }
                     
                     with open(payload_file, 'w', encoding='utf-8') as f:
@@ -7773,111 +7159,11 @@ Recent translations to summarize:
                     
                     self.append_log(f"      📝 Saved request: {os.path.basename(payload_file)}")
                     self.append_log(f"      🌐 Extracting glossary from image...")
-                
-                    # Use interruptible API call with proper error handling
-                    try:
-                        # Try different import paths
-                        send_with_interrupt = None
-                        
-                        # First try importing from the current module's directory
-                        try:
-                            import sys
-                            # Add the script directory to Python path if not already there
-                            script_dir = os.path.dirname(os.path.abspath(__file__))
-                            if script_dir not in sys.path:
-                                sys.path.insert(0, script_dir)
-                            
-                            # Try importing
-                            from TransateKRtoEN import send_with_interrupt
-                            self.append_log("      ✅ Loaded interrupt support from TranslateKRtoEN")
-                        except ImportError as e:
-                            self.append_log(f"      ⚠️ Could not import from TranslateKRtoEN: {e}")
-                            
-                            # Try alternative import
-                            try:
-                                import TranslateKRtoEN
-                                if hasattr(TranslateKRtoEN, 'send_with_interrupt'):
-                                    send_with_interrupt = TranslateKRtoEN.send_with_interrupt
-                                    self.append_log("      ✅ Found interrupt support via module import")
-                            except Exception as e2:
-                                self.append_log(f"      ⚠️ Alternative import failed: {e2}")
-                        
-                        # If we successfully imported send_with_interrupt, use it
-                        if send_with_interrupt:
-                            # For image calls, we need to temporarily override the send method
-                            original_send = client.send
-                            
-                            # Create a wrapper that captures the image data
-                            def send_wrapper(msgs, temperature=temperature, max_tokens=max_tokens):
-                                return client.send_image(msgs, image_base64, temperature, max_tokens)
-                            
-                            client.send = send_wrapper
-                            
-                            try:
-                                response = send_with_interrupt(
-                                    messages,
-                                    client,
-                                    temperature,
-                                    max_tokens,
-                                    lambda: self.stop_requested,
-                                    chunk_timeout=None
-                                )
-                            finally:
-                                # Always restore original method
-                                client.send = original_send
-                        else:
-                            # Fallback: Create inline interrupt support
-                            self.append_log("      ⚠️ Creating inline interrupt support")
-                            
-                            import threading
-                            import queue
-                            
-                            result_queue = queue.Queue()
-                            
-                            def api_call():
-                                try:
-                                    result = client.send_image(messages, image_base64, temperature=temperature, max_tokens=max_tokens)
-                                    result_queue.put(('success', result))
-                                except Exception as e:
-                                    result_queue.put(('error', e))
-                            
-                            api_thread = threading.Thread(target=api_call)
-                            api_thread.daemon = True
-                            api_thread.start()
-                            
-                            # Check for stop every 0.5 seconds
-                            while api_thread.is_alive():
-                                if self.stop_requested:
-                                    # Cancel the operation
-                                    if hasattr(client, 'cancel_current_operation'):
-                                        client.cancel_current_operation()
-                                    raise UnifiedClientError("Glossary extraction stopped by user")
-                                
-                                try:
-                                    status, result = result_queue.get(timeout=0.5)
-                                    if status == 'error':
-                                        raise result
-                                    response = result
-                                    break
-                                except queue.Empty:
-                                    continue
-                            else:
-                                # Thread finished, get final result
-                                try:
-                                    status, result = result_queue.get(timeout=1.0)
-                                    if status == 'error':
-                                        raise result
-                                    response = result
-                                except queue.Empty:
-                                    raise UnifiedClientError("API call completed but no result received")
-                        
-                    except UnifiedClientError as e:
-                        if "stopped by user" in str(e).lower() or "cancelled" in str(e).lower():
-                            self.append_log("⏹️ Glossary extraction stopped by user")
-                            self.glossary_progress_manager.update(image_path, content_hash, status="cancelled")
-                            return False
-                        else:
-                            raise
+                    
+                    # API call with interrupt support
+                    response = self._call_api_with_interrupt(
+                        client, messages, image_base64, temperature, max_tokens
+                    )
                     
                     # Check if stopped after API call
                     if self.stop_requested:
@@ -7885,10 +7171,8 @@ Recent translations to summarize:
                         self.glossary_progress_manager.update(image_path, content_hash, status="cancelled")
                         return False
                     
-                    # Get response content - handle different return types
+                    # Get response content
                     glossary_json = None
-                    
-                    # Handle different response types
                     if isinstance(response, (list, tuple)) and len(response) >= 2:
                         glossary_json = response[0]
                     elif hasattr(response, 'content'):
@@ -7896,12 +7180,11 @@ Recent translations to summarize:
                     elif isinstance(response, str):
                         glossary_json = response
                     else:
-                        # Try to convert to string
                         glossary_json = str(response)
                     
                     if glossary_json and glossary_json.strip():
-                        # Save response payload
-                        response_file = os.path.join(payloads_dir, f"glossary_image_response_{timestamp}_{base_name}.json")
+                        # Save response in thread-safe location
+                        response_file = os.path.join(thread_dir, f"image_{timestamp}_{base_name}_response.json")
                         response_payload = {
                             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                             "response_content": glossary_json,
@@ -7914,164 +7197,66 @@ Recent translations to summarize:
                         
                         # Parse the JSON response
                         try:
-                            # Clean up the response (remove markdown if present)
+                            # Clean up the response
                             glossary_json = glossary_json.strip()
                             if glossary_json.startswith('```'):
-                                # Remove markdown code blocks
                                 glossary_json = glossary_json.split('```')[1]
                                 if glossary_json.startswith('json'):
                                     glossary_json = glossary_json[4:]
                                 glossary_json = glossary_json.strip()
-                                # Remove trailing ```
                                 if glossary_json.endswith('```'):
                                     glossary_json = glossary_json[:-3].strip()
                             
                             # Parse JSON
                             glossary_data = json.loads(glossary_json)
                             
-                            # Get the expected field names based on enabled settings
-                            expected_fields = set(['original_name', 'name', 'gender', 'title', 'group_affiliation', 
-                                                  'traits', 'how_they_refer_to_others', 'locations'])
-                            
-                            # Only keep fields that are enabled in settings
-                            enabled_fields = set()
-                            if self.config.get('manual_extract_original_name', True):
-                                enabled_fields.add('original_name')
-                            if self.config.get('manual_extract_name', True):
-                                enabled_fields.add('name')
-                            if self.config.get('manual_extract_gender', True):
-                                enabled_fields.add('gender')
-                            if self.config.get('manual_extract_title', True):
-                                enabled_fields.add('title')
-                            if self.config.get('manual_extract_group_affiliation', True):
-                                enabled_fields.add('group_affiliation')
-                            if self.config.get('manual_extract_traits', True):
-                                enabled_fields.add('traits')
-                            if self.config.get('manual_extract_how_they_refer_to_others', True):
-                                enabled_fields.add('how_they_refer_to_others')
-                            if self.config.get('manual_extract_locations', True):
-                                enabled_fields.add('locations')
-                            
-                            # Add custom fields
-                            if self.custom_glossary_fields:
-                                enabled_fields.update(self.custom_glossary_fields)
-                            
-                            # Function to clean entries - remove any fields not in enabled set
-                            def clean_entry(entry):
-                                if not isinstance(entry, dict):
-                                    return None
-                                
-                                cleaned = {}
-                                for field in enabled_fields:
-                                    if field in entry:
-                                        cleaned[field] = entry[field]
-                                
-                                # Check if entry has at least one valid identifier
-                                has_identifier = False
-                                if self.config.get('manual_extract_original_name', True) and 'original_name' in cleaned:
-                                    has_identifier = True
-                                elif not self.config.get('manual_extract_original_name', True) and 'name' in cleaned:
-                                    has_identifier = True
-                                
-                                # Return cleaned entry only if it has an identifier and at least one other field
-                                if has_identifier and len(cleaned) > 1:
-                                    return cleaned
-                                
-                                # Log skipped entries
-                                invalid_fields = set(entry.keys()) - enabled_fields
-                                if invalid_fields:
-                                    self.append_log(f"      ⚠️ Skipping entry with invalid fields: {', '.join(invalid_fields)}")
-                                    
-                                return None
-                            
-                            # Handle different response formats
+                            # Process entries
                             entries_for_this_image = []
                             if isinstance(glossary_data, list):
-                                # Clean each entry
-                                for raw_entry in glossary_data:
-                                    cleaned_entry = clean_entry(raw_entry)
-                                    if cleaned_entry:
-                                        entries_for_this_image.append(cleaned_entry)
-                                        all_glossary_entries.append(cleaned_entry)
-                                
-                                # Show progress for valid entries only
-                                elapsed = time.time() - start_time
-                                valid_count = len(entries_for_this_image)
-                                
-                                for j, entry in enumerate(entries_for_this_image):
-                                    total_entries_extracted += 1
-                                    
-                                    # Calculate ETA
-                                    if total_entries_extracted == 1:
-                                        eta = 0.0
-                                    else:
-                                        avg_time = elapsed / total_entries_extracted
-                                        remaining_images = len(image_files) - (i + 1)
-                                        estimated_remaining_entries = remaining_images * 3
-                                        eta = avg_time * estimated_remaining_entries
-                                    
-                                    # Get entry name from correct fields only
-                                    entry_name = entry.get('original_name') or entry.get('name') or "?"
-                                    
-                                    # Print progress
-                                    progress_msg = f'[Image {i+1}/{len(image_files)}] [{j+1}/{valid_count}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → Entry "{entry_name}"'
-                                    print(progress_msg)
-                                    self.append_log(progress_msg)
-                                
-                                self.append_log(f"      ✅ Extracted {valid_count} valid entries (skipped {len(glossary_data) - valid_count} with invalid fields)")
-                                
-                            elif isinstance(glossary_data, dict):
-                                # It might have categories
-                                all_entries_this_image = []
-                                
-                                # Process each category
-                                for category in ['characters', 'locations', 'terms']:
-                                    if category in glossary_data and isinstance(glossary_data[category], list):
-                                        for raw_entry in glossary_data[category]:
-                                            cleaned_entry = clean_entry(raw_entry)
-                                            if cleaned_entry:
-                                                entries_for_this_image.append(cleaned_entry)
-                                                all_glossary_entries.append(cleaned_entry)
-                                                all_entries_this_image.append(cleaned_entry)
-                                
-                                # Or it might be a single entry
-                                if not all_entries_this_image:
-                                    cleaned_entry = clean_entry(glossary_data)
-                                    if cleaned_entry:
-                                        entries_for_this_image = [cleaned_entry]
-                                        all_glossary_entries.append(cleaned_entry)
-                                        all_entries_this_image = [cleaned_entry]
-                                
-                                # Show progress for valid entries
-                                elapsed = time.time() - start_time
-                                valid_count = len(all_entries_this_image)
-                                
-                                for j, entry in enumerate(all_entries_this_image):
-                                    total_entries_extracted += 1
-                                    
-                                    # Calculate ETA
-                                    if total_entries_extracted == 1:
-                                        eta = 0.0
-                                    else:
-                                        avg_time = elapsed / total_entries_extracted
-                                        remaining_images = len(image_files) - (i + 1)
-                                        estimated_remaining_entries = remaining_images * 3
-                                        eta = avg_time * estimated_remaining_entries
-                                    
-                                    # Get entry name from correct fields only
-                                    entry_name = entry.get('original_name') or entry.get('name') or "?"
-                                    
-                                    # Print progress
-                                    progress_msg = f'[Image {i+1}/{len(image_files)}] [{j+1}/{valid_count}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → Entry "{entry_name}"'
-                                    print(progress_msg)
-                                    self.append_log(progress_msg)
-                                
-                                if valid_count > 0:
-                                    self.append_log(f"      ✅ Extracted {valid_count} valid entries")
-                                else:
-                                    self.append_log(f"      ⚠️ No valid entries found")
+                                for entry in glossary_data:
+                                    # Validate entry format
+                                    if isinstance(entry, dict) and 'type' in entry and 'raw_name' in entry:
+                                        # Clean raw_name
+                                        entry['raw_name'] = entry['raw_name'].strip()
+                                        
+                                        # Ensure required fields
+                                        if 'translated_name' not in entry:
+                                            entry['translated_name'] = entry.get('name', entry['raw_name'])
+                                        
+                                        # Add gender for characters if missing
+                                        if entry['type'] == 'character' and 'gender' not in entry:
+                                            entry['gender'] = 'Unknown'
+                                        
+                                        entries_for_this_image.append(entry)
+                                        all_glossary_entries.append(entry)
                             
-                            # Update progress with the extracted data
+                            # Show progress
+                            elapsed = time.time() - start_time
+                            valid_count = len(entries_for_this_image)
+                            
+                            for j, entry in enumerate(entries_for_this_image):
+                                total_entries_extracted += 1
+                                
+                                # Calculate ETA
+                                if total_entries_extracted == 1:
+                                    eta = 0.0
+                                else:
+                                    avg_time = elapsed / total_entries_extracted
+                                    remaining_images = len(image_files) - (i + 1)
+                                    estimated_remaining_entries = remaining_images * 3
+                                    eta = avg_time * estimated_remaining_entries
+                                
+                                # Get entry name
+                                entry_name = f"{entry['raw_name']} ({entry['translated_name']})"
+                                
+                                # Print progress
+                                progress_msg = f'[Image {i+1}/{len(image_files)}] [{j+1}/{valid_count}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → {entry["type"]}: {entry_name}'
+                                print(progress_msg)
+                                self.append_log(progress_msg)
+                            
+                            self.append_log(f"      ✅ Extracted {valid_count} entries")
+                            
+                            # Update progress with extracted data
                             self.glossary_progress_manager.update(
                                 image_path, 
                                 content_hash, 
@@ -8081,9 +7266,9 @@ Recent translations to summarize:
                             
                             processed += 1
                             
-                            # Save intermediate progress - update glossary file after each successful extraction
+                            # Save intermediate progress with skip logic
                             if all_glossary_entries:
-                                self._save_intermediate_glossary(folder_name, all_glossary_entries)
+                                self._save_intermediate_glossary_with_skip(folder_name, all_glossary_entries)
                             
                         except json.JSONDecodeError as e:
                             self.append_log(f"      ❌ Failed to parse JSON: {e}")
@@ -8095,27 +7280,14 @@ Recent translations to summarize:
                         self.glossary_progress_manager.update(image_path, content_hash, status="error", error="No data")
                         skipped += 1
                     
-                    # Add delay between API calls (except for last image)
+                    # Add delay between API calls
                     if i < len(image_files) - 1 and not self.stop_requested:
                         self.append_log(f"      ⏱️ Waiting {api_delay}s before next image...")
-                        time.sleep(api_delay)
- 
-                        # Use interruptible sleep
                         elapsed = 0
                         while elapsed < api_delay and not self.stop_requested:
-                            time.sleep(0.1)  # Check every 100ms
+                            time.sleep(0.1)
                             elapsed += 0.1
                             
-                except UnifiedClientError as e:
-                    if "stopped by user" in str(e).lower() or "cancelled" in str(e).lower():
-                        self.append_log("⏹️ Glossary extraction stopped by user")
-                        self.glossary_progress_manager.update(image_path, content_hash, status="cancelled")
-                        return False
-                    else:
-                        self.append_log(f"      ❌ API Error: {str(e)}")
-                        self.glossary_progress_manager.update(image_path, content_hash, status="error", error=str(e))
-                        skipped += 1
- 
                 except Exception as e:
                     self.append_log(f"      ❌ Failed to process: {str(e)}")
                     self.glossary_progress_manager.update(image_path, content_hash, status="error", error=str(e))
@@ -8127,50 +7299,113 @@ Recent translations to summarize:
             
             self.append_log(f"\n📝 Extracted {len(all_glossary_entries)} total entries from {processed} images")
             
-            # Save the combined glossary
+            # Save the final glossary with skip logic
             output_file = os.path.join("Glossary", f"{folder_name}_glossary.json")
             
             try:
-                # Try to import merge function, but fall back if it fails
-                merged_entries = all_glossary_entries
-                try:
-                    from extract_glossary_from_epub import merge_glossary_entries
-                    self.append_log(f"📊 Merging {len(all_glossary_entries)} entries...")
-                    merged_entries = merge_glossary_entries(all_glossary_entries)
-                except Exception as e:
-                    self.append_log(f"⚠️ Could not import merge function, using raw entries: {e}")
-                    # Simple deduplication based on original_name or name
-                    seen = set()
-                    deduped = []
-                    for entry in all_glossary_entries:
-                        # Create a key from name fields
-                        key = (entry.get('original_name', ''), entry.get('name', ''), entry.get('english_name', ''))
-                        if key not in seen and any(key):
-                            seen.add(key)
-                            deduped.append(entry)
-                    merged_entries = deduped
-                    self.append_log(f"📊 Deduplicated to {len(merged_entries)} unique entries")
+                # Apply skip logic for duplicates
+                self.append_log(f"📊 Applying skip logic for duplicate raw names...")
                 
-                # Make sure Glossary folder exists
+                # Import or define the skip function
+                try:
+                    from extract_glossary_from_epub import skip_duplicate_entries, remove_honorifics
+                    # Set environment variable for honorifics toggle
+                    import os
+                    os.environ['GLOSSARY_DISABLE_HONORIFICS_FILTER'] = '1' if honorifics_disabled else '0'
+                    final_entries = skip_duplicate_entries(all_glossary_entries)
+                except:
+                    # Fallback implementation
+                    def remove_honorifics_local(name):
+                        if not name or honorifics_disabled:
+                            return name.strip()
+                        
+                        # Modern honorifics
+                        korean_honorifics = ['님', '씨', '군', '양', '선생님', '사장님', '과장님', '대리님', '주임님', '이사님']
+                        japanese_honorifics = ['さん', 'さま', '様', 'くん', '君', 'ちゃん', 'せんせい', '先生']
+                        chinese_honorifics = ['先生', '女士', '小姐', '老师', '师傅', '大人']
+                        
+                        # Archaic honorifics
+                        korean_archaic = ['공', '옹', '어른', '나리', '나으리', '대감', '영감', '마님', '마마']
+                        japanese_archaic = ['どの', '殿', 'みこと', '命', '尊', 'ひめ', '姫']
+                        chinese_archaic = ['公', '侯', '伯', '子', '男', '王', '君', '卿', '大夫']
+                        
+                        all_honorifics = (korean_honorifics + japanese_honorifics + chinese_honorifics + 
+                                        korean_archaic + japanese_archaic + chinese_archaic)
+                        
+                        name_cleaned = name.strip()
+                        sorted_honorifics = sorted(all_honorifics, key=len, reverse=True)
+                        
+                        for honorific in sorted_honorifics:
+                            if name_cleaned.endswith(honorific):
+                                name_cleaned = name_cleaned[:-len(honorific)].strip()
+                                break
+                        
+                        return name_cleaned
+                    
+                    seen_raw_names = set()
+                    final_entries = []
+                    skipped = 0
+                    
+                    for entry in all_glossary_entries:
+                        raw_name = entry.get('raw_name', '')
+                        if not raw_name:
+                            continue
+                        
+                        cleaned_name = remove_honorifics_local(raw_name)
+                        
+                        if cleaned_name.lower() in seen_raw_names:
+                            skipped += 1
+                            self.append_log(f"   ⏭️ Skipping duplicate: {raw_name}")
+                            continue
+                        
+                        seen_raw_names.add(cleaned_name.lower())
+                        final_entries.append(entry)
+                    
+                    self.append_log(f"✅ Kept {len(final_entries)} unique entries (skipped {skipped} duplicates)")
+                
+                # Save final glossary
                 os.makedirs("Glossary", exist_ok=True)
                 
-                # Write the file
                 self.append_log(f"💾 Writing glossary to: {output_file}")
                 with open(output_file, 'w', encoding='utf-8') as f:
-                    json.dump(merged_entries, f, ensure_ascii=False, indent=2)
+                    json.dump(final_entries, f, ensure_ascii=False, indent=2)
                 
-                # Verify file was created
+                # Also save as CSV for compatibility
+                csv_file = output_file.replace('.json', '.csv')
+                with open(csv_file, 'w', encoding='utf-8', newline='') as f:
+                    import csv
+                    writer = csv.writer(f)
+                    # Write header
+                    header = ['type', 'raw_name', 'translated_name', 'gender']
+                    if custom_fields:
+                        header.extend(custom_fields)
+                    writer.writerow(header)
+                    
+                    for entry in final_entries:
+                        row = [
+                            entry.get('type', ''),
+                            entry.get('raw_name', ''),
+                            entry.get('translated_name', ''),
+                            entry.get('gender', '') if entry.get('type') == 'character' else ''
+                        ]
+                        # Add custom field values
+                        if custom_fields:
+                            for field in custom_fields:
+                                row.append(entry.get(field, ''))
+                        writer.writerow(row)
+                
+                self.append_log(f"💾 Also saved as CSV: {os.path.basename(csv_file)}")
+                
+                # Verify files were created
                 if os.path.exists(output_file):
                     file_size = os.path.getsize(output_file)
                     self.append_log(f"✅ Glossary saved successfully ({file_size} bytes)")
                     
                     # Show sample of what was saved
-                    if merged_entries:
+                    if final_entries:
                         self.append_log(f"\n📋 Sample entries:")
-                        for entry in merged_entries[:3]:
-                            name = entry.get('name') or entry.get('english_name', 'Unknown')
-                            orig = entry.get('original_name', 'N/A')
-                            self.append_log(f"   - {name} ({orig})")
+                        for entry in final_entries[:5]:
+                            self.append_log(f"   - [{entry['type']}] {entry['raw_name']} → {entry['translated_name']}")
                 else:
                     self.append_log(f"❌ File was not created!")
                     return False
@@ -8293,34 +7528,75 @@ Recent translations to summarize:
         self.append_log(f"📊 Progress tracking in: Glossary/{folder_name}_glossary_progress.json")
         return progress_manager
 
-    def _save_intermediate_glossary(self, folder_name, entries):
-        """Save intermediate glossary results after each image"""
+    def _save_intermediate_glossary_with_skip(self, folder_name, entries):
+        """Save intermediate glossary results with skip logic"""
         try:
             output_file = os.path.join("Glossary", f"{folder_name}_glossary.json")
             
-            # Try to use merge function or simple dedup
-            merged_entries = entries
+            # Apply skip logic
             try:
-                from extract_glossary_from_epub import merge_glossary_entries
-                merged_entries = merge_glossary_entries(entries)
+                from extract_glossary_from_epub import skip_duplicate_entries
+                unique_entries = skip_duplicate_entries(entries)
             except:
-                # Simple deduplication
+                # Fallback
                 seen = set()
-                deduped = []
+                unique_entries = []
                 for entry in entries:
-                    key = (entry.get('original_name', ''), entry.get('name', ''), entry.get('english_name', ''))
-                    if key not in seen and any(key):
+                    key = entry.get('raw_name', '').lower().strip()
+                    if key and key not in seen:
                         seen.add(key)
-                        deduped.append(entry)
-                merged_entries = deduped
+                        unique_entries.append(entry)
             
             # Write the file
             with open(output_file, 'w', encoding='utf-8') as f:
-                json.dump(merged_entries, f, ensure_ascii=False, indent=2)
+                json.dump(unique_entries, f, ensure_ascii=False, indent=2)
                 
         except Exception as e:
-            # Don't fail the whole process if intermediate save fails
             self.append_log(f"      ⚠️ Could not save intermediate glossary: {e}")
+
+    def _call_api_with_interrupt(self, client, messages, image_base64, temperature, max_tokens):
+        """Make API call with interrupt support and thread safety"""
+        import threading
+        import queue
+        from unified_api_client import UnifiedClientError
+        
+        result_queue = queue.Queue()
+        
+        def api_call():
+            try:
+                result = client.send_image(messages, image_base64, temperature=temperature, max_tokens=max_tokens)
+                result_queue.put(('success', result))
+            except Exception as e:
+                result_queue.put(('error', e))
+        
+        api_thread = threading.Thread(target=api_call)
+        api_thread.daemon = True
+        api_thread.start()
+        
+        # Check for stop every 0.5 seconds
+        while api_thread.is_alive():
+            if self.stop_requested:
+                # Cancel the operation
+                if hasattr(client, 'cancel_current_operation'):
+                    client.cancel_current_operation()
+                raise UnifiedClientError("Glossary extraction stopped by user")
+            
+            try:
+                status, result = result_queue.get(timeout=0.5)
+                if status == 'error':
+                    raise result
+                return result
+            except queue.Empty:
+                continue
+        
+        # Thread finished, get final result
+        try:
+            status, result = result_queue.get(timeout=1.0)
+            if status == 'error':
+                raise result
+            return result
+        except queue.Empty:
+            raise UnifiedClientError("API call completed but no result received")
 
     def _extract_glossary_from_text_file(self, file_path):
         """Extract glossary from EPUB or TXT file using existing glossary extraction"""
@@ -8371,18 +7647,10 @@ Recent translations to summarize:
                     'BATCH_SIZE': str(self.batch_size_var.get()),
                     'GLOSSARY_SYSTEM_PROMPT': self.manual_glossary_prompt,
                     'CHAPTER_RANGE': self.chapter_range_entry.get().strip(),
-                    'GLOSSARY_EXTRACT_ORIGINAL_NAME': '1' if self.config.get('manual_extract_original_name', True) else '0',
-                    'GLOSSARY_EXTRACT_NAME': '1' if self.config.get('manual_extract_name', True) else '0',
-                    'GLOSSARY_EXTRACT_GENDER': '1' if self.config.get('manual_extract_gender', True) else '0',
-                    'GLOSSARY_EXTRACT_TITLE': '1' if self.config.get('manual_extract_title', True) else '0',
-                    'GLOSSARY_EXTRACT_GROUP_AFFILIATION': '1' if self.config.get('manual_extract_group_affiliation', True) else '0',
-                    'GLOSSARY_EXTRACT_TRAITS': '1' if self.config.get('manual_extract_traits', True) else '0',
-                    'GLOSSARY_EXTRACT_HOW_THEY_REFER_TO_OTHERS': '1' if self.config.get('manual_extract_how_they_refer_to_others', True) else '0',
-                    'GLOSSARY_EXTRACT_LOCATIONS': '1' if self.config.get('manual_extract_locations', True) else '0',
+                    'GLOSSARY_DISABLE_HONORIFICS_FILTER': '1' if self.config.get('glossary_disable_honorifics_filter', False) else '0',
                     'GLOSSARY_HISTORY_ROLLING': "1" if self.glossary_history_rolling_var.get() else "0",
                     'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower(),
-                    'GLOSSARY_DUPLICATE_KEY_MODE': self.config.get('glossary_duplicate_key_mode', 'auto'),
-                    'GLOSSARY_DUPLICATE_CUSTOM_FIELD': self.config.get('glossary_duplicate_custom_field', ''),
+                    'GLOSSARY_DUPLICATE_KEY_MODE': 'skip',  # Always use skip mode for new format
                     'SEND_INTERVAL_SECONDS': str(self.delay_entry.get()),
                     'CONTEXTUAL': '1' if self.contextual_var.get() else '0',
                     'GOOGLE_APPLICATION_CREDENTIALS': os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),
@@ -8430,6 +7698,14 @@ Recent translations to summarize:
                 
                 self.append_log(f"🚀 Extracting glossary from: {os.path.basename(file_path)}")
                 self.append_log(f"📤 Output Token Limit: {self.max_output_tokens}")
+                self.append_log(f"📑 Format: Simple (type, raw_name, translated_name, gender)")
+                
+                # Check honorifics filter
+                if self.config.get('glossary_disable_honorifics_filter', False):
+                    self.append_log(f"📑 Honorifics Filter: ❌ DISABLED")
+                else:
+                    self.append_log(f"📑 Honorifics Filter: ✅ ENABLED")
+                
                 os.environ['MAX_OUTPUT_TOKENS'] = str(self.max_output_tokens)
                 
                 # Enhanced stop callback that checks both flags
