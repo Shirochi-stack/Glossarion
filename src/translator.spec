@@ -97,6 +97,8 @@ app_files = [
     ('Halgakos.ico', '.'),
 	
 	('enhanced_text_extractor.py', '.'),	
+	
+	('multi_api_key_manager.py.py', '.'),	
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -129,6 +131,7 @@ app_modules = [
 	'async_api_processor',
 	'metadata_batch_translator',
 	'enhanced_text_extractor.py',
+	'multi_api_key_manager.py',
 	
 ]
 
@@ -427,6 +430,9 @@ text_modules = [
     'html2text.config',
     'html2text.compat',
     'html2text.utils',
+	
+	# ilru cahce
+	'python-lru',
  
     # AI Hunter (Datasketch)
     'datasketch',
