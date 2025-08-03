@@ -3399,7 +3399,7 @@ class BatchTranslationProcessor:
                 if 'final_body_with_images' in locals() and image_translations:
                     # Parse both versions
                     soup_with_images = BeautifulSoup(final_body_with_images, 'html.parser')
-                    soup_with_text = BeautifulSoup(final_html, 'html.parser')
+                    soup_with_text = BeautifulSoup(cleaned, 'html.parser')
                     
                     # Get the translated text content (without images)
                     body_content = soup_with_text.body
@@ -3409,9 +3409,10 @@ class BatchTranslationProcessor:
                         body_content.insert(0, trans_div)
                     
                     final_html = str(soup_with_text)
+                    cleaned = final_html
 
-                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                    f.write(final_html)
+                with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                    f.write(cleaned)
                 
                 # Update with .txt filename
                 with self.progress_lock:
@@ -3421,26 +3422,12 @@ class BatchTranslationProcessor:
                 # Original code for EPUB files
                 with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
                     f.write(cleaned)
-                
-                with self.progress_lock:
-                    # Check for QA failures with comprehensive detection
-                    if is_qa_failed_response(cleaned):
-                        chapter_status = "qa_failed"
-                        failure_reason = get_failure_reason(cleaned)
-                        print(f"⚠️ Batch: Chapter {actual_num} marked as qa_failed: {failure_reason}")
-                    else:
-                        chapter_status = "completed"
-
-                    self.update_progress_fn(idx, actual_num, content_hash, fname, status=chapter_status, ai_features=ai_features)
-                    self.save_progress_fn()            
-            
-            with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
-                f.write(cleaned)
             
             print(f"💾 Saved Chapter {actual_num}: {fname} ({len(cleaned)} chars)")
             
             # Initialize ai_features at the beginning to ensure it's always defined
-            ai_features = None
+            if ai_features is None:
+                ai_features = None
             
             # Extract and save AI features for future duplicate detection
             if (self.config.RETRY_DUPLICATE_BODIES and 
