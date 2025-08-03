@@ -161,40 +161,25 @@ class EnhancedTextExtractor:
         self.h2t = html2text.HTML2Text()
         
         # Core settings for Unicode preservation
-        self.h2t.unicode_snob = False      # CRITICAL: Use Unicode characters
-        self.h2t.escape_snob = False       # CRITICAL: Don't escape special chars
+        self.h2t.unicode_snob = True      # CRITICAL: Use Unicode characters
+        self.h2t.escape_snob = True       # CRITICAL: Don't escape special chars
         self.h2t.use_automatic_links = False
         
         # Layout settings - adjusted for CJK
         self.h2t.body_width = 0          # Don't wrap lines (important for CJK)
-        self.h2t.single_line_break = True
+        self.h2t.single_line_break = False
         
         # Content filtering
         self.h2t.ignore_links = False     # Preserve links for context
         self.h2t.ignore_images = False
-        self.h2t.ignore_anchors = True
-        self.h2t.skip_internal_links = True
+        self.h2t.ignore_anchors = False
+        self.h2t.skip_internal_links = False
         
         # Additional Unicode-friendly settings
         self.h2t.wrap_links = False
         self.h2t.wrap_list_items = False
         self.h2t.protect_links = True
         
-        # Settings to prevent quote issues
-        self.h2t.pad_tables = False
-        self.h2t.dash_unordered_list = False
-        
-        # Try to prevent quote-to-comma conversion
-        self.h2t.emphasis_mark = '_'
-        self.h2t.strong_mark = '__'
-        
-        # Disable any quote style conversion
-        self.h2t.open_quote = '"'
-        self.h2t.close_quote = '"'
-        
-        # Disable quote markers entirely
-        self.h2t.open_quote = ''
-        self.h2t.close_quote = ''
         # Structure preservation settings
         if self.preserve_structure:
             self.h2t.bypass_tables = False
