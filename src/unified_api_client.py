@@ -482,40 +482,112 @@ class UnifiedClient:
                     print(f"[Thread-{thread_name}] Rotating key (reached {self._rotation_frequency} requests)")
             
             if should_rotate:
+                retry_count = 0
+                max_retries = 3
+                
+                while retry_count < max_retries:
                     # Get a key from the pool
                     key_info = self._api_key_pool.get_key_for_thread(
                         force_rotation=should_rotate,
                         rotation_frequency=self._rotation_frequency
                     )
                     
-                    if not key_info:
-                        raise UnifiedClientError("No available API keys", error_type="no_keys")
-                    
-                    key, key_index, key_id = key_info  # Changed from 2 to 3 values
-                    
-                    # Update thread-local state
-                    tls.api_key = key.api_key
-                    tls.model = key.model
-                    tls.key_index = key_index
-                    tls.key_identifier = key_id
-                    tls.initialized = True
-                    
-                    # Copy to instance for compatibility
-                    self.api_key = tls.api_key
-                    self.model = tls.model
-                    self.key_identifier = tls.key_identifier
-                    self.current_key_index = key_index
-                    
-                    if len(self.api_key) > 12:
-                        masked_key = self.api_key[:4] + "..." + self.api_key[-4:]
-                    else:
-                        # For short keys, show less characters
-                        masked_key = self.api_key[:3] + "..." + self.api_key[-2:] if len(self.api_key) > 5 else "***"
+                    if key_info:
+                        # Successfully got a key
+                        key, key_index, key_id = key_info  # Changed from 2 to 3 values
+                        
+                        # Update thread-local state
+                        tls.api_key = key.api_key
+                        tls.model = key.model
+                        tls.key_index = key_index
+                        tls.key_identifier = key_id
+                        tls.initialized = True
+                        
+                        # Copy to instance for compatibility
+                        self.api_key = tls.api_key
+                        self.model = tls.model
+                        self.key_identifier = tls.key_identifier
+                        self.current_key_index = key_index
+                        
+                        if len(self.api_key) > 12:
+                            masked_key = self.api_key[:4] + "..." + self.api_key[-4:]
+                        else:
+                            # For short keys, show less characters
+                            masked_key = self.api_key[:3] + "..." + self.api_key[-2:] if len(self.api_key) > 5 else "***"
 
-                    print(f"[Thread-{thread_name}] 🔑 Using {self.key_identifier} - {masked_key}")
+                        print(f"[Thread-{thread_name}] 🔑 Using {self.key_identifier} - {masked_key}")
+                        
+                        # Setup client
+                        self._setup_client()
+                        return  # Success!
                     
-                    # Setup client
-                    self._setup_client()
+                    # No key available - check why
+                    if not self._api_key_pool or not self._api_key_pool.keys:
+                        raise UnifiedClientError("No API keys configured", error_type="no_keys")
+                    
+                    # All keys must be cooling down
+                    print(f"[Thread-{thread_name}] No available keys, all cooling down")
+                    
+                    # Get shortest cooldown time
+                    cooldown_time = self._get_shortest_cooldown_time()
+                    
+                    if retry_count < max_retries - 1:
+                        print(f"[Thread-{thread_name}] Waiting {cooldown_time}s for key to become available...")
+                        
+                        # Wait with cancellation check
+                        for i in range(cooldown_time):
+                            if self._cancelled:
+                                raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+                            time.sleep(1)
+                            if i % 10 == 0 and i > 0:
+                                print(f"[Thread-{thread_name}] Still waiting... {cooldown_time - i}s remaining")
+                        
+                        retry_count += 1
+                        continue
+                    else:
+                        # Final attempt - try to get ANY key, even if on cooldown
+                        print(f"[Thread-{thread_name}] Final attempt - trying to get any key")
+                        
+                        # Find key with shortest remaining cooldown
+                        best_key_index = None
+                        min_cooldown = float('inf')
+                        
+                        for i, key in enumerate(self._api_key_pool.keys):
+                            if key.enabled:  # At least check if enabled
+                                key_id = f"Key#{i+1} ({key.model})"
+                                remaining = self._rate_limit_cache.get_remaining_cooldown(key_id)
+                                if remaining < min_cooldown:
+                                    min_cooldown = remaining
+                                    best_key_index = i
+                        
+                        if best_key_index is not None:
+                            key = self._api_key_pool.keys[best_key_index]
+                            print(f"[Thread-{thread_name}] Using key on cooldown (remaining: {min_cooldown:.1f}s)")
+                            
+                            # Force assign this key
+                            tls.api_key = key.api_key
+                            tls.model = key.model
+                            tls.key_index = best_key_index
+                            tls.key_identifier = f"Key#{best_key_index+1} ({key.model})"
+                            tls.initialized = True
+                            
+                            self.api_key = tls.api_key
+                            self.model = tls.model
+                            self.key_identifier = tls.key_identifier
+                            self.current_key_index = best_key_index
+                            
+                            if len(self.api_key) > 12:
+                                masked_key = self.api_key[:4] + "..." + self.api_key[-4:]
+                            else:
+                                masked_key = self.api_key[:3] + "..." + self.api_key[-2:] if len(self.api_key) > 5 else "***"
+                            
+                            print(f"[Thread-{thread_name}] 🔑 Forced using {self.key_identifier} - {masked_key}")
+                            
+                            self._setup_client()
+                            return
+                        
+                        # Really no keys available at all
+                        raise UnifiedClientError("No available API keys for thread", error_type="no_keys")
         
         # Single key mode
         elif not tls.initialized:
