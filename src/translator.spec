@@ -98,7 +98,7 @@ app_files = [
 	
 	('enhanced_text_extractor.py', '.'),	
 	
-	('multi_api_key_manager.py.py', '.'),	
+	('multi_api_key_manager.py', '.'),	
 ]
 # Add application files to datas
 datas.extend(app_files)
