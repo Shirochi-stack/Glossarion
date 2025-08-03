@@ -316,8 +316,8 @@ class MultiAPIKeyDialog:
             key_list = [key.to_dict() for key in self.key_pool.get_all_keys()]
             self.translator_gui.config['multi_api_keys'] = key_list
             
-            # Enable multi-key mode
-            self.translator_gui.config['use_multi_api_keys'] = True
+            # Use the current state of the toggle instead of always setting to True
+            self.translator_gui.config['use_multi_api_keys'] = self.enabled_var.get()
             
             # Save rotation settings
             self.translator_gui.config['force_key_rotation'] = self.force_rotation_var.get()
