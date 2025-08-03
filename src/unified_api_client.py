@@ -4292,16 +4292,20 @@ class UnifiedClient:
                     )
                     
                 except Exception as e:
-                    if "rate limit" in str(e).lower() or "429" in str(e):
-                        if attempt < max_retries - 1:
-                            wait_time = api_delay * 10
-                            print(f"{provider} rate limit hit, waiting {wait_time}s")
-                            time.sleep(wait_time)
-                            continue
-                    elif attempt < max_retries - 1:
+                    error_str = str(e).lower()
+                    
+                    # For rate limits, immediately re-raise to let multi-key system handle it
+                    if "rate limit" in error_str or "429" in error_str or "quota" in error_str:
+                        print(f"{provider} rate limit hit - passing to multi-key handler")
+                        raise UnifiedClientError(f"{provider} rate limit: {e}", error_type="rate_limit")
+                    
+                    # For other errors, retry at this level
+                    if attempt < max_retries - 1:
                         print(f"{provider} SDK error (attempt {attempt + 1}): {e}")
                         time.sleep(api_delay)
                         continue
+                        
+                    # Final attempt failed
                     print(f"{provider} SDK error after all retries: {e}")
                     raise UnifiedClientError(f"{provider} SDK error: {e}")
         else:
@@ -4359,13 +4363,19 @@ class UnifiedClient:
                         timeout=self.request_timeout  # Use configured timeout
                     )
                     
-                    if resp.status_code == 429:  # Rate limit
-                        if attempt < max_retries - 1:
-                            wait_time = api_delay * 10
-                            print(f"{provider} rate limit hit, waiting {wait_time}s")
-                            time.sleep(wait_time)
-                            continue
-                    elif resp.status_code != 200:
+                    # Check for rate limit FIRST, before other status codes
+                    if resp.status_code == 429:
+                        # Extract any retry information if available
+                        retry_after = resp.headers.get('Retry-After', '60')
+                        print(f"{provider} rate limit hit (429) - passing to multi-key handler")
+                        raise UnifiedClientError(
+                            f"{provider} rate limit: {resp.text}", 
+                            error_type="rate_limit",
+                            http_status=429
+                        )
+                    
+                    # Handle other error status codes
+                    if resp.status_code != 200:
                         error_msg = f"{provider} API error: {resp.status_code} - {resp.text}"
                         if attempt < max_retries - 1:
                             print(f"{error_msg} (attempt {attempt + 1})")
@@ -4413,7 +4423,12 @@ class UnifiedClient:
                         raw_response=json_resp
                     )
                     
+                except UnifiedClientError:
+                    # Re-raise our own errors immediately (including rate limits)
+                    raise
+                    
                 except requests.RequestException as e:
+                    # For connection errors, retry at this level
                     if attempt < max_retries - 1:
                         print(f"{provider} API error (attempt {attempt + 1}): {e}")
                         time.sleep(api_delay)
