@@ -1924,7 +1924,7 @@ class UnifiedClient:
  
     def send(self, messages, temperature=None, max_tokens=None, 
              max_completion_tokens=None, context=None) -> Tuple[str, Optional[str]]:
-        """Thread-safe send with proper key management"""
+        """Thread-safe send with proper key management for batch translation"""
         thread_name = threading.current_thread().name
         
         # Ensure thread has a client
@@ -1936,8 +1936,14 @@ class UnifiedClient:
         retry_count = 0
         last_error = None
         
+        # Track which keys we've already tried to avoid infinite loops
+        attempted_keys = set()
+        
         while retry_count < max_retries:
             try:
+                # Track current key
+                attempted_keys.add(self.key_identifier)
+                
                 # Call the actual implementation
                 result = self._send_internal(messages, temperature, max_tokens, 
                                            max_completion_tokens, context)
@@ -1957,20 +1963,27 @@ class UnifiedClient:
                 logger.error(f"[{thread_name}] ✗ {self.key_identifier} error: {error_str[:100]}")
                 
                 # Check for rate limit
-                if "429" in error_str or "rate limit" in error_str.lower():
+                if "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
                     if self._multi_key_mode:
-                        tls = self._get_thread_local_client()
-                        if tls.key_index is not None:
-                            # Mark the key as rate limited
-                            self._api_key_pool.mark_key_error(tls.key_index, 429)
-                            
-                            # Force rotation for next attempt
-                            tls.initialized = False
-                            tls.request_count = 0
-                            
-                            retry_count += 1
-                            logger.info(f"[{thread_name}] Rate limit hit, rotating key...")
-                            continue
+                        print(f"[Thread-{thread_name}] Rate limit hit on {self.key_identifier}")
+                        
+                        # Handle rate limit for this thread
+                        self._handle_rate_limit_for_thread()
+                        
+                        # Check if we have any available keys
+                        available_count = self._count_available_keys()
+                        if available_count == 0:
+                            logger.error(f"[{thread_name}] All API keys are cooling down")
+                            raise UnifiedClientError("All API keys are cooling down", error_type="rate_limit")
+                        
+                        # Check if we've tried too many keys
+                        if len(attempted_keys) >= len(self._api_key_pool.keys):
+                            logger.error(f"[{thread_name}] Attempted all {len(self._api_key_pool.keys)} keys")
+                            raise UnifiedClientError("All API keys rate limited", error_type="rate_limit")
+                        
+                        retry_count += 1
+                        logger.info(f"[{thread_name}] Retrying with new key, attempt {retry_count}/{max_retries}")
+                        continue
                     else:
                         # Single key mode - wait and retry
                         if retry_count < max_retries - 1:
@@ -1979,6 +1992,8 @@ class UnifiedClient:
                             time.sleep(wait_time)
                             retry_count += 1
                             continue
+                        else:
+                            raise UnifiedClientError("Rate limit exceeded", error_type="rate_limit")
                 
                 # Check for cancellation
                 elif isinstance(e, UnifiedClientError) and e.error_type in ["cancelled", "timeout"]:
@@ -1992,13 +2007,19 @@ class UnifiedClient:
                             self._api_key_pool.mark_key_error(tls.key_index)
                         
                         if not self._force_rotation:
-                            # Error-based rotation
+                            # Error-based rotation - try a different key
+                            logger.info(f"[{thread_name}] Error occurred, rotating to new key...")
+                            
+                            # Force reassignment
                             tls.initialized = False
-                            logger.info(f"[{thread_name}] Error occurred, rotating key...")
+                            tls.request_count = 0
+                            self._ensure_thread_client()
+                            
                             retry_count += 1
+                            logger.info(f"[{thread_name}] Rotated to {self.key_identifier} after error")
                             continue
                     
-                    # Retry with same key
+                    # Retry with same key (or if rotation disabled)
                     retry_count += 1
                     time.sleep(2)
                     continue
@@ -2011,7 +2032,7 @@ class UnifiedClient:
             raise last_error
         else:
             raise Exception(f"Failed after {max_retries} attempts")
-
+        
     def _rotate_to_next_available_key(self, skip_current: bool = False) -> bool:
         """
         Rotate to the next available key that's not rate limited
@@ -3248,6 +3269,13 @@ class UnifiedClient:
         gemini_endpoint = os.getenv("GEMINI_OPENAI_ENDPOINT", "")
         
         if use_openai_endpoint and gemini_endpoint:
+            # Ensure the endpoint ends with /openai/ for compatibility
+            if not gemini_endpoint.endswith('/openai/'):
+                if gemini_endpoint.endswith('/'):
+                    gemini_endpoint = gemini_endpoint + 'openai/'
+                else:
+                    gemini_endpoint = gemini_endpoint + '/openai/'
+            
             print(f"🔄 Using OpenAI-compatible endpoint for Gemini: {gemini_endpoint}")
             # Route to OpenAI-compatible handler
             return self._send_openai_compatible(
@@ -4091,17 +4119,13 @@ class UnifiedClient:
         max_retries = 3
         api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
         
-        # DEBUG: Print what we're getting
-        #print(f"[DEBUG] Provider: {provider}")
-        #print(f"[DEBUG] Original base_url: {base_url}")
-        #print(f"[DEBUG] USE_CUSTOM_OPENAI_ENDPOINT: {os.getenv('USE_CUSTOM_OPENAI_ENDPOINT')}")
-        #print(f"[DEBUG] OPENAI_CUSTOM_BASE_URL: {os.getenv('OPENAI_CUSTOM_BASE_URL')}")
-        
         # CUSTOM ENDPOINT OVERRIDE - Check if enabled and override base_url
         use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
         actual_api_key = self.api_key  # Store original API key
-
-        # Skip custom OpenAI endpoint logic for Gemini-specific endpoints
+        
+        # Determine if this is a local endpoint that doesn't need a real API key
+        is_local_endpoint = False
+        
         if use_custom_endpoint and provider != "gemini-openai":
             custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
             if custom_base_url:
@@ -4109,15 +4133,38 @@ class UnifiedClient:
                 print(f"   Original: {base_url}")
                 print(f"   Override: {custom_base_url}")
                 base_url = custom_base_url
-                # Use dummy API key for local endpoints
-                actual_api_key = "ollama"  # or any dummy string
-        elif provider == "gemini-openai":
-            # For Gemini OpenAI endpoints, always use dummy API key
-            actual_api_key = "dummy-key-for-gemini"
-            print(f"   Using Gemini OpenAI-compatible endpoint")
-        else:
-            #print(f"[DEBUG] Custom endpoint NOT enabled or no URL set")
-            pass
+                
+                # Check if it's a local endpoint
+                local_indicators = [
+                    'localhost', '127.0.0.1', '0.0.0.0',
+                    '192.168.', '10.', '172.16.', '172.17.', '172.18.', '172.19.',
+                    '172.20.', '172.21.', '172.22.', '172.23.', '172.24.', '172.25.',
+                    '172.26.', '172.27.', '172.28.', '172.29.', '172.30.', '172.31.',
+                    ':11434',  # Ollama default port
+                    ':8080',   # Common local API port
+                    ':5000',   # Common local API port
+                    ':8000',   # Common local API port
+                    ':1234',   # LM Studio default port
+                    'host.docker.internal',  # Docker host
+                ]
+                
+                # Also check if user explicitly marked it as local
+                is_local_llm_env = os.getenv('IS_LOCAL_LLM', '0') == '1'
+                
+                is_local_endpoint = is_local_llm_env or any(indicator in custom_base_url.lower() for indicator in local_indicators)
+                
+                if is_local_endpoint:
+                    actual_api_key = "dummy-key-for-local-llm"
+                    #print(f"   📍 Detected local endpoint, using dummy API key")
+                else:
+                    #print(f"   ☁️  Using actual API key for cloud endpoint")
+                    pass
+        
+        # For all other providers, use the actual API key
+        # Remove the special case for gemini-openai - it needs the real API key
+        if not is_local_endpoint:
+            print(f"   Using actual API key for {provider}")
+        
         # Check if safety settings are disabled via GUI toggle
         disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
         
@@ -4141,8 +4188,8 @@ class UnifiedClient:
                         raise UnifiedClientError("Operation cancelled")
                     
                     client = openai.OpenAI(
-                        api_key=actual_api_key,  # Use overridden API key
-                        base_url=base_url,       # Use overridden base URL
+                        api_key=actual_api_key,  # Uses real key for cloud, dummy for local
+                        base_url=base_url,
                         timeout=float(self.request_timeout)
                     )
                     
@@ -4233,7 +4280,7 @@ class UnifiedClient:
             # Use HTTP API with retry logic
             if headers is None:
                 headers = {
-                    "Authorization": f"Bearer {actual_api_key}",  # Use overridden API key
+                    "Authorization": f"Bearer {actual_api_key}",  # Uses real key for cloud, dummy for local
                     "Content-Type": "application/json"
                 }
             
@@ -4647,7 +4694,7 @@ class UnifiedClient:
                   max_tokens: Optional[int] = None,
                   max_completion_tokens: Optional[int] = None,
                   context: str = 'image_translation') -> Tuple[str, str]:
-        """Thread-safe image send with proper key management"""
+        """Thread-safe image send with proper key management for batch translation"""
         thread_name = threading.current_thread().name
         
         # Ensure thread has a client
@@ -4659,8 +4706,14 @@ class UnifiedClient:
         retry_count = 0
         last_error = None
         
+        # Track which keys we've already tried
+        attempted_keys = set()
+        
         while retry_count < max_retries:
             try:
+                # Track current key
+                attempted_keys.add(self.key_identifier)
+                
                 # Call the actual implementation
                 result = self._send_image_internal(messages, image_data, temperature,
                                                  max_tokens, max_completion_tokens, context)
@@ -4679,56 +4732,35 @@ class UnifiedClient:
                 error_str = str(e)
                 
                 # Log the error with key info
-                if self.use_multi_keys:
-                    print(f"[API-IMG] ❌ {self.key_identifier} → Error: {error_str[:100]}")
+                logger.error(f"[{thread_name}] ✗ {self.key_identifier} image error: {error_str[:100]}")
                 
                 # Check if it's a rate limit error
-                is_rate_limit = False
                 if "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
-                    is_rate_limit = True
-                    print(f"[DEBUG] Image rate limit hit on {self.key_identifier} (attempt {retry_count + 1}/{max_retries})")
-                    
-                    # Handle rate limit in multi-key mode
-                    if self.use_multi_keys:
-                        # Get cooldown duration
-                        cooldown_seconds = 60
-                        if hasattr(self, 'current_key_index') and self.current_key_index is not None:
-                            if self.current_key_index < len(self._api_key_pool.keys):
-                                key = self._api_key_pool.keys[self.current_key_index]
-                                cooldown_seconds = getattr(key, 'cooldown', 60)
+                    if self._multi_key_mode:
+                        print(f"[Thread-{thread_name}] Image rate limit hit on {self.key_identifier}")
                         
-                        print(f"[API-IMG] 🕐 Putting {self.key_identifier} on cooldown for {cooldown_seconds}s")
+                        # Handle rate limit for this thread
+                        self._handle_rate_limit_for_thread()
                         
-                        # Add to rate limit cache
-                        if hasattr(self, '_rate_limit_cache'):
-                            self._rate_limit_cache.add_rate_limit(self.key_identifier, cooldown_seconds)
+                        # Check if we have any available keys
+                        available_count = self._count_available_keys()
+                        if available_count == 0:
+                            logger.error(f"[{thread_name}] All API keys are cooling down for images")
+                            raise UnifiedClientError("All API keys are cooling down", error_type="rate_limit")
                         
-                        # Mark current key as rate limited
-                        self._mark_key_error(429)
-                        
-                        # Force rotation on rate limit (always, regardless of settings)
-                        print(f"[DEBUG] Forcing rotation due to rate limit")
-                        with self._counter_lock:
-                            self._request_counter = 0  # Reset counter
-                        
-                        if self._rotate_to_next_available_key(skip_current=True):
-                            print(f"[API-IMG] 🔄 Switched to {self.key_identifier} for retry")
-                            retry_count += 1
-                            continue
-                        else:
-                            # Check if we can use a key on cooldown
-                            if len(attempted_keys) < len(self._api_key_pool.keys):
-                                if self._force_rotate_to_untried_key(attempted_keys):
-                                    print(f"[API-IMG] ⚠️ Overriding cooldown, using {self.key_identifier}")
-                                    retry_count += 1
-                                    continue
-                            
+                        # Check if we've tried too many keys
+                        if len(attempted_keys) >= len(self._api_key_pool.keys):
+                            logger.error(f"[{thread_name}] Attempted all {len(self._api_key_pool.keys)} keys for image")
                             raise UnifiedClientError("All API keys rate limited for image requests", error_type="rate_limit")
+                        
+                        retry_count += 1
+                        logger.info(f"[{thread_name}] Retrying image with new key, attempt {retry_count}/{max_retries}")
+                        continue
                     else:
-                        # Single key mode - wait before retry
+                        # Single key mode
                         if retry_count < max_retries - 1:
                             wait_time = min(30 * (retry_count + 1), 120)
-                            print(f"[DEBUG] Single key image rate limit, waiting {wait_time}s")
+                            logger.info(f"[{thread_name}] Single key image rate limit, waiting {wait_time}s")
                             time.sleep(wait_time)
                             retry_count += 1
                             continue
@@ -4740,20 +4772,26 @@ class UnifiedClient:
                     raise
                 
                 # For other errors in multi-key mode
-                elif self.use_multi_keys and retry_count < max_retries - 1:
-                    self._mark_key_error()
+                elif self._multi_key_mode and retry_count < max_retries - 1:
+                    tls = self._get_thread_local_client()
+                    if tls.key_index is not None:
+                        self._api_key_pool.mark_key_error(tls.key_index)
                     
                     if not self._force_rotation:
-                        # Error-based rotation mode - rotate on any error
-                        print(f"[DEBUG] Image processing error, rotating to next key (error-based rotation)")
-                        self._force_next_key()
+                        # Error-based rotation mode
+                        logger.info(f"[{thread_name}] Image error, rotating to new key...")
+                        
+                        # Force reassignment
+                        tls.initialized = False
+                        tls.request_count = 0
+                        self._ensure_thread_client()
+                        
                         retry_count += 1
                         continue
                     else:
-                        # Force rotation mode - don't rotate on non-rate-limit errors
-                        print(f"[DEBUG] Non-rate-limit error in force rotation mode, retrying same key")
+                        # Force rotation mode - retry same key
                         retry_count += 1
-                        time.sleep(2)  # Small delay before retry
+                        time.sleep(2)
                         continue
                 
                 # Can't retry, raise the error
@@ -4764,6 +4802,7 @@ class UnifiedClient:
             raise last_error
         else:
             raise Exception(f"Image request failed after {max_retries} attempts")
+
 
     def _send_image_internal(self, messages: List[Dict[str, Any]], image_data: Any,
                             temperature: Optional[float] = None, 
@@ -5015,6 +5054,13 @@ class UnifiedClient:
             gemini_endpoint = os.getenv("GEMINI_OPENAI_ENDPOINT", "")
             
             if use_openai_endpoint and gemini_endpoint:
+                # Ensure the endpoint ends with /openai/ for compatibility
+                if not gemini_endpoint.endswith('/openai/'):
+                    if gemini_endpoint.endswith('/'):
+                        gemini_endpoint = gemini_endpoint + 'openai/'
+                    else:
+                        gemini_endpoint = gemini_endpoint + '/openai/'
+                
                 print(f"🔄 Using OpenAI-compatible endpoint for Gemini image: {gemini_endpoint}")
                 # Route to OpenAI-compatible handler
                 return self._send_openai_compatible(
@@ -5025,6 +5071,7 @@ class UnifiedClient:
                     response_name=response_name,
                     provider="gemini-openai"
                 )
+        
             # Import types at the top
             from google.genai import types
             
