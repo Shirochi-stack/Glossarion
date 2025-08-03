@@ -431,8 +431,9 @@ text_modules = [
     'html2text.compat',
     'html2text.utils',
 	
-	# ilru cahce
-	'python-lru',
+	# ilru cache
+	'functools',
+	'lru',
  
     # AI Hunter (Datasketch)
     'datasketch',
