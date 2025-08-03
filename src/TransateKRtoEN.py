@@ -80,7 +80,19 @@ class TranslationConfig:
         self.WATERMARK_PATTERN_THRESHOLD = int(os.getenv("WATERMARK_PATTERN_THRESHOLD", "10"))
         self.WATERMARK_CLAHE_LIMIT = float(os.getenv("WATERMARK_CLAHE_LIMIT", "3.0"))
         self.COMPRESSION_FACTOR = float(os.getenv("COMPRESSION_FACTOR", "1.0"))
-
+        
+        # Multi API key support
+        self.use_multi_api_keys = os.environ.get('USE_MULTI_API_KEYS', '0') == '1'
+        self.multi_api_keys = []
+        
+        if self.use_multi_api_keys:
+            multi_keys_json = os.environ.get('MULTI_API_KEYS', '[]')
+            try:
+                self.multi_api_keys = json.loads(multi_keys_json)
+                print(f"Loaded {len(self.multi_api_keys)} API keys for multi-key mode")
+            except Exception as e:
+                print(f"Failed to load multi API keys: {e}")
+                self.use_multi_api_keys = False
         
         
 # =====================================================
@@ -2648,7 +2660,7 @@ class ChapterExtractor:
 # =====================================================
 # UNIFIED TRANSLATION PROCESSOR
 # =====================================================
-
+    
 class TranslationProcessor:
     """Handles the translation of individual chapters"""
     
@@ -2661,7 +2673,29 @@ class TranslationProcessor:
         self.chapter_splitter = ChapterSplitter(model_name=config.MODEL)
         self.uses_zero_based = uses_zero_based
         self.is_text_file = is_text_file
+        
+        # Check and log multi-key status
+        if hasattr(self.client, 'use_multi_keys') and self.client.use_multi_keys:
+            stats = self.client.get_stats()
+            self._log(f"🔑 Multi-key mode active: {stats.get('total_keys', 0)} keys")
+            self._log(f"   Active keys: {stats.get('active_keys', 0)}")
+    
+    def _log(self, message):
+        """Log a message"""
+        if self.log_callback:
+            self.log_callback(message)
+        else:
+            print(message)
 
+    def report_key_status(self):
+        """Report multi-key status if available"""
+        if hasattr(self.client, 'get_stats'):
+            stats = self.client.get_stats()
+            if stats.get('multi_key_mode', False):
+                self._log(f"\n📊 API Key Status:")
+                self._log(f"   Active Keys: {stats.get('active_keys', 0)}/{stats.get('total_keys', 0)}")
+                self._log(f"   Success Rate: {stats.get('success_rate', 0):.1%}")
+                self._log(f"   Total Requests: {stats.get('total_requests', 0)}\n")
         
     def check_stop(self):
         """Check if translation should stop"""
@@ -3241,6 +3275,11 @@ class BatchTranslationProcessor:
         self.chapters_completed = 0
         self.chunks_completed = 0
         self.is_text_file = is_text_file
+        
+       # Optionally log multi-key status
+        if hasattr(self.client, 'use_multi_keys') and self.client.use_multi_keys:
+            stats = self.client.get_stats()
+            print(f"🔑 Batch processor using multi-key mode: {stats.get('total_keys', 0)} keys")
     
     def process_single_chapter(self, chapter_data):
         """Process a single chapter (runs in thread)"""
@@ -4886,6 +4925,7 @@ def cleanup_previous_extraction(output_dir):
 # =====================================================
 def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None):
     """Send API request with interrupt capability and optional timeout retry"""
+    # The client.send() call will handle multi-key rotation automatically
     result_queue = queue.Queue()
     
     def api_call():
@@ -4938,6 +4978,32 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
         client.cancel_current_operation()
     raise UnifiedClientError(f"API call timed out after {timeout} seconds")
 
+def handle_api_error(processor, error, chunk_info=""):
+    """Handle API errors with multi-key support"""
+    error_str = str(error)
+    
+    # Check for rate limit
+    if "429" in error_str or "rate limit" in error_str.lower():
+        if processor.config.use_multi_api_keys:
+            # The client should have already rotated keys internally
+            print(f"⚠️ Rate limit hit {chunk_info}, client should rotate to next key")
+            # Get current stats
+            stats = processor.client.get_stats()
+            print(f"📊 API Stats - Active keys: {stats.get('active_keys', 0)}/{stats.get('total_keys', 0)}")
+            
+            # Check if any keys are available
+            if stats.get('active_keys', 0) == 0:
+                print("❌ All API keys are cooling down")
+                return False
+            return True
+        else:
+            print(f"⚠️ Rate limit hit {chunk_info}, waiting before retry...")
+            time.sleep(30)  # Wait 30 seconds for single key mode
+            return True
+    
+    # Other errors
+    print(f"❌ API Error {chunk_info}: {error_str}")
+    
 def parse_token_limit(env_value):
     """Parse token limit from environment variable"""
     if not env_value or env_value.strip() == "":
@@ -5567,6 +5633,12 @@ def main(log_callback=None, stop_callback=None):
     print(f"[DEBUG] Max output tokens = {config.MAX_OUTPUT_TOKENS}")
 
     client = UnifiedClient(model=config.MODEL, api_key=config.API_KEY, output_dir=out)
+    if hasattr(client, 'use_multi_keys') and client.use_multi_keys:
+        stats = client.get_stats()
+        print(f"🔑 Multi-key mode active: {stats.get('total_keys', 0)} keys loaded")
+        print(f"   Active keys: {stats.get('active_keys', 0)}")
+    else:
+        print(f"🔑 Single-key mode: Using {config.MODEL}")    
     # Reset cleanup state when starting new translation
     if hasattr(client, 'reset_cleanup_state'):
         client.reset_cleanup_state()    
@@ -5621,6 +5693,13 @@ def main(log_callback=None, stop_callback=None):
 
     print(f"[DEBUG] Initializing client with model = {config.MODEL}")
     client = UnifiedClient(api_key=config.API_KEY, model=config.MODEL, output_dir=out)
+    if hasattr(client, 'use_multi_keys') and client.use_multi_keys:
+        stats = client.get_stats()
+        print(f"🔑 Multi-key mode active: {stats.get('total_keys', 0)} keys loaded")
+        print(f"   Active keys: {stats.get('active_keys', 0)}")
+    else:
+        print(f"🔑 Single-key mode: Using {config.MODEL}")
+    
     # Reset cleanup state when starting new translation
     if hasattr(client, 'reset_cleanup_state'):
         client.reset_cleanup_state()
