@@ -1186,12 +1186,7 @@ class TranslatorGUI:
             self.enhanced_preserve_structure_var = tk.BooleanVar(
                 value=self.config.get('enhanced_preserve_structure', True)
             )
-        
-        # Fallback enabled toggle
-        if not hasattr(self, 'enhanced_fallback_enabled_var'):
-            self.enhanced_fallback_enabled_var = tk.BooleanVar(
-                value=self.config.get('enhanced_fallback_enabled', True)
-            )       
+             
         # Initialize update manager AFTER config is loaded
         try:
             from update_manager import UpdateManager
@@ -7374,7 +7369,6 @@ Recent translations to summarize:
             "EXTRACTION_MODE": extraction_mode,
             "ENHANCED_FILTERING": enhanced_filtering,
             "ENHANCED_PRESERVE_STRUCTURE": "1" if getattr(self, 'enhanced_preserve_structure_var', tk.BooleanVar(value=True)).get() else "0",
-            "ENHANCED_FALLBACK_ENABLED": "1" if getattr(self, 'enhanced_fallback_enabled_var', tk.BooleanVar(value=True)).get() else "0",
             
             # For new UI (if available)
             "TEXT_EXTRACTION_METHOD": extraction_method if hasattr(self, 'text_extraction_method_var') else ('enhanced' if extraction_mode == 'enhanced' else 'standard'),
@@ -11186,9 +11180,9 @@ Recent translations to summarize:
     def prompt_custom_token_limit(self):
        val = simpledialog.askinteger(
            "Set Max Output Token Limit",
-           "Enter max output tokens for API output (e.g., 2048, 4196, 8192):",
+           "Enter max output tokens for API output (e.g., 16384, 32768, 65536):",
            minvalue=1,
-           maxvalue=200000
+           maxvalue=2000000
        )
        if val:
            self.max_output_tokens = val
@@ -11411,7 +11405,7 @@ Recent translations to summarize:
         self.thinking_budget_entry.pack(side=tk.LEFT, padx=5)
         tk.Label(thinking_frame, text="tokens").pack(side=tk.LEFT)
         
-        tk.Label(section_frame, text="Control Gemini's thinking process. 0 = disabled,\n1-8192 = limited thinking, -1 = dynamic (auto)",
+        tk.Label(section_frame, text="Control Gemini's thinking process. 0 = disabled,\n512-24576 = limited thinking, -1 = dynamic (auto)",
                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
         
         # Add separator after thinking toggle
@@ -11775,10 +11769,6 @@ Recent translations to summarize:
             self.enhanced_preserve_structure_var = tk.BooleanVar(
                 value=self.config.get('enhanced_preserve_structure', True)
             )
-        if not hasattr(self, 'enhanced_fallback_enabled_var'):
-            self.enhanced_fallback_enabled_var = tk.BooleanVar(
-                value=self.config.get('enhanced_fallback_enabled', True)
-            )
         
         # --- Text Extraction Method Section ---
         method_frame = tk.Frame(extraction_frame)
@@ -11816,14 +11806,6 @@ Recent translations to summarize:
         
         tk.Label(self.enhanced_options_frame, text="Keep formatting (bold, headers, lists) for better AI context",
                 font=('TkDefaultFont', 8), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 3))
-        
-        # Fallback option
-        tb.Checkbutton(self.enhanced_options_frame, text="Enable Fallback to Standard", 
-                      variable=self.enhanced_fallback_enabled_var,
-                      bootstyle="round-toggle").pack(anchor=tk.W, pady=2)
-        
-        tk.Label(self.enhanced_options_frame, text="Use standard extraction if html2text fails",
-                font=('TkDefaultFont', 8), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
         
         # Requirements note
         requirements_frame = tk.Frame(self.enhanced_options_frame)
@@ -13348,10 +13330,6 @@ Recent translations to summarize:
             # Enhanced mode settings (these already exist in your code but ensure they're saved)
             self.config['enhanced_filtering'] = getattr(self, 'enhanced_filtering_var', tk.StringVar(value='smart')).get()
             self.config['enhanced_preserve_structure'] = getattr(self, 'enhanced_preserve_structure_var', tk.BooleanVar(value=True)).get()
-            self.config['enhanced_fallback_enabled'] = getattr(self, 'enhanced_fallback_enabled_var', tk.BooleanVar(value=True)).get()
-
-
-
 
             # Save image compression settings if they exist
             # These are saved from the compression dialog, but we ensure defaults here
