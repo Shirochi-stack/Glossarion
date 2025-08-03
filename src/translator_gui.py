@@ -1129,6 +1129,8 @@ class TranslatorGUI:
         self.disable_chapter_merging_var = tk.BooleanVar(value=self.config.get('disable_chapter_merging', False))
         self.selected_files = []
         self.current_file_index = 0
+        self.use_gemini_openai_endpoint_var = tk.BooleanVar(value=self.config.get('use_gemini_openai_endpoint', False))
+        self.gemini_openai_endpoint_var = tk.StringVar(value=self.config.get('gemini_openai_endpoint', ''))
 
         # Initialize compression-related variables
         self.enable_image_compression_var = tk.BooleanVar(value=self.config.get('enable_image_compression', False))
@@ -7365,6 +7367,8 @@ Recent translations to summarize:
             'BATCH_SIZE': self.batch_size_var.get(),
             'DISABLE_ZERO_DETECTION': "1" if self.disable_zero_detection_var.get() else "0",
             'TRANSLATION_HISTORY_ROLLING': "1" if self.translation_history_rolling_var.get() else "0",
+            'USE_GEMINI_OPENAI_ENDPOINT': '1' if self.use_gemini_openai_endpoint_var.get() else '0',
+            'GEMINI_OPENAI_ENDPOINT': self.gemini_openai_endpoint_var.get() if self.gemini_openai_endpoint_var.get() else '',
             # Extraction settings
             "EXTRACTION_MODE": extraction_mode,
             "ENHANCED_FILTERING": enhanced_filtering,
@@ -7443,6 +7447,11 @@ Recent translations to summarize:
             'GOOGLE_CLOUD_PROJECT': google_cloud_project,  # Now properly set from credentials
             'VERTEX_AI_LOCATION': self.vertex_location_var.get() if hasattr(self, 'vertex_location_var') else 'us-east5',
             
+           # Multi API Key support
+            'USE_MULTI_API_KEYS': "1" if self.config.get('use_multi_api_keys', False) else "0",
+            'MULTI_API_KEYS': json.dumps(self.config.get('multi_api_keys', [])) if self.config.get('use_multi_api_keys', False) else '[]',
+            'FORCE_KEY_ROTATION': '1' if self.config.get('force_key_rotation', True) else '0',
+            'ROTATION_FREQUENCY': str(self.config.get('rotation_frequency', 1)),
            
        }
         print(f"[DEBUG] DISABLE_CHAPTER_MERGING = '{os.getenv('DISABLE_CHAPTER_MERGING', '0')}'")
@@ -11383,7 +11392,7 @@ Recent translations to summarize:
         tk.Label(section_frame, text="Check GitHub for new Glossarion releases\nand download updates",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 5))
 
-    def _create_response_handling_section(self, parent):  # ← ADD self HERE
+    def _create_response_handling_section(self, parent):
         """Create response handling section with AI Hunter additions"""
         section_frame = tk.LabelFrame(parent, text="Response Handling & Retry Logic", padx=10, pady=10)
         section_frame.grid(row=1, column=0, sticky="nsew", padx=(10, 5), pady=5)
@@ -11411,6 +11420,43 @@ Recent translations to summarize:
         # Add separator after thinking toggle
         ttk.Separator(section_frame, orient='horizontal').pack(fill='x', pady=10)
         
+        # Multi API Key Management Section
+        multi_key_frame = tk.Frame(section_frame)
+        multi_key_frame.pack(anchor=tk.W, fill=tk.X, pady=(0, 15))
+        
+        # Multi-key indicator and button in same row
+        multi_key_row = tk.Frame(multi_key_frame)
+        multi_key_row.pack(fill=tk.X)
+        
+        # Show status if multi-key is enabled
+        if self.config.get('use_multi_api_keys', False):
+            multi_keys = self.config.get('multi_api_keys', [])
+            active_keys = sum(1 for k in multi_keys if k.get('enabled', True))
+            
+            status_frame = tk.Frame(multi_key_row)
+            status_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            
+            tk.Label(status_frame, text="🔑 Multi-Key Mode:", 
+                    font=('TkDefaultFont', 11, 'bold')).pack(side=tk.LEFT)
+            
+            tk.Label(status_frame, text=f"ACTIVE ({active_keys}/{len(multi_keys)} keys)", 
+                    font=('TkDefaultFont', 11, 'bold'), fg='green').pack(side=tk.LEFT, padx=(5, 0))
+        else:
+            tk.Label(multi_key_row, text="🔑 Multi-Key Mode: DISABLED", 
+                    font=('TkDefaultFont', 11), fg='gray').pack(side=tk.LEFT)
+        
+        # Multi API Key Manager button
+        tb.Button(multi_key_row, text="Configure API Keys", 
+                  command=self.open_multi_api_key_manager,
+                  bootstyle="primary-outline",
+                  width=20).pack(side=tk.RIGHT)
+        
+        tk.Label(section_frame, text="Manage multiple API keys with automatic rotation and rate limit handling",
+                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+        
+        # Add separator after Multi API Key section
+        ttk.Separator(section_frame, orient='horizontal').pack(fill='x', pady=10)
+     
         # Retry Truncated
         tb.Checkbutton(section_frame, text="Auto-retry Truncated Responses", 
                           variable=self.retry_truncated_var,
@@ -11545,7 +11591,76 @@ Recent translations to summarize:
 
         tk.Label(section_frame, text="Retry chunks/images that take too long\n(reduces tokens for faster response)",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 5))
+                
+    def toggle_gemini_endpoint(self):
+        """Enable/disable Gemini endpoint entry based on toggle"""
+        if self.use_gemini_openai_endpoint_var.get():
+            self.gemini_endpoint_entry.config(state='normal')
+        else:
+            self.gemini_endpoint_entry.config(state='disabled')
 
+    def open_multi_api_key_manager(self):
+        """Open the multi API key manager dialog"""
+        # Import here to avoid circular imports
+        try:
+            from multi_api_key_manager import MultiAPIKeyDialog
+            
+            # Create and show dialog
+            dialog = MultiAPIKeyDialog(self.master, self)
+            
+            # Wait for dialog to close
+            self.master.wait_window(dialog.dialog)
+            
+            # Refresh the settings display if in settings dialog
+            if hasattr(self, 'current_settings_dialog'):
+                # Close and reopen settings to refresh
+                self.current_settings_dialog.destroy()
+                self.show_settings()  # or open_other_settings()
+                
+        except ImportError as e:
+            messagebox.showerror("Error", f"Failed to load Multi API Key Manager: {str(e)}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Error opening Multi API Key Manager: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def _create_multi_key_row(self, parent):
+        """Create a compact multi-key configuration row"""
+        frame = tk.Frame(parent)
+        frame.pack(fill=tk.X, pady=5)
+        
+        # Status indicator
+        if self.config.get('use_multi_api_keys', False):
+            keys = self.config.get('multi_api_keys', [])
+            active = sum(1 for k in keys if k.get('enabled', True))
+            
+            # Checkbox to enable/disable
+            tb.Checkbutton(frame, text="Multi API Key Mode", 
+                          variable=self.use_multi_api_keys_var,
+                          bootstyle="round-toggle",
+                          command=self._toggle_multi_key_setting).pack(side=tk.LEFT)
+            
+            # Status
+            tk.Label(frame, text=f"({active}/{len(keys)} active)", 
+                    font=('TkDefaultFont', 10), fg='green').pack(side=tk.LEFT, padx=(5, 0))
+        else:
+            tb.Checkbutton(frame, text="Multi API Key Mode", 
+                          variable=self.use_multi_api_keys_var,
+                          bootstyle="round-toggle",
+                          command=self._toggle_multi_key_setting).pack(side=tk.LEFT)
+        
+        # Configure button
+        tb.Button(frame, text="Configure Keys...", 
+                  command=self.open_multi_api_key_manager,
+                  bootstyle="primary-outline").pack(side=tk.LEFT, padx=(20, 0))
+        
+        return frame
+                
+    def _toggle_multi_key_setting(self):
+        """Toggle multi-key mode from settings dialog"""
+        self.config['use_multi_api_keys'] = self.use_multi_api_keys_var.get()
+        # Don't save immediately, let the dialog's save button handle it
+    
     def create_ai_hunter_section(self, parent_frame):
         """Create the AI Hunter configuration section - without redundant toggle"""
         # AI Hunter Configuration
@@ -12503,6 +12618,52 @@ Recent translations to summarize:
                                bootstyle="info")
         test_button.pack(pady=10)
 
+        # Gemini OpenAI-Compatible Endpoint (inside additional_endpoints_frame)
+        gemini_frame = tb.Frame(self.additional_endpoints_frame)
+        gemini_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        # Checkbox for enabling Gemini endpoint
+        self.gemini_checkbox = tb.Checkbutton(
+            gemini_frame,
+            text="Enable Gemini OpenAI-Compatible Endpoint",
+            variable=self.use_gemini_openai_endpoint_var,
+            command=self.toggle_gemini_endpoint,  # Add the command
+            bootstyle="primary"
+        )
+        self.gemini_checkbox.pack(anchor=tk.W, pady=(5, 5))
+
+        # Gemini endpoint URL input
+        gemini_url_frame = tb.Frame(self.additional_endpoints_frame)
+        gemini_url_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        tb.Label(gemini_url_frame, text="Gemini OpenAI Endpoint:").pack(side=tk.LEFT, padx=(0, 5))
+        self.gemini_endpoint_entry = tb.Entry(gemini_url_frame, textvariable=self.gemini_openai_endpoint_var, width=50)
+        self.gemini_endpoint_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        self.gemini_clear_button = tb.Button(gemini_url_frame, text="Clear", 
+                 command=lambda: self.gemini_openai_endpoint_var.set(""),
+                 bootstyle="secondary", width=8)
+        self.gemini_clear_button.pack(side=tk.LEFT)
+
+        # Help text
+        gemini_help = tb.Label(self.additional_endpoints_frame, 
+                              text="For Gemini rate limit optimization with proxy services (e.g., OpenRouter, LiteLLM)",
+                              font=('TkDefaultFont', 8), foreground='gray')
+        gemini_help.pack(anchor=tk.W, padx=5, pady=(0, 5))
+
+        # Set initial state based on checkbox
+        if not self.use_gemini_openai_endpoint_var.get():
+            self.gemini_endpoint_entry.configure(state='disabled')
+            self.gemini_clear_button.configure(state='disabled')
+
+    def toggle_gemini_endpoint(self):
+        """Enable/disable Gemini endpoint entry based on toggle"""
+        if self.use_gemini_openai_endpoint_var.get():
+            self.gemini_endpoint_entry.configure(state='normal')
+            self.gemini_clear_button.configure(state='normal')
+        else:
+            self.gemini_endpoint_entry.configure(state='disabled')
+            self.gemini_clear_button.configure(state='disabled')
+        
     def toggle_custom_endpoint_ui(self):
         """Enable/disable the OpenAI base URL entry and clear button based on checkbox"""
         if self.use_custom_openai_endpoint_var.get():
@@ -12761,7 +12922,8 @@ Recent translations to summarize:
                     'GROQ_API_URL': self.groq_base_url_var.get() if hasattr(self, 'groq_base_url_var') and self.groq_base_url_var.get() else '',
                     'FIREWORKS_API_URL': self.fireworks_base_url_var.get() if hasattr(self, 'fireworks_base_url_var') and self.fireworks_base_url_var.get() else '',
                     'USE_CUSTOM_OPENAI_ENDPOINT': '1' if self.use_custom_openai_endpoint_var.get() else '0',
-                    
+                    'USE_GEMINI_OPENAI_ENDPOINT': '1' if self.use_gemini_openai_endpoint_var.get() else '0',
+                    'GEMINI_OPENAI_ENDPOINT': self.gemini_openai_endpoint_var.get() if self.gemini_openai_endpoint_var.get() else '',
                     # Image compression settings
                     'ENABLE_IMAGE_COMPRESSION': "1" if self.config.get('enable_image_compression', False) else "0",
                     'AUTO_COMPRESS_ENABLED': "1" if self.config.get('auto_compress_enabled', True) else "0",
@@ -12803,6 +12965,7 @@ Recent translations to summarize:
                     'LOGIT_BIAS_STRENGTH': str(self.logit_bias_strength_var.get()) if hasattr(self, 'logit_bias_strength_var') else '-0.5',
                     'BIAS_COMMON_WORDS': '1' if hasattr(self, 'bias_common_words_var') and self.bias_common_words_var.get() else '0',
                     'BIAS_REPETITIVE_PHRASES': '1' if hasattr(self, 'bias_repetitive_phrases_var') and self.bias_repetitive_phrases_var.get() else '0',
+                    
                 }
                 os.environ.update(env_updates)
                 
@@ -13312,6 +13475,8 @@ Recent translations to summarize:
             self.config['fireworks_base_url'] = self.fireworks_base_url_var.get()
             self.config['use_custom_openai_endpoint'] = self.use_custom_openai_endpoint_var.get()
             self.config['disable_chapter_merging'] = self.disable_chapter_merging_var.get()
+            self.config['use_gemini_openai_endpoint'] = self.use_gemini_openai_endpoint_var.get()
+            self.config['gemini_openai_endpoint'] = self.gemini_openai_endpoint_var.get()
             # New cleaner UI variables
             if hasattr(self, 'text_extraction_method_var'):
                 self.config['text_extraction_method'] = self.text_extraction_method_var.get()
