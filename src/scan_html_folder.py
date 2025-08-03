@@ -40,6 +40,7 @@ import time
 import html as html_lib
 from typing import Dict, List, Tuple, Set, Optional
 import warnings
+from functools import lru_cache
 warnings.filterwarnings('ignore')
 
 # Try to import optional dependencies
@@ -173,7 +174,236 @@ TRANSLATION_ARTIFACTS = {
     'split_indicators': re.compile(r'(part \d+|section \d+|\(\d+/\d+\))', re.IGNORECASE),
     'api_response_unavailable': re.compile(r'\[AI RESPONSE UNAVAILABLE\]|\[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED\]|\[IMAGE TRANSLATION FAILED\]', re.IGNORECASE)
 }
+# Cache configuration - will be updated by configure_qa_cache()
+_cache_config = {
+    "enabled": True,
+    "sizes": {
+        "normalize_text": 10000,
+        "similarity_ratio": 20000,
+        "content_hashes": 5000,
+        "semantic_fingerprint": 2000,
+        "structural_signature": 2000,
+        "semantic_similarity": 5000,
+        "structural_similarity": 5000,
+        "file_extraction": 200
+    }
+}
 
+def configure_qa_cache(config):
+    """Update cache configuration"""
+    global _cache_config
+    _cache_config.update(config)
+    # Clear existing caches after configuration
+    clear_qa_caches()
+    # Re-apply caches with new sizes
+    _apply_caches()
+
+def get_cache_size(func_name):
+    """Get configured cache size for a function"""
+    if not _cache_config.get("enabled", True):
+        return 0  # Disable cache
+    
+    size = _cache_config.get("sizes", {}).get(func_name, 1000)
+    return None if size == -1 else size
+
+# Define functions WITHOUT decorators first
+def extract_semantic_fingerprint_impl(text):
+    """Extract semantic fingerprint and signature from text"""
+    # For cache efficiency with long texts
+    cache_text = text[:50000] if len(text) > 50000 else text
+    
+    # Extract features for semantic analysis
+    words = cache_text.lower().split()
+    
+    # Character names (words starting with capital letters, appearing multiple times)
+    potential_names = re.findall(r'\b[A-Z][a-z]+\b', cache_text)
+    name_freq = Counter(potential_names)
+    characters = [name for name, count in name_freq.items() 
+                  if count >= 3 and name not in COMMON_WORDS]
+    
+    # Dialogue density
+    dialogue_count = len(re.findall(r'["\"\'""''『』「」]([^"\"\'""''『』「」]+)["\"\'""''『』「」]', cache_text))
+    dialogue_density = dialogue_count / max(1, len(words)) if words else 0
+    
+    # Action words density
+    action_words = len(re.findall(r'\b(\w+ed|spoke|says?|asks?|replies?|shouts?|screams?|whispers?)\b', cache_text))
+    action_density = action_words / max(1, len(words)) if words else 0
+    
+    # Numbers in text
+    numbers = re.findall(r'\b\d+\b', cache_text)
+    
+    # Create fingerprint string
+    fingerprint = f"chars:{len(characters)}_dial:{dialogue_density:.2f}_act:{action_density:.2f}_nums:{len(numbers)}_words:{len(words)}"
+    
+    # Create signature dict
+    signature = {
+        'characters': characters[:20],  # Top 20 characters
+        'dialogue_density': dialogue_density,
+        'action_density': action_density,
+        'numbers': numbers[:50],  # First 50 numbers
+        'text_length': len(cache_text)
+    }
+    
+    return fingerprint, signature
+
+def extract_structural_signature_impl(text):
+    """Extract structural patterns from text"""
+    # For cache efficiency with long texts
+    cache_text = text[:50000] if len(text) > 50000 else text
+    
+    lines = cache_text.split('\n')
+    
+    # Count different types of lines
+    para_count = len([l for l in lines if len(l.strip()) > 50])
+    short_lines = len([l for l in lines if 0 < len(l.strip()) < 20])
+    empty_lines = len([l for l in lines if not l.strip()])
+    
+    # Dialogue patterns
+    dialogue_lines = len(re.findall(r'["\"\'""''『』「」].*?["\"\'""''『』「」]', cache_text))
+    
+    # Create pattern string (first letter of each line type)
+    pattern = ''
+    for line in lines[:100]:  # First 100 lines
+        if not line.strip():
+            pattern += 'E'  # Empty
+        elif len(line.strip()) < 20:
+            pattern += 'S'  # Short
+        elif re.search(r'["\"\'""''『』「」]', line):
+            pattern += 'D'  # Dialogue
+        else:
+            pattern += 'P'  # Paragraph
+    
+    # Calculate average paragraph length
+    paragraphs = [l for l in lines if len(l.strip()) > 50]
+    avg_para_length = sum(len(p) for p in paragraphs) / max(1, len(paragraphs)) if paragraphs else 0
+    
+    # Dialogue ratio
+    dialogue_ratio = dialogue_lines / max(1, len(lines))
+    
+    signature = {
+        'pattern': pattern,
+        'paragraph_count': para_count,
+        'avg_paragraph_length': avg_para_length,
+        'dialogue_ratio': dialogue_ratio,
+        'short_lines': short_lines,
+        'empty_lines': empty_lines
+    }
+    
+    return signature
+
+def extract_content_fingerprint_impl(text):
+    """Extract key sentences that can identify duplicate content"""
+    lines = [line.strip() for line in text.split('\n') 
+             if len(line.strip()) > 50 and not is_dash_separator_line(line)]
+    
+    if len(lines) < 5:
+        return ""
+    
+    # Take first, middle, and last substantial sentences
+    fingerprint_lines = []
+    if len(lines) >= 3:
+        fingerprint_lines = [lines[0], lines[len(lines)//2], lines[-1]]
+    else:
+        fingerprint_lines = lines[:3]
+    
+    return ' '.join(fingerprint_lines).lower()
+
+# Initialize cached versions
+extract_semantic_fingerprint = None
+extract_structural_signature = None
+extract_content_fingerprint = None
+
+def _apply_caches():
+    """Apply LRU cache to functions with current configuration"""
+    global extract_semantic_fingerprint, extract_structural_signature, extract_content_fingerprint
+    
+    # Apply caching with current sizes
+    extract_semantic_fingerprint = lru_cache(maxsize=get_cache_size("semantic_fingerprint") or 2000)(extract_semantic_fingerprint_impl)
+    extract_structural_signature = lru_cache(maxsize=get_cache_size("structural_signature") or 2000)(extract_structural_signature_impl)
+    extract_content_fingerprint = lru_cache(maxsize=get_cache_size("content_fingerprint") or 2000)(extract_content_fingerprint_impl)
+
+# Apply initial caches
+_apply_caches()
+
+def clear_qa_caches():
+    """Clear all QA scanner caches"""
+    # Clear directly cached functions
+    if hasattr(normalize_text, 'cache_clear'):
+        normalize_text.cache_clear()
+    
+    if hasattr(generate_content_hashes, 'cache_clear'):
+        generate_content_hashes.cache_clear()
+    
+    if hasattr(calculate_similarity_ratio, 'cache_clear'):
+        calculate_similarity_ratio.cache_clear()
+    
+    # Clear the actual cached implementations
+    if hasattr(_calculate_semantic_similarity_cached, 'cache_clear'):
+        _calculate_semantic_similarity_cached.cache_clear()
+    
+    if hasattr(_calculate_structural_similarity_cached, 'cache_clear'):
+        _calculate_structural_similarity_cached.cache_clear()
+    
+    if hasattr(calculate_semantic_fingerprint_similarity, 'cache_clear'):
+        calculate_semantic_fingerprint_similarity.cache_clear()
+    
+    if hasattr(extract_semantic_fingerprint, 'cache_clear'):
+        extract_semantic_fingerprint.cache_clear()
+    
+    if hasattr(extract_structural_signature, 'cache_clear'):
+        extract_structural_signature.cache_clear()
+    
+    if hasattr(extract_content_fingerprint, 'cache_clear'):
+        extract_content_fingerprint.cache_clear()
+    
+    if hasattr(_extract_text_from_html_cached, 'cache_clear'):
+        _extract_text_from_html_cached.cache_clear()
+    
+def get_cache_info():
+    """Get cache statistics for all cached functions"""
+    cache_info = {}
+    
+    # For functions that are directly cached
+    if hasattr(normalize_text, 'cache_info'):
+        cache_info['normalize_text'] = normalize_text.cache_info()
+    
+    if hasattr(generate_content_hashes, 'cache_info'):
+        cache_info['content_hashes'] = generate_content_hashes.cache_info()
+    
+    if hasattr(calculate_similarity_ratio, 'cache_info'):
+        cache_info['similarity_ratio'] = calculate_similarity_ratio.cache_info()
+    
+    # For wrapper functions, use the actual cached implementation
+    if hasattr(_calculate_semantic_similarity_cached, 'cache_info'):
+        cache_info['semantic_similarity'] = _calculate_semantic_similarity_cached.cache_info()
+    
+    if hasattr(_calculate_structural_similarity_cached, 'cache_info'):
+        cache_info['structural_similarity'] = _calculate_structural_similarity_cached.cache_info()
+    
+    if hasattr(calculate_semantic_fingerprint_similarity, 'cache_info'):
+        cache_info['semantic_fingerprint_similarity'] = calculate_semantic_fingerprint_similarity.cache_info()
+    
+    if hasattr(extract_semantic_fingerprint, 'cache_info'):
+        cache_info['semantic_fingerprint'] = extract_semantic_fingerprint.cache_info()
+    
+    if hasattr(extract_structural_signature, 'cache_info'):
+        cache_info['structural_signature'] = extract_structural_signature.cache_info()
+    
+    if hasattr(extract_content_fingerprint, 'cache_info'):
+        cache_info['content_fingerprint'] = extract_content_fingerprint.cache_info()
+    
+    if hasattr(_extract_text_from_html_cached, 'cache_info'):
+        cache_info['file_extraction'] = _extract_text_from_html_cached.cache_info()
+    
+    return cache_info
+
+# For very long texts, we'll use a hash as cache key
+def _get_cache_key(text, max_length=10000):
+    """Generate a cache key for text, using hash for long texts"""
+    if len(text) > max_length:
+        return hashlib.md5(text.encode('utf-8')).hexdigest()
+    return text
+    
 def extract_text_from_html(file_path):
     """Extract text from HTML or TXT file
     
@@ -182,6 +412,17 @@ def extract_text_from_html(file_path):
             - For backwards compatibility: just the text (if not checking HTML structure)
             - For new functionality: (text_content, has_html_tag) tuple
     """
+    # Get file modification time as part of cache key
+    try:
+        mtime = os.path.getmtime(file_path)
+        cache_key = f"{file_path}:{mtime}"
+    except OSError:
+        cache_key = file_path
+    
+    return _extract_text_from_html_cached(cache_key, file_path)
+
+def _extract_text_from_html_cached(cache_key, file_path):
+    """Cached implementation of extract_text_from_html"""
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
         content = f.read()
         
@@ -197,6 +438,9 @@ def extract_text_from_html(file_path):
     # For backwards compatibility, we'll handle the HTML tag check separately
     # in the scan function rather than always returning a tuple
     return text
+
+# Configure cache size dynamically
+_extract_text_from_html_cached = lru_cache(maxsize=get_cache_size("file_extraction") or 200)(_extract_text_from_html_cached)
 
 import re
 
@@ -390,9 +634,99 @@ def detect_translation_artifacts(text):
     
     return artifacts_found
 
+def extract_semantic_fingerprint(text):
+    """Extract semantic fingerprint and signature from text - CACHED VERSION"""
+    # For cache efficiency with long texts
+    cache_text = text[:50000] if len(text) > 50000 else text
+    
+    # Extract features for semantic analysis
+    words = cache_text.lower().split()
+    
+    # Character names (words starting with capital letters, appearing multiple times)
+    potential_names = re.findall(r'\b[A-Z][a-z]+\b', cache_text)
+    name_freq = Counter(potential_names)
+    characters = [name for name, count in name_freq.items() 
+                  if count >= 3 and name not in COMMON_WORDS]
+    
+    # Dialogue density
+    dialogue_count = len(re.findall(r'["\"\'""''『』「」]([^"\"\'""''『』「」]+)["\"\'""''『』「」]', cache_text))
+    dialogue_density = dialogue_count / max(1, len(words)) if words else 0
+    
+    # Action words density
+    action_words = len(re.findall(r'\b(\w+ed|spoke|says?|asks?|replies?|shouts?|screams?|whispers?)\b', cache_text))
+    action_density = action_words / max(1, len(words)) if words else 0
+    
+    # Numbers in text
+    numbers = re.findall(r'\b\d+\b', cache_text)
+    
+    # Create fingerprint string
+    fingerprint = f"chars:{len(characters)}_dial:{dialogue_density:.2f}_act:{action_density:.2f}_nums:{len(numbers)}_words:{len(words)}"
+    
+    # Create signature dict
+    signature = {
+        'characters': characters[:20],  # Top 20 characters
+        'dialogue_density': dialogue_density,
+        'action_density': action_density,
+        'numbers': numbers[:50],  # First 50 numbers
+        'text_length': len(cache_text)
+    }
+    
+    return fingerprint, signature
+
+# Apply dynamic caching
+extract_semantic_fingerprint = lru_cache(maxsize=get_cache_size("semantic_fingerprint") or 2000)(extract_semantic_fingerprint)
+
+def extract_structural_signature(text):
+    """Extract structural patterns from text - CACHED VERSION"""
+    # For cache efficiency with long texts
+    cache_text = text[:50000] if len(text) > 50000 else text
+    
+    lines = cache_text.split('\n')
+    
+    # Count different types of lines
+    para_count = len([l for l in lines if len(l.strip()) > 50])
+    short_lines = len([l for l in lines if 0 < len(l.strip()) < 20])
+    empty_lines = len([l for l in lines if not l.strip()])
+    
+    # Dialogue patterns
+    dialogue_lines = len(re.findall(r'["\"\'""''『』「」].*?["\"\'""''『』「」]', cache_text))
+    
+    # Create pattern string (first letter of each line type)
+    pattern = ''
+    for line in lines[:100]:  # First 100 lines
+        if not line.strip():
+            pattern += 'E'  # Empty
+        elif len(line.strip()) < 20:
+            pattern += 'S'  # Short
+        elif re.search(r'["\"\'""''『』「」]', line):
+            pattern += 'D'  # Dialogue
+        else:
+            pattern += 'P'  # Paragraph
+    
+    # Calculate average paragraph length
+    paragraphs = [l for l in lines if len(l.strip()) > 50]
+    avg_para_length = sum(len(p) for p in paragraphs) / max(1, len(paragraphs)) if paragraphs else 0
+    
+    # Dialogue ratio
+    dialogue_ratio = dialogue_lines / max(1, len(lines))
+    
+    signature = {
+        'pattern': pattern,
+        'paragraph_count': para_count,
+        'avg_paragraph_length': avg_para_length,
+        'dialogue_ratio': dialogue_ratio,
+        'short_lines': short_lines,
+        'empty_lines': empty_lines
+    }
+    
+    return signature
+
 def extract_content_fingerprint(text):
-    """Extract key sentences that can identify duplicate content"""
-    lines = [line.strip() for line in text.split('\n') 
+    """Extract key sentences that can identify duplicate content - CACHED VERSION"""
+    # For cache efficiency with very long texts, limit to first 100KB
+    cache_text = text[:100000] if len(text) > 100000 else text
+    
+    lines = [line.strip() for line in cache_text.split('\n') 
              if len(line.strip()) > 50 and not is_dash_separator_line(line)]
     
     if len(lines) < 5:
@@ -407,91 +741,8 @@ def extract_content_fingerprint(text):
     
     return ' '.join(fingerprint_lines).lower()
 
-def extract_semantic_fingerprint(text):
-    """Extract key narrative elements for semantic comparison"""
-    # Extract potential character names (capitalized words appearing multiple times)
-    words = re.findall(r'\b[A-Z][a-z]+\b', text)
-    name_candidates = Counter(words)
-    likely_names = [name for name, count in name_candidates.items() 
-                   if count >= 3 and name not in COMMON_WORDS]
-    
-    # Extract quoted dialogue count
-    dialogue_count = len(re.findall(r'[""]([^""]+)[""]', text))
-    
-    # Extract action verbs (past tense)
-    action_verbs = len(re.findall(r'\b\w+ed\b', text))
-    
-    # Extract numbers and quantities
-    numbers = re.findall(r'\b\d+\b', text)
-    
-    # Create semantic signature
-    semantic_sig = {
-        'characters': sorted(likely_names)[:10],  # Top 10 character names
-        'dialogue_density': dialogue_count / max(1, len(text.split('\n'))),
-        'action_density': action_verbs / max(1, len(text.split())),
-        'numbers': sorted(set(numbers))[:20],
-        'text_length': len(text)
-    }
-    
-    # Convert to string for hashing
-    semantic_str = f"chars:{','.join(semantic_sig['characters'])}" \
-                  f"_dial:{semantic_sig['dialogue_density']:.2f}" \
-                  f"_act:{semantic_sig['action_density']:.2f}" \
-                  f"_nums:{','.join(semantic_sig['numbers'])}"
-    
-    return semantic_str, semantic_sig
-
-def extract_structural_signature(text):
-    """Create a signature based on paragraph lengths and dialogue patterns"""
-    lines = text.split('\n')
-    structure = []
-    paragraph_lengths = []
-    current_para_length = 0
-    
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            if current_para_length > 0:
-                paragraph_lengths.append(current_para_length)
-                current_para_length = 0
-            continue
-            
-        current_para_length += len(stripped)
-        
-        # Classify line type
-        if any(quote in stripped for quote in ['"', '"', '「', '『', "'", '"']):
-            structure.append('D')  # Dialogue
-        elif len(stripped) < 50:
-            structure.append('S')  # Short
-        else:
-            structure.append('N')  # Narrative
-    
-    if current_para_length > 0:
-        paragraph_lengths.append(current_para_length)
-    
-    # Create structural pattern
-    structural_pattern = ''.join(structure)
-    
-    # Compress pattern by counting consecutive similar elements
-    compressed = []
-    if structural_pattern:
-        current = structural_pattern[0]
-        count = 1
-        for char in structural_pattern[1:]:
-            if char == current:
-                count += 1
-            else:
-                compressed.append(f"{current}{count}")
-                current = char
-                count = 1
-        compressed.append(f"{current}{count}")
-    
-    return {
-        'pattern': ''.join(compressed),
-        'paragraph_count': len(paragraph_lengths),
-        'avg_paragraph_length': sum(paragraph_lengths) / max(1, len(paragraph_lengths)),
-        'dialogue_ratio': structure.count('D') / max(1, len(structure))
-    }
+# Configure cache size dynamically
+extract_content_fingerprint = lru_cache(maxsize=get_cache_size("content_fingerprint"))(extract_content_fingerprint)
 
 def roman_to_int(s):
     """Convert Roman numerals to integer"""
@@ -681,8 +932,13 @@ def create_minhash_index(results, config):
     
     return lsh, minhashes
 
+def _normalize_text_cached(cache_key):
+    """Cached implementation of normalize_text"""
+    # This will be called with the actual text
+    return cache_key
+
 def normalize_text(text):
-    """Normalize text for comparison"""
+    """Normalize text for comparison - CACHED VERSION"""
     normalized = text.lower().strip()
     
     # Remove chapter indicators
@@ -702,8 +958,21 @@ def normalize_text(text):
     
     return normalized
 
+# Configure cache size dynamically
+normalize_text = lru_cache(maxsize=get_cache_size("normalize_text"))(normalize_text)
+
+@lru_cache(maxsize=5000)
+def _generate_content_hashes_cached(text_hash):
+    """Cached helper for generate_content_hashes"""
+    # This is just a placeholder - actual implementation is in the main function
+    return text_hash
+
+@lru_cache(maxsize=5000)
 def generate_content_hashes(text):
-    """Generate multiple hashes for better duplicate detection"""
+    """Generate multiple hashes for better duplicate detection - CACHED VERSION"""
+    # For very long texts, use first 50KB for cache key
+    cache_key = _get_cache_key(text, 50000)
+    
     normalized = normalize_text(text)
     
     # 1. Raw hash
@@ -728,14 +997,23 @@ def generate_content_hashes(text):
     first_chunk = normalized[:1000] if len(normalized) > 1000 else normalized
     first_chunk_hash = hashlib.md5(first_chunk.encode('utf-8')).hexdigest()
     
-    # 6. Semantic fingerprint hash
-    semantic_str, _ = extract_semantic_fingerprint(text)
-    semantic_hash = hashlib.md5(semantic_str.encode('utf-8')).hexdigest()
+    # 6. Semantic fingerprint hash - FIXED
+    semantic_result = extract_semantic_fingerprint(text)
+    if semantic_result and isinstance(semantic_result, tuple) and len(semantic_result) >= 2:
+        semantic_str = semantic_result[0]
+        semantic_hash = hashlib.md5(semantic_str.encode('utf-8')).hexdigest()
+    else:
+        # Fallback if function returns unexpected value
+        semantic_hash = hashlib.md5(text[:1000].encode('utf-8')).hexdigest()
     
     # 7. Structural signature hash
     structural_sig = extract_structural_signature(text)
-    structural_str = json.dumps(structural_sig, sort_keys=True)
-    structural_hash = hashlib.md5(structural_str.encode('utf-8')).hexdigest()
+    if structural_sig:
+        structural_str = json.dumps(structural_sig, sort_keys=True)
+        structural_hash = hashlib.md5(structural_str.encode('utf-8')).hexdigest()
+    else:
+        # Fallback
+        structural_hash = hashlib.md5(text[:500].encode('utf-8')).hexdigest()
     
     return {
         'raw': raw_hash,
@@ -747,8 +1025,18 @@ def generate_content_hashes(text):
         'structural': structural_hash
     }
 
+@lru_cache(maxsize=20000)
+def _calculate_similarity_ratio_cached(text1_hash, text2_hash):
+    """Cached helper for similarity ratio"""
+    return (text1_hash, text2_hash)
+
+@lru_cache(maxsize=20000)
 def calculate_similarity_ratio(text1, text2):
-    """Calculate similarity with optimizations for large texts"""
+    """Calculate similarity with optimizations for large texts - CACHED VERSION"""
+    # Ensure consistent ordering for cache
+    if text1 > text2:
+        text1, text2 = text2, text1
+    
     len_ratio = len(text1) / max(1, len(text2))
     if len_ratio < 0.7 or len_ratio > 1.3:
         return 0.0
@@ -770,80 +1058,72 @@ def calculate_similarity_ratio(text1, text2):
     else:
         return SequenceMatcher(None, text1, text2).ratio()
 
+# Configure cache size dynamically
+calculate_similarity_ratio = lru_cache(maxsize=get_cache_size("similarity_ratio"))(calculate_similarity_ratio)
+
+# This function should NOT be cached directly
 def calculate_semantic_similarity(sig1, sig2):
-    """Calculate similarity between two semantic signatures"""
+    """Calculate similarity between two semantic signatures
+    This wrapper handles dict inputs and calls the cached implementation
+    """
+    # Convert dicts to JSON strings
+    if isinstance(sig1, dict):
+        sig1_json = json.dumps(sig1, sort_keys=True)
+    else:
+        sig1_json = sig1
+        
+    if isinstance(sig2, dict):
+        sig2_json = json.dumps(sig2, sort_keys=True)
+    else:
+        sig2_json = sig2
+    
+    # Call the cached implementation with JSON strings
+    return _calculate_semantic_similarity_cached(sig1_json, sig2_json)
+
+# This function IS cached because it only receives JSON strings
+def _calculate_semantic_similarity_cached(sig1_json, sig2_json):
+    """Cached implementation that works with JSON strings"""
+    sig1 = json.loads(sig1_json)
+    sig2 = json.loads(sig2_json)
+    
     # Character overlap
-    chars1 = set(sig1['characters'])
-    chars2 = set(sig2['characters'])
+    chars1 = set(sig1.get('characters', []))
+    chars2 = set(sig2.get('characters', []))
     char_overlap = len(chars1 & chars2) / max(1, len(chars1 | chars2))
     
     # Dialogue density similarity
-    dial_sim = 1 - abs(sig1['dialogue_density'] - sig2['dialogue_density'])
+    dial_sim = 1 - abs(sig1.get('dialogue_density', 0) - sig2.get('dialogue_density', 0))
     
     # Action density similarity
-    act_sim = 1 - abs(sig1['action_density'] - sig2['action_density'])
+    act_sim = 1 - abs(sig1.get('action_density', 0) - sig2.get('action_density', 0))
     
     # Number overlap
-    nums1 = set(sig1['numbers'])
-    nums2 = set(sig2['numbers'])
+    nums1 = set(sig1.get('numbers', []))
+    nums2 = set(sig2.get('numbers', []))
     num_overlap = len(nums1 & nums2) / max(1, len(nums1 | nums2)) if nums1 or nums2 else 1
     
     # Length similarity
-    len_ratio = min(sig1['text_length'], sig2['text_length']) / max(1, max(sig1['text_length'], sig2['text_length']))
+    len_ratio = min(sig1.get('text_length', 1), sig2.get('text_length', 1)) / max(1, max(sig1.get('text_length', 1), sig2.get('text_length', 1)))
     
     # Weighted average
     return (char_overlap * 0.4 + dial_sim * 0.2 + act_sim * 0.2 + num_overlap * 0.1 + len_ratio * 0.1)
-    
+
+# Apply caching ONLY to the implementation function, NOT the wrapper
+_calculate_semantic_similarity_cached = lru_cache(maxsize=get_cache_size("semantic_similarity") or 5000)(_calculate_semantic_similarity_cached)
+
+# Make sure calculate_semantic_similarity is NOT cached
+# If there's any line like this, REMOVE IT:
+# calculate_semantic_similarity = lru_cache(...)(calculate_semantic_similarity)
+
+
 def calculate_semantic_fingerprint_similarity(text1, text2):
-    """Calculate similarity based on semantic structure rather than exact wording"""
+    """Calculate similarity based on semantic structure rather than exact wording - CACHED VERSION"""
+    # For very long texts, truncate for cache efficiency
+    cache_text1 = text1[:100000] if len(text1) > 100000 else text1
+    cache_text2 = text2[:100000] if len(text2) > 100000 else text2
     
-    # Step 1: Extract structural elements that persist across translations
-    def extract_semantic_fingerprint(text):
-        # Remove HTML tags
-        text = re.sub(r'<[^>]+>', ' ', text)
-        
-        # Extract all quoted dialogue (preserving order)
-        dialogue_pattern = r'["\"\'""''『』「」]([^"\"\'""''『』「」]+)["\"\'""''『』「」]'
-        dialogues = re.findall(dialogue_pattern, text)
-        
-        # Extract character names that appear multiple times
-        potential_names = re.findall(r'\b[A-Z][a-z]+\b', text)
-        name_freq = {}
-        for name in potential_names:
-            if name not in ['The', 'A', 'An', 'In', 'On', 'At', 'To', 'From', 'With', 'By', 'For', 'Of', 'As', 'But', 'And', 'Or']:
-                name_freq[name] = name_freq.get(name, 0) + 1
-        
-        # Characters mentioned 3+ times are likely actual characters
-        character_names = [name for name, count in name_freq.items() if count >= 3]
-        
-        # Extract numbers (these rarely change in translation)
-        numbers = re.findall(r'\b\d+\b', text)
-        
-        # Extract the sequence of speaker+action patterns
-        # This captures "X said", "Y asked", etc.
-        speaker_actions = re.findall(r'([A-Z][a-z]+)\s+(\w+ed|spoke|says?|asks?|replies?|shouts?|screams?|whispers?)', text)
-        
-        # Extract paragraph structure (length of each paragraph)
-        paragraphs = text.split('\n')
-        para_lengths = [len(p.strip()) for p in paragraphs if len(p.strip()) > 20]
-        
-        # Create a structural signature
-        signature = {
-            'dialogue_count': len(dialogues),
-            'dialogue_lengths': [len(d) for d in dialogues[:50]],  # First 50 dialogue lengths
-            'characters': sorted(character_names),
-            'character_frequencies': sorted([name_freq[name] for name in character_names]),
-            'numbers': sorted(numbers),
-            'speaker_sequence': [f"{speaker}_{action}" for speaker, action in speaker_actions[:30]],
-            'paragraph_structure': para_lengths[:50],  # First 50 paragraph lengths
-            'unique_words': len(set(text.lower().split())),
-            'total_words': len(text.split())
-        }
-        
-        return signature
-    
-    sig1 = extract_semantic_fingerprint(text1)
-    sig2 = extract_semantic_fingerprint(text2)
+    sig1 = _extract_semantic_fingerprint_for_similarity(cache_text1)
+    sig2 = _extract_semantic_fingerprint_for_similarity(cache_text2)
     
     similarities = []
     
@@ -904,24 +1184,59 @@ def calculate_semantic_fingerprint_similarity(text1, text2):
     else:
         return 0.0
 
+# Configure cache size dynamically
+calculate_semantic_fingerprint_similarity = lru_cache(maxsize=get_cache_size("semantic_fingerprint"))(calculate_semantic_fingerprint_similarity)
+
+# This function should NOT be cached directly - it's the wrapper
 def calculate_structural_similarity(struct1, struct2):
-    """Calculate similarity between two structural signatures"""
+    """Calculate similarity between two structural signatures
+    This wrapper handles dict inputs and calls the cached implementation
+    """
+    # Convert dicts to JSON strings
+    if isinstance(struct1, dict):
+        struct1_json = json.dumps(struct1, sort_keys=True)
+    else:
+        struct1_json = struct1
+        
+    if isinstance(struct2, dict):
+        struct2_json = json.dumps(struct2, sort_keys=True)
+    else:
+        struct2_json = struct2
+    
+    # Call the cached implementation with JSON strings
+    return _calculate_structural_similarity_cached(struct1_json, struct2_json)
+
+# This function IS cached because it only receives JSON strings
+def _calculate_structural_similarity_cached(struct1_json, struct2_json):
+    """Cached implementation that works with JSON strings"""
+    # Convert JSON strings back to dictionaries
+    struct1 = json.loads(struct1_json)
+    struct2 = json.loads(struct2_json)
+    
     # Pattern similarity
-    pattern_sim = SequenceMatcher(None, struct1['pattern'], struct2['pattern']).ratio()
+    pattern_sim = SequenceMatcher(None, struct1.get('pattern', ''), struct2.get('pattern', '')).ratio()
     
     # Paragraph count similarity
-    para_ratio = min(struct1['paragraph_count'], struct2['paragraph_count']) / \
-                 max(1, max(struct1['paragraph_count'], struct2['paragraph_count']))
+    para_ratio = min(struct1.get('paragraph_count', 1), struct2.get('paragraph_count', 1)) / \
+                 max(1, max(struct1.get('paragraph_count', 1), struct2.get('paragraph_count', 1)))
     
     # Average paragraph length similarity
-    len_ratio = min(struct1['avg_paragraph_length'], struct2['avg_paragraph_length']) / \
-                max(1, max(struct1['avg_paragraph_length'], struct2['avg_paragraph_length']))
+    len_ratio = min(struct1.get('avg_paragraph_length', 1), struct2.get('avg_paragraph_length', 1)) / \
+                max(1, max(struct1.get('avg_paragraph_length', 1), struct2.get('avg_paragraph_length', 1)))
     
     # Dialogue ratio similarity
-    dial_sim = 1 - abs(struct1['dialogue_ratio'] - struct2['dialogue_ratio'])
+    dial_sim = 1 - abs(struct1.get('dialogue_ratio', 0) - struct2.get('dialogue_ratio', 0))
     
     # Weighted average
     return (pattern_sim * 0.5 + para_ratio * 0.2 + len_ratio * 0.15 + dial_sim * 0.15)
+
+# Apply caching ONLY to the implementation function, NOT the wrapper
+_calculate_structural_similarity_cached = lru_cache(maxsize=get_cache_size("structural_similarity") or 5000)(_calculate_structural_similarity_cached)
+
+# Configure cache sizes for helper functions
+extract_semantic_fingerprint = lru_cache(maxsize=get_cache_size("semantic_fingerprint"))(extract_semantic_fingerprint)
+extract_structural_signature = lru_cache(maxsize=get_cache_size("structural_signature"))(extract_structural_signature)
+extract_content_fingerprint = lru_cache(maxsize=get_cache_size("content_fingerprint"))(extract_content_fingerprint)
 
 def extract_chapter_title(text):
     """Extract chapter title from text"""
@@ -966,8 +1281,51 @@ def merge_duplicate_groups(duplicate_groups, filename1, filename2):
             if group == max_group:
                 duplicate_groups[filename] = min_group
 
+
 def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence, config, log, should_stop=None):
-    """Additional duplicate detection specifically for different naming formats"""
+    """Additional duplicate detection specifically for different naming formats - CACHED VERSION"""
+    
+    # Create cached comparison functions for this detection run
+    @lru_cache(maxsize=5000)
+    def compare_texts_cached(text1_hash, text2_hash, text1_len, text2_len):
+        """Cached text comparison - returns similarity ratio"""
+        # Find actual texts by hash in our results
+        text1, text2 = None, None
+        for result in results:
+            text = result.get('raw_text', '')[:5000]
+            if hashlib.md5(text.encode()).hexdigest() == text1_hash:
+                text1 = text
+            if hashlib.md5(text.encode()).hexdigest() == text2_hash:
+                text2 = text
+        
+        if text1 and text2:
+            return calculate_similarity_ratio(text1, text2)
+        return 0.0
+    
+    @lru_cache(maxsize=2000)
+    def normalize_preview_cached(preview_hash):
+        """Cached preview normalization"""
+        # Find actual preview by hash
+        for result in results:
+            preview = result.get('raw_text', '')[:1000].strip()
+            if hashlib.md5(preview.encode()).hexdigest() == preview_hash:
+                return ' '.join(preview.split()[:50])  # First 50 words
+        return ""
+    
+    # Pre-compute hashes for all texts to enable caching
+    text_hashes = {}
+    preview_hashes = {}
+    for i, result in enumerate(results):
+        text = result.get('raw_text', '')[:5000]
+        preview = result.get('raw_text', '')[:1000].strip()
+        text_hashes[i] = {
+            'hash': hashlib.md5(text.encode()).hexdigest(),
+            'length': len(text)
+        }
+        preview_hashes[i] = {
+            'hash': hashlib.md5(preview.encode()).hexdigest(),
+            'text': preview
+        }
     
     # First, normalize all chapter numbers
     normalize_chapter_numbers(results)
@@ -997,16 +1355,23 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
                     idx1, result1 = group[i]
                     idx2, result2 = group[j]
                     
-                    # Check content similarity
-                    text1 = result1.get('raw_text', '')[:5000]
-                    text2 = result2.get('raw_text', '')[:5000]
+                    # Use cached comparison
+                    hash1 = text_hashes[idx1]['hash']
+                    hash2 = text_hashes[idx2]['hash']
+                    len1 = text_hashes[idx1]['length']
+                    len2 = text_hashes[idx2]['length']
                     
-                    similarity = calculate_similarity_ratio(text1, text2)
+                    # Ensure consistent ordering for cache
+                    if hash1 > hash2:
+                        hash1, hash2 = hash2, hash1
+                        len1, len2 = len2, len1
+                    
+                    similarity = compare_texts_cached(hash1, hash2, len1, len2)
                     
                     # Log what we're comparing
                     log(f"      Comparing: {result1['filename']} vs {result2['filename']}")
-                    log(f"      Preview 1: {text1[:100]}...")
-                    log(f"      Preview 2: {text2[:100]}...")
+                    log(f"      Preview 1: {result1.get('raw_text', '')[:100]}...")
+                    log(f"      Preview 2: {result2.get('raw_text', '')[:100]}...")
                     log(f"      Similarity: {int(similarity*100)}%")
                     
                     if similarity >= config.get_threshold('similarity'):
@@ -1026,6 +1391,7 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
                         log(f"      ✓ DUPLICATE: {result1['filename']} ≈ {result2['filename']} ({int(similarity*100)}%)")
                     else:
                         log(f"      ✗ NOT SIMILAR ENOUGH (threshold: {int(config.get_threshold('similarity')*100)}%)")
+    
     # ALSO check for misnamed files - compare all files with different chapter numbers
     log("🔍 Checking for misnamed chapters (content vs filename mismatch)...")
     
@@ -1033,31 +1399,51 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
     preview_groups = {}
     total_files = len(results)
     
+    # Create a cache for preview similarity checks
+    @lru_cache(maxsize=10000)
+    def compare_preview_similarity(preview_hash1, preview_hash2):
+        """Cached preview similarity comparison"""
+        preview1 = normalize_preview_cached(preview_hash1)
+        preview2 = normalize_preview_cached(preview_hash2)
+        return calculate_similarity_ratio(preview1[:500], preview2[:500])
+    
     for i, result in enumerate(results):
         if i % 20 == 0 and i > 0:
             log(f"   📊 Grouping previews: {i}/{total_files} files processed...")
-            
-        preview = result.get('raw_text', '')[:1000].strip()
-        if not preview:
+        
+        preview_hash = preview_hashes[i]['hash']
+        if not preview_hashes[i]['text']:
             continue
-            
-        # Normalize the preview for comparison
-        normalized_preview = ' '.join(preview.split()[:50])  # First 50 words
+        
+        # Get normalized preview using cache
+        normalized_preview = normalize_preview_cached(preview_hash)
         
         # Check against existing groups
         found_group = False
-        for group_preview, group_indices in preview_groups.items():
-            similarity = calculate_similarity_ratio(normalized_preview[:500], group_preview[:500])
-            if similarity >= 0.9:  # High threshold for preview matching
-                group_indices.append((i, result))
-                found_group = True
-                break
+        for group_key, group_indices in preview_groups.items():
+            # Compare with first item in group
+            if group_indices:
+                first_idx = group_indices[0][0]
+                first_hash = preview_hashes[first_idx]['hash']
+                
+                # Ensure consistent ordering for cache
+                hash1, hash2 = preview_hash, first_hash
+                if hash1 > hash2:
+                    hash1, hash2 = hash2, hash1
+                
+                similarity = compare_preview_similarity(hash1, hash2)
+                
+                if similarity >= 0.9:  # High threshold for preview matching
+                    group_indices.append((i, result))
+                    found_group = True
+                    break
         
         if not found_group:
-            preview_groups[normalized_preview] = [(i, result)]
+            # Use preview hash as group key
+            preview_groups[preview_hash] = [(i, result)]
     
     # Check groups with multiple files
-    for preview, group in preview_groups.items():
+    for preview_key, group in preview_groups.items():
         if should_stop and should_stop():
             log("⛔ Duplicate check interrupted by user.")
             return duplicates_found
@@ -1071,10 +1457,18 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
                     idx1, result1 = group[i]
                     idx2, result2 = group[j]
                     
-                    # Do a more thorough check
-                    text1 = result1.get('raw_text', '')[:5000]
-                    text2 = result2.get('raw_text', '')[:5000]
-                    similarity = calculate_similarity_ratio(text1, text2)
+                    # Do a more thorough check using cached comparison
+                    hash1 = text_hashes[idx1]['hash']
+                    hash2 = text_hashes[idx2]['hash']
+                    len1 = text_hashes[idx1]['length']
+                    len2 = text_hashes[idx2]['length']
+                    
+                    # Ensure consistent ordering for cache
+                    if hash1 > hash2:
+                        hash1, hash2 = hash2, hash1
+                        len1, len2 = len2, len1
+                    
+                    similarity = compare_texts_cached(hash1, hash2, len1, len2)
                     
                     if similarity >= config.get_threshold('similarity'):
                         log(f"      ✓ Found duplicate content: {result1['filename']} ≈ {result2['filename']} ({int(similarity*100)}%)")
@@ -1092,9 +1486,13 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
                             'similarity': similarity
                         })
     
+    # Clear local caches when done
+    compare_texts_cached.cache_clear()
+    normalize_preview_cached.cache_clear()
+    compare_preview_similarity.cache_clear()
+    
     return duplicates_found
-
-
+    
 def detect_duplicates(results, log, should_stop, config):
     """Detect duplicates using multiple strategies with enhanced methods - PERFORMANCE OPTIMIZED"""
     duplicate_groups = {}
@@ -1103,6 +1501,34 @@ def detect_duplicates(results, log, should_stop, config):
     
     total_files = len(results)
     dup_start_time = time.time()  # Track timing for progress estimates
+    
+    # Create local cached functions for this detection run
+    @lru_cache(maxsize=10000)
+    def compare_texts_cached(text1_hash, text2_hash, max_length=2000):
+        """Cached text comparison"""
+        # Find texts by hash
+        text1, text2 = None, None
+        for result in results:
+            text = result.get('raw_text', '')[:max_length]
+            text_hash = hashlib.md5(text.encode()).hexdigest()
+            if text_hash == text1_hash:
+                text1 = text
+            if text_hash == text2_hash:
+                text2 = text
+        
+        if text1 and text2:
+            return calculate_similarity_ratio(text1, text2)
+        return 0.0
+    
+    # Pre-compute text hashes for caching
+    text_hashes = {}
+    for idx, result in enumerate(results):
+        text = result.get('raw_text', '')
+        text_hashes[idx] = {
+            'hash_2k': hashlib.md5(text[:2000].encode()).hexdigest() if len(text) >= 2000 else None,
+            'hash_5k': hashlib.md5(text[:5000].encode()).hexdigest() if len(text) >= 5000 else None,
+            'full_text': text
+        }
     
     # Extract additional signatures for all results
     log("🔍 Extracting semantic and structural signatures...")
@@ -1225,10 +1651,10 @@ def detect_duplicates(results, log, should_stop, config):
                         continue
                     
                     sem_sim = calculate_semantic_similarity(result['semantic_sig'], 
-                                                           candidate_result['semantic_sig'])
+                                                          candidate_result['semantic_sig'])
                     if sem_sim >= semantic_threshold:
                         struct_sim = calculate_structural_similarity(result['structural_sig'],
-                                                                   candidate_result['structural_sig'])
+                                                                    candidate_result['structural_sig'])
                         
                         if struct_sim >= config.get_threshold('structural'):
                             merge_duplicate_groups(duplicate_groups, 
@@ -1249,168 +1675,98 @@ def detect_duplicates(results, log, should_stop, config):
             if config.mode == 'ai-hunter':
                 log("🤖 AI Hunter mode: Enhanced semantic and structural checking active")
                 log("   ⚠️ This will check ALL file pairs - may take several minutes for large datasets")
-        
-        total_comparisons = (len(results) * (len(results) - 1)) // 2
-        comparisons_done = 0
-        last_progress = 0
-        ai_start_time = time.time()  # Use local timer for AI Hunter
-        
-        # Check EVERY pair of files
-        for i in range(len(results)):
-            if should_stop():
-                log("⛔ Semantic check interrupted by user.")
-                break
             
-            for j in range(i + 1, len(results)):
-                comparisons_done += 1
+            total_comparisons = (len(results) * (len(results) - 1)) // 2
+            comparisons_done = 0
+            last_progress = 0
+            ai_start_time = time.time()  # Use local timer for AI Hunter
+            
+            # Create cached AI Hunter comparison
+            @lru_cache(maxsize=10000)
+            def ai_hunter_check_cached(idx1, idx2):
+                """Cached AI Hunter check"""
+                sem_sim = calculate_semantic_similarity(results[idx1]['semantic_sig'], 
+                                                      results[idx2]['semantic_sig'])
+                struct_sim = calculate_structural_similarity(results[idx1]['structural_sig'],
+                                                           results[idx2]['structural_sig'])
                 
-                # Show progress every 5%
-                progress = int((comparisons_done / total_comparisons) * 100)
-                if progress >= last_progress + 5:
-                    elapsed = time.time() - ai_start_time
-                    if elapsed > 0 and comparisons_done > 0:
-                        rate = comparisons_done / elapsed
-                        remaining = (total_comparisons - comparisons_done) / rate
-                        log(f"   📊 AI Hunter progress: {comparisons_done}/{total_comparisons} ({progress}%) - ~{int(remaining)}s remaining")
+                # Quick text check
+                hash1 = text_hashes[idx1]['hash_2k']
+                hash2 = text_hashes[idx2]['hash_2k']
+                if hash1 and hash2:
+                    if hash1 > hash2:
+                        hash1, hash2 = hash2, hash1
+                    text_sim = compare_texts_cached(hash1, hash2, 2000)
+                else:
+                    text_sim = 0.0
+                
+                return sem_sim, struct_sim, text_sim
+            
+            # Check EVERY pair of files
+            for i in range(len(results)):
+                if should_stop():
+                    log("⛔ Semantic check interrupted by user.")
+                    break
+                
+                for j in range(i + 1, len(results)):
+                    comparisons_done += 1
+                    
+                    # Show progress every 5%
+                    progress = int((comparisons_done / total_comparisons) * 100)
+                    if progress >= last_progress + 5:
+                        elapsed = time.time() - ai_start_time
+                        if elapsed > 0 and comparisons_done > 0:
+                            rate = comparisons_done / elapsed
+                            remaining = (total_comparisons - comparisons_done) / rate
+                            log(f"   📊 AI Hunter progress: {comparisons_done}/{total_comparisons} ({progress}%) - ~{int(remaining)}s remaining")
+                        else:
+                            log(f"   📊 AI Hunter progress: {comparisons_done}/{total_comparisons} ({progress}%)")
+                        last_progress = progress
+                    
+                    # Skip if already in same group
+                    if (results[i]['filename'] in duplicate_groups and 
+                        results[j]['filename'] in duplicate_groups and
+                        duplicate_groups[results[i]['filename']] == duplicate_groups[results[j]['filename']]):
+                        continue
+                    
+                    # Get cached comparison results
+                    sem_sim, struct_sim, text_sim = ai_hunter_check_cached(i, j)
+                    
+                    # For AI Hunter, use a combination approach
+                    if config.mode == 'ai-hunter':
+                        # High semantic + high structural = likely same content
+                        if sem_sim >= semantic_threshold and struct_sim >= config.get_threshold('structural'):
+                            # If text similarity is low but semantic/structural is high, it's likely a retranslation
+                            if text_sim < 0.6:  # Different enough text
+                                log(f"   🎯 AI Hunter: Found potential retranslation")
+                                log(f"      Files: {results[i]['filename']} ≈ {results[j]['filename']}")
+                                log(f"      Text similarity: {int(text_sim*100)}% (low)")
+                                log(f"      Semantic similarity: {int(sem_sim*100)}% (high)")
+                                log(f"      Structural similarity: {int(struct_sim*100)}% (high)")
+                                
+                                merge_duplicate_groups(duplicate_groups, 
+                                                     results[i]['filename'], 
+                                                     results[j]['filename'])
+                                confidence = (sem_sim + struct_sim) / 2
+                                duplicate_confidence[(results[i]['filename'], results[j]['filename'])] = confidence
+                                log(f"   └─ 🤖 Flagged as AI retranslation variant (confidence: {int(confidence*100)}%)")
                     else:
-                        log(f"   📊 AI Hunter progress: {comparisons_done}/{total_comparisons} ({progress}%)")
-                    last_progress = progress
-                    last_progress = progress
-                # Skip if already in same group
-                if (results[i]['filename'] in duplicate_groups and 
-                    results[j]['filename'] in duplicate_groups and
-                    duplicate_groups[results[i]['filename']] == duplicate_groups[results[j]['filename']]):
-                    continue
-                
-                # Get both semantic and structural signatures
-                sem_sim = calculate_semantic_similarity(results[i]['semantic_sig'], 
-                                                       results[j]['semantic_sig'])
-                struct_sim = calculate_structural_similarity(results[i]['structural_sig'],
-                                                           results[j]['structural_sig'])
-                
-                # For AI Hunter, use a combination approach
-                if config.mode == 'ai-hunter':
-                    # High semantic + high structural = likely same content
-                    if sem_sim >= semantic_threshold and struct_sim >= config.get_threshold('structural'):
-                        # Do a quick text check to see if they're actually different
-                        text_sim = calculate_similarity_ratio(
-                            results[i].get('raw_text', '')[:2000],
-                            results[j].get('raw_text', '')[:2000]
-                        )
-                        
-                        # If text similarity is low but semantic/structural is high, it's likely a retranslation
-                        if text_sim < 0.6:  # Different enough text
-                            log(f"   🎯 AI Hunter: Found potential retranslation")
-                            log(f"      Files: {results[i]['filename']} ≈ {results[j]['filename']}")
-                            log(f"      Text similarity: {int(text_sim*100)}% (low)")
-                            log(f"      Semantic similarity: {int(sem_sim*100)}% (high)")
-                            log(f"      Structural similarity: {int(struct_sim*100)}% (high)")
-                            
+                        # Normal semantic checking
+                        if sem_sim >= semantic_threshold and struct_sim >= config.get_threshold('structural'):
                             merge_duplicate_groups(duplicate_groups, 
                                                  results[i]['filename'], 
                                                  results[j]['filename'])
                             confidence = (sem_sim + struct_sim) / 2
                             duplicate_confidence[(results[i]['filename'], results[j]['filename'])] = confidence
-                            log(f"   └─ 🤖 Flagged as AI retranslation variant (confidence: {int(confidence*100)}%)")
-                else:
-                    # Normal semantic checking
-                    if sem_sim >= semantic_threshold and struct_sim >= config.get_threshold('structural'):
-                        merge_duplicate_groups(duplicate_groups, 
-                                             results[i]['filename'], 
-                                             results[j]['filename'])
-                        confidence = (sem_sim + struct_sim) / 2
-                        duplicate_confidence[(results[i]['filename'], results[j]['filename'])] = confidence
-                        log(f"   └─ Semantic match: {results[i]['filename']} ≈ {results[j]['filename']} "
-                            f"(sem: {int(sem_sim*100)}%, struct: {int(struct_sim*100)}%)")
+                            log(f"   └─ Semantic match: {results[i]['filename']} ≈ {results[j]['filename']} "
+                                f"(sem: {int(sem_sim*100)}%, struct: {int(struct_sim*100)}%)")
+            
+            # Clear local cache
+            ai_hunter_check_cached.cache_clear()
     
-    # 5. Deep similarity check (content-based) - OPTIMIZED
-    similarity_threshold = config.get_threshold('similarity')
-    log(f"🔍 Deep content similarity analysis (threshold: {int(similarity_threshold*100)}%)...")
-
-    # Use MinHash candidates for deep checking if available
-    if lsh and config.mode != 'ai-hunter':
-        for result in results:
-            if should_stop():
-                log("⛔ Similarity check interrupted by user.")
-                break
-            
-            if result['filename'] in minhashes:
-                candidates = lsh.query(minhashes[result['filename']])
-                for candidate_filename in candidates:
-                    if candidate_filename == result['filename']:
-                        continue
-                    
-                    # Skip if already in same group
-                    if (result['filename'] in duplicate_groups and 
-                        candidate_filename in duplicate_groups and
-                        duplicate_groups[result['filename']] == duplicate_groups[candidate_filename]):
-                        continue
-                    
-                    # Find the candidate result
-                    candidate_result = next((r for r in results if r['filename'] == candidate_filename), None)
-                    if not candidate_result:
-                        continue
-                    
-                    # Check similarity
-                    text1_preview = result.get('raw_text', '')[:2000]
-                    text2_preview = candidate_result.get('raw_text', '')[:2000]
-                    
-                    similarity = calculate_similarity_ratio(text1_preview, text2_preview)
-                    
-                    if similarity >= similarity_threshold:
-                        merge_duplicate_groups(duplicate_groups, result['filename'], candidate_filename)
-                        pair = tuple(sorted([result['filename'], candidate_filename]))
-                        duplicate_confidence[pair] = max(duplicate_confidence.get(pair, 0), similarity)
-                        log(f"   └─ Content match: {result['filename']} ≈ {candidate_filename} ({int(similarity*100)}%)")
-    else:
-        # Fallback: check all pairs (slower but thorough)
-        total_comparisons = (len(results) * (len(results) - 1)) // 2
-        comparisons_done = 0
-        last_progress = 0
-        
-        log(f"   📊 Checking {total_comparisons} file pairs for content similarity...")
-        
-        for i in range(len(results)):
-            if should_stop():
-                log("⛔ Similarity check interrupted by user.")
-                break
-            
-            for j in range(i + 1, len(results)):
-                comparisons_done += 1
-                
-                # Show progress every 10% or every 100 comparisons
-                if comparisons_done % 100 == 0 or (total_comparisons < 1000 and comparisons_done % 10 == 0):
-                    progress = int((comparisons_done / total_comparisons) * 100)
-                    if progress >= last_progress + 10:
-                        log(f"   📊 Content similarity progress: {comparisons_done}/{total_comparisons} ({progress}%)")
-                        last_progress = progress
-                # Check if already in same group
-                if (results[i]['filename'] in duplicate_groups and 
-                    results[j]['filename'] in duplicate_groups and
-                    duplicate_groups[results[i]['filename']] == duplicate_groups[results[j]['filename']]):
-                    continue
-                
-                # Always check first 2000 chars for similarity
-                text1_preview = results[i].get('raw_text', '')[:2000]
-                text2_preview = results[j].get('raw_text', '')[:2000]
-                
-                # Quick preview check
-                if text1_preview == text2_preview and len(text1_preview) > 100:
-                    # Exact match - definitely duplicates
-                    merge_duplicate_groups(duplicate_groups, results[i]['filename'], results[j]['filename'])
-                    pair = tuple(sorted([results[i]['filename'], results[j]['filename']]))
-                    duplicate_confidence[pair] = 1.0
-                    log(f"   └─ Exact match: {results[i]['filename']} ≡ {results[j]['filename']} (100%)")
-                    continue
-                
-                # Calculate similarity
-                similarity = calculate_similarity_ratio(text1_preview, text2_preview)
-                
-                if similarity >= similarity_threshold:
-                    merge_duplicate_groups(duplicate_groups, results[i]['filename'], results[j]['filename'])
-                    pair = tuple(sorted([results[i]['filename'], results[j]['filename']]))
-                    duplicate_confidence[pair] = max(duplicate_confidence.get(pair, 0), similarity)
-                    log(f"   └─ Content match: {results[i]['filename']} ≈ {results[j]['filename']} ({int(similarity*100)}%)")
+    # 5. Deep similarity check (content-based) - Now uses cached function
+    perform_deep_similarity_check(results, duplicate_groups, duplicate_confidence, 
+                                config.get_threshold('similarity'), log, should_stop)
     
     # 6. Consecutive chapter check with fuzzy matching
     check_consecutive_chapters(results, duplicate_groups, duplicate_confidence, config, log, should_stop)
@@ -1423,6 +1779,9 @@ def detect_duplicates(results, log, should_stop, config):
     
     # 8. Specific pattern detection
     check_specific_patterns(results, duplicate_groups, duplicate_confidence, log, should_stop)
+    
+    # Clear local caches
+    compare_texts_cached.cache_clear()
     
     # Summary of findings
     unique_groups = len(set(duplicate_groups.values())) if duplicate_groups else 0
@@ -1437,12 +1796,64 @@ def detect_duplicates(results, log, should_stop, config):
     
     return duplicate_groups, near_duplicate_groups, duplicate_confidence
 
+# Create a cached version of the similarity check
+@lru_cache(maxsize=10000)
+def _check_pair_similarity_cached(text1_hash, text2_hash, text1_len, text2_len, threshold):
+    """Cached similarity check - returns (is_similar, similarity_score, check_variant)"""
+    # This is called with hashes, but we need to work with the actual text
+    # Since we can't pass the full text (unhashable), we'll need a different approach
+    return None  # Placeholder - see better implementation below
+
 def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidence, 
                                 threshold, log, should_stop):
-    """Perform deep similarity analysis between files"""
+    """Perform deep similarity analysis between files - OPTIMIZED VERSION"""
     log(f"🔍 Deep content similarity analysis (threshold: {int(threshold*100)}%)...")
     
     checked_pairs = set()
+    
+    # Pre-cache text samples for all results to avoid repeated slicing
+    text_samples = {}
+    for idx, result in enumerate(results):
+        text = result.get('raw_text', '')
+        if len(text) >= 500:
+            text_samples[idx] = {
+                'full': text,
+                'sample_5k': text[:5000],
+                'sample_10k': text[:10000],
+                'hash_5k': hashlib.md5(text[:5000].encode()).hexdigest(),
+                'hash_10k': hashlib.md5(text[:10000].encode()).hexdigest()
+            }
+    
+    # Create cached similarity checker
+    @lru_cache(maxsize=5000)
+    def check_similarity_cached(hash1, hash2):
+        """Check similarity between two text hashes"""
+        # Find the actual texts by their hashes
+        text1, text2 = None, None
+        for samples in text_samples.values():
+            if samples['hash_5k'] == hash1:
+                text1 = samples['sample_5k']
+            if samples['hash_5k'] == hash2:
+                text2 = samples['sample_5k']
+        
+        if text1 and text2:
+            return calculate_similarity_ratio(text1, text2)
+        return 0.0
+    
+    @lru_cache(maxsize=2000)
+    def check_semantic_similarity_cached(hash1, hash2):
+        """Check semantic similarity between two text hashes"""
+        # Find the actual texts by their hashes
+        text1, text2 = None, None
+        for samples in text_samples.values():
+            if samples['hash_10k'] == hash1:
+                text1 = samples['sample_10k']
+            if samples['hash_10k'] == hash2:
+                text2 = samples['sample_10k']
+        
+        if text1 and text2:
+            return calculate_semantic_fingerprint_similarity(text1, text2)
+        return 0.0
     
     for i in range(len(results)):
         if should_stop():
@@ -1453,6 +1864,10 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
             log(f"   Progress: {i}/{len(results)} files analyzed...")
         
         for j in range(i + 1, len(results)):
+            # Skip if not in text_samples (too short)
+            if i not in text_samples or j not in text_samples:
+                continue
+                
             pair = tuple(sorted([results[i]['filename'], results[j]['filename']]))
             if pair in checked_pairs:
                 continue
@@ -1464,27 +1879,34 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
                 duplicate_groups[results[i]['filename']] == duplicate_groups[results[j]['filename']]):
                 continue
             
-            # Get text samples
-            text1 = results[i].get('raw_text', '')
-            text2 = results[j].get('raw_text', '')
+            # Use cached similarity check
+            hash1 = text_samples[i]['hash_5k']
+            hash2 = text_samples[j]['hash_5k']
             
-            if len(text1) < 500 or len(text2) < 500:
-                continue
+            # Ensure consistent ordering for cache
+            if hash1 > hash2:
+                hash1, hash2 = hash2, hash1
             
-            # Calculate standard similarity
-            similarity = calculate_similarity_ratio(text1[:5000], text2[:5000])
+            similarity = check_similarity_cached(hash1, hash2)
             
             if similarity >= threshold:
                 merge_duplicate_groups(duplicate_groups, results[i]['filename'], results[j]['filename'])
-                duplicate_confidence[pair] = max(duplicate_confidence[pair], similarity)
+                duplicate_confidence[pair] = max(duplicate_confidence.get(pair, 0), similarity)
                 log(f"   └─ Content similarity: {results[i]['filename']} ≈ {results[j]['filename']} ({int(similarity*100)}%)")
             
             # Check for translation variants if similarity is moderate
             elif 0.5 <= similarity < threshold:
                 log(f"   Checking potential translation variant: {results[i]['filename']} vs {results[j]['filename']} (base: {int(similarity*100)}%)")
                 
-                # Check semantic fingerprint
-                semantic_sim = calculate_semantic_fingerprint_similarity(text1[:10000], text2[:10000])
+                # Check semantic fingerprint using cached version
+                hash1_10k = text_samples[i]['hash_10k']
+                hash2_10k = text_samples[j]['hash_10k']
+                
+                # Ensure consistent ordering for cache
+                if hash1_10k > hash2_10k:
+                    hash1_10k, hash2_10k = hash2_10k, hash1_10k
+                
+                semantic_sim = check_semantic_similarity_cached(hash1_10k, hash2_10k)
                 
                 if semantic_sim >= 0.75:  # High semantic similarity threshold
                     combined_score = (similarity * 0.4 + semantic_sim * 0.6)
@@ -1495,6 +1917,13 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
                         duplicate_confidence[pair] = combined_score
                     else:
                         log(f"   └─ Not similar enough (semantic: {int(semantic_sim*100)}%, combined: {int(combined_score*100)}%)")
+    
+    # Clear local caches when done
+    check_similarity_cached.cache_clear()
+    check_semantic_similarity_cached.cache_clear()
+
+# If you want to make it configurable with your cache system:
+perform_deep_similarity_check = lru_cache(maxsize=get_cache_size("deep_similarity") or 100)(perform_deep_similarity_check)
 
 def check_consecutive_chapters(results, duplicate_groups, duplicate_confidence, config, log, should_stop=None):
     """Check for consecutive chapters with same title using fuzzy matching"""
