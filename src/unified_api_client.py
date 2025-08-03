@@ -1921,7 +1921,7 @@ class UnifiedClient:
                 return True
             else:
                 return False
- 
+                
     def send(self, messages, temperature=None, max_tokens=None, 
              max_completion_tokens=None, context=None) -> Tuple[str, Optional[str]]:
         """Thread-safe send with proper key management for batch translation"""
@@ -1974,7 +1974,30 @@ class UnifiedClient:
                         available_count = self._count_available_keys()
                         if available_count == 0:
                             logger.error(f"[{thread_name}] All API keys are cooling down")
-                            raise UnifiedClientError("All API keys are cooling down", error_type="rate_limit")
+                            
+                            # If we still have retries left, wait for the shortest cooldown
+                            if retry_count < max_retries - 1:
+                                cooldown_time = self._get_shortest_cooldown_time()
+                                print(f"⏳ [Thread-{thread_name}] All keys cooling down, waiting {cooldown_time}s...")
+                                
+                                # Wait with cancellation check
+                                for i in range(cooldown_time):
+                                    if self._cancelled:
+                                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                    time.sleep(1)
+                                    if i % 10 == 0 and i > 0:
+                                        print(f"⏳ [Thread-{thread_name}] Still waiting... {cooldown_time - i}s remaining")
+                                
+                                # Force re-initialization after cooldown
+                                tls = self._get_thread_local_client()
+                                tls.initialized = False
+                                self._ensure_thread_client()
+                                
+                                retry_count += 1
+                                continue
+                            else:
+                                # No more retries, raise the error
+                                raise UnifiedClientError("All API keys are cooling down", error_type="rate_limit")
                         
                         # Check if we've tried too many keys
                         if len(attempted_keys) >= len(self._api_key_pool.keys):
@@ -1989,7 +2012,12 @@ class UnifiedClient:
                         if retry_count < max_retries - 1:
                             wait_time = min(30 * (retry_count + 1), 120)
                             logger.info(f"[{thread_name}] Rate limit, waiting {wait_time}s")
-                            time.sleep(wait_time)
+                            
+                            for i in range(wait_time):
+                                if self._cancelled:
+                                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                time.sleep(1)
+                                
                             retry_count += 1
                             continue
                         else:
@@ -4746,7 +4774,30 @@ class UnifiedClient:
                         available_count = self._count_available_keys()
                         if available_count == 0:
                             logger.error(f"[{thread_name}] All API keys are cooling down for images")
-                            raise UnifiedClientError("All API keys are cooling down", error_type="rate_limit")
+                            
+                            # If we still have retries left, wait for the shortest cooldown
+                            if retry_count < max_retries - 1:
+                                cooldown_time = self._get_shortest_cooldown_time()
+                                print(f"⏳ [Thread-{thread_name}] All keys cooling down for image request, waiting {cooldown_time}s...")
+                                
+                                # Wait with cancellation check
+                                for i in range(cooldown_time):
+                                    if self._cancelled:
+                                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                    time.sleep(1)
+                                    if i % 10 == 0 and i > 0:
+                                        print(f"⏳ [Thread-{thread_name}] Still waiting for image API... {cooldown_time - i}s remaining")
+                                
+                                # Force re-initialization after cooldown
+                                tls = self._get_thread_local_client()
+                                tls.initialized = False
+                                self._ensure_thread_client()
+                                
+                                retry_count += 1
+                                continue
+                            else:
+                                # No more retries, raise the error
+                                raise UnifiedClientError("All API keys are cooling down", error_type="rate_limit")
                         
                         # Check if we've tried too many keys
                         if len(attempted_keys) >= len(self._api_key_pool.keys):
@@ -4761,7 +4812,12 @@ class UnifiedClient:
                         if retry_count < max_retries - 1:
                             wait_time = min(30 * (retry_count + 1), 120)
                             logger.info(f"[{thread_name}] Single key image rate limit, waiting {wait_time}s")
-                            time.sleep(wait_time)
+                            
+                            for i in range(wait_time):
+                                if self._cancelled:
+                                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                time.sleep(1)
+                                
                             retry_count += 1
                             continue
                         else:
