@@ -571,9 +571,34 @@ class MultiAPIKeyDialog:
         self.translator_gui.config['use_multi_api_keys'] = enabled
         
         # Update UI state
-        for widget in [self.tree, self.api_key_entry, self.model_entry]:
+        for widget in [self.api_key_entry, self.model_entry]:
             if widget:
                 widget.config(state=tk.NORMAL if enabled else tk.DISABLED)
+        
+        # Handle Treeview separately - it doesn't support state property
+        if self.tree:
+            if enabled:
+                # Re-enable tree interactions
+                self.tree.bind('<Button-1>', lambda e: 'break' if not self.enabled_var.get() else None)
+                self.tree.bind('<Button-3>', self._show_context_menu)
+                self.tree.bind('<Double-Button-1>', self._on_double_click)
+            else:
+                # Disable tree interactions
+                self.tree.bind('<Button-1>', lambda e: 'break')
+                self.tree.bind('<Button-3>', lambda e: 'break')
+                self.tree.bind('<Double-Button-1>', lambda e: 'break')
+                
+        # Update action buttons state
+        for child in self.dialog.winfo_children():
+            if isinstance(child, tk.Frame):
+                for subchild in child.winfo_children():
+                    if isinstance(subchild, tk.Frame):
+                        for button in subchild.winfo_children():
+                            if isinstance(button, (tb.Button, ttk.Button)) and button.cget('text') in [
+                                'Test Selected', 'Test All', 'Enable Selected', 
+                                'Disable Selected', 'Remove Selected', 'Add Key'
+                            ]:
+                                button.config(state=tk.NORMAL if enabled else tk.DISABLED)
     
     def _copy_current_settings(self):
         """Copy current API key and model from main GUI"""
