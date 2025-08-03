@@ -28,7 +28,7 @@ if sys.platform.startswith("win"):
         if sys.stdout and hasattr(sys.stdout, 'buffer'):
             sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
-MODEL = os.getenv("MODEL", "gemini-1.5-flash")
+MODEL = os.getenv("MODEL", "gemini-2.0-flash")
 
 def interruptible_sleep(duration, check_stop_fn, interval=0.1):
     """Sleep that can be interrupted by stop request"""
@@ -49,7 +49,6 @@ def cancel_all_futures(futures):
             cancelled_count += 1
     return cancelled_count
 
-# Replace your existing send_with_interrupt function with this improved version:
 def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None):
     """Send API request with interrupt capability and optional timeout retry"""
     result_queue = queue.Queue()
@@ -112,7 +111,6 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
         client.cancel_current_operation()
     raise UnifiedClientError(f"API call timed out after {timeout} seconds")
 
-    
 # Parse token limit from environment variable (same logic as translation)
 def parse_glossary_token_limit():
     """Parse token limit from environment variable"""
@@ -166,7 +164,91 @@ from bs4 import BeautifulSoup
 from unified_api_client import UnifiedClient
 from typing import List, Dict
 import re
+
 PROGRESS_FILE = "glossary_progress.json"
+
+def remove_honorifics(name):
+    """Remove common honorifics from names"""
+    if not name:
+        return name
+    
+    # Check if honorifics filtering is disabled
+    if os.getenv('GLOSSARY_DISABLE_HONORIFICS_FILTER', '0') == '1':
+        return name.strip()
+    
+    # Modern Korean honorifics
+    korean_honorifics = [
+        '님', '씨', '씨는', '군', '양', '선생님', '선생', '사장님', '사장', 
+        '과장님', '과장', '대리님', '대리', '주임님', '주임', '이사님', '이사',
+        '부장님', '부장', '차장님', '차장', '팀장님', '팀장', '실장님', '실장',
+        '교수님', '교수', '박사님', '박사', '원장님', '원장', '회장님', '회장',
+        '소장님', '소장', '전무님', '전무', '상무님', '상무', '이사장님', '이사장'
+    ]
+    
+    # Archaic/Historical Korean honorifics
+    korean_archaic = [
+        '공', '옹', '어른', '나리', '나으리', '대감', '영감', '마님', '마마',
+        '대군', '군', '옹주', '공주', '왕자', '세자', '영애', '영식', '도령',
+        '낭자', '낭군', '서방', '영감님', '대감님', '마님', '아씨', '도련님',
+        '아가씨', '나으리', '진사', '첨지', '영의정', '좌의정', '우의정',
+        '판서', '참판', '정승', '대원군'
+    ]
+    
+    # Modern Japanese honorifics
+    japanese_honorifics = [
+        'さん', 'さま', '様', 'くん', '君', 'ちゃん', 'せんせい', '先生',
+        'どの', '殿', 'たん', 'ぴょん', 'ぽん', 'ちん', 'りん', 'せんぱい',
+        '先輩', 'こうはい', '後輩', 'し', '氏', 'ふじん', '夫人', 'かちょう',
+        '課長', 'ぶちょう', '部長', 'しゃちょう', '社長'
+    ]
+    
+    # Archaic/Historical Japanese honorifics
+    japanese_archaic = [
+        'どの', '殿', 'たいゆう', '大夫', 'きみ', '公', 'あそん', '朝臣',
+        'おみ', '臣', 'むらじ', '連', 'みこと', '命', '尊', 'ひめ', '姫',
+        'みや', '宮', 'おう', '王', 'こう', '侯', 'はく', '伯', 'し', '子',
+        'だん', '男', 'じょ', '女', 'ひこ', '彦', 'ひめみこ', '姫御子',
+        'すめらみこと', '天皇', 'きさき', '后', 'みかど', '帝'
+    ]
+    
+    # Modern Chinese honorifics
+    chinese_honorifics = [
+        '先生', '女士', '小姐', '老师', '师傅', '大人', '公', '君', '总',
+        '老总', '老板', '经理', '主任', '处长', '科长', '股长', '教授',
+        '博士', '院长', '校长', '同志', '师兄', '师姐', '师弟', '师妹',
+        '学长', '学姐', '前辈', '阁下'
+    ]
+    
+    # Archaic/Historical Chinese honorifics
+    chinese_archaic = [
+        '公', '侯', '伯', '子', '男', '王', '君', '卿', '大夫', '士',
+        '陛下', '殿下', '阁下', '爷', '老爷', '大人', '夫人', '娘娘',
+        '公子', '公主', '郡主', '世子', '太子', '皇上', '皇后', '贵妃',
+        '娘子', '相公', '官人', '郎君', '小姐', '姑娘', '公公', '嬷嬷',
+        '大侠', '少侠', '前辈', '晚辈', '在下', '足下', '兄台', '仁兄',
+        '贤弟', '老夫', '老朽', '本座', '本尊', '真人', '上人', '尊者'
+    ]
+    
+    # Combine all honorifics
+    all_honorifics = (
+        korean_honorifics + korean_archaic +
+        japanese_honorifics + japanese_archaic +
+        chinese_honorifics + chinese_archaic
+    )
+    
+    # Remove honorifics from the end of the name
+    name_cleaned = name.strip()
+    
+    # Sort by length (longest first) to avoid partial matches
+    sorted_honorifics = sorted(all_honorifics, key=len, reverse=True)
+    
+    for honorific in sorted_honorifics:
+        if name_cleaned.endswith(honorific):
+            name_cleaned = name_cleaned[:-len(honorific)].strip()
+            # Only remove one honorific per pass
+            break
+    
+    return name_cleaned
 
 def set_output_redirect(log_callback=None):
     """Redirect print statements to a callback function for GUI integration"""
@@ -215,18 +297,23 @@ def save_progress(completed: List[int], glossary: List[Dict], context_history: L
         json.dump({"completed": completed, "glossary": glossary, "context_history": context_history}, f, ensure_ascii=False, indent=2)
 
 def save_glossary_json(glossary: List[Dict], output_path: str):
+    """Save glossary in the new simple format"""
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(glossary, f, ensure_ascii=False, indent=2)
 
-def save_glossary_md(glossary: List[Dict], output_path: str):
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write("# Character Glossary\n\n")
-        for char in glossary:
-            f.write(f"## {char.get('name')} ({char.get('original_name')})\n")
-            for key, val in char.items():
-                if key not in ['name', 'original_name']:
-                    f.write(f"- **{key}**: {val}\n")
-            f.write("\n")
+def save_glossary_csv(glossary: List[Dict], output_path: str):
+    """Save glossary in CSV format exactly like the example"""
+    import csv
+    
+    csv_path = output_path.replace('.json', '.csv')
+    
+    with open(csv_path, 'w', encoding='utf-8', newline='') as f:
+        # Write without header, just like the example
+        for entry in glossary:
+            if entry['type'] == 'character':
+                f.write(f"character,{entry['raw_name']},{entry['translated_name']},{entry.get('gender', '')}\n")
+            else:
+                f.write(f"term,{entry['raw_name']},{entry['translated_name']},\n")
 
 def extract_chapters_from_epub(epub_path: str) -> List[str]:
     chapters = []
@@ -327,479 +414,279 @@ def trim_context_history(history: List[Dict], limit: int, rolling_window: bool =
         trimmed.append({"role": "assistant", "content": entry["assistant"]})
     return trimmed
 
-
 def load_progress() -> Dict:
     if os.path.exists(PROGRESS_FILE):
         with open(PROGRESS_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
     return {"completed": [], "glossary": [], "context_history": []}
 
-def dedupe_keep_order(old, new):
-    seen = set()
-    out = []
-    for x in (old if isinstance(old, list) else [old]) + \
-             (new if isinstance(new, list) else [new]):
-        if isinstance(x, str):
-            lx = x.lower()
-            if lx not in seen:
-                seen.add(lx)
-                out.append(x)
-    return out
-
-
-# Add validation for extracted data with custom fields:
-def validate_extracted_entry(entry):
-    """Validate that extracted entry has required fields"""
-    # Check if original_name field is enabled
-    extract_original_name = os.getenv('GLOSSARY_EXTRACT_ORIGINAL_NAME', '1') == '1'
+def parse_api_response(response_text: str) -> List[Dict]:
+    """Parse API response to extract glossary entries - handles both JSON and CSV-like formats"""
+    entries = []
     
-    # Validation rule 1: Must have an identifier
-    # - If original_name is enabled, it must be present (original behavior)
-    # - If original_name is disabled, must have 'name' field instead
-    if extract_original_name:
-        if 'original_name' not in entry or not entry['original_name']:
-            return False
-    else:
-        # When original_name is disabled, 'name' becomes the required identifier
-        if 'name' not in entry or not entry['name']:
-            return False
-    
-    # Validation rule 2: Must have at least one content field
-    # Build list of enabled content fields (exactly as original)
-    enabled_fields = []
-    
-    if os.getenv('GLOSSARY_EXTRACT_NAME', '1') == '1':
-        enabled_fields.append('name')
-    if os.getenv('GLOSSARY_EXTRACT_GENDER', '1') == '1':
-        enabled_fields.append('gender')
-    if os.getenv('GLOSSARY_EXTRACT_TITLE', '1') == '1':
-        enabled_fields.append('title')
-    if os.getenv('GLOSSARY_EXTRACT_GROUP_AFFILIATION', '1') == '1':
-        enabled_fields.append('group_affiliation')
-    if os.getenv('GLOSSARY_EXTRACT_TRAITS', '1') == '1':
-        enabled_fields.append('traits')
-    if os.getenv('GLOSSARY_EXTRACT_HOW_THEY_REFER_TO_OTHERS', '1') == '1':
-        enabled_fields.append('how_they_refer_to_others')
-    if os.getenv('GLOSSARY_EXTRACT_LOCATIONS', '1') == '1':
-        enabled_fields.append('locations')
-    
-    # Add custom fields (exactly as original)
-    custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
+    # First try JSON parsing
     try:
-        custom_fields = json.loads(custom_fields_json)
-        enabled_fields.extend(custom_fields)
-    except:
+        # Clean up response text
+        cleaned_text = response_text.strip()
+        
+        # Remove markdown code blocks if present
+        if '```json' in cleaned_text or '```' in cleaned_text:
+            # Extract content between code blocks
+            import re
+            code_block_match = re.search(r'```(?:json)?\s*(.*?)\s*```', cleaned_text, re.DOTALL)
+            if code_block_match:
+                cleaned_text = code_block_match.group(1)
+        
+        # Try to find JSON array or object
+        import re
+        json_match = re.search(r'[\[\{].*[\]\}]', cleaned_text, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(0)
+            data = json.loads(json_str)
+            
+            if isinstance(data, list):
+                # Process each entry to fix structure
+                for item in data:
+                    if isinstance(item, dict):
+                        # Fix entries where the model put the type value in the wrong field
+                        if 'character' in item and 'type' not in item:
+                            # Model put raw_name in 'character' field
+                            fixed_entry = {
+                                'type': 'character',
+                                'raw_name': item.get('character', ''),
+                                'translated_name': item.get('translated_name', ''),
+                                'gender': item.get('gender', 'Unknown')
+                            }
+                            # Copy any other fields
+                            for k, v in item.items():
+                                if k not in ['character', 'translated_name', 'gender']:
+                                    fixed_entry[k] = v
+                            entries.append(fixed_entry)
+                        elif 'term' in item and 'type' not in item:
+                            # Model put raw_name in 'term' field
+                            fixed_entry = {
+                                'type': 'term',
+                                'raw_name': item.get('term', item.get('raw_name', '')),
+                                'translated_name': item.get('translated_name', '')
+                            }
+                            # Copy any other fields
+                            for k, v in item.items():
+                                if k not in ['term', 'translated_name']:
+                                    fixed_entry[k] = v
+                            entries.append(fixed_entry)
+                        elif 'type' in item:
+                            # Entry has correct structure
+                            entries.append(item)
+                        else:
+                            # Try to infer type from other fields
+                            if 'gender' in item:
+                                item['type'] = 'character'
+                            else:
+                                item['type'] = 'term'
+                            entries.append(item)
+                
+                # If we processed entries, return them
+                if entries:
+                    return entries
+                
+                # Otherwise return original data
+                return data
+                
+            elif isinstance(data, dict):
+                # It might be a single entry or have a wrapper
+                if 'type' in data and 'raw_name' in data:
+                    # Single entry with correct structure
+                    return [data]
+                elif 'character' in data or 'term' in data:
+                    # Single entry with wrong structure
+                    if 'character' in data:
+                        fixed_entry = {
+                            'type': 'character',
+                            'raw_name': data.get('character', ''),
+                            'translated_name': data.get('translated_name', ''),
+                            'gender': data.get('gender', 'Unknown')
+                        }
+                    else:
+                        fixed_entry = {
+                            'type': 'term',
+                            'raw_name': data.get('term', data.get('raw_name', '')),
+                            'translated_name': data.get('translated_name', '')
+                        }
+                    # Copy other fields
+                    for k, v in data.items():
+                        if k not in ['character', 'term', 'translated_name', 'gender', 'type', 'raw_name']:
+                            fixed_entry[k] = v
+                    return [fixed_entry]
+                else:
+                    # Check for common wrapper keys
+                    for key in ['entries', 'glossary', 'characters', 'terms', 'data']:
+                        if key in data and isinstance(data[key], list):
+                            # Recursively parse the wrapped data
+                            return parse_api_response(json.dumps(data[key]))
+                    # If no wrapper found but it has valid fields, treat as single entry
+                    if any(k in data for k in ['raw_name', 'translated_name']):
+                        return [data]
+    except (json.JSONDecodeError, AttributeError) as e:
+        print(f"[Debug] JSON parsing failed: {e}")
         pass
     
-    # Check for at least one content field (exactly as original)
-    has_content = False
-    for field in enabled_fields:
-        if field in entry and entry[field]:
-            has_content = True
-            break
+    # If not JSON, try parsing as CSV-like format
+    lines = response_text.strip().split('\n')
     
-    return has_content
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith('#'):
+            # Skip empty lines and comments
+            continue
+        
+        # Skip header lines
+        if 'type' in line.lower() and 'raw_name' in line.lower():
+            continue
+        
+        # Try to parse CSV-like format
+        # Handle quoted values properly
+        parts = []
+        current_part = []
+        in_quotes = False
+        
+        for char in line + ',':  # Add comma to process last field
+            if char == '"':
+                in_quotes = not in_quotes
+            elif char == ',' and not in_quotes:
+                parts.append(''.join(current_part).strip())
+                current_part = []
+            else:
+                current_part.append(char)
+        
+        # Remove last empty part if line ended with comma
+        if parts and parts[-1] == '':
+            parts = parts[:-1]
+        
+        if len(parts) >= 3:
+            entry_type = parts[0].lower()
+            
+            if entry_type in ['character', 'term']:
+                entry = {
+                    'type': entry_type,
+                    'raw_name': parts[1],
+                    'translated_name': parts[2]
+                }
+                
+                # Add gender for characters
+                if entry_type == 'character' and len(parts) > 3 and parts[3]:
+                    entry['gender'] = parts[3]
+                elif entry_type == 'character':
+                    entry['gender'] = 'Unknown'
+                
+                # Add any custom fields
+                custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
+                try:
+                    custom_fields = json.loads(custom_fields_json)
+                    for i, field in enumerate(custom_fields):
+                        if len(parts) > 4 + i:
+                            entry[field] = parts[4 + i]
+                except:
+                    pass
+                
+                entries.append(entry)
+    
+    return entries
 
-# Updated build_prompt function to handle custom prompts and fields:
+def validate_extracted_entry(entry):
+    """Validate that extracted entry has required fields for simple format"""
+    # Check based on entry type
+    if 'type' not in entry:
+        return False
+    
+    entry_type = entry['type'].lower()
+    
+    # Must have raw_name and translated_name for all entries
+    if 'raw_name' not in entry or not entry['raw_name']:
+        return False
+    if 'translated_name' not in entry or not entry['translated_name']:
+        return False
+    
+    # Characters should have gender, but it's not strictly required
+    # Custom fields are allowed, so we don't reject entries with extra fields
+    
+    return True
 
 def build_prompt(chapter_text: str) -> str:
-    """
-    Build the extraction prompt based on enabled fields and custom settings.
-    Supports both custom prompts with placeholders and default prompts.
-    """
-    # Get custom prompt from environment or use default
+    """Build the extraction prompt - NO HARDCODED PROMPTS"""
+    # Get custom prompt from environment
     custom_prompt = os.getenv('GLOSSARY_SYSTEM_PROMPT', '').strip()
     
-    # Check which fields are enabled via environment variables
-    field_settings = {
-        'original_name': os.getenv('GLOSSARY_EXTRACT_ORIGINAL_NAME', '1') == '1',
-        'name': os.getenv('GLOSSARY_EXTRACT_NAME', '1') == '1',
-        'gender': os.getenv('GLOSSARY_EXTRACT_GENDER', '1') == '1',
-        'title': os.getenv('GLOSSARY_EXTRACT_TITLE', '1') == '1',
-        'group_affiliation': os.getenv('GLOSSARY_EXTRACT_GROUP_AFFILIATION', '1') == '1',
-        'traits': os.getenv('GLOSSARY_EXTRACT_TRAITS', '1') == '1',
-        'how_they_refer_to_others': os.getenv('GLOSSARY_EXTRACT_HOW_THEY_REFER_TO_OTHERS', '1') == '1',
-        'locations': os.getenv('GLOSSARY_EXTRACT_LOCATIONS', '1') == '1'
-    }
+    if not custom_prompt:
+        # If no custom prompt provided, return minimal instruction
+        return f"Extract glossary from this text:\n\n{chapter_text}"
     
-    # Field descriptions for the prompt
-    field_descriptions = {
-        'original_name': "- original_name: name in the original script",
-        'name': "- name: English/romanized name",
-        'gender': "- gender",
-        'title': "- title (with romanized suffix)",
-        'group_affiliation': "- group_affiliation",
-        'traits': "- traits",
-        'how_they_refer_to_others': "- how_they_refer_to_others (mapping with romanized suffix)",
-        'locations': "- locations: list of place names mentioned (include the original language in brackets)"
-    }
+    # Build fields specification for {fields} placeholder
+    fields_spec = []
     
-    # Build field list based on enabled fields
-    fields = []
-    enabled_fields = []
+    # Standard format
+    fields_spec.append("For characters: character,raw_name,translated_name,gender")
+    fields_spec.append("For terms/locations: term,raw_name,translated_name,")
     
-    for field_name, is_enabled in field_settings.items():
-        if is_enabled:
-            fields.append(field_descriptions[field_name])
-            enabled_fields.append(field_name)
-    
-    # Add custom fields
+    # Add custom fields if any
     custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
     try:
         custom_fields = json.loads(custom_fields_json)
-        for field in custom_fields:
-            fields.append(f"- {field}")
-            enabled_fields.append(field)
-    except Exception as e:
-        print(f"[Warning] Failed to parse custom fields: {e}")
-    
-    # Ensure we have at least one field to extract
-    if not fields:
-        # Fallback logic: try to enable at least one identifier field
-        fallback_fields = ['name', 'original_name', 'title']
-        for fallback in fallback_fields:
-            if fallback in field_descriptions:
-                fields.append(field_descriptions[fallback])
-                enabled_fields.append(fallback)
-                print(f"[Warning] No fields selected, defaulting to {fallback}")
-                break
-        
-        # If still no fields, force original_name as absolute fallback
-        if not fields:
-            fields.append(field_descriptions['original_name'])
-            enabled_fields.append('original_name')
-            print("[Warning] No fields selected, forcing original_name as fallback")
-    
-    # Log which fields are enabled for debugging
-    print(f"[DEBUG] Enabled extraction fields: {', '.join(enabled_fields)}")
-    
-    # Build the prompt
-    if custom_prompt:
-        # Use custom prompt with placeholders
-        fields_str = '\n'.join(fields)
-        prompt = custom_prompt
-        
-        # Replace placeholders (case-insensitive)
-        prompt = prompt.replace('{fields}', fields_str)
-        prompt = prompt.replace('{chapter_text}', chapter_text)
-        
-        # Also support alternative placeholder formats
-        prompt = prompt.replace('{{fields}}', fields_str)
-        prompt = prompt.replace('{{chapter_text}}', chapter_text)
-        prompt = prompt.replace('{text}', chapter_text)
-        prompt = prompt.replace('{{text}}', chapter_text)
-        
-        # Validate that placeholders were replaced
-        if '{' in prompt and '}' in prompt:
-            print("[Warning] Custom prompt may contain unreplaced placeholders")
-        
-        return prompt
-    else:
-        # Use default prompt structure
-        fields_str = chr(10).join(fields)  # Using chr(10) for newline as in original
-        
-        prompt = f"""Output exactly a JSON array of objects and nothing else.
-You are a glossary extractor for Korean, Japanese, or Chinese novels.
-- Extract character information (e.g., name, traits), locations (countries, regions, cities), and translate them into English (romanization or equivalent).
-- Romanize all untranslated honorifics and suffixes (e.g., 님 to '-nim', さん to '-san').
-- all output must be in english, unless specified otherwise
-For each character, provide JSON fields:
-{fields_str}
-Sort by appearance order; respond with a JSON array only.
-
-Text:
-{chapter_text}"""
-        
-        return prompt
-
-# Updated merge_glossary_entries to handle custom fields:
-def merge_glossary_entries(glossary):
-    """
-    Merge duplicate glossary entries based on configurable key field.
-    Supports fuzzy matching for finding similar entries.
-    """
-    from difflib import SequenceMatcher
-    
-    merged = {}
-    
-    # Get list of custom fields
-    custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
-    try:
-        custom_fields_list = json.loads(custom_fields_json)
+        if custom_fields:
+            # Add note about custom fields
+            custom_fields_str = ','.join(custom_fields)
+            fields_spec.append(f"Custom fields (add as extra columns): {custom_fields_str}")
     except:
-        custom_fields_list = []
+        custom_fields = []
     
-    # Standard fields that use list merging
-    list_fields = ['locations', 'traits', 'group_affiliation'] + custom_fields_list
+    fields_str = '\n'.join(fields_spec)
     
-    # Check configuration - try to load from config file first
-    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config.json')
-    duplicate_key_mode = 'auto'
-    custom_field = ''
-    fuzzy_threshold = 0.85
+    # Replace placeholders
+    prompt = custom_prompt
+    prompt = prompt.replace('{fields}', fields_str)
+    prompt = prompt.replace('{chapter_text}', chapter_text)
+    prompt = prompt.replace('{{fields}}', fields_str)
+    prompt = prompt.replace('{{chapter_text}}', chapter_text)
+    prompt = prompt.replace('{text}', chapter_text)
+    prompt = prompt.replace('{{text}}', chapter_text)
     
-    try:
-        if os.path.exists(config_path):
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-                duplicate_key_mode = config.get('glossary_duplicate_key_mode', 
-                                              os.getenv('GLOSSARY_DUPLICATE_KEY_MODE', 'auto'))
-                custom_field = config.get('glossary_duplicate_custom_field',
-                                        os.getenv('GLOSSARY_DUPLICATE_CUSTOM_FIELD', ''))
-                fuzzy_threshold = float(config.get('glossary_fuzzy_threshold', 
-                                                 os.getenv('GLOSSARY_FUZZY_THRESHOLD', '85'))) / 100.0
-        else:
-            duplicate_key_mode = os.getenv('GLOSSARY_DUPLICATE_KEY_MODE', 'auto')
-            custom_field = os.getenv('GLOSSARY_DUPLICATE_CUSTOM_FIELD', '')
-            fuzzy_threshold = float(os.getenv('GLOSSARY_FUZZY_THRESHOLD', '85')) / 100.0
-    except:
-        duplicate_key_mode = os.getenv('GLOSSARY_DUPLICATE_KEY_MODE', 'auto')
-        custom_field = os.getenv('GLOSSARY_DUPLICATE_CUSTOM_FIELD', '')
-        fuzzy_threshold = 0.85
+    return prompt
+
+def skip_duplicate_entries(glossary):
+    """
+    Skip entries with duplicate raw names (after removing honorifics).
+    Returns deduplicated list maintaining first occurrence of each unique raw name.
+    """
+    seen_raw_names = set()
+    deduplicated = []
+    skipped_count = 0
     
-    extract_original_name = os.getenv('GLOSSARY_EXTRACT_ORIGINAL_NAME', '1') == '1'
-    
-    # Track statistics for logging
-    merge_stats = {
-        'total_entries': len(glossary),
-        'unique_entries': 0,
-        'merged_entries': 0,
-        'key_field_used': None,
-        'fuzzy_matches': 0
-    }
-    
-    # Helper function to get the key from an entry
-    def get_entry_key(entry):
-        key = None
-        
-        if duplicate_key_mode == 'original_name':
-            key = entry.get('original_name')
-            merge_stats['key_field_used'] = 'original_name'
-        elif duplicate_key_mode == 'name':
-            key = entry.get('name')
-            merge_stats['key_field_used'] = 'name'
-        elif duplicate_key_mode == 'custom':
-            if custom_field:
-                key = entry.get(custom_field)
-                merge_stats['key_field_used'] = f'custom ({custom_field})'
-            else:
-                key = entry.get('original_name') or entry.get('name')
-                merge_stats['key_field_used'] = 'fallback (no custom field specified)'
-        elif duplicate_key_mode == 'auto' or duplicate_key_mode == 'fuzzy':
-            if extract_original_name and 'original_name' in entry:
-                key = entry['original_name']
-                merge_stats['key_field_used'] = 'original_name (auto)'
-            elif not extract_original_name and 'name' in entry:
-                key = entry['name']
-                merge_stats['key_field_used'] = 'name (auto)'
-            else:
-                key = entry.get('original_name') or entry.get('name')
-                merge_stats['key_field_used'] = 'fallback'
-        
-        return str(key).strip() if key else None
-    
-    # Helper function to find fuzzy match
-    def find_fuzzy_match(key, existing_keys):
-        """Find the best fuzzy match for a key among existing keys"""
-        if not key:
-            return None
+    for entry in glossary:
+        # Get raw_name and clean it
+        raw_name = entry.get('raw_name', '')
+        if not raw_name:
+            continue
             
-        best_match = None
-        best_score = 0
+        # Remove honorifics for comparison (unless disabled)
+        cleaned_name = remove_honorifics(raw_name)
         
-        for existing_key in existing_keys:
-            # Calculate similarity
-            score = SequenceMatcher(None, key.lower(), existing_key.lower()).ratio()
-            
-            if score >= fuzzy_threshold and score > best_score:
-                best_match = existing_key
-                best_score = score
+        # Check if we've seen this cleaned name before
+        if cleaned_name.lower() in seen_raw_names:
+            skipped_count += 1
+            print(f"[Skip] Duplicate entry: {raw_name} (cleaned: {cleaned_name})")
+            continue
         
-        if best_match and best_score < 1.0:  # Only count as fuzzy if not exact
-            merge_stats['fuzzy_matches'] += 1
-            print(f"🔍 Fuzzy match: '{key}' → '{best_match}' (similarity: {best_score:.2%})")
-        
-        return best_match
+        # Add to seen set and keep the entry
+        seen_raw_names.add(cleaned_name.lower())
+        deduplicated.append(entry)
     
-    # Helper function to calculate entry completeness score
-    def calculate_entry_score(entry):
-        """Calculate how complete/informative an entry is"""
-        score = 0
-        
-        # Check each field
-        if entry.get('original_name'):
-            score += 2  # Original name is important
-        if entry.get('name'):
-            score += 2
-        if entry.get('gender'):
-            score += 1
-        if entry.get('title'):
-            score += 1
-        
-        # List fields - count non-empty lists
-        for field in ['traits', 'locations', 'group_affiliation']:
-            if entry.get(field) and len(entry[field]) > 0:
-                score += len(entry[field])
-        
-        # How they refer to others
-        if entry.get('how_they_refer_to_others'):
-            score += len(entry.get('how_they_refer_to_others', {}))
-        
-        # Custom fields
-        for field in custom_fields_list:
-            if entry.get(field):
-                if isinstance(entry[field], list):
-                    score += len(entry[field])
-                else:
-                    score += 1
-        
-        return score
+    if skipped_count > 0:
+        print(f"⏭️ Skipped {skipped_count} duplicate entries")
+        print(f"✅ Kept {len(deduplicated)} unique entries")
     
-    # Process entries based on mode
-    if duplicate_key_mode == 'fuzzy':
-        print(f"🔍 Using fuzzy matching with threshold: {fuzzy_threshold:.0%}")
-        
-        # For fuzzy matching, we need to process entries one by one
-        for entry in glossary:
-            key = get_entry_key(entry)
-            
-            if not key:
-                print(f"⚠️  Skipping entry without key field: {entry}")
-                continue
-            
-            # Find best fuzzy match among existing keys
-            existing_keys = list(merged.keys())
-            match_key = find_fuzzy_match(key, existing_keys)
-            
-            if match_key:
-                # Merge with existing entry
-                merge_stats['merged_entries'] += 1
-                existing_entry = merged[match_key]
-                
-                # Compare scores to decide which entry to keep as base
-                existing_score = calculate_entry_score(existing_entry)
-                new_score = calculate_entry_score(entry)
-                
-                if new_score > existing_score:
-                    # New entry is more complete, use it as base but preserve the matched key
-                    merged_entry = entry.copy()
-                    # Merge in any missing fields from existing
-                    for field in existing_entry:
-                        if field not in merged_entry or not merged_entry[field]:
-                            merged_entry[field] = existing_entry[field]
-                    merged[match_key] = merged_entry
-                else:
-                    # Existing entry is more complete, merge new data into it
-                    # Merge list fields
-                    for field in list_fields:
-                        old = existing_entry.get(field) or []
-                        new = entry.get(field) or []
-                        existing_entry[field] = dedupe_keep_order(old, new)
-                    
-                    # Merge how_they_refer_to_others
-                    old_map = existing_entry.get('how_they_refer_to_others', {}) or {}
-                    new_map = entry.get('how_they_refer_to_others', {}) or {}
-                    for k, v in new_map.items():
-                        if v is not None and k not in old_map:
-                            old_map[k] = v
-                    existing_entry['how_they_refer_to_others'] = old_map
-                    
-                    # Merge single-value fields (keep first non-None value)
-                    single_value_fields = ['name', 'gender', 'title']
-                    if extract_original_name:
-                        single_value_fields.insert(0, 'original_name')
-                    
-                    for field in single_value_fields:
-                        if field not in existing_entry or existing_entry.get(field) is None:
-                            if field in entry and entry[field] is not None:
-                                existing_entry[field] = entry[field]
-            else:
-                # No fuzzy match found, add as new entry
-                merged[key] = entry.copy()
-                merge_stats['unique_entries'] += 1
-                
-                # Initial normalize all list fields
-                for field in list_fields:
-                    if field in merged[key]:
-                        merged[key][field] = dedupe_keep_order(
-                            entry.get(field) or [], []
-                        )
-    
-    else:
-        # Non-fuzzy modes - use exact matching (original logic)
-        for entry in glossary:
-            key = get_entry_key(entry)
-            
-            if not key:
-                print(f"⚠️  Skipping entry without key field: {entry}")
-                continue
-            
-            if key not in merged:
-                merged[key] = entry.copy()
-                merge_stats['unique_entries'] += 1
-                
-                # Initial normalize all list fields
-                for field in list_fields:
-                    if field in merged[key]:
-                        merged[key][field] = dedupe_keep_order(
-                            entry.get(field) or [], []
-                        )
-            else:
-                merge_stats['merged_entries'] += 1
-                
-                # Merge list fields
-                for field in list_fields:
-                    old = merged[key].get(field) or []
-                    new = entry.get(field) or []
-                    merged[key][field] = dedupe_keep_order(old, new)
-                
-                # Merge how_they_refer_to_others
-                old_map = merged[key].get('how_they_refer_to_others', {}) or {}
-                new_map = entry.get('how_they_refer_to_others', {}) or {}
-                for k, v in new_map.items():
-                    if v is not None and k not in old_map:
-                        old_map[k] = v
-                merged[key]['how_they_refer_to_others'] = old_map
-                
-                # Merge single-value fields (keep first non-None value)
-                single_value_fields = ['name', 'gender', 'title']
-                if extract_original_name:
-                    single_value_fields.insert(0, 'original_name')
-                
-                for field in single_value_fields:
-                    if field not in merged[key] or merged[key].get(field) is None:
-                        if field in entry and entry[field] is not None:
-                            merged[key][field] = entry[field]
-    
-    # Strip out any None fields
-    for entry in merged.values():
-        # Remove None values from all fields
-        for field in list(entry.keys()):
-            if entry.get(field) is None:
-                entry.pop(field, None)
-        
-        # Sanitize how_they_refer_to_others
-        htr = entry.get('how_they_refer_to_others')
-        if isinstance(htr, dict):
-            entry['how_they_refer_to_others'] = {
-                k: v for k, v in htr.items() if v is not None
-            }
-            # Remove empty dict
-            if not entry['how_they_refer_to_others']:
-                entry.pop('how_they_refer_to_others', None)
-        else:
-            entry.pop('how_they_refer_to_others', None)
-    
-    # Log merge statistics
-    if merge_stats['merged_entries'] > 0 or merge_stats['fuzzy_matches'] > 0:
-        print(f"🔀 Merged {merge_stats['merged_entries']} duplicate entries")
-        if duplicate_key_mode == 'fuzzy':
-            print(f"   Fuzzy matches: {merge_stats['fuzzy_matches']}")
-            print(f"   Threshold: {fuzzy_threshold:.0%}")
-        print(f"   Key field: {merge_stats['key_field_used']}")
-        print(f"   Total entries: {merge_stats['total_entries']} → {merge_stats['unique_entries']}")
-    
-    return list(merged.values())
+    return deduplicated
+
+# Replace the merge_glossary_entries function with skip_duplicate_entries
+merge_glossary_entries = skip_duplicate_entries  # For backward compatibility
 
 # Batch processing functions
 def process_chapter_batch(chapters_batch: List[Tuple[int, str]], 
@@ -897,12 +784,29 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
 def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict], 
                                   client: UnifiedClient, temp: float, mtoks: int,
                                   stop_check_fn, chunk_timeout: int = None) -> Dict:
-    """Process a single chapter API call for batch processing with interrupt support"""
+    """Process a single chapter API call with thread-safe payload handling"""
     start_time = time.time()
     print(f"[BATCH] Starting API call for Chapter {idx+1} at {time.strftime('%H:%M:%S')}")
     
+    # Thread-safe payload directory
+    thread_name = threading.current_thread().name
+    thread_id = threading.current_thread().ident
+    thread_dir = os.path.join("Payloads", "glossary", f"{thread_name}_{thread_id}")
+    os.makedirs(thread_dir, exist_ok=True)
+    
     try:
-        # Use send_with_interrupt instead of direct client.send
+        # Save request payload before API call
+        payload_file = os.path.join(thread_dir, f"chapter_{idx+1}_request.json")
+        with open(payload_file, 'w', encoding='utf-8') as f:
+            json.dump({
+                'chapter': idx + 1,
+                'messages': msgs,
+                'temperature': temp,
+                'max_tokens': mtoks,
+                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+            }, f, indent=2, ensure_ascii=False)
+        
+        # Use send_with_interrupt for API call
         raw = send_with_interrupt(
             messages=msgs,
             client=client, 
@@ -914,54 +818,34 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
         
         resp = raw[0] if isinstance(raw, tuple) else raw
         
-        # Save the raw response
-        os.makedirs("Payloads", exist_ok=True)
-        with open(f"Payloads/batch_response_chap{idx+1}.txt", "w", encoding="utf-8", errors="replace") as f:
+        # Save the raw response in thread-safe location
+        response_file = os.path.join(thread_dir, f"chapter_{idx+1}_response.txt")
+        with open(response_file, "w", encoding="utf-8", errors="replace") as f:
             f.write(resp)
         
-        # Extract JSON
-        m = re.search(r"\[.*\]", resp, re.DOTALL)
-        if not m:
-            print(f"[Warning] Couldn't find JSON array in chapter {idx+1}")
-            return {
-                'idx': idx,
-                'data': [],
-                'resp': resp,
-                'error': "No JSON array found"
-            }
+        # Parse response using the new parser
+        data = parse_api_response(resp)
         
-        json_str = m.group(0)
+        # Filter out invalid entries
+        valid_data = []
+        for entry in data:
+            if validate_extracted_entry(entry):
+                # Clean the raw_name
+                if 'raw_name' in entry:
+                    entry['raw_name'] = entry['raw_name'].strip()
+                valid_data.append(entry)
+            else:
+                print(f"[Debug] Skipped invalid entry in chapter {idx+1}: {entry}")
         
-        # Parse JSON and validate entries
-        try:
-            data = json.loads(json_str)
-            
-            # Filter out invalid entries
-            valid_data = []
-            for entry in data:
-                if validate_extracted_entry(entry):
-                    valid_data.append(entry)
-                else:
-                    print(f"[Debug] Skipped invalid entry in chapter {idx+1}: {entry.get('original_name', 'unknown')}")
-            
-            elapsed = time.time() - start_time
-            print(f"[BATCH] Completed Chapter {idx+1} in {elapsed:.1f}s at {time.strftime('%H:%M:%S')} - Extracted {len(valid_data)} entries")
-            
-            return {
-                'idx': idx,
-                'data': valid_data,
-                'resp': resp,
-                'error': None
-            }
-            
-        except json.JSONDecodeError as e:
-            print(f"[Warning] JSON decode error chap {idx+1}: {e}")
-            return {
-                'idx': idx,
-                'data': [],
-                'resp': resp,
-                'error': f"JSON decode error: {e}"
-            }
+        elapsed = time.time() - start_time
+        print(f"[BATCH] Completed Chapter {idx+1} in {elapsed:.1f}s at {time.strftime('%H:%M:%S')} - Extracted {len(valid_data)} entries")
+        
+        return {
+            'idx': idx,
+            'data': valid_data,
+            'resp': resp,
+            'error': None
+        }
             
     except UnifiedClientError as e:
         print(f"[Error] API call interrupted/failed for chapter {idx+1}: {e}")
@@ -979,7 +863,6 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             'resp': "",
             'error': str(e)
         }
-
 
 # Update main function to support batch processing:
 def main(log_callback=None, stop_callback=None):
@@ -1106,25 +989,22 @@ def main(log_callback=None, stop_callback=None):
     elif chapter_range:
         print(f"⚠️ Invalid chapter range format: {chapter_range} (use format: 5-10)")
 
-    # Log enabled fields
-    print("📑 Extraction Fields Configuration:")
-    original_name_enabled = os.environ.get('GLOSSARY_EXTRACT_ORIGINAL_NAME', '1') == '1'
-    status = "✅" if original_name_enabled else "❌"
-    print(f"   • Original Name: {status}")
-    print(f"   • Name: {'✅' if os.getenv('GLOSSARY_EXTRACT_NAME', '1') == '1' else '❌'}")
-    print(f"   • Gender: {'✅' if os.getenv('GLOSSARY_EXTRACT_GENDER', '1') == '1' else '❌'}")
-    print(f"   • Title: {'✅' if os.getenv('GLOSSARY_EXTRACT_TITLE', '1') == '1' else '❌'}")
-    print(f"   • Group: {'✅' if os.getenv('GLOSSARY_EXTRACT_GROUP_AFFILIATION', '1') == '1' else '❌'}")
-    print(f"   • Traits: {'✅' if os.getenv('GLOSSARY_EXTRACT_TRAITS', '1') == '1' else '❌'}")
-    print(f"   • References: {'✅' if os.getenv('GLOSSARY_EXTRACT_HOW_THEY_REFER_TO_OTHERS', '1') == '1' else '❌'}")
-    print(f"   • Locations: {'✅' if os.getenv('GLOSSARY_EXTRACT_LOCATIONS', '1') == '1' else '❌'}")
+    # Log settings
+    print("📑 Glossary Format: Simple (type, raw_name, translated_name, gender)")
+    
+    # Check honorifics filter toggle
+    honorifics_disabled = os.getenv('GLOSSARY_DISABLE_HONORIFICS_FILTER', '0') == '1'
+    if honorifics_disabled:
+        print("📑 Honorifics Filtering: ❌ DISABLED")
+    else:
+        print("📑 Honorifics Filtering: ✅ ENABLED")
     
     # Log custom fields
     custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
     try:
         custom_fields = json.loads(custom_fields_json)
         if custom_fields:
-            print(f"   • Custom Fields: {', '.join(custom_fields)}")
+            print(f"📑 Custom Fields: {', '.join(custom_fields)}")
     except:
         pass
     
@@ -1233,8 +1113,13 @@ def main(log_callback=None, stop_callback=None):
                     else:
                         avg = elapsed / ((idx * 100) + eidx)
                         eta = avg * (total_chapters * 100 - ((idx * 100) + eidx))
-                    name = entry.get("original_name","?")
-                    print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → Entry "{name}"')
+                    
+                    # Get entry info based on new format
+                    entry_type = entry.get("type", "?")
+                    raw_name = entry.get("raw_name", "?")
+                    trans_name = entry.get("translated_name", "?")
+                    
+                    print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → {entry_type}: {raw_name} ({trans_name})')
                 
                 # Collect entries for batch merging
                 batch_glossary_entries.extend(data)
@@ -1244,16 +1129,16 @@ def main(log_callback=None, stop_callback=None):
                 if contextual_enabled:
                     history.append({"user": build_prompt(chap), "assistant": resp})
             
-            # Merge batch entries into main glossary
+            # Apply skip logic to batch entries
             if batch_glossary_entries:
-                print(f"🔀 Merging {len(batch_glossary_entries)} entries from batch {batch_num+1}")
+                print(f"🔀 Processing {len(batch_glossary_entries)} entries from batch {batch_num+1}")
                 glossary.extend(batch_glossary_entries)
-                glossary[:] = merge_glossary_entries(glossary)
+                glossary[:] = skip_duplicate_entries(glossary)
             
             # Save progress after each batch
             save_progress(completed, glossary, history)
             save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
-            save_glossary_md(glossary, os.path.join(glossary_dir, os.path.basename(args.output).replace('.json', '.md')))
+            save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
             
             # Handle context history
             if contextual_enabled:
@@ -1397,18 +1282,21 @@ def main(log_callback=None, stop_callback=None):
                         # Process chunk response
                         chunk_resp = chunk_raw[0] if isinstance(chunk_raw, tuple) else chunk_raw
                         
-                        # Save chunk response
-                        os.makedirs("Payloads", exist_ok=True)
-                        with open(f"Payloads/chunk_response_chap{idx+1}_chunk{chunk_idx}.txt", "w", encoding="utf-8", errors="replace") as f:
+                        # Save chunk response with thread-safe location
+                        thread_name = threading.current_thread().name
+                        thread_id = threading.current_thread().ident
+                        thread_dir = os.path.join("Payloads", "glossary", f"{thread_name}_{thread_id}")
+                        os.makedirs(thread_dir, exist_ok=True)
+                        
+                        with open(os.path.join(thread_dir, f"chunk_response_chap{idx+1}_chunk{chunk_idx}.txt"), "w", encoding="utf-8", errors="replace") as f:
                             f.write(chunk_resp)
                         
                         # Extract JSON from chunk
-                        chunk_m = re.search(r"\[.*\]", chunk_resp, re.DOTALL)
-                        if not chunk_m:
-                            print(f"[Warning] No JSON found in chunk {chunk_idx}, skipping...")
-                            continue
+                        chunk_resp_data = parse_api_response(chunk_resp)
                         
-                        chunk_json_str = chunk_m.group(0)
+                        if not chunk_resp_data:
+                            print(f"[Warning] No data found in chunk {chunk_idx}, skipping...")
+                            continue
                         
                         # Parse chunk JSON
                         try:
@@ -1420,7 +1308,7 @@ def main(log_callback=None, stop_callback=None):
                                 if validate_extracted_entry(entry):
                                     valid_chunk_data.append(entry)
                                 else:
-                                    print(f"[Debug] Skipped invalid entry in chunk {chunk_idx}: {entry.get('original_name', 'unknown')}")
+                                    print(f"[Debug] Skipped invalid entry in chunk {chunk_idx}: {entry}")
                             
                             chapter_glossary_data.extend(valid_chunk_data)
                             print(f"✅ Chunk {chunk_idx}/{total_chunks}: extracted {len(valid_chunk_data)} entries")
@@ -1478,55 +1366,52 @@ def main(log_callback=None, stop_callback=None):
                     # Process response
                     resp = raw[0] if isinstance(raw, tuple) else raw
 
-                    # Save the raw response
-                    os.makedirs("Payloads", exist_ok=True)
-                    with open(f"Payloads/failed_response_chap{idx+1}.txt", "w", encoding="utf-8", errors="replace") as f:
+                    # Save the raw response with thread-safe location
+                    thread_name = threading.current_thread().name
+                    thread_id = threading.current_thread().ident
+                    thread_dir = os.path.join("Payloads", "glossary", f"{thread_name}_{thread_id}")
+                    os.makedirs(thread_dir, exist_ok=True)
+                    
+                    with open(os.path.join(thread_dir, f"response_chap{idx+1}.txt"), "w", encoding="utf-8", errors="replace") as f:
                         f.write(resp)
 
-                    # Extract JSON
-                    m = re.search(r"\[.*\]", resp, re.DOTALL)
-                    if not m:
-                        print(f"[Warning] Couldn't find JSON array in chapter {idx+1}, saving raw…")
-                        continue
-
-                    json_str = m.group(0) if m else resp
-
-                    # Parse JSON and validate entries
-                    try:
-                        data = json.loads(json_str)
-                        
-                        # Filter out invalid entries
-                        valid_data = []
-                        for entry in data:
-                            if validate_extracted_entry(entry):
-                                valid_data.append(entry)
-                            else:
-                                print(f"[Debug] Skipped invalid entry: {entry.get('original_name', 'unknown')}")
-                        
-                        data = valid_data
-                        total_ent = len(data)
-                        
-                        # Log entries
-                        for eidx, entry in enumerate(data, start=1):
-                            if check_stop():
-                                print(f"❌ Glossary extraction stopped during entry processing for chapter {idx+1}")
-                                return
-                                
-                            elapsed = time.time() - start
-                            if idx == 0 and eidx == 1:
-                                eta = 0
-                            else:
-                                avg = elapsed / ((idx * 100) + eidx)
-                                eta = avg * (total_chapters * 100 - ((idx * 100) + eidx))
-                            name = entry.get("original_name","?")
-                            print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → Entry "{name}"')
-                    except json.JSONDecodeError as e:
-                        print(f"[Warning] JSON decode error chap {idx+1}: {e}")
-                        continue    
+                    # Parse response using the new parser
+                    data = parse_api_response(resp)
                     
-                # Merge and save (original behavior for sequential mode)
+                    # Filter out invalid entries
+                    valid_data = []
+                    for entry in data:
+                        if validate_extracted_entry(entry):
+                            valid_data.append(entry)
+                        else:
+                            print(f"[Debug] Skipped invalid entry: {entry}")
+                    
+                    data = valid_data
+                    total_ent = len(data)
+                    
+                    # Log entries
+                    for eidx, entry in enumerate(data, start=1):
+                        if check_stop():
+                            print(f"❌ Glossary extraction stopped during entry processing for chapter {idx+1}")
+                            return
+                            
+                        elapsed = time.time() - start
+                        if idx == 0 and eidx == 1:
+                            eta = 0
+                        else:
+                            avg = elapsed / ((idx * 100) + eidx)
+                            eta = avg * (total_chapters * 100 - ((idx * 100) + eidx))
+                        
+                        # Get entry info based on new format
+                        entry_type = entry.get("type", "?")
+                        raw_name = entry.get("raw_name", "?")
+                        trans_name = entry.get("translated_name", "?")
+                        
+                        print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → {entry_type}: {raw_name} ({trans_name})')    
+                    
+                # Apply skip logic and save
                 glossary.extend(data)
-                glossary[:] = merge_glossary_entries(glossary)
+                glossary[:] = skip_duplicate_entries(glossary)
                 completed.append(idx)
 
                 # Only add to history if contextual is enabled
@@ -1541,7 +1426,7 @@ def main(log_callback=None, stop_callback=None):
 
                 save_progress(completed, glossary, history)
                 save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
-                save_glossary_md(glossary, os.path.join(glossary_dir, os.path.basename(args.output).replace('.json', '.md')))
+                save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                 
                 # Add delay before next API call (but not after the last chapter)
                 if idx < len(chapters) - 1:
@@ -1573,6 +1458,15 @@ def main(log_callback=None, stop_callback=None):
                     return
 
     print(f"Done. Glossary saved to {args.output}")
+    
+    # Also save as CSV format for compatibility
+    try:
+        csv_output = args.output.replace('.json', '.csv')
+        csv_path = os.path.join(glossary_dir, os.path.basename(csv_output))
+        save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+        print(f"Also saved as CSV: {csv_path}")
+    except Exception as e:
+        print(f"[Warning] Could not save CSV format: {e}")
 
 if __name__=='__main__':
     main()
