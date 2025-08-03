@@ -4263,7 +4263,8 @@ class UnifiedClient:
         # For all other providers, use the actual API key
         # Remove the special case for gemini-openai - it needs the real API key
         if not is_local_endpoint:
-            print(f"   Using actual API key for {provider}")
+            #print(f"   Using actual API key for {provider}")
+            pass
         
         # Check if safety settings are disabled via GUI toggle
         disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
