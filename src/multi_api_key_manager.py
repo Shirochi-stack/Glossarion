@@ -228,6 +228,21 @@ class APIKeyPool:
         """Get all keys in the pool"""
         with self.lock:
             return self.keys.copy()
+
+    @property
+    def current_index(self):
+        """Get the current rotation index"""
+        with self.lock:
+            return self._rotation_index
+
+    @current_index.setter
+    def current_index(self, value: int):
+        """Set the current rotation index"""
+        with self.lock:
+            if self.keys:
+                self._rotation_index = value % len(self.keys)
+            else:
+                self._rotation_index = 0
             
     def add_key(self, key_entry: APIKeyEntry):
         """Add a new key to the pool"""
