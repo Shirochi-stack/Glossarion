@@ -1796,14 +1796,6 @@ def detect_duplicates(results, log, should_stop, config):
     
     return duplicate_groups, near_duplicate_groups, duplicate_confidence
 
-# Create a cached version of the similarity check
-@lru_cache(maxsize=10000)
-def _check_pair_similarity_cached(text1_hash, text2_hash, text1_len, text2_len, threshold):
-    """Cached similarity check - returns (is_similar, similarity_score, check_variant)"""
-    # This is called with hashes, but we need to work with the actual text
-    # Since we can't pass the full text (unhashable), we'll need a different approach
-    return None  # Placeholder - see better implementation below
-
 def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidence, 
                                 threshold, log, should_stop):
     """Perform deep similarity analysis between files - OPTIMIZED VERSION"""
@@ -1824,7 +1816,7 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
                 'hash_10k': hashlib.md5(text[:10000].encode()).hexdigest()
             }
     
-    # Create cached similarity checker
+    # Create cached similarity checker - ADD @lru_cache decorator!
     @lru_cache(maxsize=5000)
     def check_similarity_cached(hash1, hash2):
         """Check similarity between two text hashes"""
@@ -1921,9 +1913,6 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
     # Clear local caches when done
     check_similarity_cached.cache_clear()
     check_semantic_similarity_cached.cache_clear()
-
-# If you want to make it configurable with your cache system:
-perform_deep_similarity_check = lru_cache(maxsize=get_cache_size("deep_similarity") or 100)(perform_deep_similarity_check)
 
 def check_consecutive_chapters(results, duplicate_groups, duplicate_confidence, config, log, should_stop=None):
     """Check for consecutive chapters with same title using fuzzy matching"""
