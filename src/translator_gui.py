@@ -1225,7 +1225,7 @@ class TranslatorGUI:
                 "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
                 "- Retain Korean honorifics and respectful speech markers in romanized form, including but not limited to: -nim, -ssi, -yang, -gun, -isiyeo, -hasoseo. For archaic/classical Korean honorific forms (like 이시여/isiyeo, 하소서/hasoseo), preserve them as-is rather than converting to modern equivalents.\n"
                 "- Always localize Korean terminology to proper English equivalents instead of literal translations (examples: 마왕 = Demon King; 마술 = magic).\n"
-                "- When translating Korean's pronoun-dropping style, insert pronouns in English only where needed for clarity: use they/them as default except where glossary specifies otherwise, use I/me for first-person narration, and maintain natural English flow without overusing pronouns just because they're omitted in Korean.\n"
+                "- When translating Korean's pronoun-dropping style, insert pronouns in English only where needed for clarity: prioritize original pronouns as implied or according to the glossary, and only use they/them as a last resort, use I/me for first-person narration, and maintain natural English flow without overusing pronouns just because they're omitted in Korean.\n"
                 "- All Korean profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
@@ -1239,7 +1239,7 @@ class TranslatorGUI:
                 "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
                 "- Retain Japanese honorifics and respectful speech markers in romanized form, including but not limited to: -san, -sama, -chan, -kun, -dono, -sensei, -senpai, -kouhai. For archaic/classical Japanese honorific forms, preserve them as-is rather than converting to modern equivalents.\n"
                 "- Always localize Japanese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 魔術 = magic).\n"
-                "- When translating Japanese's pronoun-dropping style, insert pronouns in English only where needed for clarity: use they/them as default except where glossary specifies otherwise, use I/me for first-person narration while reflecting the Japanese pronoun's nuance (私/僕/俺/etc.) through speech patterns rather than the pronoun itself, and maintain natural English flow without overusing pronouns just because they're omitted in Japanese.\n"
+                "- When translating Japanese's pronoun-dropping style, insert pronouns in English only where needed for clarity: prioritize original pronouns as implied or according to the glossary, and only use they/them as a last resort, use I/me for first-person narration while reflecting the Japanese pronoun's nuance (私/僕/俺/etc.) through speech patterns rather than the pronoun itself, and maintain natural English flow without overusing pronouns just because they're omitted in Japanese.\n"
                 "- All Japanese profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
@@ -1253,7 +1253,7 @@ class TranslatorGUI:
                 "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
                 "- Retain Chinese titles and respectful forms of address in romanized form, including but not limited to: laoban, laoshi, shifu, xiaojie, xiansheng, taitai, daren, qianbei. For archaic/classical Chinese respectful forms, preserve them as-is rather than converting to modern equivalents.\n"
                 "- Always localize Chinese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 法术 = magic).\n"
-                "- When translating Chinese's flexible pronoun usage, insert pronouns in English only where needed for clarity: use they/them as default except where glossary specifies otherwise, use I/me for first-person narration while reflecting the pronoun's nuance (我/吾/咱/人家/etc.) through speech patterns and formality level rather than the pronoun itself, and since Chinese pronouns don't indicate gender in speech (他/她/它 all sound like 'tā'), rely on context or glossary rather than assuming gender.\n"
+                "- When translating Chinese's flexible pronoun usage, insert pronouns in English only where needed for clarity: prioritize original pronouns as implied or according to the glossary, and only use they/them as a last resort, use I/me for first-person narration while reflecting the pronoun's nuance (我/吾/咱/人家/etc.) through speech patterns and formality level rather than the pronoun itself, and since Chinese pronouns don't indicate gender in speech (他/她/它 all sound like 'tā'), rely on context or glossary rather than assuming gender.\n"
                 "- All Chinese profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
@@ -1267,7 +1267,7 @@ class TranslatorGUI:
                 "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
                 "- Retain Korean honorifics and respectful speech markers in romanized form, including but not limited to: -nim, -ssi, -yang, -gun, -isiyeo, -hasoseo. For archaic/classical Korean honorific forms (like 이시여/isiyeo, 하소서/hasoseo), preserve them as-is rather than converting to modern equivalents.\n"
                 "- Always localize Korean terminology to proper English equivalents instead of literal translations (examples: 마왕 = Demon King; 마술 = magic).\n"
-                "- When translating Korean's pronoun-dropping style, insert pronouns in English only where needed for clarity: use they/them as default except where glossary specifies otherwise, use I/me for first-person narration, and maintain natural English flow without overusing pronouns just because they're omitted in Korean.\n"
+                "- When translating Korean's pronoun-dropping style, insert pronouns in English only where needed for clarity: prioritize original pronouns as implied or according to the glossary, and only use they/them as a last resort, use I/me for first-person narration, and maintain natural English flow without overusing pronouns just because they're omitted in Korean.\n"
                 "- All Korean profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
@@ -1282,7 +1282,7 @@ class TranslatorGUI:
                 "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
                 "- Retain Japanese honorifics and respectful speech markers in romanized form, including but not limited to: -san, -sama, -chan, -kun, -dono, -sensei, -senpai, -kouhai. For archaic/classical Japanese honorific forms, preserve them as-is rather than converting to modern equivalents.\n"
                 "- Always localize Japanese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 魔術 = magic).\n"
-                "- When translating Japanese's pronoun-dropping style, insert pronouns in English only where needed for clarity: use they/them as default except where glossary specifies otherwise, use I/me for first-person narration while reflecting the Japanese pronoun's nuance (私/僕/俺/etc.) through speech patterns rather than the pronoun itself, and maintain natural English flow without overusing pronouns just because they're omitted in Japanese.\n"
+                "- When translating Japanese's pronoun-dropping style, insert pronouns in English only where needed for clarity: prioritize original pronouns as implied or according to the glossary, and only use they/them as a last resort, use I/me for first-person narration while reflecting the Japanese pronoun's nuance (私/僕/俺/etc.) through speech patterns rather than the pronoun itself, and maintain natural English flow without overusing pronouns just because they're omitted in Japanese.\n"
                 "- All Japanese profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
@@ -1297,7 +1297,7 @@ class TranslatorGUI:
                 "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
                 "- Retain Chinese titles and respectful forms of address in romanized form, including but not limited to: laoban, laoshi, shifu, xiaojie, xiansheng, taitai, daren, qianbei. For archaic/classical Chinese respectful forms, preserve them as-is rather than converting to modern equivalents.\n"
                 "- Always localize Chinese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 法术 = magic).\n"
-                "- When translating Chinese's flexible pronoun usage, insert pronouns in English only where needed for clarity: use they/them as default except where glossary specifies otherwise, use I/me for first-person narration while reflecting the pronoun's nuance (我/吾/咱/人家/etc.) through speech patterns and formality level rather than the pronoun itself, and since Chinese pronouns don't indicate gender in speech (他/她/它 all sound like 'tā'), rely on context or glossary rather than assuming gender.\n"
+                "- When translating Chinese's flexible pronoun usage, insert pronouns in English only where needed for clarity: prioritize original pronouns as implied or according to the glossary, and only use they/them as a last resort, use I/me for first-person narration while reflecting the pronoun's nuance (我/吾/咱/人家/etc.) through speech patterns and formality level rather than the pronoun itself, and since Chinese pronouns don't indicate gender in speech (他/她/它 all sound like 'tā'), rely on context or glossary rather than assuming gender.\n"
                 "- All Chinese profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
@@ -1312,7 +1312,7 @@ class TranslatorGUI:
                 "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
                 "- Retain Korean honorifics and respectful speech markers in romanized form, including but not limited to: -nim, -ssi, -yang, -gun, -isiyeo, -hasoseo. For archaic/classical Korean honorific forms (like 이시여/isiyeo, 하소서/hasoseo), preserve them as-is rather than converting to modern equivalents.\n"
                 "- Always localize Korean terminology to proper English equivalents instead of literal translations (examples: 마왕 = Demon King; 마술 = magic).\n"
-                "- When translating Korean's pronoun-dropping style, insert pronouns in English only where needed for clarity: use they/them as default except where glossary specifies otherwise, use I/me for first-person narration, and maintain natural English flow without overusing pronouns just because they're omitted in Korean.\n"
+                "- When translating Korean's pronoun-dropping style, insert pronouns in English only where needed for clarity: prioritize original pronouns as implied or according to the glossary, and only use they/them as a last resort, use I/me for first-person narration, and maintain natural English flow without overusing pronouns just because they're omitted in Korean.\n"
                 "- All Korean profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
@@ -1326,7 +1326,7 @@ class TranslatorGUI:
                 "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
                 "- Retain Japanese honorifics and respectful speech markers in romanized form, including but not limited to: -san, -sama, -chan, -kun, -dono, -sensei, -senpai, -kouhai. For archaic/classical Japanese honorific forms, preserve them as-is rather than converting to modern equivalents.\n"
                 "- Always localize Japanese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 魔術 = magic).\n"
-                "- When translating Japanese's pronoun-dropping style, insert pronouns in English only where needed for clarity: use they/them as default except where glossary specifies otherwise, use I/me for first-person narration while reflecting the Japanese pronoun's nuance (私/僕/俺/etc.) through speech patterns rather than the pronoun itself, and maintain natural English flow without overusing pronouns just because they're omitted in Japanese.\n"
+                "- When translating Japanese's pronoun-dropping style, insert pronouns in English only where needed for clarity: prioritize original pronouns as implied or according to the glossary, and only use they/them as a last resort, use I/me for first-person narration while reflecting the Japanese pronoun's nuance (私/僕/俺/etc.) through speech patterns rather than the pronoun itself, and maintain natural English flow without overusing pronouns just because they're omitted in Japanese.\n"
                 "- All Japanese profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
@@ -1340,7 +1340,7 @@ class TranslatorGUI:
                 "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
                 "- Retain Chinese titles and respectful forms of address in romanized form, including but not limited to: laoban, laoshi, shifu, xiaojie, xiansheng, taitai, daren, qianbei. For archaic/classical Chinese respectful forms, preserve them as-is rather than converting to modern equivalents.\n"
                 "- Always localize Chinese terminology to proper English equivalents instead of literal translations (examples: 魔王 = Demon King; 法术 = magic).\n"
-                "- When translating Chinese's flexible pronoun usage, insert pronouns in English only where needed for clarity: use they/them as default except where glossary specifies otherwise, use I/me for first-person narration while reflecting the pronoun's nuance (我/吾/咱/人家/etc.) through speech patterns and formality level rather than the pronoun itself, and since Chinese pronouns don't indicate gender in speech (他/她/它 all sound like 'tā'), rely on context or glossary rather than assuming gender.\n"
+                "- When translating Chinese's flexible pronoun usage, insert pronouns in English only where needed for clarity: prioritize original pronouns as implied or according to the glossary, and only use they/them as a last resort, use I/me for first-person narration while reflecting the pronoun's nuance (我/吾/咱/人家/etc.) through speech patterns and formality level rather than the pronoun itself, and since Chinese pronouns don't indicate gender in speech (他/她/它 all sound like 'tā'), rely on context or glossary rather than assuming gender.\n"
                 "- All Chinese profanity must be translated to English profanity.\n"
                 "- Preserve original intent, and speech tone.\n"
                 "- Retain onomatopoeia in Romaji.\n"
@@ -8710,7 +8710,16 @@ Recent translations to summarize:
                 'check_missing_html_tag': True,     
                 'check_word_count_ratio': False,     
                 'check_multiple_headers': True,     
-                'warn_name_mismatch': True         
+                'warn_name_mismatch': True,
+                'cache_enabled': True,
+                'cache_auto_size': False,
+                'cache_show_stats': False,
+                'cache_normalize_text': 10000,
+                'cache_similarity_ratio': 20000,
+                'cache_content_hashes': 5000,
+                'cache_semantic_fingerprint': 2000,
+                'cache_structural_signature': 2000,
+                'cache_translation_artifacts': 1000             
             })
             # Debug: Print current settings
             print(f"[DEBUG] QA Settings: {qa_settings}")
@@ -9374,22 +9383,77 @@ Recent translations to summarize:
             mode = selected_mode_value
             self.append_log(f"🔍 Starting QA scan in {mode.upper()} mode for folder: {folder_path}")
             self.stop_requested = False
+ 
+            # Extract cache configuration from qa_settings
+            cache_config = {
+                'enabled': qa_settings.get('cache_enabled', True),
+                'auto_size': qa_settings.get('cache_auto_size', False),
+                'show_stats': qa_settings.get('cache_show_stats', False),
+                'sizes': {}
+            }
             
+            # Get individual cache sizes
+            for cache_name in ['normalize_text', 'similarity_ratio', 'content_hashes', 
+                              'semantic_fingerprint', 'structural_signature', 'translation_artifacts']:
+                size = qa_settings.get(f'cache_{cache_name}', None)
+                if size is not None:
+                    # Convert -1 to None for unlimited
+                    cache_config['sizes'][cache_name] = None if size == -1 else size
+            
+            # Create custom settings that includes cache config
+            custom_settings = {
+                'qa_settings': qa_settings,
+                'cache_config': cache_config,
+                'log_cache_stats': qa_settings.get('cache_show_stats', False)
+            }
+     
             def run_scan():
                 self.master.after(0, self.update_run_button)
                 self.qa_button.config(text="Stop Scan", command=self.stop_qa_scan, bootstyle="danger")
                 
                 try:
-                    # Pass the QA settings to scan_html_folder
+                    # Extract cache configuration from qa_settings
+                    cache_config = {
+                        'enabled': qa_settings.get('cache_enabled', True),
+                        'auto_size': qa_settings.get('cache_auto_size', False),
+                        'show_stats': qa_settings.get('cache_show_stats', False),
+                        'sizes': {}
+                    }
+                    
+                    # Get individual cache sizes
+                    for cache_name in ['normalize_text', 'similarity_ratio', 'content_hashes', 
+                                      'semantic_fingerprint', 'structural_signature', 'translation_artifacts']:
+                        size = qa_settings.get(f'cache_{cache_name}', None)
+                        if size is not None:
+                            # Convert -1 to None for unlimited
+                            cache_config['sizes'][cache_name] = None if size == -1 else size
+                    
+                    # Configure the cache BEFORE calling scan_html_folder
+                    from scan_html_folder import configure_qa_cache
+                    configure_qa_cache(cache_config)
+                    
+                    # Pass the QA settings to scan_html_folder (without custom_settings)
                     scan_html_folder(
                         folder_path, 
                         log=self.append_log, 
                         stop_flag=lambda: self.stop_requested, 
                         mode=mode,
-                        qa_settings=qa_settings,
-                        epub_path=epub_path             # Pass settings to the scanner
+                        qa_settings=qa_settings,  # Keep existing qa_settings parameter
+                        epub_path=epub_path
                     )
+                    
+                    # If show_stats is enabled, log cache statistics
+                    if qa_settings.get('cache_show_stats', False):
+                        from scan_html_folder import get_cache_info
+                        cache_stats = get_cache_info()
+                        self.append_log("\n📊 Cache Performance Statistics:")
+                        for name, info in cache_stats.items():
+                            if info:  # Check if info exists
+                                hit_rate = info.hits / (info.hits + info.misses) if (info.hits + info.misses) > 0 else 0
+                                self.append_log(f"  {name}: {info.hits} hits, {info.misses} misses ({hit_rate:.1%} hit rate)")
+                    
                     self.append_log("✅ QA scan completed successfully.")
+        
                 except Exception as e:
                     self.append_log(f"❌ QA scan error: {e}")
                     self.append_log(f"Traceback: {traceback.format_exc()}")
@@ -9816,6 +9880,183 @@ Recent translations to summarize:
             )
             report_section.pack(fill=tk.X, pady=(0, 20))
 
+            # Cache Settings Section
+            cache_section = tk.LabelFrame(
+                main_frame,
+                text="Performance Cache Settings",
+                font=('Arial', 12, 'bold'),
+                padx=20,
+                pady=15
+            )
+            cache_section.pack(fill=tk.X, pady=(0, 20))
+            
+            # Enable cache checkbox
+            cache_enabled_var = tk.BooleanVar(value=qa_settings.get('cache_enabled', True))
+            cache_checkbox = tb.Checkbutton(
+                cache_section,
+                text="Enable performance cache (speeds up duplicate detection)",
+                variable=cache_enabled_var,
+                bootstyle="primary"
+            )
+            cache_checkbox.pack(anchor=tk.W, pady=(0, 10))
+            
+            # Cache size settings frame
+            cache_sizes_frame = tk.Frame(cache_section)
+            cache_sizes_frame.pack(fill=tk.X, padx=(20, 0))
+            
+            # Description
+            tk.Label(
+                cache_sizes_frame,
+                text="Cache sizes (0 = disabled, -1 = unlimited):",
+                font=('Arial', 10)
+            ).pack(anchor=tk.W, pady=(0, 5))
+            
+            # Cache size variables
+            cache_vars = {}
+            cache_defaults = {
+                'normalize_text': 10000,
+                'similarity_ratio': 20000,
+                'content_hashes': 5000,
+                'semantic_fingerprint': 2000,
+                'structural_signature': 2000,
+                'translation_artifacts': 1000
+            }
+            
+            # Create input fields for each cache type
+            for cache_name, default_value in cache_defaults.items():
+                row_frame = tk.Frame(cache_sizes_frame)
+                row_frame.pack(fill=tk.X, pady=2)
+                
+                # Label
+                label_text = cache_name.replace('_', ' ').title() + ":"
+                tk.Label(
+                    row_frame,
+                    text=label_text,
+                    width=25,
+                    anchor='w',
+                    font=('Arial', 9)
+                ).pack(side=tk.LEFT)
+                
+                # Get current value
+                current_value = qa_settings.get(f'cache_{cache_name}', default_value)
+                cache_var = tk.IntVar(value=current_value)
+                cache_vars[cache_name] = cache_var
+                
+                # Spinbox
+                spinbox = tb.Spinbox(
+                    row_frame,
+                    from_=-1,
+                    to=50000,
+                    textvariable=cache_var,
+                    width=10,
+                    bootstyle="primary"
+                )
+                spinbox.pack(side=tk.LEFT, padx=(0, 10))
+                
+                # Disable mousewheel scrolling
+                UIHelper.disable_spinbox_mousewheel(spinbox)
+                
+                # Quick preset buttons
+                button_frame = tk.Frame(row_frame)
+                button_frame.pack(side=tk.LEFT)
+                
+                tk.Button(
+                    button_frame,
+                    text="Off",
+                    width=4,
+                    font=('Arial', 8),
+                    command=lambda v=cache_var: v.set(0)
+                ).pack(side=tk.LEFT, padx=1)
+                
+                tk.Button(
+                    button_frame,
+                    text="Small",
+                    width=5,
+                    font=('Arial', 8),
+                    command=lambda v=cache_var: v.set(1000)
+                ).pack(side=tk.LEFT, padx=1)
+                
+                tk.Button(
+                    button_frame,
+                    text="Medium",
+                    width=7,
+                    font=('Arial', 8),
+                    command=lambda v=cache_var, d=default_value: v.set(d)
+                ).pack(side=tk.LEFT, padx=1)
+                
+                tk.Button(
+                    button_frame,
+                    text="Large",
+                    width=5,
+                    font=('Arial', 8),
+                    command=lambda v=cache_var, d=default_value: v.set(d * 2)
+                ).pack(side=tk.LEFT, padx=1)
+                
+                tk.Button(
+                    button_frame,
+                    text="Max",
+                    width=4,
+                    font=('Arial', 8),
+                    command=lambda v=cache_var: v.set(-1)
+                ).pack(side=tk.LEFT, padx=1)
+            
+            # Enable/disable cache size controls based on checkbox
+            def toggle_cache_controls(*args):
+                state = 'normal' if cache_enabled_var.get() else 'disabled'
+                for widget in cache_sizes_frame.winfo_children():
+                    if isinstance(widget, tk.Frame):
+                        for child in widget.winfo_children():
+                            if isinstance(child, (tb.Spinbox, tk.Button)):
+                                child.config(state=state)
+            
+            cache_enabled_var.trace('w', toggle_cache_controls)
+            toggle_cache_controls()  # Set initial state
+            
+            # Auto-size cache option
+            auto_size_frame = tk.Frame(cache_section)
+            auto_size_frame.pack(fill=tk.X, pady=(10, 5))
+            
+            auto_size_var = tk.BooleanVar(value=qa_settings.get('cache_auto_size', False))
+            auto_size_check = tb.Checkbutton(
+                auto_size_frame,
+                text="Auto-size caches based on available RAM",
+                variable=auto_size_var,
+                bootstyle="primary"
+            )
+            auto_size_check.pack(side=tk.LEFT)
+            
+            tk.Label(
+                auto_size_frame,
+                text="(overrides manual settings)",
+                font=('Arial', 9),
+                fg='gray'
+            ).pack(side=tk.LEFT, padx=(10, 0))
+            
+            # Cache statistics display
+            stats_frame = tk.Frame(cache_section)
+            stats_frame.pack(fill=tk.X, pady=(10, 0))
+            
+            show_stats_var = tk.BooleanVar(value=qa_settings.get('cache_show_stats', False))
+            tb.Checkbutton(
+                stats_frame,
+                text="Show cache hit/miss statistics after scan",
+                variable=show_stats_var,
+                bootstyle="primary"
+            ).pack(anchor=tk.W)
+            
+            # Info about cache
+            tk.Label(
+                cache_section,
+                text="Larger cache sizes use more memory but improve performance for:\n" +
+                     "• Large datasets (100+ files)\n" +
+                     "• AI Hunter mode (all file pairs compared)\n" +
+                     "• Repeated scans of the same folder",
+                wraplength=700,
+                justify=tk.LEFT,
+                fg='gray',
+                font=('Arial', 9)
+            ).pack(anchor=tk.W, padx=(20, 0), pady=(10, 0))
+
             # Report format
             format_frame = tk.Frame(report_section)
             format_frame.pack(fill=tk.X, pady=(0, 10))
@@ -9875,6 +10116,15 @@ Recent translations to summarize:
                     qa_settings['check_missing_html_tag'] = check_missing_html_tag_var.get()
                     qa_settings['check_paragraph_structure'] = check_paragraph_structure_var.get()
                     
+                    # Save cache settings
+                    qa_settings['cache_enabled'] = cache_enabled_var.get()
+                    qa_settings['cache_auto_size'] = auto_size_var.get()
+                    qa_settings['cache_show_stats'] = show_stats_var.get()
+                    
+                    # Save individual cache sizes
+                    for cache_name, cache_var in cache_vars.items():
+                        qa_settings[f'cache_{cache_name}'] = cache_var.get()
+                    
                     # Validate and save paragraph threshold
                     try:
                         threshold_value = paragraph_threshold_var.get()
@@ -9924,6 +10174,15 @@ Recent translations to summarize:
                     check_missing_html_tag_var.set(True)
                     check_paragraph_structure_var.set(True)
                     paragraph_threshold_var.set(30)  # 30% default
+                    
+                    # Reset cache settings
+                    cache_enabled_var.set(True)
+                    auto_size_var.set(False)
+                    show_stats_var.set(False)
+                    
+                    # Reset cache sizes to defaults
+                    for cache_name, default_value in cache_defaults.items():
+                        cache_vars[cache_name].set(default_value)
             
             # Create buttons using ttkbootstrap styles
             save_btn = tb.Button(
@@ -12837,7 +13096,9 @@ Recent translations to summarize:
                     'file_filtering_level': self.file_filtering_level_var.get() if hasattr(self, 'file_filtering_level_var') else 'smart',
                     'extraction_mode': 'enhanced' if self.text_extraction_method_var.get() == 'enhanced' else self.file_filtering_level_var.get(), 
                     'enhanced_filtering': self.file_filtering_level_var.get() if self.text_extraction_method_var.get() == 'enhanced' else 'smart', 
-                    
+                    'use_gemini_openai_endpoint': self.use_gemini_openai_endpoint_var.get(),
+                    'gemini_openai_endpoint': self.gemini_openai_endpoint_var.get(),
+                                        
                     # ALL Anti-duplicate parameters (moved below other settings)
                     'enable_anti_duplicate': getattr(self, 'enable_anti_duplicate_var', type('', (), {'get': lambda: False})).get(),
                     'top_p': float(getattr(self, 'top_p_var', type('', (), {'get': lambda: 1.0})).get()),
