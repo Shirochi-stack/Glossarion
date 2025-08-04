@@ -3463,6 +3463,15 @@ def test_stop_functionality():
     _stop_flag = False  # Reset
     return True
 
+# Add this to scan_html_folder.py - parallel AI Hunter implementation
+
+import concurrent.futures
+import multiprocessing
+from threading import Lock
+
+# Add a global lock for thread-safe operations
+merge_lock = Lock()
+
 def parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, config, log, should_stop):
     """Parallel AI Hunter checking - no quality compromises, just pure speed"""
     
@@ -3481,7 +3490,21 @@ def parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, co
     cpu_count = multiprocessing.cpu_count()
     
     # Check if there's a configured limit
-    max_workers_config = config.get('ai_hunter_max_workers', 0)
+    # Try to read from a global config file or environment variable
+    max_workers_config = 0
+    try:
+        # Try to read from config.json if it exists
+        import json
+        import os
+        config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+        if os.path.exists(config_path):
+            with open(config_path, 'r', encoding='utf-8') as f:
+                full_config = json.load(f)
+                ai_hunter_config = full_config.get('ai_hunter_config', {})
+                max_workers_config = ai_hunter_config.get('ai_hunter_max_workers', 0)
+    except:
+        # If config reading fails, default to 0 (use all cores)
+        max_workers_config = 0
     
     if max_workers_config > 0:
         max_workers = min(max_workers_config, cpu_count)
