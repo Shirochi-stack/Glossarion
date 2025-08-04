@@ -3449,14 +3449,20 @@ class BatchTranslationProcessor:
                     chapter_status = "qa_failed"
                     failure_reason = get_failure_reason(cleaned)
                     print(f"⚠️ Batch: Chapter {actual_num} marked as qa_failed: {failure_reason}")
+                    # Update progress to qa_failed status
+                    self.update_progress_fn(idx, actual_num, content_hash, fname, status=chapter_status, ai_features=ai_features)
+                    self.save_progress_fn()
+                    # DO NOT increment chapters_completed for qa_failed
+                    # Return False to indicate failure
+                    return False, actual_num
                 else:
                     chapter_status = "completed"
-
-                self.update_progress_fn(idx, actual_num, content_hash, fname, status=chapter_status, ai_features=ai_features)
-                self.save_progress_fn()
-                
-                self.chapters_completed += 1
-                self.chunks_completed += 1
+                    # Update progress to completed status
+                    self.update_progress_fn(idx, actual_num, content_hash, fname, status=chapter_status, ai_features=ai_features)
+                    self.save_progress_fn()
+                    # Only increment chapters_completed for successful chapters
+                    self.chapters_completed += 1
+                    self.chunks_completed += 1
             
             print(f"✅ Chapter {actual_num} completed successfully")
             return True, actual_num
@@ -3467,7 +3473,7 @@ class BatchTranslationProcessor:
                 self.update_progress_fn(idx, actual_num, content_hash, None, status="failed")
                 self.save_progress_fn()
             return False, actual_num
-
+            
 # =====================================================
 # GLOSSARY MANAGER
 # =====================================================
@@ -6331,10 +6337,11 @@ def main(log_callback=None, stop_callback=None):
         
         print(f"\n🎉 Parallel translation complete!")
         print(f"   Total chapters processed: {processed}")
-        print(f"   Successful: {chapters_completed}")
         
-        # Log any chapters that were marked as qa_failed
-        qa_failed_chapters = []
+        # Count qa_failed chapters correctly
+        qa_failed_count = 0
+        actual_successful = 0
+        
         for idx, c in enumerate(chapters):
             # Get the chapter's actual number
             if (is_text_file and c.get('is_chunk', False) and isinstance(c['num'], float)):
@@ -6345,16 +6352,31 @@ def main(log_callback=None, stop_callback=None):
             # Check if this chapter was processed and has qa_failed status
             content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
             
-            # Check if this chapter exists in progress and has qa_failed status
-            # The chapter key is the content_hash itself
+            # Check if this chapter exists in progress
             chapter_info = progress_manager.prog["chapters"].get(content_hash, {})
             status = chapter_info.get("status")
             
             if status == "qa_failed":
-                qa_failed_chapters.append(actual_num)
+                qa_failed_count += 1
+            elif status == "completed":
+                actual_successful += 1
         
-        if qa_failed_chapters:
-            print(f"\n⚠️ {len(qa_failed_chapters)} chapters failed due to content policy violations:")
+        # Correct the displayed counts
+        print(f"   Successful: {actual_successful}")
+        if qa_failed_count > 0:
+            print(f"\n⚠️ {qa_failed_count} chapters failed due to content policy violations:")
+            qa_failed_chapters = []
+            for idx, c in enumerate(chapters):
+                if (is_text_file and c.get('is_chunk', False) and isinstance(c['num'], float)):
+                    actual_num = c['num']
+                else:
+                    actual_num = c.get('actual_chapter_num', c['num'])
+                
+                content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
+                chapter_info = progress_manager.prog["chapters"].get(content_hash, {})
+                if chapter_info.get("status") == "qa_failed":
+                    qa_failed_chapters.append(actual_num)
+            
             print(f"   Failed chapters: {', '.join(map(str, sorted(qa_failed_chapters)))}")
         
         # Stop translation completely after batch mode
