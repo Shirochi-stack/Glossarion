@@ -47,6 +47,10 @@ from threading import Lock
 
 # Add a global lock for thread-safe operations
 merge_lock = Lock()
+
+# Global variable for text samples mapping
+_global_text_samples = {}
+
 warnings.filterwarnings('ignore')
 
 # Try to import optional dependencies
@@ -1264,7 +1268,10 @@ def extract_chapter_title(text):
     return None
 
 def merge_duplicate_groups(duplicate_groups, filename1, filename2):
-    """Intelligently merge duplicate groups when new connections are found"""
+    """Intelligently merge duplicate groups when new connections are found
+    
+    Note: When called from parallel processing, should be wrapped with a lock
+    """
     group1 = duplicate_groups.get(filename1)
     group2 = duplicate_groups.get(filename2)
     
@@ -1833,10 +1840,14 @@ def detect_duplicates(results, log, should_stop, config):
 
 def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidence, 
                                 threshold, log, should_stop):
-    """Perform deep similarity analysis between files - OPTIMIZED VERSION"""
-    log(f"🔍 Deep content similarity analysis (threshold: {int(threshold*100)}%)...")
+    """Perform deep similarity analysis between files - PARALLEL OPTIMIZED VERSION
     
-    checked_pairs = set()
+    This function must be defined at module level, before detect_duplicates
+    """
+    global _global_text_samples
+    
+    log(f"🔍 Deep content similarity analysis (threshold: {int(threshold*100)}%)...")
+    log("⚡ PARALLEL PROCESSING ENABLED - Using all CPU cores for maximum speed!")
     
     # Pre-cache text samples for all results to avoid repeated slicing
     text_samples = {}
@@ -1851,13 +1862,21 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
                 'hash_10k': hashlib.md5(text[:10000].encode()).hexdigest()
             }
     
-    # Create cached similarity checker - ADD @lru_cache decorator!
-    @lru_cache(maxsize=5000)
+    # Set global mapping for the cached functions to use
+    _global_text_samples = text_samples
+    
+    # Create local cached functions that use the global mapping
+    # Using similarity_ratio size for text comparison cache
+    # Using semantic_fingerprint size for semantic comparison cache
+    similarity_cache_size = get_cache_size("similarity_ratio") or 20000
+    semantic_cache_size = get_cache_size("semantic_fingerprint") or 2000
+    
+    @lru_cache(maxsize=similarity_cache_size)
     def check_similarity_cached(hash1, hash2):
         """Check similarity between two text hashes"""
         # Find the actual texts by their hashes
         text1, text2 = None, None
-        for samples in text_samples.values():
+        for samples in _global_text_samples.values():
             if samples['hash_5k'] == hash1:
                 text1 = samples['sample_5k']
             if samples['hash_5k'] == hash2:
@@ -1867,12 +1886,12 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
             return calculate_similarity_ratio(text1, text2)
         return 0.0
     
-    @lru_cache(maxsize=2000)
+    @lru_cache(maxsize=semantic_cache_size)
     def check_semantic_similarity_cached(hash1, hash2):
         """Check semantic similarity between two text hashes"""
         # Find the actual texts by their hashes
         text1, text2 = None, None
-        for samples in text_samples.values():
+        for samples in _global_text_samples.values():
             if samples['hash_10k'] == hash1:
                 text1 = samples['sample_10k']
             if samples['hash_10k'] == hash2:
@@ -1882,14 +1901,40 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
             return calculate_semantic_fingerprint_similarity(text1, text2)
         return 0.0
     
+    # Determine number of workers
+    cpu_count = multiprocessing.cpu_count()
+    
+    # Check if there's a configured limit
+    max_workers_config = 0
+    try:
+        # Try to read from config.json if it exists
+        config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+        if os.path.exists(config_path):
+            with open(config_path, 'r', encoding='utf-8') as f:
+                full_config = json.load(f)
+                # Check for qa_scanner_config first, then deep_check_config
+                qa_config = full_config.get('qa_scanner_config', {})
+                deep_check_config = full_config.get('deep_check_config', {})
+                # Priority: deep_check_config > qa_scanner_config.max_workers > 0
+                max_workers_config = deep_check_config.get('max_workers', 
+                                                          qa_config.get('max_workers', 0))
+    except:
+        max_workers_config = 0
+    
+    if max_workers_config > 0:
+        max_workers = min(max_workers_config, cpu_count)
+        log(f"   🖥️ Using {max_workers} parallel workers (configured limit of {max_workers_config})")
+    else:
+        max_workers = cpu_count
+        log(f"   🚀 Using ALL {max_workers} CPU cores - MAXIMUM PERFORMANCE!")
+        if cpu_count > 8:
+            log(f"   💡 Tip: You can limit CPU cores in QA scanner settings or config.json")
+    
+    # Create all comparison tasks
+    comparison_tasks = []
+    checked_pairs = set()
+    
     for i in range(len(results)):
-        if should_stop():
-            log("⛔ Similarity check interrupted by user.")
-            break
-        
-        if i % 10 == 0 and i > 0:
-            log(f"   Progress: {i}/{len(results)} files analyzed...")
-        
         for j in range(i + 1, len(results)):
             # Skip if not in text_samples (too short)
             if i not in text_samples or j not in text_samples:
@@ -1906,6 +1951,29 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
                 duplicate_groups[results[i]['filename']] == duplicate_groups[results[j]['filename']]):
                 continue
             
+            comparison_tasks.append((i, j, results[i]['filename'], results[j]['filename']))
+    
+    total_comparisons = len(comparison_tasks)
+    log(f"   📋 Created {total_comparisons:,} comparison tasks")
+    
+    if total_comparisons == 0:
+        log("   ✅ No comparisons needed - all files already grouped or too short")
+        return
+    
+    # Progress tracking
+    comparisons_done = 0
+    last_progress = 0
+    start_time = time.time()
+    found_duplicates = []
+    
+    def process_comparison_batch(batch):
+        """Process a batch of comparisons"""
+        batch_results = []
+        
+        for i, j, filename_i, filename_j in batch:
+            if should_stop():
+                return batch_results
+            
             # Use cached similarity check
             hash1 = text_samples[i]['hash_5k']
             hash2 = text_samples[j]['hash_5k']
@@ -1917,14 +1985,15 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
             similarity = check_similarity_cached(hash1, hash2)
             
             if similarity >= threshold:
-                merge_duplicate_groups(duplicate_groups, results[i]['filename'], results[j]['filename'])
-                duplicate_confidence[pair] = max(duplicate_confidence.get(pair, 0), similarity)
-                log(f"   └─ Content similarity: {results[i]['filename']} ≈ {results[j]['filename']} ({int(similarity*100)}%)")
-            
+                batch_results.append({
+                    'filename1': filename_i,
+                    'filename2': filename_j,
+                    'similarity': similarity,
+                    'is_variant': False,
+                    'semantic_sim': None
+                })
             # Check for translation variants if similarity is moderate
             elif 0.5 <= similarity < threshold:
-                log(f"   Checking potential translation variant: {results[i]['filename']} vs {results[j]['filename']} (base: {int(similarity*100)}%)")
-                
                 # Check semantic fingerprint using cached version
                 hash1_10k = text_samples[i]['hash_10k']
                 hash2_10k = text_samples[j]['hash_10k']
@@ -1939,16 +2008,112 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
                     combined_score = (similarity * 0.4 + semantic_sim * 0.6)
                     
                     if combined_score >= threshold:
-                        log(f"   └─ Translation variant detected (semantic: {int(semantic_sim*100)}%, combined: {int(combined_score*100)}%)")
-                        merge_duplicate_groups(duplicate_groups, results[i]['filename'], results[j]['filename'])
-                        duplicate_confidence[pair] = combined_score
-                    else:
-                        log(f"   └─ Not similar enough (semantic: {int(semantic_sim*100)}%, combined: {int(combined_score*100)}%)")
+                        batch_results.append({
+                            'filename1': filename_i,
+                            'filename2': filename_j,
+                            'similarity': combined_score,
+                            'is_variant': True,
+                            'semantic_sim': semantic_sim,
+                            'base_sim': similarity
+                        })
+        
+        return batch_results
+    
+    # Split tasks into batches
+    batch_size = max(10, total_comparisons // (max_workers * 100))  # Dynamic batch size
+    batch_size = min(batch_size, 1000)  # Cap batch size for memory efficiency
+    batches = [comparison_tasks[i:i + batch_size] for i in range(0, len(comparison_tasks), batch_size)]
+    
+    log(f"   📦 Split into {len(batches)} batches of ~{batch_size} comparisons each")
+    
+    # Process batches in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all batches
+        future_to_batch = {executor.submit(process_comparison_batch, batch): batch for batch in batches}
+        
+        # Process results as they complete
+        for future in concurrent.futures.as_completed(future_to_batch):
+            if should_stop():
+                log("⛔ Deep similarity check interrupted by user.")
+                executor.shutdown(wait=False)
+                # Clear caches before returning
+                check_similarity_cached.cache_clear()
+                check_semantic_similarity_cached.cache_clear()
+                return
+            
+            try:
+                batch_results = future.result()
+                
+                # Thread-safe merge of results
+                with merge_lock:
+                    for result in batch_results:
+                        file1 = result['filename1']
+                        file2 = result['filename2']
+                        pair = tuple(sorted([file1, file2]))
+                        
+                        # Use the original merge_duplicate_groups function
+                        merge_duplicate_groups(duplicate_groups, file1, file2)
+                        
+                        # Update confidence
+                        duplicate_confidence[pair] = max(
+                            duplicate_confidence.get(pair, 0), 
+                            result['similarity']
+                        )
+                        
+                        # Log findings
+                        if result['is_variant']:
+                            msg = (f"   └─ Translation variant detected: {file1} ≈ {file2} "
+                                  f"(base: {int(result.get('base_sim', 0)*100)}%, "
+                                  f"semantic: {int(result['semantic_sim']*100)}%, "
+                                  f"combined: {int(result['similarity']*100)}%)")
+                        else:
+                            msg = (f"   └─ Content similarity: {file1} ≈ {file2} "
+                                  f"({int(result['similarity']*100)}%)")
+                        
+                        found_duplicates.append(msg)
+                
+                # Update progress
+                comparisons_done += len(future_to_batch[future])
+                progress = int((comparisons_done / total_comparisons) * 100)
+                
+                if progress >= last_progress + 5:  # Update every 5%
+                    elapsed = time.time() - start_time
+                    rate = comparisons_done / elapsed if elapsed > 0 else 0
+                    remaining = (total_comparisons - comparisons_done) / rate if rate > 0 else 0
+                    
+                    log(f"   📊 Deep check progress: {comparisons_done:,}/{total_comparisons:,} "
+                        f"({progress}%) - ~{int(remaining)}s remaining - "
+                        f"Speed: {int(rate):,} comparisons/sec")
+                    
+                    # Log some found duplicates (limit output to avoid spam)
+                    for dup_msg in found_duplicates[:5]:
+                        log(dup_msg)
+                    found_duplicates = found_duplicates[5:]
+                    
+                    last_progress = progress
+                    
+            except Exception as e:
+                log(f"   ❌ Error in parallel processing: {e}")
+                import traceback
+                log(f"   Traceback: {traceback.format_exc()}")
+    
+    # Final summary
+    elapsed = time.time() - start_time
+    log(f"✅ Deep similarity check complete! Processed {total_comparisons:,} comparisons in {int(elapsed)}s")
+    log(f"   ⚡ Speed: {int(total_comparisons/elapsed):,} comparisons/sec")
+    
+    # Log remaining duplicates (last 10)
+    for dup_msg in found_duplicates[-10:]:
+        log(dup_msg)
     
     # Clear local caches when done
     check_similarity_cached.cache_clear()
     check_semantic_similarity_cached.cache_clear()
+    
+    # Clear global mapping
+    _global_text_samples.clear()
 
+        
 def check_consecutive_chapters(results, duplicate_groups, duplicate_confidence, config, log, should_stop=None):
     """Check for consecutive chapters with same title using fuzzy matching"""
     log("🔍 Checking consecutive same-titled chapters...")
