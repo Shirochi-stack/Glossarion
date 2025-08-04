@@ -570,6 +570,9 @@ class MultiAPIKeyDialog:
         enabled = self.enabled_var.get()
         self.translator_gui.config['use_multi_api_keys'] = enabled
         
+        # Save the config immediately
+        self.translator_gui.save_config(show_message=False)
+        
         # Update UI state
         for widget in [self.api_key_entry, self.model_entry]:
             if widget:
@@ -587,7 +590,7 @@ class MultiAPIKeyDialog:
                 self.tree.bind('<Button-1>', lambda e: 'break')
                 self.tree.bind('<Button-3>', lambda e: 'break')
                 self.tree.bind('<Double-Button-1>', lambda e: 'break')
-                
+        
         # Update action buttons state
         for child in self.dialog.winfo_children():
             if isinstance(child, tk.Frame):
