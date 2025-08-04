@@ -9518,7 +9518,7 @@ Important rules:
 
             # Get current value from AI Hunter config
             ai_hunter_config = self.config.get('ai_hunter_config', {})
-            current_max_workers = ai_hunter_config.get('ai_hunter_max_workers', 0)
+            current_max_workers = ai_hunter_config.get('ai_hunter_max_workers', 1)
 
             ai_hunter_workers_var = tk.IntVar(value=current_max_workers)
             workers_spinbox = tb.Spinbox(
@@ -9737,7 +9737,7 @@ Important rules:
                     for cache_name, default_value in cache_defaults.items():
                         cache_vars[cache_name].set(default_value)
                         
-                    ai_hunter_workers_var.set(0)
+                    ai_hunter_workers_var.set(1)
             
             # Create buttons using ttkbootstrap styles
             save_btn = tb.Button(
