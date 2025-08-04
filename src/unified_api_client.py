@@ -1515,7 +1515,7 @@ class UnifiedClient:
             self._in_cleanup = False
             self._cancelled = False
 
-    def _send_vertex_model_garden(self, messages, temperature=0.7, max_tokens=None, stop_sequences=None):
+    def _send_vertex_model_garden(self, messages, temperature=0.7, max_tokens=None, stop_sequences=None, response_name=None):
         """Send request to Vertex AI Model Garden models (including Claude)"""
         try:
             from google.cloud import aiplatform
@@ -1888,17 +1888,67 @@ class UnifiedClient:
                 # Configure safety settings based on GUI toggle
                 safety_settings = None
                 if disable_safety:
-                    safety_settings = {
-                        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-                        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                        HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY: HarmBlockThreshold.BLOCK_NONE,
-                        # Add any additional 2025 safety categories if they exist in Vertex AI
-                    }
+                    # Import SafetySetting from vertexai
+                    from vertexai.generative_models import SafetySetting
+                    
+                    # Create list of SafetySetting objects (same format as regular Gemini)
+                    safety_settings = [
+                        SafetySetting(
+                            category=HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                            threshold=HarmBlockThreshold.BLOCK_NONE
+                        ),
+                        SafetySetting(
+                            category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                            threshold=HarmBlockThreshold.BLOCK_NONE
+                        ),
+                        SafetySetting(
+                            category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                            threshold=HarmBlockThreshold.BLOCK_NONE
+                        ),
+                        SafetySetting(
+                            category=HarmCategory.HARM_CATEGORY_HARASSMENT,
+                            threshold=HarmBlockThreshold.BLOCK_NONE
+                        ),
+                        SafetySetting(
+                            category=HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
+                            threshold=HarmBlockThreshold.BLOCK_NONE
+                        ),
+                    ]
                     print(f"🔒 Vertex AI Gemini Safety Status: DISABLED - All categories set to BLOCK_NONE")
                 else:
                     print(f"🔒 Vertex AI Gemini Safety Status: ENABLED - Using default Gemini safety settings")
+                    
+                # SAVE SAFETY CONFIGURATION FOR VERIFICATION
+                if safety_settings:
+                    safety_status = "DISABLED - All categories set to BLOCK_NONE"
+                    readable_safety = {
+                        "HATE_SPEECH": "BLOCK_NONE",
+                        "SEXUALLY_EXPLICIT": "BLOCK_NONE",
+                        "HARASSMENT": "BLOCK_NONE",
+                        "DANGEROUS_CONTENT": "BLOCK_NONE",
+                        "CIVIC_INTEGRITY": "BLOCK_NONE"
+                    }
+                else:
+                    safety_status = "ENABLED - Using default Gemini safety settings"
+                    readable_safety = "DEFAULT"
+                
+                # Save configuration to file
+                config_data = {
+                    "type": "VERTEX_AI_GEMINI_REQUEST",
+                    "model": model_name,
+                    "project_id": project_id,
+                    "location": location,
+                    "safety_enabled": not disable_safety,
+                    "safety_settings": readable_safety,
+                    "temperature": temperature,
+                    "max_output_tokens": max_tokens or 8192,
+                    "timestamp": datetime.now().isoformat(),
+                }
+                
+                # Save configuration to file with thread isolation
+                if response_name:  # Only save if response_name is provided
+                    self._save_gemini_safety_config(config_data, response_name)
+            
                 # Retry logic with token reduction
                 BOOST_FACTOR = 1
                 attempts = 4
@@ -2571,9 +2621,9 @@ class UnifiedClient:
         # For OpenAI, pass the max_completion_tokens parameter
         if self.client_type == 'openai':
             return handler(messages, temperature, max_tokens, max_completion_tokens, response_name)
-        elif self.client_type == 'vertex_model_garden':  # ADD THIS ELIF BLOCK
+        elif self.client_type == 'vertex_model_garden':
             # Vertex AI doesn't use response_name parameter
-            return handler(messages, temperature, max_tokens or max_completion_tokens)
+            return handler(messages, temperature, max_tokens or max_completion_tokens, None, response_name)
         else:
             # Other providers don't use max_completion_tokens yet
             return handler(messages, temperature, max_tokens, response_name)
@@ -3463,6 +3513,40 @@ class UnifiedClient:
                     gemini_endpoint = gemini_endpoint + '/openai/'
             
             print(f"🔄 Using OpenAI-compatible endpoint for Gemini: {gemini_endpoint}")
+            
+            # SAVE SAFETY CONFIGURATION FOR GEMINI OPENAI ENDPOINT
+            # Check if safety settings are disabled
+            disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
+            
+            # Prepare safety configuration data
+            if disable_safety:
+                safety_status = "DISABLED - Using OpenAI-compatible endpoint"
+                readable_safety = "DISABLED_VIA_OPENAI_ENDPOINT"
+            else:
+                safety_status = "ENABLED - Using default settings via OpenAI endpoint"
+                readable_safety = "DEFAULT"
+            
+            print(f"🔒 Gemini OpenAI Endpoint Safety Status: {safety_status}")
+            
+            # Save configuration to file
+            config_data = {
+                "type": "GEMINI_OPENAI_ENDPOINT_REQUEST",
+                "model": self.model,
+                "endpoint": gemini_endpoint,
+                "safety_enabled": not disable_safety,
+                "safety_settings": readable_safety,
+                "temperature": temperature,
+                "max_output_tokens": max_tokens,
+                "timestamp": datetime.now().isoformat(),
+            }
+            
+            # Handle None response_name
+            if not response_name:
+                response_name = f"gemini_openai_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            
+            # Save configuration to file with thread isolation
+            self._save_gemini_safety_config(config_data, response_name)
+            
             # Route to OpenAI-compatible handler
             return self._send_openai_compatible(
                 messages=messages,
@@ -5249,7 +5333,7 @@ class UnifiedClient:
         messages_with_image = messages[:-1] + [image_message]
         
         # Use the regular Vertex AI send method
-        return self._send_vertex_model_garden(messages_with_image, temperature, max_tokens)
+        return self._send_vertex_model_garden(messages_with_image, temperature, max_tokens, response_name=response_name)
 
     def _is_o_series_model(self) -> bool:
         """Check if the current model is an o-series model (o1, o3, o4, etc.)"""
@@ -5292,6 +5376,40 @@ class UnifiedClient:
                         gemini_endpoint = gemini_endpoint + '/openai/'
                 
                 print(f"🔄 Using OpenAI-compatible endpoint for Gemini image: {gemini_endpoint}")
+                
+                # SAVE SAFETY CONFIGURATION FOR GEMINI OPENAI ENDPOINT (IMAGE)
+                # Check if safety settings are disabled
+                disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
+                
+                # Prepare safety configuration data
+                if disable_safety:
+                    safety_status = "DISABLED - Using OpenAI-compatible endpoint"
+                    readable_safety = "DISABLED_VIA_OPENAI_ENDPOINT"
+                else:
+                    safety_status = "ENABLED - Using default settings via OpenAI endpoint"
+                    readable_safety = "DEFAULT"
+                
+                print(f"🔒 Gemini OpenAI Endpoint Safety Status (Image): {safety_status}")
+                
+                # Save configuration to file
+                config_data = {
+                    "type": "GEMINI_OPENAI_ENDPOINT_IMAGE_REQUEST",
+                    "model": self.model,
+                    "endpoint": gemini_endpoint,
+                    "safety_enabled": not disable_safety,
+                    "safety_settings": readable_safety,
+                    "temperature": temperature,
+                    "max_output_tokens": max_tokens,
+                    "timestamp": datetime.now().isoformat(),
+                }
+                
+                # Handle None response_name
+                if not response_name:
+                    response_name = f"gemini_openai_image_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                
+                # Save configuration to file with thread isolation
+                self._save_gemini_safety_config(config_data, response_name)
+                
                 # Route to OpenAI-compatible handler
                 return self._send_openai_compatible(
                     messages=messages,
