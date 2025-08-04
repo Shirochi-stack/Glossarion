@@ -30,7 +30,7 @@ class AIHunterConfigGUI:
         # Default AI Hunter settings structure
         self.default_ai_hunter = {
             'enabled': True,
-            'ai_hunter_max_workers': 0,
+            'ai_hunter_max_workers': 1,
             'sample_size': 3000,
             'thresholds': {
                 'exact': 90,
