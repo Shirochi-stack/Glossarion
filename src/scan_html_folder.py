@@ -1295,55 +1295,187 @@ def merge_duplicate_groups(duplicate_groups, filename1, filename2):
                 duplicate_groups[filename] = min_group
 
 
-def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence, config, log, should_stop=None):
-    """Additional duplicate detection specifically for different naming formats - CACHED VERSION"""
+def process_enhance_duplicate_batch(args):
+    """Process a batch of enhanced duplicate detection - MUST BE AT MODULE LEVEL"""
+    batch_type, batch_data, worker_data = args
+    batch_results = []
     
-    # Create cached comparison functions for this detection run
-    @lru_cache(maxsize=5000)
-    def compare_texts_cached(text1_hash, text2_hash, text1_len, text2_len):
-        """Cached text comparison - returns similarity ratio"""
-        # Find actual texts by hash in our results
-        text1, text2 = None, None
-        for result in results:
-            text = result.get('raw_text', '')[:5000]
-            if hashlib.md5(text.encode()).hexdigest() == text1_hash:
-                text1 = text
-            if hashlib.md5(text.encode()).hexdigest() == text2_hash:
-                text2 = text
+    # Import what we need
+    from difflib import SequenceMatcher
+    import hashlib
+    
+    # Local caches for this worker
+    similarity_cache = {}
+    preview_cache = {}
+    
+    if batch_type == 'chapter_comparison':
+        # Process chapter number group comparisons
+        comparisons = batch_data
+        text_data = worker_data['text_data']
+        threshold = worker_data['similarity_threshold']
         
-        if text1 and text2:
-            return calculate_similarity_ratio(text1, text2)
-        return 0.0
+        for idx1, idx2, file1, file2, chapter_num in comparisons:
+            # Get text data
+            data1 = text_data[idx1]
+            data2 = text_data[idx2]
+            
+            # Create cache key (handle None hashes)
+            if data1['hash'] is None or data2['hash'] is None:
+                continue  # Skip if either file is empty
+            
+            cache_key = (min(data1['hash'], data2['hash']), max(data1['hash'], data2['hash']))
+            
+            if cache_key in similarity_cache:
+                similarity = similarity_cache[cache_key]
+            else:
+                # Check if hashes are identical
+                if data1['hash'] == data2['hash']:
+                    similarity = 1.0
+                else:
+                    # Calculate similarity
+                    similarity = calculate_similarity_ratio(data1['text'], data2['text'])
+                
+                similarity_cache[cache_key] = similarity
+            
+            if similarity >= threshold:
+                batch_results.append({
+                    'type': 'chapter_duplicate',
+                    'file1': file1,
+                    'file2': file2,
+                    'chapter': chapter_num,
+                    'similarity': similarity,
+                    'preview1': data1['text'][:100],
+                    'preview2': data2['text'][:100]
+                })
     
-    @lru_cache(maxsize=2000)
-    def normalize_preview_cached(preview_hash):
-        """Cached preview normalization"""
-        # Find actual preview by hash
-        for result in results:
-            preview = result.get('raw_text', '')[:1000].strip()
-            if hashlib.md5(preview.encode()).hexdigest() == preview_hash:
-                return ' '.join(preview.split()[:50])  # First 50 words
-        return ""
+    elif batch_type == 'preview_comparison':
+        # Process preview-based comparisons
+        comparisons = batch_data
+        text_data = worker_data['text_data']
+        preview_data = worker_data['preview_data']
+        threshold = worker_data['similarity_threshold']
+        preview_threshold = worker_data['preview_threshold']
+        
+        for idx1, idx2, file1, file2 in comparisons:
+            # First check preview similarity
+            preview1 = preview_data[idx1]
+            preview2 = preview_data[idx2]
+            
+            # Normalize previews (first 50 words)
+            norm_preview1 = ' '.join(preview1['text'].split()[:50])
+            norm_preview2 = ' '.join(preview2['text'].split()[:50])
+            
+            # Check preview similarity (handle None hashes)
+            if preview1['hash'] is None or preview2['hash'] is None:
+                continue  # Skip if either preview is empty
+            
+            preview_cache_key = (min(preview1['hash'], preview2['hash']), 
+                               max(preview1['hash'], preview2['hash']))
+            
+            if preview_cache_key in preview_cache:
+                preview_sim = preview_cache[preview_cache_key]
+            else:
+                preview_sim = calculate_similarity_ratio(norm_preview1[:500], norm_preview2[:500])
+                preview_cache[preview_cache_key] = preview_sim
+            
+            # If previews are similar enough, check full text
+            if preview_sim >= preview_threshold:
+                # Get full text data
+                data1 = text_data[idx1]
+                data2 = text_data[idx2]
+                
+                # Check full text similarity (handle None hashes)
+                if data1['hash'] is None or data2['hash'] is None:
+                    continue  # Skip if either file is empty
+                
+                cache_key = (min(data1['hash'], data2['hash']), max(data1['hash'], data2['hash']))
+                
+                if cache_key in similarity_cache:
+                    similarity = similarity_cache[cache_key]
+                else:
+                    if data1['hash'] == data2['hash']:
+                        similarity = 1.0
+                    else:
+                        similarity = calculate_similarity_ratio(data1['text'], data2['text'])
+                    
+                    similarity_cache[cache_key] = similarity
+                
+                if similarity >= threshold:
+                    batch_results.append({
+                        'type': 'misnamed_duplicate',
+                        'file1': file1,
+                        'file2': file2,
+                        'chapter': f"misnamed_{data1.get('chapter_num', '?')}_vs_{data2.get('chapter_num', '?')}",
+                        'similarity': similarity,
+                        'preview_similarity': preview_sim
+                    })
     
-    # Pre-compute hashes for all texts to enable caching
-    text_hashes = {}
-    preview_hashes = {}
+    return batch_results
+
+
+def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence, config, log, should_stop=None):
+    """Additional duplicate detection - PROCESSPOOLEXECUTOR VERSION"""
+    
+    log("🔍 Enhanced duplicate detection (different naming formats)...")
+    log("⚡ PROCESSPOOLEXECUTOR ENABLED - MAXIMUM PERFORMANCE!")
+    
+    # Determine number of workers
+    cpu_count = multiprocessing.cpu_count()
+    max_workers_config = 0
+    
+    try:
+        config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+        if os.path.exists(config_path):
+            with open(config_path, 'r', encoding='utf-8') as f:
+                full_config = json.load(f)
+                # Check multiple possible config locations
+                qa_config = full_config.get('qa_scanner_config', {})
+                ai_hunter_config = full_config.get('ai_hunter_config', {})
+                
+                # Priority: qa_scanner_config > ai_hunter_config
+                max_workers_config = qa_config.get('max_workers',
+                                    ai_hunter_config.get('ai_hunter_max_workers', 0))
+    except:
+        max_workers_config = 0
+    
+    if max_workers_config > 0:
+        max_workers = min(max_workers_config, cpu_count)
+        log(f"   🖥️ Using {max_workers} parallel processes (configured limit)")
+    else:
+        max_workers = cpu_count
+        log(f"   🚀 Using ALL {max_workers} CPU cores for enhanced detection")
+        if cpu_count > 8:
+            log(f"   💡 Tip: You can limit CPU cores in QA scanner settings")
+    
+    # Pre-compute all data
+    log("   📊 Pre-computing text and preview data...")
+    
+    text_data = {}
+    preview_data = {}
+    
     for i, result in enumerate(results):
+        # Text data (first 5000 chars)
         text = result.get('raw_text', '')[:5000]
-        preview = result.get('raw_text', '')[:1000].strip()
-        text_hashes[i] = {
-            'hash': hashlib.md5(text.encode()).hexdigest(),
-            'length': len(text)
+        text_data[i] = {
+            'text': text,
+            'hash': hashlib.md5(text.encode()).hexdigest() if text else None,
+            'length': len(text),
+            'chapter_num': result.get('chapter_num')
         }
-        preview_hashes[i] = {
-            'hash': hashlib.md5(preview.encode()).hexdigest(),
-            'text': preview
+        
+        # Preview data (first 1000 chars)
+        preview = result.get('raw_text', '')[:1000].strip()
+        preview_data[i] = {
+            'text': preview,
+            'hash': hashlib.md5(preview.encode()).hexdigest() if preview else None
         }
     
     # First, normalize all chapter numbers
     normalize_chapter_numbers(results)
     
-    # Group by normalized chapter number
+    # PART 1: Group by normalized chapter number
+    log("   📚 Checking files with same chapter numbers...")
+    
     chapter_groups = {}
     for i, result in enumerate(results):
         if result.get('normalized_chapter_num') is not None:
@@ -1352,157 +1484,180 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
                 chapter_groups[num] = []
             chapter_groups[num].append((i, result))
     
-    # Check each group for duplicates
-    duplicates_found = []
+    # Create comparison tasks for chapter groups
+    chapter_comparisons = []
     for chapter_num, group in chapter_groups.items():
-        if should_stop and should_stop():
-            log("⛔ Duplicate check interrupted by user.")
-            return duplicates_found
-            
         if len(group) > 1:
             log(f"   └─ Found {len(group)} files for chapter {chapter_num}")
             
-            # Multiple files with same chapter number - check if they're duplicates
+            # Create all pair comparisons for this group
             for i in range(len(group)):
                 for j in range(i + 1, len(group)):
                     idx1, result1 = group[i]
                     idx2, result2 = group[j]
-                    
-                    # Use cached comparison
-                    hash1 = text_hashes[idx1]['hash']
-                    hash2 = text_hashes[idx2]['hash']
-                    len1 = text_hashes[idx1]['length']
-                    len2 = text_hashes[idx2]['length']
-                    
-                    # Ensure consistent ordering for cache
-                    if hash1 > hash2:
-                        hash1, hash2 = hash2, hash1
-                        len1, len2 = len2, len1
-                    
-                    similarity = compare_texts_cached(hash1, hash2, len1, len2)
-                    
-                    # Log what we're comparing
-                    log(f"      Comparing: {result1['filename']} vs {result2['filename']}")
-                    log(f"      Preview 1: {result1.get('raw_text', '')[:100]}...")
-                    log(f"      Preview 2: {result2.get('raw_text', '')[:100]}...")
-                    log(f"      Similarity: {int(similarity*100)}%")
-                    
-                    if similarity >= config.get_threshold('similarity'):
-                        merge_duplicate_groups(duplicate_groups, 
-                                             result1['filename'], 
-                                             result2['filename'])
-                        pair = tuple(sorted([result1['filename'], result2['filename']]))
-                        duplicate_confidence[pair] = max(duplicate_confidence.get(pair, 0), similarity)
-                        
-                        duplicates_found.append({
-                            'file1': result1['filename'],
-                            'file2': result2['filename'],
-                            'chapter': chapter_num,
-                            'similarity': similarity
-                        })
-                        
-                        log(f"      ✓ DUPLICATE: {result1['filename']} ≈ {result2['filename']} ({int(similarity*100)}%)")
-                    else:
-                        log(f"      ✗ NOT SIMILAR ENOUGH (threshold: {int(config.get_threshold('similarity')*100)}%)")
+                    chapter_comparisons.append((
+                        idx1, idx2, 
+                        result1['filename'], result2['filename'],
+                        chapter_num
+                    ))
     
-    # ALSO check for misnamed files - compare all files with different chapter numbers
+    # Process chapter comparisons in batches
+    duplicates_found = []
+    
+    if chapter_comparisons:
+        log(f"   📋 Processing {len(chapter_comparisons)} chapter comparisons...")
+        
+        # Prepare worker data
+        worker_data = {
+            'text_data': text_data,
+            'similarity_threshold': config.get_threshold('similarity')
+        }
+        
+        # Create batches
+        batch_size = max(100, len(chapter_comparisons) // max_workers)
+        batches = []
+        
+        for i in range(0, len(chapter_comparisons), batch_size):
+            batch = chapter_comparisons[i:i + batch_size]
+            batches.append(('chapter_comparison', batch, worker_data))
+        
+        # Process with ProcessPoolExecutor
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+            
+            for batch_args in batches:
+                if should_stop and should_stop():
+                    log("⛔ Enhanced detection interrupted by user.")
+                    executor.shutdown(wait=True)
+                    return duplicates_found
+                
+                future = executor.submit(process_enhance_duplicate_batch, batch_args)
+                futures.append(future)
+            
+            # Collect results
+            for future in concurrent.futures.as_completed(futures):
+                batch_results = future.result()
+                
+                # Process results
+                for result in batch_results:
+                    if result['type'] == 'chapter_duplicate':
+                        # Update duplicate groups
+                        with merge_lock:
+                            merge_duplicate_groups(duplicate_groups, 
+                                                 result['file1'], 
+                                                 result['file2'])
+                            pair = tuple(sorted([result['file1'], result['file2']]))
+                            duplicate_confidence[pair] = max(
+                                duplicate_confidence.get(pair, 0), 
+                                result['similarity']
+                            )
+                        
+                        duplicates_found.append(result)
+                        
+                        log(f"      ✓ DUPLICATE: {result['file1']} ≈ {result['file2']} "
+                            f"({int(result['similarity']*100)}%)")
+                        log(f"      Preview 1: {result['preview1']}...")
+                        log(f"      Preview 2: {result['preview2']}...")
+    
+    # PART 2: Check for misnamed files
     log("🔍 Checking for misnamed chapters (content vs filename mismatch)...")
     
-    # Group files by their content preview for faster checking
-    preview_groups = {}
+    # Create preview-based comparison tasks
+    preview_comparisons = []
     total_files = len(results)
     
-    # Create a cache for preview similarity checks
-    @lru_cache(maxsize=10000)
-    def compare_preview_similarity(preview_hash1, preview_hash2):
-        """Cached preview similarity comparison"""
-        preview1 = normalize_preview_cached(preview_hash1)
-        preview2 = normalize_preview_cached(preview_hash2)
-        return calculate_similarity_ratio(preview1[:500], preview2[:500])
-    
-    for i, result in enumerate(results):
-        if i % 20 == 0 and i > 0:
-            log(f"   📊 Grouping previews: {i}/{total_files} files processed...")
+    # We need to check all pairs, but we can filter some obvious non-matches
+    for i in range(total_files):
+        if i % 100 == 0 and i > 0:
+            log(f"   📊 Creating preview comparisons: {i}/{total_files} files...")
         
-        preview_hash = preview_hashes[i]['hash']
-        if not preview_hashes[i]['text']:
-            continue
-        
-        # Get normalized preview using cache
-        normalized_preview = normalize_preview_cached(preview_hash)
-        
-        # Check against existing groups
-        found_group = False
-        for group_key, group_indices in preview_groups.items():
-            # Compare with first item in group
-            if group_indices:
-                first_idx = group_indices[0][0]
-                first_hash = preview_hashes[first_idx]['hash']
-                
-                # Ensure consistent ordering for cache
-                hash1, hash2 = preview_hash, first_hash
-                if hash1 > hash2:
-                    hash1, hash2 = hash2, hash1
-                
-                similarity = compare_preview_similarity(hash1, hash2)
-                
-                if similarity >= 0.9:  # High threshold for preview matching
-                    group_indices.append((i, result))
-                    found_group = True
-                    break
-        
-        if not found_group:
-            # Use preview hash as group key
-            preview_groups[preview_hash] = [(i, result)]
-    
-    # Check groups with multiple files
-    for preview_key, group in preview_groups.items():
-        if should_stop and should_stop():
-            log("⛔ Duplicate check interrupted by user.")
-            return duplicates_found
+        for j in range(i + 1, total_files):
+            # Skip if:
+            # 1. Already in same duplicate group
+            if (results[i]['filename'] in duplicate_groups and 
+                results[j]['filename'] in duplicate_groups and
+                duplicate_groups[results[i]['filename']] == duplicate_groups[results[j]['filename']]):
+                continue
             
-        if len(group) > 1:
-            log(f"   └─ Found {len(group)} files with similar content")
+            # 2. Both have same chapter number (already checked above)
+            if (results[i].get('normalized_chapter_num') is not None and 
+                results[j].get('normalized_chapter_num') is not None and
+                results[i]['normalized_chapter_num'] == results[j]['normalized_chapter_num']):
+                continue
             
-            # Check all pairs in this group
-            for i in range(len(group)):
-                for j in range(i + 1, len(group)):
-                    idx1, result1 = group[i]
-                    idx2, result2 = group[j]
-                    
-                    # Do a more thorough check using cached comparison
-                    hash1 = text_hashes[idx1]['hash']
-                    hash2 = text_hashes[idx2]['hash']
-                    len1 = text_hashes[idx1]['length']
-                    len2 = text_hashes[idx2]['length']
-                    
-                    # Ensure consistent ordering for cache
-                    if hash1 > hash2:
-                        hash1, hash2 = hash2, hash1
-                        len1, len2 = len2, len1
-                    
-                    similarity = compare_texts_cached(hash1, hash2, len1, len2)
-                    
-                    if similarity >= config.get_threshold('similarity'):
-                        log(f"      ✓ Found duplicate content: {result1['filename']} ≈ {result2['filename']} ({int(similarity*100)}%)")
-                        
-                        merge_duplicate_groups(duplicate_groups, 
-                                             result1['filename'], 
-                                             result2['filename'])
-                        pair = tuple(sorted([result1['filename'], result2['filename']]))
-                        duplicate_confidence[pair] = max(duplicate_confidence.get(pair, 0), similarity)
-                        
-                        duplicates_found.append({
-                            'file1': result1['filename'],
-                            'file2': result2['filename'],
-                            'chapter': f"misnamed_{result1.get('chapter_num', '?')}_vs_{result2.get('chapter_num', '?')}",
-                            'similarity': similarity
-                        })
+            # 3. Text lengths are very different (handle None/empty texts)
+            len1 = text_data[i]['length']
+            len2 = text_data[j]['length']
+            if len1 == 0 or len2 == 0:
+                continue  # Skip empty files
+            
+            len_ratio = min(len1, len2) / max(len1, len2)
+            if len_ratio < 0.7:  # Skip if lengths differ by more than 30%
+                continue
+            
+            preview_comparisons.append((i, j, results[i]['filename'], results[j]['filename']))
     
-    # Clear local caches when done
-    compare_texts_cached.cache_clear()
-    normalize_preview_cached.cache_clear()
-    compare_preview_similarity.cache_clear()
+    if preview_comparisons:
+        log(f"   📋 Processing {len(preview_comparisons)} preview comparisons...")
+        
+        # Prepare worker data
+        worker_data = {
+            'text_data': text_data,
+            'preview_data': preview_data,
+            'similarity_threshold': config.get_threshold('similarity'),
+            'preview_threshold': 0.9  # High threshold for preview matching
+        }
+        
+        # Create batches
+        batch_size = max(500, len(preview_comparisons) // (max_workers * 10))
+        batches = []
+        
+        for i in range(0, len(preview_comparisons), batch_size):
+            batch = preview_comparisons[i:i + batch_size]
+            batches.append(('preview_comparison', batch, worker_data))
+        
+        # Process with ProcessPoolExecutor
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+            
+            for batch_args in batches:
+                if should_stop and should_stop():
+                    log("⛔ Enhanced detection interrupted by user.")
+                    executor.shutdown(wait=True)
+                    return duplicates_found
+                
+                future = executor.submit(process_enhance_duplicate_batch, batch_args)
+                futures.append(future)
+            
+            # Collect results with progress
+            completed = 0
+            for future in concurrent.futures.as_completed(futures):
+                completed += 1
+                if completed % 10 == 0:
+                    log(f"   📊 Preview comparison progress: {completed}/{len(futures)} batches")
+                
+                batch_results = future.result()
+                
+                # Process results
+                for result in batch_results:
+                    if result['type'] == 'misnamed_duplicate':
+                        # Update duplicate groups
+                        with merge_lock:
+                            merge_duplicate_groups(duplicate_groups, 
+                                                 result['file1'], 
+                                                 result['file2'])
+                            pair = tuple(sorted([result['file1'], result['file2']]))
+                            duplicate_confidence[pair] = max(
+                                duplicate_confidence.get(pair, 0), 
+                                result['similarity']
+                            )
+                        
+                        duplicates_found.append(result)
+                        
+                        log(f"      ✓ Found misnamed duplicate: {result['file1']} ≈ {result['file2']} "
+                            f"({int(result['similarity']*100)}%)")
+    
+    log(f"✅ Enhanced detection complete! Found {len(duplicates_found)} duplicates")
     
     return duplicates_found
     
@@ -1838,99 +1993,148 @@ def detect_duplicates(results, log, should_stop, config):
     
     return duplicate_groups, near_duplicate_groups, duplicate_confidence
 
+def process_deep_similarity_batch(args):
+    """Process a batch of deep similarity comparisons - MUST BE AT MODULE LEVEL"""
+    batch, data = args
+    batch_results = []
+    
+    text_samples = data['text_samples']
+    threshold = data['threshold']
+    
+    # Import what we need inside the worker
+    from difflib import SequenceMatcher
+    
+    # Local cache for this worker process
+    similarity_cache = {}
+    semantic_cache = {}
+    
+    for i, j, filename_i, filename_j in batch:
+        # Get text samples
+        sample_i = text_samples.get(i)
+        sample_j = text_samples.get(j)
+        
+        if not sample_i or not sample_j:
+            continue
+        
+        # Use hashes for similarity check with caching
+        hash1 = sample_i['hash_5k']
+        hash2 = sample_j['hash_5k']
+        
+        # Create cache key (ensure consistent ordering)
+        cache_key = (min(hash1, hash2), max(hash1, hash2))
+        
+        # Check cache first
+        if cache_key in similarity_cache:
+            similarity = similarity_cache[cache_key]
+        else:
+            # Check if hashes are identical
+            if hash1 == hash2:
+                similarity = 1.0
+            else:
+                # Calculate text similarity
+                text1 = sample_i['sample_5k']
+                text2 = sample_j['sample_5k']
+                similarity = calculate_similarity_ratio(text1, text2)
+            
+            # Cache the result
+            similarity_cache[cache_key] = similarity
+        
+        if similarity >= threshold:
+            batch_results.append({
+                'filename1': filename_i,
+                'filename2': filename_j,
+                'similarity': similarity,
+                'is_variant': False,
+                'semantic_sim': None
+            })
+        # Check for translation variants if similarity is moderate
+        elif 0.5 <= similarity < threshold:
+            # Check semantic similarity with caching
+            hash1_10k = sample_i['hash_10k']
+            hash2_10k = sample_j['hash_10k']
+            
+            # Create semantic cache key
+            sem_cache_key = (min(hash1_10k, hash2_10k), max(hash1_10k, hash2_10k))
+            
+            if sem_cache_key in semantic_cache:
+                semantic_sim = semantic_cache[sem_cache_key]
+            else:
+                if hash1_10k == hash2_10k:
+                    semantic_sim = 1.0
+                else:
+                    text1_10k = sample_i['sample_10k']
+                    text2_10k = sample_j['sample_10k']
+                    semantic_sim = calculate_semantic_fingerprint_similarity(text1_10k, text2_10k)
+                
+                # Cache the result
+                semantic_cache[sem_cache_key] = semantic_sim
+            
+            if semantic_sim >= 0.75:  # High semantic similarity threshold
+                combined_score = (similarity * 0.4 + semantic_sim * 0.6)
+                
+                if combined_score >= threshold:
+                    batch_results.append({
+                        'filename1': filename_i,
+                        'filename2': filename_j,
+                        'similarity': combined_score,
+                        'is_variant': True,
+                        'semantic_sim': semantic_sim,
+                        'base_sim': similarity
+                    })
+    
+    return batch_results
+
+
 def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidence, 
                                 threshold, log, should_stop):
-    """Perform deep similarity analysis between files - PARALLEL OPTIMIZED VERSION
-    
-    This function must be defined at module level, before detect_duplicates
-    """
-    global _global_text_samples
+    """Perform deep similarity analysis - PROCESSPOOLEXECUTOR VERSION"""
     
     log(f"🔍 Deep content similarity analysis (threshold: {int(threshold*100)}%)...")
-    log("⚡ PARALLEL PROCESSING ENABLED - Using all CPU cores for maximum speed!")
+    log("⚡ PROCESSPOOLEXECUTOR ENABLED - MAXIMUM PERFORMANCE!")
     
-    # Pre-cache text samples for all results to avoid repeated slicing
+    # Pre-cache text samples for all results
     text_samples = {}
     for idx, result in enumerate(results):
         text = result.get('raw_text', '')
         if len(text) >= 500:
             text_samples[idx] = {
-                'full': text,
                 'sample_5k': text[:5000],
                 'sample_10k': text[:10000],
                 'hash_5k': hashlib.md5(text[:5000].encode()).hexdigest(),
                 'hash_10k': hashlib.md5(text[:10000].encode()).hexdigest()
             }
     
-    # Set global mapping for the cached functions to use
-    _global_text_samples = text_samples
-    
-    # Create local cached functions that use the global mapping
-    # Using similarity_ratio size for text comparison cache
-    # Using semantic_fingerprint size for semantic comparison cache
-    similarity_cache_size = get_cache_size("similarity_ratio") or 20000
-    semantic_cache_size = get_cache_size("semantic_fingerprint") or 2000
-    
-    @lru_cache(maxsize=similarity_cache_size)
-    def check_similarity_cached(hash1, hash2):
-        """Check similarity between two text hashes"""
-        # Find the actual texts by their hashes
-        text1, text2 = None, None
-        for samples in _global_text_samples.values():
-            if samples['hash_5k'] == hash1:
-                text1 = samples['sample_5k']
-            if samples['hash_5k'] == hash2:
-                text2 = samples['sample_5k']
-        
-        if text1 and text2:
-            return calculate_similarity_ratio(text1, text2)
-        return 0.0
-    
-    @lru_cache(maxsize=semantic_cache_size)
-    def check_semantic_similarity_cached(hash1, hash2):
-        """Check semantic similarity between two text hashes"""
-        # Find the actual texts by their hashes
-        text1, text2 = None, None
-        for samples in _global_text_samples.values():
-            if samples['hash_10k'] == hash1:
-                text1 = samples['sample_10k']
-            if samples['hash_10k'] == hash2:
-                text2 = samples['sample_10k']
-        
-        if text1 and text2:
-            return calculate_semantic_fingerprint_similarity(text1, text2)
-        return 0.0
-    
     # Determine number of workers
     cpu_count = multiprocessing.cpu_count()
-    
-    # Check if there's a configured limit
     max_workers_config = 0
+    
     try:
-        # Try to read from config.json if it exists
         config_path = os.path.join(os.path.dirname(__file__), 'config.json')
         if os.path.exists(config_path):
             with open(config_path, 'r', encoding='utf-8') as f:
                 full_config = json.load(f)
-                # Check for qa_scanner_config first, then deep_check_config
+                # Check multiple possible config locations
                 qa_config = full_config.get('qa_scanner_config', {})
                 deep_check_config = full_config.get('deep_check_config', {})
-                # Priority: deep_check_config > qa_scanner_config.max_workers > 0
+                ai_hunter_config = full_config.get('ai_hunter_config', {})
+                
+                # Priority: deep_check_config > qa_scanner_config > ai_hunter_config
                 max_workers_config = deep_check_config.get('max_workers', 
-                                                          qa_config.get('max_workers', 0))
+                                    qa_config.get('max_workers',
+                                    ai_hunter_config.get('ai_hunter_max_workers', 0)))
     except:
         max_workers_config = 0
     
     if max_workers_config > 0:
         max_workers = min(max_workers_config, cpu_count)
-        log(f"   🖥️ Using {max_workers} parallel workers (configured limit of {max_workers_config})")
+        log(f"   🖥️ Using {max_workers} parallel processes (configured limit)")
     else:
         max_workers = cpu_count
         log(f"   🚀 Using ALL {max_workers} CPU cores - MAXIMUM PERFORMANCE!")
         if cpu_count > 8:
-            log(f"   💡 Tip: You can limit CPU cores in QA scanner settings or config.json")
+            log(f"   💡 Tip: You can limit CPU cores in QA scanner settings")
     
-    # Create all comparison tasks
+    # Create comparison tasks with smart filtering
     comparison_tasks = []
     checked_pairs = set()
     
@@ -1957,7 +2161,7 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
     log(f"   📋 Created {total_comparisons:,} comparison tasks")
     
     if total_comparisons == 0:
-        log("   ✅ No comparisons needed - all files already grouped or too short")
+        log("   ✅ No comparisons needed!")
         return
     
     # Progress tracking
@@ -1966,117 +2170,91 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
     start_time = time.time()
     found_duplicates = []
     
-    def process_comparison_batch(batch):
-        """Process a batch of comparisons"""
-        batch_results = []
-        
-        for i, j, filename_i, filename_j in batch:
-            if should_stop():
-                return batch_results
-            
-            # Use cached similarity check
-            hash1 = text_samples[i]['hash_5k']
-            hash2 = text_samples[j]['hash_5k']
-            
-            # Ensure consistent ordering for cache
-            if hash1 > hash2:
-                hash1, hash2 = hash2, hash1
-            
-            similarity = check_similarity_cached(hash1, hash2)
-            
-            if similarity >= threshold:
-                batch_results.append({
-                    'filename1': filename_i,
-                    'filename2': filename_j,
-                    'similarity': similarity,
-                    'is_variant': False,
-                    'semantic_sim': None
-                })
-            # Check for translation variants if similarity is moderate
-            elif 0.5 <= similarity < threshold:
-                # Check semantic fingerprint using cached version
-                hash1_10k = text_samples[i]['hash_10k']
-                hash2_10k = text_samples[j]['hash_10k']
-                
-                # Ensure consistent ordering for cache
-                if hash1_10k > hash2_10k:
-                    hash1_10k, hash2_10k = hash2_10k, hash1_10k
-                
-                semantic_sim = check_semantic_similarity_cached(hash1_10k, hash2_10k)
-                
-                if semantic_sim >= 0.75:  # High semantic similarity threshold
-                    combined_score = (similarity * 0.4 + semantic_sim * 0.6)
-                    
-                    if combined_score >= threshold:
-                        batch_results.append({
-                            'filename1': filename_i,
-                            'filename2': filename_j,
-                            'similarity': combined_score,
-                            'is_variant': True,
-                            'semantic_sim': semantic_sim,
-                            'base_sim': similarity
-                        })
-        
-        return batch_results
+    # Prepare data for workers
+    worker_data = {
+        'text_samples': text_samples,
+        'threshold': threshold
+    }
     
-    # Split tasks into batches
-    batch_size = max(10, total_comparisons // (max_workers * 100))  # Dynamic batch size
-    batch_size = min(batch_size, 1000)  # Cap batch size for memory efficiency
-    batches = [comparison_tasks[i:i + batch_size] for i in range(0, len(comparison_tasks), batch_size)]
+    # Optimal batch size for ProcessPoolExecutor
+    optimal_batch_size = max(1000, total_comparisons // (max_workers * 5))
+    optimal_batch_size = min(optimal_batch_size, 10000)
     
-    log(f"   📦 Split into {len(batches)} batches of ~{batch_size} comparisons each")
+    batches = []
+    for i in range(0, len(comparison_tasks), optimal_batch_size):
+        batch = comparison_tasks[i:i + optimal_batch_size]
+        batches.append(batch)
     
-    # Process batches in parallel
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+    log(f"   📦 Split into {len(batches)} batches of ~{optimal_batch_size} comparisons each")
+    
+    # Prepare batch arguments
+    batch_args = [(batch, worker_data) for batch in batches]
+    
+    # Process with ProcessPoolExecutor
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
         # Submit all batches
-        future_to_batch = {executor.submit(process_comparison_batch, batch): batch for batch in batches}
-        
-        # Process results as they complete
-        for future in concurrent.futures.as_completed(future_to_batch):
+        futures = []
+        for args in batch_args:
             if should_stop():
                 log("⛔ Deep similarity check interrupted by user.")
-                executor.shutdown(wait=False)
-                # Clear caches before returning
-                check_similarity_cached.cache_clear()
-                check_semantic_similarity_cached.cache_clear()
+                executor.shutdown(wait=True)
+                return
+            
+            future = executor.submit(process_deep_similarity_batch, args)
+            futures.append(future)
+        
+        # Process results as they complete
+        for completed_future in concurrent.futures.as_completed(futures):
+            if should_stop():
+                log("⛔ Deep similarity check interrupted by user.")
+                executor.shutdown(wait=True)
                 return
             
             try:
-                batch_results = future.result()
+                batch_results = completed_future.result()
                 
-                # Thread-safe merge of results
-                with merge_lock:
-                    for result in batch_results:
-                        file1 = result['filename1']
-                        file2 = result['filename2']
-                        pair = tuple(sorted([file1, file2]))
-                        
-                        # Use the original merge_duplicate_groups function
-                        merge_duplicate_groups(duplicate_groups, file1, file2)
-                        
-                        # Update confidence
-                        duplicate_confidence[pair] = max(
-                            duplicate_confidence.get(pair, 0), 
-                            result['similarity']
-                        )
-                        
-                        # Log findings
-                        if result['is_variant']:
-                            msg = (f"   └─ Translation variant detected: {file1} ≈ {file2} "
-                                  f"(base: {int(result.get('base_sim', 0)*100)}%, "
-                                  f"semantic: {int(result['semantic_sim']*100)}%, "
-                                  f"combined: {int(result['similarity']*100)}%)")
-                        else:
-                            msg = (f"   └─ Content similarity: {file1} ≈ {file2} "
-                                  f"({int(result['similarity']*100)}%)")
-                        
-                        found_duplicates.append(msg)
+                # Batch all updates
+                updates = []
+                for result in batch_results:
+                    updates.append((
+                        result['filename1'],
+                        result['filename2'],
+                        result
+                    ))
+                
+                # Apply all updates in one lock
+                if updates:
+                    with merge_lock:
+                        for file1, file2, result in updates:
+                            pair = tuple(sorted([file1, file2]))
+                            
+                            merge_duplicate_groups(duplicate_groups, file1, file2)
+                            duplicate_confidence[pair] = max(
+                                duplicate_confidence.get(pair, 0), 
+                                result['similarity']
+                            )
+                            
+                            # Store messages for logging
+                            if result['is_variant']:
+                                msg = (f"   └─ Translation variant detected: {file1} ≈ {file2} "
+                                      f"(base: {int(result.get('base_sim', 0)*100)}%, "
+                                      f"semantic: {int(result['semantic_sim']*100)}%, "
+                                      f"combined: {int(result['similarity']*100)}%)")
+                            else:
+                                msg = (f"   └─ Content similarity: {file1} ≈ {file2} "
+                                      f"({int(result['similarity']*100)}%)")
+                            
+                            found_duplicates.append(msg)
                 
                 # Update progress
-                comparisons_done += len(future_to_batch[future])
+                comparisons_done += optimal_batch_size
+                if comparisons_done > total_comparisons:
+                    comparisons_done = total_comparisons
+                
                 progress = int((comparisons_done / total_comparisons) * 100)
                 
-                if progress >= last_progress + 5:  # Update every 5%
+                # Update every 10% for less overhead
+                if progress >= last_progress + 10 or progress == 100:
                     elapsed = time.time() - start_time
                     rate = comparisons_done / elapsed if elapsed > 0 else 0
                     remaining = (total_comparisons - comparisons_done) / rate if rate > 0 else 0
@@ -2085,7 +2263,7 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
                         f"({progress}%) - ~{int(remaining)}s remaining - "
                         f"Speed: {int(rate):,} comparisons/sec")
                     
-                    # Log some found duplicates (limit output to avoid spam)
+                    # Log some found duplicates
                     for dup_msg in found_duplicates[:5]:
                         log(dup_msg)
                     found_duplicates = found_duplicates[5:]
@@ -2099,20 +2277,13 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
     
     # Final summary
     elapsed = time.time() - start_time
-    log(f"✅ Deep similarity check complete! Processed {total_comparisons:,} comparisons in {int(elapsed)}s")
+    log(f"✅ Deep similarity check complete! Processed {total_comparisons:,} comparisons in {elapsed:.1f}s")
     log(f"   ⚡ Speed: {int(total_comparisons/elapsed):,} comparisons/sec")
+    log(f"   🚀 ProcessPoolExecutor: ENABLED")
     
-    # Log remaining duplicates (last 10)
+    # Log remaining duplicates
     for dup_msg in found_duplicates[-10:]:
         log(dup_msg)
-    
-    # Clear local caches when done
-    check_similarity_cached.cache_clear()
-    check_semantic_similarity_cached.cache_clear()
-    
-    # Clear global mapping
-    _global_text_samples.clear()
-
         
 def check_consecutive_chapters(results, duplicate_groups, duplicate_confidence, config, log, should_stop=None):
     """Check for consecutive chapters with same title using fuzzy matching"""
@@ -2882,23 +3053,160 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
         'reason': 'No matching chapter found in original'
     }
 
+def process_html_file_batch(args):
+    """Process a batch of HTML files - MUST BE AT MODULE LEVEL"""
+    file_batch, folder_path, qa_settings, mode, original_word_counts = args
+    batch_results = []
+    
+    # Import what we need inside the worker
+    import os
+    import hashlib
+    
+    is_quick_scan = (mode == 'quick-scan')
+    
+    for idx, filename in file_batch:
+        full_path = os.path.join(folder_path, filename)
+        
+        try:
+            raw_text = extract_text_from_html(full_path)
+        except Exception as e:
+            # Skip files that can't be read
+            continue
+        
+        # Check minimum file length
+        min_length = qa_settings.get('min_file_length', 0)
+        if len(raw_text.strip()) < min_length:
+            continue
+        
+        chapter_num, chapter_title = extract_chapter_info(filename, raw_text)
+        
+        # Quick scan optimizations
+        if is_quick_scan:
+            hashes = {}  # Empty dict for quick scan
+            preview_size = min(300, len(raw_text))
+        else:
+            hashes = generate_content_hashes(raw_text)
+            preview_size = 500
+        
+        preview = raw_text[:preview_size].replace('\n', ' ')
+        if len(preview) > preview_size:
+            preview = preview[:preview_size-3] + '...'
+        
+        # Normalize preview
+        preview_normalized = normalize_text(preview)[:300]
+        
+        # Detect translation artifacts
+        artifacts = []
+        if not is_quick_scan and qa_settings.get('check_translation_artifacts', True):
+            artifacts = detect_translation_artifacts(raw_text)
+            
+        # Filter out encoding_issues if disabled
+        if not qa_settings.get('check_encoding_issues', True):
+            artifacts = [a for a in artifacts if a['type'] != 'encoding_issues']
+        
+        # Initialize issues list
+        issues = []
+        
+        # HTML tag check
+        check_missing_html_tag = qa_settings.get('check_missing_html_tag', True)
+        if check_missing_html_tag and filename.lower().endswith('.html'):
+            # Create a dummy log function for the worker
+            def dummy_log(msg):
+                pass
+            
+            has_issues, html_issues = check_html_structure_issues(full_path, dummy_log)
+            
+            if has_issues:
+                for issue in html_issues:
+                    if issue == 'missing_html_structure':
+                        issues.append("missing_html_tag")
+                    elif issue == 'insufficient_paragraph_tags':
+                        issues.append("insufficient_paragraph_tags")
+                    elif issue == 'unwrapped_text_content':
+                        issues.append("unwrapped_text_content")
+                    elif issue == 'unclosed_html_tags':
+                        issues.append("unclosed_html_tags")
+                    elif issue == 'incomplete_html_structure':
+                        issues.append("incomplete_html_structure")
+                    elif issue == 'invalid_nesting':
+                        issues.append("invalid_nesting")
+                    elif issue == 'malformed_html':
+                        issues.append("malformed_html")
+                    else:
+                        issues.append(issue)
+        
+        # Check for multiple headers
+        check_multiple_headers = qa_settings.get('check_multiple_headers', True)
+        has_multiple = False
+        header_count = 0
+        header_info = None
+        
+        if check_multiple_headers:
+            has_multiple, header_count, header_info = detect_multiple_headers(raw_text)
+            if has_multiple:
+                issues.append(f"multiple_headers_{header_count}_found")
+        
+        # Check word count ratio
+        word_count_check = None
+        check_word_count = qa_settings.get('check_word_count_ratio', False)
+        
+        if check_word_count and original_word_counts:
+            # Create dummy log for worker
+            def dummy_log(msg):
+                pass
+                
+            wc_result = cross_reference_word_counts(
+                original_word_counts, 
+                filename, 
+                raw_text,
+                dummy_log
+            )
+            
+            if wc_result['found_match']:
+                word_count_check = wc_result
+                if not wc_result['is_reasonable']:
+                    issues.append(f"word_count_mismatch_ratio_{wc_result['ratio']:.2f}")
+            else:
+                word_count_check = wc_result
+                issues.append("word_count_no_match_found")
+        
+        # Create result dictionary
+        result = {
+            "file_index": idx,
+            "filename": filename,
+            "filepath": full_path,
+            "issues": issues,
+            "preview": preview,
+            "preview_normalized": preview_normalized,
+            "score": 0,
+            "chapter_num": chapter_num,
+            "hashes": hashes,
+            "raw_text": raw_text,
+            "translation_artifacts": artifacts
+        }
+        
+        # Add optional fields
+        if check_multiple_headers and has_multiple:
+            result['header_count'] = header_count
+            result['header_info'] = header_info
+        
+        if word_count_check:
+            result['word_count_check'] = word_count_check
+        
+        batch_results.append(result)
+    
+    return batch_results
+
+
 def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', qa_settings=None, epub_path=None):
     """
-    Scan HTML folder for QA issues with configurable settings
-    
-    Args:
-        folder_path: Path to folder containing HTML files
-        log: Logging function
-        stop_flag: Function that returns True to stop scanning
-        mode: Detection mode ('ai-hunter', 'aggressive', 'standard', 'strict')
-        qa_settings: Dictionary of QA scanner settings
+    Scan HTML folder for QA issues - PROCESSPOOLEXECUTOR VERSION
     """
     global _stop_flag
     _stop_flag = False
     
     # Create a combined stop check function
     def should_stop():
-        # Check both the passed stop_flag and global flag
         if stop_flag and stop_flag():
             log("⛔ Stop requested via GUI stop button")
             return True
@@ -2910,14 +3218,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     start_time = time.time()
     
     # Debug info
-    log(f"🔍 Starting scan with stop_flag={'provided' if stop_flag else 'not provided'}")
-    if stop_flag:
-        log(f"   Stop flag callable: {callable(stop_flag)}")
-        try:
-            current_state = stop_flag()
-            log(f"   Stop flag current state: {current_state}")
-        except:
-            log("   Could not check stop flag state")
+    log(f"🔍 Starting scan with ProcessPoolExecutor")
+    log(f"⚡ MAXIMUM PERFORMANCE MODE ENABLED")
     
     # Load default settings if not provided
     if qa_settings is None:
@@ -2931,13 +3233,13 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'report_format': 'detailed',
             'auto_save_report': True,
             'check_missing_html_tag': True, 
-            'check_paragraph_structure': True,       # NEW
-            'paragraph_threshold': 0.3,              # NEW - 30% minimum            
+            'check_paragraph_structure': True,
+            'paragraph_threshold': 0.3,
             'check_word_count_ratio': False,     
             'check_multiple_headers': True,   
             'warn_name_mismatch': True           
         }
-        # Get settings for new features (OUTSIDE the if block!)
+    
     check_word_count = qa_settings.get('check_word_count_ratio', False)
     check_multiple_headers = qa_settings.get('check_multiple_headers', True)
     
@@ -2951,7 +3253,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         else:
             log("⚠️ Word count cross-reference enabled but no valid EPUB provided - skipping this check")
             check_word_count = False
-            
+    
+    # Log settings
     log(f"\n📋 QA Settings Status:")
     log(f"   ✓ Encoding issues check: {'ENABLED' if qa_settings.get('check_encoding_issues', True) else 'DISABLED'}")
     log(f"   ✓ Repetition check: {'ENABLED' if qa_settings.get('check_repetition', True) else 'DISABLED'}")
@@ -2967,7 +3270,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     if mode == 'custom' and qa_settings and 'custom_mode_settings' in qa_settings:
         custom_settings = qa_settings['custom_mode_settings']
     config = DuplicateDetectionConfig(mode, custom_settings)
-        
+    
+    # Log mode info
     mode_messages = {
         'aggressive': '🚨 AGGRESSIVE',
         'quick-scan': '⚡ Quick Scan',
@@ -2981,204 +3285,155 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     if mode == 'ai-hunter':
         log("   ⚠️ WARNING: This mode will flag almost everything as potential duplicates!")
         log("   🎯 Designed specifically for catching AI retranslations of the same content")
-        log("   ⏱️ NOTE: AI Hunter mode checks EVERY file pair - this can take several minutes!")
-    elif mode == 'aggressive':
-        log("   ⚡ Aggressive mode: Lower thresholds for catching more potential duplicates")
-    elif mode == 'quick-scan':
-        log("   ⚡ Quick Scan mode: Optimized for speed with balanced accuracy")
-    elif mode == 'custom':
-        log("   ⚙️ Custom mode: Using user-defined thresholds and settings")
-        if custom_settings:
-            log(f"   Sample size: {custom_settings.get('sample_size', 3000)} characters")
-            log(f"   Check all pairs: {custom_settings.get('check_all_pairs', False)}")
+        log("   ⏱️ NOTE: AI Hunter mode checks EVERY file pair - but now with PARALLEL PROCESSING!")
     
+    # Get HTML files
     html_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith(".html")])
-    log(f"🔍 Found {len(html_files)} HTML files. Starting scan...")
+    log(f"🔍 Found {len(html_files)} HTML files. Starting parallel scan...")
     
-    # Warn about AI Hunter mode with large datasets
-    if mode == 'ai-hunter' and len(html_files) > 100:
-        total_comparisons = (len(html_files) * (len(html_files) - 1)) // 2
-        estimated_time = total_comparisons * 0.001  # Rough estimate: 1ms per comparison
-        log(f"   ⚠️ AI Hunter mode with {len(html_files)} files = {total_comparisons:,} comparisons")
-        log(f"   ⏱️ Estimated time: {int(estimated_time)} seconds ({int(estimated_time/60)} minutes)")
-        log(f"   💡 Consider using 'aggressive' mode for faster scanning of large datasets")
+    # Determine number of workers
+    cpu_count = multiprocessing.cpu_count()
+    max_workers_config = 0
     
-    results = []
-    
-    # First pass: collect all data
-    # Determine if we're in quick scan mode
-    is_quick_scan = (mode == 'quick-scan')
-    
-    # Quick scan optimizations
-    if is_quick_scan:
-        log("   ⚡ Quick Scan optimizations enabled:")
-        log("      • Reduced sample size (1000 chars)")
-        log("      • Skipping AI Hunter checks")
-        log("      • Simplified similarity calculations")
-        log("      • Checking only consecutive chapters")
-    
-    results = []
-    
-    # First pass: collect all data
-    for idx, filename in enumerate(html_files):
-        if should_stop():
-            log("⛔ QA scan interrupted by user.")
-            return
-        
-        # Progress update every 10 files
-        if idx % 10 == 0:
-            progress = int((idx / len(html_files)) * 100)
-            log(f"📄 [{idx+1}/{len(html_files)}] Scanning {filename}... ({progress}% complete)")
-            
-            # Debug: Check stop flag states periodically
-            if idx % 50 == 0 and idx > 0:
-                log(f"   [DEBUG] Global stop flag: {_stop_flag}, Stop function: {stop_flag() if stop_flag else 'N/A'}")
-        else:
-            # Less verbose for other files - show every file but compact
-            print(f"\r📄 Scanning: {filename} [{idx+1}/{len(html_files)}]", end='', flush=True)
-        
-        full_path = os.path.join(folder_path, filename)
-        try:
-            raw_text = extract_text_from_html(full_path)
-        except Exception as e:
-            log(f"⚠️ Failed to read {filename}: {e}")
-            continue
-        
-        # Check for stop after each file read
-        if should_stop():
-            log("⛔ QA scan interrupted during file reading.")
-            return
-        
-        # Check minimum file length from settings
-        min_length = qa_settings.get('min_file_length', 0)
-        if len(raw_text.strip()) < min_length:
-            log(f"⚠️ Skipped {filename}: Too short (< {min_length} chars)")
-            continue
-        
-        chapter_num, chapter_title = extract_chapter_info(filename, raw_text)
-        
-        # Quick scan: Skip expensive hash calculations
-        if is_quick_scan:
-            hashes = {}  # Empty dict for quick scan
-            preview_size = min(300, len(raw_text))  # Smaller preview
-        else:
-            hashes = generate_content_hashes(raw_text)
-            preview_size = 500
-        
-        preview = raw_text[:preview_size].replace('\n', ' ')
-        if len(preview) > preview_size:
-            preview = preview[:preview_size-3] + '...'
-        
-        # Normalize preview
-        preview_normalized = normalize_text(preview)[:300]
-        
-        # Detect translation artifacts only if enabled and not quick scan
-        artifacts = []
-        if not is_quick_scan and qa_settings.get('check_translation_artifacts', True):
-            artifacts = detect_translation_artifacts(raw_text)
-            
-        # Filter out encoding_issues if check_encoding_issues is disabled
-        if not qa_settings.get('check_encoding_issues', True):
-            original_count = len(artifacts)
-            artifacts = [a for a in artifacts if a['type'] != 'encoding_issues']
-            if original_count != len(artifacts):
-                log(f"      → Filtered out encoding artifacts (check disabled)")
-        
-        # Initialize issues list
-        issues = []
-
-
-        # HTML tag check:
-        check_missing_html_tag = qa_settings.get('check_missing_html_tag', True)
-
-        if check_missing_html_tag and filename.lower().endswith('.html'):
-            # Use the new comprehensive check
-            has_issues, html_issues = check_html_structure_issues(full_path, log)
-            
-            if has_issues:
-                for issue in html_issues:
-                    if issue == 'missing_html_structure':
-                        issues.append("missing_html_tag")
-                    elif issue == 'insufficient_paragraph_tags':
-                        issues.append("insufficient_paragraph_tags")
-                    elif issue == 'unwrapped_text_content':
-                        issues.append("unwrapped_text_content")
-                    elif issue == 'unclosed_html_tags':
-                        issues.append("unclosed_html_tags")  # ADD THIS
-                    elif issue == 'incomplete_html_structure':
-                        issues.append("incomplete_html_structure")  # ADD THIS
-                    elif issue == 'invalid_nesting':
-                        issues.append("invalid_nesting")  # ADD THIS
-                    elif issue == 'malformed_html':
-                        issues.append("malformed_html")  # ADD THIS
-                    else:
-                        # Fallback for any new issue types
-                        issues.append(issue)  # ADD THIS AS SAFETY NET
+    try:
+        config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+        if os.path.exists(config_path):
+            with open(config_path, 'r', encoding='utf-8') as f:
+                full_config = json.load(f)
+                # Check multiple possible config locations
+                qa_config = full_config.get('qa_scanner_config', {})
+                ai_hunter_config = full_config.get('ai_hunter_config', {})
                 
-                # Log the issues found
-                log(f"   → Found HTML structure issues in {filename}: {', '.join(html_issues)}")
-        
-        
-        # Check for multiple headers
-        if check_multiple_headers:
-            has_multiple, header_count, header_info = detect_multiple_headers(raw_text)
-            if has_multiple:
-                issues.append(f"multiple_headers_{header_count}_found")
-        
-        # Check word count ratio
-        word_count_check = None
-        if check_word_count and original_word_counts:
-            wc_result = cross_reference_word_counts(
-                original_word_counts, 
-                filename, 
-                raw_text,  # Use the preview text
-                log
-            )
-            
-            if wc_result['found_match']:
-                word_count_check = wc_result
-                if not wc_result['is_reasonable']:
-                    issues.append(f"word_count_mismatch_ratio_{wc_result['ratio']:.2f}")
-                    log(f"   {filename}: Word count ratio {wc_result['ratio']:.2f} " +
-                        f"(Original: {wc_result['original_wc']}, Translated: {wc_result['translated_wc']})")
-            else:
-                word_count_check = wc_result
-                issues.append("word_count_no_match_found")
-        
-        # Create result dictionary
-        result = {
-            "file_index": idx,
-            "filename": filename,
-            "filepath": full_path,
-            "issues": issues,  # Use the issues list we created
-            "preview": preview,
-            "preview_normalized": preview_normalized,
-            "score": 0,
-            "chapter_num": chapter_num,
-            "hashes": hashes,
-            "raw_text": raw_text,
-            "translation_artifacts": artifacts
-        }
-        
-        # Add optional fields if they exist
-        if check_multiple_headers and has_multiple:
-            result['header_count'] = header_count
-            result['header_info'] = header_info
-        
-        if word_count_check:
-            result['word_count_check'] = word_count_check
-        
-        results.append(result)
+                # Priority: qa_scanner_config > ai_hunter_config
+                max_workers_config = qa_config.get('max_workers',
+                                    ai_hunter_config.get('ai_hunter_max_workers', 0))
+    except:
+        max_workers_config = 0
     
-    # Clear the progress line
+    if max_workers_config > 0:
+        max_workers = min(max_workers_config, cpu_count)
+        log(f"   🖥️ Using {max_workers} CPU cores for file processing (configured limit)")
+    else:
+        max_workers = cpu_count
+        log(f"   🚀 Using ALL {max_workers} CPU cores for file processing")
+        if cpu_count > 8:
+            log(f"   💡 Tip: You can limit CPU cores in QA scanner settings")
+    
+    # Create file batches with indices
+    file_list = [(idx, filename) for idx, filename in enumerate(html_files)]
+    batch_size = max(10, len(html_files) // (max_workers * 5))
+    batches = []
+    
+    for i in range(0, len(file_list), batch_size):
+        batch = file_list[i:i + batch_size]
+        batches.append(batch)
+    
+    log(f"   📦 Split into {len(batches)} batches of ~{batch_size} files each")
+    
+    # Prepare worker data
+    worker_args = []
+    for batch in batches:
+        args = (batch, folder_path, qa_settings, mode, original_word_counts)
+        worker_args.append(args)
+    
+    # Process files in parallel
+    results = []
+    processed_count = 0
+    
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all batches
+        futures = []
+        
+        for args in worker_args:
+            if should_stop():
+                log("⛔ QA scan interrupted before processing.")
+                executor.shutdown(wait=True)
+                return
+            
+            future = executor.submit(process_html_file_batch, args)
+            futures.append(future)
+        
+        # Collect results as they complete
+        for completed_idx, future in enumerate(concurrent.futures.as_completed(futures)):
+            if should_stop():
+                log("⛔ QA scan interrupted during processing.")
+                executor.shutdown(wait=True)
+                return
+            
+            try:
+                batch_results = future.result()
+                
+                # Log individual file progress like original
+                for result in batch_results:
+                    processed_count += 1
+                    idx = result['file_index']
+                    filename = result['filename']
+                    
+                    # Progress update every 10 files (like original)
+                    if processed_count % 10 == 0:
+                        progress = int((processed_count / len(html_files)) * 100)
+                        log(f"📄 [{processed_count}/{len(html_files)}] Scanning {filename}... ({progress}% complete)")
+                        
+                        # Debug: Check stop flag states periodically (like original)
+                        if processed_count % 50 == 0 and processed_count > 0:
+                            log(f"   [DEBUG] Global stop flag: {_stop_flag}, Stop function: {stop_flag() if stop_flag else 'N/A'}")
+                    else:
+                        # Less verbose for other files - show every file but compact
+                        print(f"\r📄 Scanning: {filename} [{processed_count}/{len(html_files)}]", end='', flush=True)
+                    
+                    # Log issues found (like original)
+                    if result.get('issues'):
+                        # Check if HTML structure issues were found
+                        html_issues = [i for i in result['issues'] if 'html' in i.lower() or 'paragraph' in i.lower()]
+                        if html_issues:
+                            log(f"   → Found HTML structure issues in {filename}: {', '.join(html_issues)}")
+                        
+                        # Log word count issues
+                        wc_issues = [i for i in result['issues'] if 'word_count' in i]
+                        if wc_issues and result.get('word_count_check'):
+                            wc = result['word_count_check']
+                            if wc.get('ratio'):
+                                log(f"   {filename}: Word count ratio {wc['ratio']:.2f} " +
+                                    f"(Original: {wc.get('original_wc', '?')}, Translated: {wc.get('translated_wc', '?')})")
+                        
+                        # Log encoding artifacts (if enabled)
+                        if qa_settings.get('check_encoding_issues', True):
+                            encoding_issues = [i for i in result['issues'] if 'encoding' in i]
+                            if encoding_issues and processed_count <= 5:  # Only log first 5
+                                count = next((int(i.split('_')[2]) for i in encoding_issues if '_found' in i), 0)
+                                if count > 0:
+                                    log(f"      → Found encoding artifacts in {filename}: {count} instances")
+                        
+                        # Log spacing issues
+                        if 'no_spacing_or_linebreaks' in result['issues'] and processed_count <= 5:
+                            log(f"      → Found spacing/linebreak issue in {filename}")
+                        
+                        # Log API response unavailable markers
+                        api_issues = [i for i in result['issues'] if 'api_response_unavailable' in i]
+                        if api_issues and processed_count <= 5:
+                            count = next((int(i.split('_')[3]) for i in api_issues if '_found' in i), 0)
+                            if count > 0:
+                                log(f"      → Found AI response unavailable markers in {filename}: {count} instances")
+                
+                results.extend(batch_results)
+                
+            except Exception as e:
+                log(f"   ❌ Error processing batch: {e}")
+                import traceback
+                log(f"   Traceback: {traceback.format_exc()}")
+    
+    # Clear the progress line (like original)
     print()  # New line after progress indicator
+    
+    # Sort results by file index to maintain order
+    results.sort(key=lambda x: x['file_index'])
     
     log("\n✅ Initial scan complete.")
     
     # Time the duplicate detection phase
     dup_start_time = time.time()
     
-    # Detect duplicates with enhanced methods
+    # Detect duplicates (already optimized)
     duplicate_groups, near_duplicate_groups, duplicate_confidence = detect_duplicates(
         results, log, should_stop, config
     )
@@ -3186,7 +3441,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     dup_time = time.time() - dup_start_time
     log(f"✅ Duplicate detection completed in {dup_time:.1f} seconds")
     
-    # Process results and check for issues
+    # Process results and check for additional issues
     log("\n📊 Checking for other issues...")
     
     # Group files by duplicate group
@@ -3196,9 +3451,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             groups[group_id] = []
         groups[group_id].append(filename)
     
-    # Check each file for all issues
-    for result in results:
-        issues = result.get('issues', []) 
+    # Check each file for all issues (this part is fast, no need to parallelize)
+    for idx, result in enumerate(results):
+        issues = result.get('issues', [])
         
         # Check duplicates
         if result['filename'] in duplicate_groups:
@@ -3207,7 +3462,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             if len(group_files) > 1:
                 others = [f for f in group_files if f != result['filename']]
                 
-                # Get the highest confidence score for this file
+                # Get confidence score
                 confidence = 0
                 for other in others:
                     pair = tuple(sorted([result['filename'], other]))
@@ -3235,47 +3490,37 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         # Check other issues
         raw_text = result['raw_text']
         
-        # Non-English content (excluding Korean separators) - pass settings
+        # Non-English content
         has_non_english, lang_issues = detect_non_english_content(raw_text, qa_settings)
         if has_non_english:
             issues.extend(lang_issues)
         
-        # Spacing/formatting issues - only if encoding check is enabled
+        # Spacing/formatting issues
         if qa_settings.get('check_encoding_issues', True):
             if has_no_spacing_or_linebreaks(raw_text):
                 issues.append("no_spacing_or_linebreaks")
-                # Debug log when issue is found
-                if idx < 5:  # Only log for first 5 files to avoid spam
-                    log(f"      → Found spacing/linebreak issue in {result['filename']}")
         
-        # Repetitive content - only if repetition check is enabled
+        # Repetitive content
         if qa_settings.get('check_repetition', True):
             if has_repeating_sentences(raw_text):
                 issues.append("excessive_repetition")
         
-        # Translation artifacts - already handled above
+        # Translation artifacts
         if result.get('translation_artifacts'):
             for artifact in result['translation_artifacts']:
                 if artifact['type'] == 'machine_translation':
                     issues.append(f"machine_translation_markers_{artifact['count']}_found")
                 elif artifact['type'] == 'encoding_issues':
-                    # Only add encoding issues if the check is enabled
                     if qa_settings.get('check_encoding_issues', True):
                         issues.append(f"encoding_issues_{artifact['count']}_found")
-                        # Debug log
-                        if idx < 5:  # Only log for first 5 files
-                            log(f"      → Found encoding artifacts in {result['filename']}: {artifact['count']} instances")
                 elif artifact['type'] == 'repeated_watermarks':
                     issues.append(f"repeated_watermarks_{artifact['count']}_found")
                 elif artifact['type'] == 'api_response_unavailable':
                     issues.append(f"api_response_unavailable_{artifact['count']}_found")
-                    if idx < 5:  # Log for debugging
-                        log(f"      → Found AI response unavailable markers in {result['filename']}: {artifact['count']} instances")
                 elif artifact['type'] == 'chapter_continuation':
                     issues.append(f"chapter_continuation_{artifact['count']}_found")
                 elif artifact['type'] == 'split_indicators':
                     issues.append(f"split_indicators_{artifact['count']}_found")
-
         
         result['issues'] = issues
         result['score'] = len(issues)
@@ -3283,7 +3528,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         if issues:
             log(f"   {result['filename']}: {', '.join(issues[:2])}" + (" ..." if len(issues) > 2 else ""))
     
-    # Clean up raw_text to save memory
+    # Clean up to save memory
     for result in results:
         result.pop('raw_text', None)
         result.pop('hashes', None)
@@ -3291,7 +3536,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         result.pop('structural_sig', None)
         result.pop('normalized_text', None)
     
-    # Generate reports with enhanced information and settings
+    # Generate reports
     generate_reports(results, folder_path, duplicate_confidence, log, qa_settings)
     
     # Update progress file
@@ -3302,6 +3547,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     log(f"\n⏱️ Total scan time: {total_time:.1f} seconds")
     if total_time > 60:
         log(f"   ({int(total_time // 60)} minutes {int(total_time % 60)} seconds)")
+    
+    log("⚡ ProcessPoolExecutor: ENABLED - Maximum performance achieved!")
 
 
 def check_html_structure_issues(file_path, log=print):
@@ -3636,37 +3883,101 @@ def test_stop_functionality():
     _stop_flag = False  # Reset
     return True
 
-# Add this to scan_html_folder.py - parallel AI Hunter implementation
 
-import concurrent.futures
-import multiprocessing
-from threading import Lock
+# ADD THIS AT MODULE LEVEL (outside any function/class)
 
-# Add a global lock for thread-safe operations
-merge_lock = Lock()
+def process_comparison_batch_fast(args):
+    """Process a batch of comparisons - MUST BE AT MODULE LEVEL FOR PICKLING"""
+    batch, data = args
+    batch_results = []
+    
+    all_data = data['all_data']
+    thresholds = data['thresholds']
+    
+    # Import what we need inside the worker
+    from difflib import SequenceMatcher
+    
+    # Import the similarity functions - they must also be at module level
+    # If they're in the same module, you might need to import them explicitly
+    # from scan_html_folder import calculate_semantic_similarity, calculate_structural_similarity
+    
+    for i, j in batch:
+        data_i = all_data[i]
+        data_j = all_data[j]
+        
+        # Calculate ALL similarities - NO SHORTCUTS
+        
+        # 1. Semantic similarity
+        sem_sim = calculate_semantic_similarity(
+            data_i['semantic_sig'], 
+            data_j['semantic_sig']
+        )
+        
+        # 2. Structural similarity
+        struct_sim = calculate_structural_similarity(
+            data_i['structural_sig'],
+            data_j['structural_sig']
+        )
+        
+        # 3. Text similarity - ALWAYS calculate
+        text_sim = 0.0
+        if data_i['text_hash'] and data_j['text_hash']:
+            if data_i['text_hash'] == data_j['text_hash']:
+                text_sim = 1.0
+            else:
+                # Always calculate full similarity
+                text_sim = SequenceMatcher(
+                    None, 
+                    data_i['text'], 
+                    data_j['text']
+                ).ratio()
+        
+        # Check ALL duplicate conditions
+        is_duplicate = False
+        is_retranslation = False
+        confidence = 0.0
+        
+        # AI Hunter logic: High semantic + high structural = likely duplicate
+        if sem_sim >= thresholds['semantic'] and struct_sim >= thresholds['structural']:
+            is_duplicate = True
+            is_retranslation = text_sim < 0.6
+            confidence = (sem_sim + struct_sim) / 2
+        # Traditional similarity check
+        elif text_sim >= thresholds['similarity']:
+            is_duplicate = True
+            is_retranslation = False
+            confidence = text_sim
+        
+        # Store result if duplicate found
+        if is_duplicate:
+            batch_results.append({
+                'i': i,
+                'j': j,
+                'sem_sim': sem_sim,
+                'struct_sim': struct_sim,
+                'text_sim': text_sim,
+                'is_duplicate': True,
+                'is_retranslation': is_retranslation,
+                'confidence': confidence
+            })
+    
+    return batch_results
+
 
 def parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, config, log, should_stop):
-    """Parallel AI Hunter checking - no quality compromises, just pure speed"""
+    """Parallel AI Hunter checking - FIXED FOR PROCESSPOOLEXECUTOR"""
     
     log("🤖 AI Hunter mode: Enhanced semantic and structural checking active")
-    log("⚡ PARALLEL PROCESSING ENABLED - Using all CPU cores for maximum speed!")
+    log("⚡ PARALLEL PROCESSING ENABLED - MAXIMUM PERFORMANCE!")
     
     total_comparisons = (len(results) * (len(results) - 1)) // 2
-    log(f"   ⚠️ Will check ALL {total_comparisons:,} file pairs - but in parallel!")
-    
-    # Add debugging output
-    log(f"   [DEBUG] AI Hunter parallel processing started")
-    log(f"   [DEBUG] Total files to compare: {len(results)}")
-    log(f"   [DEBUG] Total comparisons needed: {total_comparisons:,}")
+    log(f"   ⚠️ Will check ALL {total_comparisons:,} file pairs - NO COMPROMISES!")
     
     # Determine number of workers
     cpu_count = multiprocessing.cpu_count()
-    
-    # Check if there's a configured limit
-    # Try to read from a global config file or environment variable
     max_workers_config = 0
+    
     try:
-        # Try to read from config.json if it exists
         import json
         import os
         config_path = os.path.join(os.path.dirname(__file__), 'config.json')
@@ -3676,28 +3987,40 @@ def parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, co
                 ai_hunter_config = full_config.get('ai_hunter_config', {})
                 max_workers_config = ai_hunter_config.get('ai_hunter_max_workers', 0)
     except:
-        # If config reading fails, default to 0 (use all cores)
         max_workers_config = 0
     
     if max_workers_config > 0:
         max_workers = min(max_workers_config, cpu_count)
         log(f"   🖥️ Using {max_workers} parallel workers (configured limit of {max_workers_config})")
     else:
-        max_workers = cpu_count  # No limit - use all available cores!
+        max_workers = cpu_count
         log(f"   🚀 Using ALL {max_workers} CPU cores - MAXIMUM PERFORMANCE!")
-        if cpu_count > 8:
-            log(f"   💡 Tip: You can limit CPU cores under the QA scanner settings")
     
-    # Pre-compute text hashes for all results
-    text_hashes = {}
+    # Pre-compute everything once
+    log("   📊 Pre-computing all data structures...")
+    
+    # Build a single data structure with everything we need
+    all_data = []
+    text_hash_lookup = {}
+    
     for idx, result in enumerate(results):
         text = result.get('normalized_text', '')[:2000]
-        text_hashes[idx] = {
-            'hash_2k': hashlib.md5(text.encode()).hexdigest() if text else None,
-            'text_2k': text
+        text_hash = hashlib.md5(text.encode()).hexdigest() if text else None
+        
+        data_entry = {
+            'idx': idx,
+            'filename': result['filename'],
+            'text': text,
+            'text_hash': text_hash,
+            'semantic_sig': result.get('semantic_sig', {}),
+            'structural_sig': result.get('structural_sig', {})
         }
+        all_data.append(data_entry)
+        
+        if text_hash:
+            text_hash_lookup[text_hash] = text_hash_lookup.get(text_hash, 0) + 1
     
-    # Create all comparison tasks
+    # Create ALL comparison tasks
     comparison_tasks = []
     for i in range(len(results)):
         for j in range(i + 1, len(results)):
@@ -3705,115 +4028,84 @@ def parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, co
     
     log(f"   📋 Created {len(comparison_tasks):,} comparison tasks")
     
+    # Optimal batch size
+    optimal_batch_size = max(1000, total_comparisons // (max_workers * 5))
+    optimal_batch_size = min(optimal_batch_size, 10000)
+    
+    batches = []
+    for i in range(0, len(comparison_tasks), optimal_batch_size):
+        batch = comparison_tasks[i:i + optimal_batch_size]
+        batches.append(batch)
+    
+    log(f"   📦 Split into {len(batches)} batches of ~{optimal_batch_size} comparisons each")
+    
     # Progress tracking
     comparisons_done = 0
     last_progress = 0
     start_time = time.time()
     found_duplicates = []
     
-    def process_comparison_batch(batch):
-        """Process a batch of comparisons"""
-        batch_results = []
-        
-        for i, j in batch:
-            if should_stop():
-                return batch_results
-            
-            # Calculate all similarities
-            sem_sim = calculate_semantic_similarity(
-                results[i]['semantic_sig'], 
-                results[j]['semantic_sig']
-            )
-            
-            struct_sim = calculate_structural_similarity(
-                results[i]['structural_sig'],
-                results[j]['structural_sig']
-            )
-            
-            # Text similarity
-            text_sim = 0.0
-            if text_hashes[i]['hash_2k'] and text_hashes[j]['hash_2k']:
-                if text_hashes[i]['hash_2k'] == text_hashes[j]['hash_2k']:
-                    text_sim = 1.0
-                else:
-                    text_sim = SequenceMatcher(
-                        None, 
-                        text_hashes[i]['text_2k'], 
-                        text_hashes[j]['text_2k']
-                    ).ratio()
-            
-            # AI Hunter logic: High semantic + high structural = likely duplicate
-            if sem_sim >= config.get_threshold('semantic') and struct_sim >= config.get_threshold('structural'):
-                # If text similarity is low but semantic/structural is high, it's likely a retranslation
-                is_retranslation = text_sim < 0.6
-                
-                batch_results.append({
-                    'i': i,
-                    'j': j,
-                    'sem_sim': sem_sim,
-                    'struct_sim': struct_sim,
-                    'text_sim': text_sim,
-                    'is_duplicate': True,
-                    'is_retranslation': is_retranslation,
-                    'confidence': (sem_sim + struct_sim) / 2
-                })
-            
-            # Also check traditional similarity
-            elif text_sim >= config.get_threshold('similarity'):
-                batch_results.append({
-                    'i': i,
-                    'j': j,
-                    'sem_sim': sem_sim,
-                    'struct_sim': struct_sim,
-                    'text_sim': text_sim,
-                    'is_duplicate': True,
-                    'is_retranslation': False,
-                    'confidence': text_sim
-                })
-        
-        return batch_results
+    # Prepare data for multiprocessing
+    worker_data = {
+        'all_data': all_data,
+        'thresholds': {
+            'semantic': config.get_threshold('semantic'),
+            'structural': config.get_threshold('structural'),
+            'similarity': config.get_threshold('similarity')
+        }
+    }
     
-    # Split tasks into batches
-    batch_size = max(10, total_comparisons // (max_workers * 100))  # Dynamic batch size
-    batches = [comparison_tasks[i:i + batch_size] for i in range(0, len(comparison_tasks), batch_size)]
+    # Prepare batch arguments
+    batch_args = [(batch, worker_data) for batch in batches]
     
-    log(f"   📦 Split into {len(batches)} batches of ~{batch_size} comparisons each")
-    
-    # Process batches in parallel
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+    # Process with ProcessPoolExecutor
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
         # Submit all batches
-        future_to_batch = {executor.submit(process_comparison_batch, batch): batch for batch in batches}
-        
-        # Process results as they complete
-        for future in concurrent.futures.as_completed(future_to_batch):
+        futures = []
+        for args in batch_args:
             if should_stop():
                 log("⛔ AI Hunter interrupted by user.")
-                executor.shutdown(wait=False)
-                return
+                executor.shutdown(wait=True)
+                return comparisons_done
             
-            try:
-                batch_results = future.result()
-                
-                # Thread-safe merge of results
+            future = executor.submit(process_comparison_batch_fast, args)
+            futures.append(future)
+        
+        # Process results as they complete
+        for completed_future in concurrent.futures.as_completed(futures):
+            if should_stop():
+                log("⛔ AI Hunter interrupted by user.")
+                executor.shutdown(wait=True)
+                return comparisons_done
+            
+            # Get results
+            batch_results = completed_future.result()
+            
+            # Batch all updates
+            updates = []
+            for result in batch_results:
+                if result['is_duplicate']:
+                    file1 = all_data[result['i']]['filename']
+                    file2 = all_data[result['j']]['filename']
+                    updates.append((file1, file2, result))
+            
+            # Apply all updates in one lock
+            if updates:
                 with merge_lock:
-                    for result in batch_results:
-                        if result['is_duplicate']:
-                            file1 = results[result['i']]['filename']
-                            file2 = results[result['j']]['filename']
+                    for file1, file2, result in updates:
+                        merge_duplicate_groups(duplicate_groups, file1, file2)
+                        duplicate_confidence[(file1, file2)] = result['confidence']
+                        
+                        # Log findings
+                        if result['is_retranslation']:
+                            msg = (f"🎯 AI Hunter: Found potential retranslation\n"
+                                  f"      Files: {file1} ≈ {file2}\n"
+                                  f"      Text similarity: {int(result['text_sim']*100)}% (low)\n"
+                                  f"      Semantic similarity: {int(result['sem_sim']*100)}% (high)\n"
+                                  f"      Structural similarity: {int(result['struct_sim']*100)}% (high)")
+                            found_duplicates.append(msg)
                             
-                            merge_duplicate_groups(duplicate_groups, file1, file2)
-                            duplicate_confidence[(file1, file2)] = result['confidence']
-                            
-                            if result['is_retranslation']:
-                                found_duplicates.append(
-                                    f"🎯 AI Hunter: Found potential retranslation\n"
-                                    f"      Files: {file1} ≈ {file2}\n"
-                                    f"      Text similarity: {int(result['text_sim']*100)}% (low)\n"
-                                    f"      Semantic similarity: {int(result['sem_sim']*100)}% (high)\n"
-                                    f"      Structural similarity: {int(result['struct_sim']*100)}% (high)"
-                                )
-                                
-                                # Debug output for retranslations
+                            if len(found_duplicates) <= 3:
                                 log(f"\n   [DEBUG] AI Hunter Retranslation Detection:")
                                 log(f"   [DEBUG] File 1: {file1}")
                                 log(f"   [DEBUG] File 2: {file2}")
@@ -3821,51 +4113,38 @@ def parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, co
                                 log(f"   [DEBUG] Semantic Similarity: {result['sem_sim']:.4f}")
                                 log(f"   [DEBUG] Structural Similarity: {result['struct_sim']:.4f}")
                                 log(f"   [DEBUG] Confidence: {result['confidence']:.4f}")
-                            else:
-                                found_duplicates.append(
-                                    f"   📄 Found duplicate: {file1} ≈ {file2} "
-                                    f"(confidence: {int(result['confidence']*100)}%)"
-                                )
-                                
-                                # Debug output for regular duplicates
-                                if len(found_duplicates) <= 5:  # Only debug first few to avoid spam
-                                    log(f"   [DEBUG] Regular duplicate: {file1} ≈ {file2} (confidence: {result['confidence']:.4f})")
+                        else:
+                            msg = (f"   📄 Found duplicate: {file1} ≈ {file2} "
+                                  f"(confidence: {int(result['confidence']*100)}%)")
+                            found_duplicates.append(msg)
+            
+            # Update progress
+            comparisons_done += optimal_batch_size
+            if comparisons_done > total_comparisons:
+                comparisons_done = total_comparisons
+            
+            progress = int((comparisons_done / total_comparisons) * 100)
+            
+            if progress >= last_progress + 10 or progress == 100:
+                elapsed = time.time() - start_time
+                rate = comparisons_done / elapsed if elapsed > 0 else 0
+                remaining = (total_comparisons - comparisons_done) / rate if rate > 0 else 0
                 
-                # Update progress
-                comparisons_done += len(future_to_batch[future])
-                progress = int((comparisons_done / len(comparison_tasks)) * 100)
+                log(f"   📊 AI Hunter progress: {comparisons_done:,}/{total_comparisons:,} "
+                    f"({progress}%) - ~{int(remaining)}s remaining - "
+                    f"Speed: {int(rate):,} comparisons/sec")
                 
-                if progress >= last_progress + 5:  # Update every 5%
-                    elapsed = time.time() - start_time
-                    rate = comparisons_done / elapsed if elapsed > 0 else 0
-                    remaining = (len(comparison_tasks) - comparisons_done) / rate if rate > 0 else 0
-                    
-                    log(f"   📊 AI Hunter progress: {comparisons_done:,}/{len(comparison_tasks):,} "
-                        f"({progress}%) - ~{int(remaining)}s remaining - "
-                        f"Speed: {int(rate):,} comparisons/sec")
-                    
-                    # Debug output
-                    log(f"   [DEBUG] Completed batches: {comparisons_done // batch_size}/{len(batches)}")
-                    log(f"   [DEBUG] Active threads: {len([f for f in future_to_batch if not f.done()])}")
-                    log(f"   [DEBUG] Duplicates found so far: {len(duplicate_groups)}")
-                    
-                    # Log some found duplicates
-                    if found_duplicates and len(found_duplicates) <= 5:
-                        for dup_msg in found_duplicates:
-                            log(dup_msg)
-                        found_duplicates.clear()
-                    
-                    last_progress = progress
-                    
-            except Exception as e:
-                log(f"   ❌ Error in parallel processing: {e}")
+                for msg in found_duplicates[:5]:
+                    log(msg)
+                found_duplicates = found_duplicates[5:]
+                
+                last_progress = progress
     
     # Final summary
     elapsed = time.time() - start_time
     log(f"✅ AI Hunter complete! Processed {total_comparisons:,} comparisons in {int(elapsed)}s")
-    log(f"   ⚡ Speed improvement: {int(total_comparisons/elapsed):,} comparisons/sec")
+    log(f"   ⚡ Speed: {int(total_comparisons/elapsed):,} comparisons/sec")
     
-    # Debug final statistics
     log(f"\n   [DEBUG] === AI HUNTER FINAL STATISTICS ===")
     log(f"   [DEBUG] Total comparisons: {total_comparisons:,}")
     log(f"   [DEBUG] Time taken: {elapsed:.2f} seconds")
@@ -3873,11 +4152,10 @@ def parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, co
     log(f"   [DEBUG] Duplicate groups found: {len(set(duplicate_groups.values()))}")
     log(f"   [DEBUG] Total duplicate pairs: {len(duplicate_confidence)}")
     log(f"   [DEBUG] Parallel workers used: {max_workers}")
+    log(f"   [DEBUG] ProcessPoolExecutor: ENABLED")
     log(f"   [DEBUG] =====================================\n")
     
-    # Log remaining duplicates
-    for dup_msg in found_duplicates[-10:]:  # Show last 10
-        log(dup_msg)
+    for msg in found_duplicates[-10:]:
+        log(msg)
     
-    # Return the comparisons count
     return comparisons_done
