@@ -6344,7 +6344,7 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Check if this chapter was processed and has qa_failed status
                 content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
-                status = progress_manager.get_chapter_status(idx, actual_num, content_hash)
+                status = progress_manager.check_chapter_status(idx, actual_num, content_hash)
                 
                 if status == "qa_failed":
                     qa_failed_chapters.append(actual_num)
