@@ -118,6 +118,7 @@ import base64
 from PIL import Image
 import io
 import time
+import random
 import csv
 from datetime import datetime
 import traceback
@@ -2637,8 +2638,10 @@ class UnifiedClient:
         self.context = context or 'translation'
         self.conversation_message_count += 1
         
-        # Internal retry logic for 500 errors
-        internal_retries = 3
+        # Internal retry logic for 500 errors - INCREASED TO 7
+        internal_retries = 7
+        base_delay = 5  # Base delay for exponential backoff
+        
         for attempt in range(internal_retries):
             try:
                 # Validate request
@@ -2758,18 +2761,23 @@ class UnifiedClient:
                     fallback_content = self._handle_empty_result(messages, context, str(e))
                     return fallback_content, 'error'
                 
-                # Check for 500 errors - retry these
+                # Check for 500 errors - retry these with exponential backoff
                 http_status = getattr(e, 'http_status', None)
                 if http_status == 500 or "500" in error_str or "api_error" in error_str:
                     if attempt < internal_retries - 1:
-                        wait_time = min(5 * (attempt + 1), 15)  # 5s, 10s, 15s backoff
-                        print(f"🔄 Server error (500) - auto-retrying in {wait_time}s (attempt {attempt + 1}/{internal_retries})")
+                        # Exponential backoff with jitter
+                        delay = (base_delay * (2 ** attempt)) + random.uniform(0, 1)
+                        # Cap the maximum delay to prevent extremely long waits
+                        delay = min(delay, 60)  # Max 60 seconds
+                        
+                        print(f"🔄 Server error (500) - auto-retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries})")
                         
                         # Wait with cancellation check
-                        for i in range(wait_time):
+                        wait_start = time.time()
+                        while time.time() - wait_start < delay:
                             if self._cancelled:
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                            time.sleep(1)
+                            time.sleep(0.5)  # Check every 0.5 seconds
                         continue
                     else:
                         print(f"❌ Server error (500) - exhausted {internal_retries} retries")
@@ -2810,22 +2818,34 @@ class UnifiedClient:
                 # Check for 500 errors in unexpected exceptions
                 if "500" in error_str or "internal server error" in error_str:
                     if attempt < internal_retries - 1:
-                        wait_time = min(5 * (attempt + 1), 15)
-                        print(f"🔄 Server error (500) - auto-retrying in {wait_time}s (attempt {attempt + 1}/{internal_retries})")
+                        # Exponential backoff with jitter
+                        delay = (base_delay * (2 ** attempt)) + random.uniform(0, 1)
+                        delay = min(delay, 60)  # Max 60 seconds
                         
-                        for i in range(wait_time):
+                        print(f"🔄 Server error (500) - auto-retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries})")
+                        
+                        wait_start = time.time()
+                        while time.time() - wait_start < delay:
                             if self._cancelled:
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                            time.sleep(1)
+                            time.sleep(0.5)
                         continue
                 
-                # Check for other transient errors
+                # Check for other transient errors with exponential backoff
                 transient_errors = ["502", "503", "504", "connection reset", "connection aborted"]
                 if any(err in error_str for err in transient_errors):
                     if attempt < internal_retries - 1:
-                        wait_time = min(3 * (attempt + 1), 10)
-                        print(f"🔄 Transient error - retrying in {wait_time}s")
-                        time.sleep(wait_time)
+                        # Use a slightly less aggressive backoff for transient errors
+                        delay = (base_delay/2 * (2 ** attempt)) + random.uniform(0, 1)
+                        delay = min(delay, 30)  # Max 30 seconds for transient errors
+                        
+                        print(f"🔄 Transient error - retrying in {delay:.1f}s")
+                        
+                        wait_start = time.time()
+                        while time.time() - wait_start < delay:
+                            if self._cancelled:
+                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                            time.sleep(0.5)
                         continue
                 
                 # Save failed request and return fallback for other errors
@@ -4065,11 +4085,12 @@ class UnifiedClient:
                 break  # Exit the retry loop
                 
         # After getting the response, use the enhanced extraction method
-        result, finish_reason = self._extract_gemini_response_text(
-            response, 
-            supports_thinking=supports_thinking,
-            thinking_budget=thinking_budget
-        )
+        if response is not None:
+            result, finish_reason = self._extract_gemini_response_text(
+                response, 
+                supports_thinking=supports_thinking,
+                thinking_budget=thinking_budget
+            )
         
         if not result:
             print("All Gemini retries failed")
@@ -4086,7 +4107,7 @@ class UnifiedClient:
         return UnifiedResponse(
             content=result,
             finish_reason=finish_reason,
-            raw_response=response if 'response' in locals() else None,
+            raw_response=response,
             error_details=error_details if error_details else None
         )
     
