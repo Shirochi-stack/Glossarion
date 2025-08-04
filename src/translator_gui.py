@@ -4037,53 +4037,72 @@ Recent translations to summarize:
        control_frame.pack(fill=tk.X, padx=10, pady=10)
        
        def save_glossary_settings():
-           try:
-               # Save custom fields
-               self.config['custom_glossary_fields'] = self.custom_glossary_fields
+            try:
+                # Save custom fields
+                self.config['custom_glossary_fields'] = self.custom_glossary_fields
+                
+                # Update enabled status from checkboxes
+                for type_name, var in self.type_enabled_vars.items():
+                    if type_name in self.custom_entry_types:
+                        self.custom_entry_types[type_name]['enabled'] = var.get()
+                
+                # Save custom entry types
+                self.config['custom_entry_types'] = self.custom_entry_types
+                
+                # Prompts
+                self.manual_glossary_prompt = self.manual_prompt_text.get('1.0', tk.END).strip()
+                self.auto_glossary_prompt = self.auto_prompt_text.get('1.0', tk.END).strip()
+                self.config['manual_glossary_prompt'] = self.manual_glossary_prompt
+                self.config['enable_auto_glossary'] = self.enable_auto_glossary_var.get()
+                self.config['append_glossary'] = self.append_glossary_var.get()
+                self.config['auto_glossary_prompt'] = self.auto_glossary_prompt
+                self.append_glossary_prompt = self.append_prompt_text.get('1.0', tk.END).strip()
+                self.config['append_glossary_prompt'] = self.append_glossary_prompt
+                
+                # Temperature and context limit
+                try:
+                    self.config['manual_glossary_temperature'] = float(self.manual_temp_var.get())
+                    self.config['manual_context_limit'] = int(self.manual_context_var.get())
+                except ValueError:
+                    messagebox.showwarning("Invalid Input", 
+                        "Please enter valid numbers for temperature and context limit")
+                    return
+                
+                # Honorifics filter toggle
+                self.config['glossary_disable_honorifics_filter'] = self.disable_honorifics_var.get()
+                
+                # Update environment variables
+                os.environ['GLOSSARY_SYSTEM_PROMPT'] = self.manual_glossary_prompt
+                os.environ['AUTO_GLOSSARY_PROMPT'] = self.auto_glossary_prompt
+                os.environ['GLOSSARY_DISABLE_HONORIFICS_FILTER'] = '1' if self.disable_honorifics_var.get() else '0'
+                
+                # Set custom entry types as environment variable
+                os.environ['GLOSSARY_CUSTOM_ENTRY_TYPES'] = json.dumps(self.custom_entry_types)
+                
+                # Set custom fields
+                if self.custom_glossary_fields:
+                    os.environ['GLOSSARY_CUSTOM_FIELDS'] = json.dumps(self.custom_glossary_fields)
+                
+                # Save config
+                with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(self.config, f, ensure_ascii=False, indent=2)
+                
+                self.append_log("✅ Glossary settings saved successfully")
+                
+                # Check if any types are enabled
+                enabled_types = [t for t, cfg in self.custom_entry_types.items() if cfg.get('enabled', True)]
+                if not enabled_types:
+                    messagebox.showwarning("Warning", "No entry types selected! The glossary extraction will not find any entries.")
+                else:
+                    self.append_log(f"📑 Enabled types: {', '.join(enabled_types)}")
+                
+                messagebox.showinfo("Success", "Glossary settings saved!")
+                dialog.destroy()
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save settings: {e}")
+                self.append_log(f"❌ Failed to save glossary settings: {e}")
                
-               # Prompts
-               self.manual_glossary_prompt = self.manual_prompt_text.get('1.0', tk.END).strip()
-               self.auto_glossary_prompt = self.auto_prompt_text.get('1.0', tk.END).strip()
-               self.config['manual_glossary_prompt'] = self.manual_glossary_prompt
-               self.config['enable_auto_glossary'] = self.enable_auto_glossary_var.get()
-               self.config['append_glossary'] = self.append_glossary_var.get()
-               self.config['auto_glossary_prompt'] = self.auto_glossary_prompt
-               self.append_glossary_prompt = self.append_prompt_text.get('1.0', tk.END).strip()
-               self.config['append_glossary_prompt'] = self.append_glossary_prompt
-               
-               # Temperature and context limit
-               try:
-                   self.config['manual_glossary_temperature'] = float(self.manual_temp_var.get())
-                   self.config['manual_context_limit'] = int(self.manual_context_var.get())
-               except ValueError:
-                   messagebox.showwarning("Invalid Input", 
-                       "Please enter valid numbers for temperature and context limit")
-                   return
-               
-               # Honorifics filter toggle
-               self.config['glossary_disable_honorifics_filter'] = self.disable_honorifics_var.get()
-               
-               # Update environment variables
-               os.environ['GLOSSARY_SYSTEM_PROMPT'] = self.manual_glossary_prompt
-               os.environ['AUTO_GLOSSARY_PROMPT'] = self.auto_glossary_prompt
-               os.environ['GLOSSARY_DISABLE_HONORIFICS_FILTER'] = '1' if self.disable_honorifics_var.get() else '0'
-               
-               # Set custom fields
-               if self.custom_glossary_fields:
-                   os.environ['GLOSSARY_CUSTOM_FIELDS'] = json.dumps(self.custom_glossary_fields)
-               
-               # Save config
-               with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-                   json.dump(self.config, f, ensure_ascii=False, indent=2)
-               
-               self.append_log("✅ Glossary settings saved successfully")
-               messagebox.showinfo("Success", "Glossary settings saved!")
-               dialog.destroy()
-               
-           except Exception as e:
-               messagebox.showerror("Error", f"Failed to save settings: {e}")
-               self.append_log(f"❌ Failed to save glossary settings: {e}")
-       
        # Create button container
        button_container = tk.Frame(control_frame)
        button_container.pack(expand=True)
@@ -4106,117 +4125,238 @@ Recent translations to summarize:
        ).pack(side=tk.LEFT, padx=5)
        
        # Auto-resize and show
-       self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.8, max_height_ratio=1.43)
+       self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.8, max_height_ratio=1.5)
        
        dialog.protocol("WM_DELETE_WINDOW", 
                       lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
 
     def _setup_manual_glossary_tab(self, parent):
-       """Setup manual glossary tab - simplified for new format"""
-       manual_container = tk.Frame(parent)
-       manual_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-       
-       # Format info frame
-       format_frame = tk.LabelFrame(manual_container, text="Glossary Format", padx=10, pady=10)
-       format_frame.pack(fill=tk.X, pady=(0, 10))
-       
-       tk.Label(format_frame, text="The glossary will be extracted in the following format:",
-               font=('TkDefaultFont', 10)).pack(anchor=tk.W, pady=(0, 5))
-       
-       # Show format examples
-       format_text = """For characters:
-   type,raw_name,translated_name,gender
-   character,김솔음,Kim Sol-eum,Male
-
-For terms/locations:
-   type,raw_name,translated_name,
-   term,어둠탐사기록,Dark Exploration Records,"""
-       
-       format_display = tk.Text(format_frame, height=6, width=60, wrap=tk.NONE)
-       format_display.pack(fill=tk.X, pady=5)
-       format_display.insert('1.0', format_text)
-       format_display.config(state='disabled', font=('Consolas', 9))
-       
-       # Custom fields section
-       custom_frame = tk.LabelFrame(manual_container, text="Custom Fields", padx=10, pady=10)
-       custom_frame.pack(fill=tk.X, pady=(0, 10))
-       
-       custom_list_frame = tk.Frame(custom_frame)
-       custom_list_frame.pack(fill=tk.X)
-       
-       tk.Label(custom_list_frame, text="Additional fields to extract (will be added as extra columns):").pack(anchor=tk.W)
-       
-       custom_scroll = ttk.Scrollbar(custom_list_frame)
-       custom_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-       
-       self.custom_fields_listbox = tk.Listbox(custom_list_frame, height=4, 
+        """Setup manual glossary tab - simplified for new format"""
+        manual_container = tk.Frame(parent)
+        manual_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Type filtering section with custom types
+        type_filter_frame = tk.LabelFrame(manual_container, text="Entry Type Configuration", padx=10, pady=10)
+        type_filter_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Initialize custom entry types if not exists
+        if not hasattr(self, 'custom_entry_types'):
+            # Default types with their enabled status
+            self.custom_entry_types = self.config.get('custom_entry_types', {
+                'character': {'enabled': True, 'has_gender': True},
+                'term': {'enabled': True, 'has_gender': False}
+            })
+        
+        # Main container with grid for better control
+        type_main_container = tk.Frame(type_filter_frame)
+        type_main_container.pack(fill=tk.X)
+        type_main_container.grid_columnconfigure(0, weight=3)  # Left side gets 3/5 of space
+        type_main_container.grid_columnconfigure(1, weight=2)  # Right side gets 2/5 of space
+        
+        # Left side - type list with checkboxes
+        type_list_frame = tk.Frame(type_main_container)
+        type_list_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 15))
+        
+        tk.Label(type_list_frame, text="Active Entry Types:",
+                font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W)
+        
+        # Scrollable frame for type checkboxes
+        type_scroll_frame = tk.Frame(type_list_frame)
+        type_scroll_frame.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
+        
+        type_canvas = tk.Canvas(type_scroll_frame, height=150)
+        type_scrollbar = ttk.Scrollbar(type_scroll_frame, orient="vertical", command=type_canvas.yview)
+        self.type_checkbox_frame = tk.Frame(type_canvas)
+        
+        type_canvas.configure(yscrollcommand=type_scrollbar.set)
+        type_canvas_window = type_canvas.create_window((0, 0), window=self.type_checkbox_frame, anchor="nw")
+        
+        type_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        type_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Store checkbox variables
+        self.type_enabled_vars = {}
+        
+        def update_type_checkboxes():
+            """Rebuild the checkbox list"""
+            # Clear existing checkboxes
+            for widget in self.type_checkbox_frame.winfo_children():
+                widget.destroy()
+            
+            # Sort types: built-in first, then custom alphabetically
+            sorted_types = sorted(self.custom_entry_types.items(), 
+                                key=lambda x: (x[0] not in ['character', 'term'], x[0]))
+            
+            # Create checkboxes for each type
+            for type_name, type_config in sorted_types:
+                var = tk.BooleanVar(value=type_config.get('enabled', True))
+                self.type_enabled_vars[type_name] = var
+                
+                frame = tk.Frame(self.type_checkbox_frame)
+                frame.pack(fill=tk.X, pady=2)
+                
+                # Checkbox
+                cb = tb.Checkbutton(frame, text=type_name, variable=var,
+                                  bootstyle="round-toggle")
+                cb.pack(side=tk.LEFT)
+                
+                # Add gender indicator for types that support it
+                if type_config.get('has_gender', False):
+                    tk.Label(frame, text="(has gender field)", 
+                            font=('TkDefaultFont', 9), fg='gray').pack(side=tk.LEFT, padx=(10, 0))
+                
+                # Delete button for custom types
+                if type_name not in ['character', 'term']:
+                    tb.Button(frame, text="×", command=lambda t=type_name: remove_type(t),
+                             bootstyle="danger", width=3).pack(side=tk.RIGHT, padx=(5, 0))
+            
+            # Update canvas scroll region
+            self.type_checkbox_frame.update_idletasks()
+            type_canvas.configure(scrollregion=type_canvas.bbox("all"))
+        
+        # Right side - controls for adding custom types
+        type_control_frame = tk.Frame(type_main_container)
+        type_control_frame.grid(row=0, column=1, sticky="nsew")
+        
+        tk.Label(type_control_frame, text="Add Custom Type:",
+                font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W)
+        
+        # Entry for new type field
+        new_type_frame = tk.Frame(type_control_frame)
+        new_type_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        tk.Label(new_type_frame, text="Type Field:").pack(anchor=tk.W)
+        new_type_entry = tb.Entry(new_type_frame)
+        new_type_entry.pack(fill=tk.X, pady=(2, 0))
+        
+        # Checkbox for gender field
+        has_gender_var = tk.BooleanVar(value=False)
+        tb.Checkbutton(new_type_frame, text="Include gender field", 
+                      variable=has_gender_var).pack(anchor=tk.W, pady=(5, 0))
+        
+        def add_custom_type():
+            type_name = new_type_entry.get().strip().lower()
+            if not type_name:
+                messagebox.showwarning("Invalid Input", "Please enter a type name")
+                return
+            
+            if type_name in self.custom_entry_types:
+                messagebox.showwarning("Duplicate Type", f"Type '{type_name}' already exists")
+                return
+            
+            # Add the new type
+            self.custom_entry_types[type_name] = {
+                'enabled': True,
+                'has_gender': has_gender_var.get()
+            }
+            
+            # Clear inputs
+            new_type_entry.delete(0, tk.END)
+            has_gender_var.set(False)
+            
+            # Update display
+            update_type_checkboxes()
+            self.append_log(f"✅ Added custom type: {type_name}")
+        
+        def remove_type(type_name):
+            if type_name in ['character', 'term']:
+                messagebox.showwarning("Cannot Remove", "Built-in types cannot be removed")
+                return
+            
+            if messagebox.askyesno("Confirm Removal", f"Remove type '{type_name}'?"):
+                del self.custom_entry_types[type_name]
+                if type_name in self.type_enabled_vars:
+                    del self.type_enabled_vars[type_name]
+                update_type_checkboxes()
+                self.append_log(f"🗑️ Removed custom type: {type_name}")
+        
+        tb.Button(new_type_frame, text="Add Type", command=add_custom_type,
+                 bootstyle="success").pack(fill=tk.X, pady=(10, 0))
+        
+        # Initialize checkboxes
+        update_type_checkboxes()
+        
+        # Custom fields section
+        custom_frame = tk.LabelFrame(manual_container, text="Custom Fields (Additional Columns)", padx=10, pady=10)
+        custom_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        custom_list_frame = tk.Frame(custom_frame)
+        custom_list_frame.pack(fill=tk.X)
+        
+        tk.Label(custom_list_frame, text="Additional fields to extract (will be added as extra columns):").pack(anchor=tk.W)
+        
+        custom_scroll = ttk.Scrollbar(custom_list_frame)
+        custom_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.custom_fields_listbox = tk.Listbox(custom_list_frame, height=4, 
                                               yscrollcommand=custom_scroll.set)
-       self.custom_fields_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-       custom_scroll.config(command=self.custom_fields_listbox.yview)
-       
-       # Initialize custom_glossary_fields if not exists
-       if not hasattr(self, 'custom_glossary_fields'):
-           self.custom_glossary_fields = self.config.get('custom_glossary_fields', [])
-       
-       for field in self.custom_glossary_fields:
-           self.custom_fields_listbox.insert(tk.END, field)
-       
-       custom_controls = tk.Frame(custom_frame)
-       custom_controls.pack(fill=tk.X, pady=(5, 0))
-       
-       self.custom_field_entry = tb.Entry(custom_controls, width=30)
-       self.custom_field_entry.pack(side=tk.LEFT, padx=(0, 5))
-       
-       def add_custom_field():
-           field = self.custom_field_entry.get().strip()
-           if field and field not in self.custom_glossary_fields:
-               self.custom_glossary_fields.append(field)
-               self.custom_fields_listbox.insert(tk.END, field)
-               self.custom_field_entry.delete(0, tk.END)
-       
-       def remove_custom_field():
-           selection = self.custom_fields_listbox.curselection()
-           if selection:
-               idx = selection[0]
-               field = self.custom_fields_listbox.get(idx)
-               self.custom_glossary_fields.remove(field)
-               self.custom_fields_listbox.delete(idx)
-       
-       tb.Button(custom_controls, text="Add", command=add_custom_field, width=10).pack(side=tk.LEFT, padx=2)
-       tb.Button(custom_controls, text="Remove", command=remove_custom_field, width=10).pack(side=tk.LEFT, padx=2)
-       
-       # Honorifics filter toggle
-       honorifics_frame = tk.LabelFrame(manual_container, text="Honorifics Handling", padx=10, pady=10)
-       honorifics_frame.pack(fill=tk.X, pady=(0, 10))
-       
-       if not hasattr(self, 'disable_honorifics_var'):
-           self.disable_honorifics_var = tk.BooleanVar(value=self.config.get('glossary_disable_honorifics_filter', False))
-       
-       tb.Checkbutton(honorifics_frame, text="Disable honorifics filtering", 
-                     variable=self.disable_honorifics_var,
-                     bootstyle="round-toggle").pack(anchor=tk.W)
-       
-       tk.Label(honorifics_frame, text="When enabled, honorifics (님, さん, 先生, etc.) will NOT be removed from raw names",
-               font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, padx=20, pady=(0, 5))
-       
-       # Prompt section
-       prompt_frame = tk.LabelFrame(manual_container, text="Extraction Prompt", padx=10, pady=10)
-       prompt_frame.pack(fill=tk.BOTH, expand=True)
-       
-       tk.Label(prompt_frame, text="Use {fields} for field list and {chapter_text} for content placeholder",
-               font=('TkDefaultFont', 9), fg='blue').pack(anchor=tk.W, pady=(0, 5))
-       
-       tk.Label(prompt_frame, text="The {fields} placeholder will be replaced with the format specification",
-               font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(0, 5))
-       
-       self.manual_prompt_text = self.ui.setup_scrollable_text(
-           prompt_frame, height=12, wrap=tk.WORD
-       )
-       self.manual_prompt_text.pack(fill=tk.BOTH, expand=True)
-       
-       # Set default prompt if not already set
-       if not hasattr(self, 'manual_glossary_prompt') or not self.manual_glossary_prompt:
-           self.manual_glossary_prompt = """Extract character names and important terms from the following text.
+        self.custom_fields_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        custom_scroll.config(command=self.custom_fields_listbox.yview)
+        
+        # Initialize custom_glossary_fields if not exists
+        if not hasattr(self, 'custom_glossary_fields'):
+            self.custom_glossary_fields = self.config.get('custom_glossary_fields', [])
+        
+        for field in self.custom_glossary_fields:
+            self.custom_fields_listbox.insert(tk.END, field)
+        
+        custom_controls = tk.Frame(custom_frame)
+        custom_controls.pack(fill=tk.X, pady=(5, 0))
+        
+        self.custom_field_entry = tb.Entry(custom_controls, width=30)
+        self.custom_field_entry.pack(side=tk.LEFT, padx=(0, 5))
+        
+        def add_custom_field():
+            field = self.custom_field_entry.get().strip()
+            if field and field not in self.custom_glossary_fields:
+                self.custom_glossary_fields.append(field)
+                self.custom_fields_listbox.insert(tk.END, field)
+                self.custom_field_entry.delete(0, tk.END)
+        
+        def remove_custom_field():
+            selection = self.custom_fields_listbox.curselection()
+            if selection:
+                idx = selection[0]
+                field = self.custom_fields_listbox.get(idx)
+                self.custom_glossary_fields.remove(field)
+                self.custom_fields_listbox.delete(idx)
+        
+        tb.Button(custom_controls, text="Add", command=add_custom_field, width=10).pack(side=tk.LEFT, padx=2)
+        tb.Button(custom_controls, text="Remove", command=remove_custom_field, width=10).pack(side=tk.LEFT, padx=2)
+        
+        # Continue with rest of the original code...
+        # Honorifics filter toggle
+        honorifics_frame = tk.LabelFrame(manual_container, text="Honorifics Handling", padx=10, pady=10)
+        honorifics_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        if not hasattr(self, 'disable_honorifics_var'):
+            self.disable_honorifics_var = tk.BooleanVar(value=self.config.get('glossary_disable_honorifics_filter', False))
+        
+        tb.Checkbutton(honorifics_frame, text="Disable honorifics filtering", 
+                      variable=self.disable_honorifics_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W)
+        
+        tk.Label(honorifics_frame, text="When enabled, honorifics (님, さん, 先生, etc.) will NOT be removed from raw names",
+                font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, padx=20, pady=(0, 5))
+        
+        # Prompt section (continues as before)
+        prompt_frame = tk.LabelFrame(manual_container, text="Extraction Prompt", padx=10, pady=10)
+        prompt_frame.pack(fill=tk.BOTH, expand=True)
+        
+        tk.Label(prompt_frame, text="Use {fields} for field list and {chapter_text} for content placeholder",
+                font=('TkDefaultFont', 9), fg='blue').pack(anchor=tk.W, pady=(0, 5))
+        
+        tk.Label(prompt_frame, text="The {fields} placeholder will be replaced with the format specification",
+                font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(0, 5))
+        
+        self.manual_prompt_text = self.ui.setup_scrollable_text(
+            prompt_frame, height=13, wrap=tk.WORD
+        )
+        self.manual_prompt_text.pack(fill=tk.BOTH, expand=True)
+        
+        # Set default prompt if not already set
+        if not hasattr(self, 'manual_glossary_prompt') or not self.manual_glossary_prompt:
+            self.manual_glossary_prompt = """Extract character names and important terms from the following text.
 
 Output format:
 {fields}
@@ -4226,20 +4366,18 @@ Rules:
 - No headers, no extra text, no JSON
 - One entry per line
 - Leave gender empty for terms (just end with comma)
-
-Text:
-{chapter_text}"""
-       
-       self.manual_prompt_text.insert('1.0', self.manual_glossary_prompt)
-       self.manual_prompt_text.edit_reset()
-       
-       prompt_controls = tk.Frame(manual_container)
-       prompt_controls.pack(fill=tk.X, pady=(10, 0))
-       
-       def reset_manual_prompt():
-           if messagebox.askyesno("Reset Prompt", "Reset manual glossary prompt to default?"):
-               self.manual_prompt_text.delete('1.0', tk.END)
-               default_prompt = """Extract character names and important terms from the following text.
+"""
+        
+        self.manual_prompt_text.insert('1.0', self.manual_glossary_prompt)
+        self.manual_prompt_text.edit_reset()
+        
+        prompt_controls = tk.Frame(manual_container)
+        prompt_controls.pack(fill=tk.X, pady=(10, 0))
+        
+        def reset_manual_prompt():
+            if messagebox.askyesno("Reset Prompt", "Reset manual glossary prompt to default?"):
+                self.manual_prompt_text.delete('1.0', tk.END)
+                default_prompt = """Extract character names and important terms from the following text.
 
 Output format:
 {fields}
@@ -4249,36 +4387,34 @@ Rules:
 - No headers, no extra text, no JSON
 - One entry per line
 - Leave gender empty for terms (just end with comma)
-
-Text:
-{chapter_text}"""
-               self.manual_prompt_text.insert('1.0', default_prompt)
-       
-       tb.Button(prompt_controls, text="Reset to Default", command=reset_manual_prompt, 
+"""
+                self.manual_prompt_text.insert('1.0', default_prompt)
+        
+        tb.Button(prompt_controls, text="Reset to Default", command=reset_manual_prompt, 
                 bootstyle="warning").pack(side=tk.LEFT, padx=5)
-       
-       # Settings
-       settings_frame = tk.LabelFrame(manual_container, text="Extraction Settings", padx=10, pady=10)
-       settings_frame.pack(fill=tk.X, pady=(10, 0))
-       
-       settings_grid = tk.Frame(settings_frame)
-       settings_grid.pack()
-       
-       tk.Label(settings_grid, text="Temperature:").grid(row=0, column=0, sticky=tk.W, padx=5)
-       self.manual_temp_var = tk.StringVar(value=str(self.config.get('manual_glossary_temperature', 0.1)))
-       tb.Entry(settings_grid, textvariable=self.manual_temp_var, width=10).grid(row=0, column=1, padx=5)
-       
-       tk.Label(settings_grid, text="Context Limit:").grid(row=0, column=2, sticky=tk.W, padx=5)
-       self.manual_context_var = tk.StringVar(value=str(self.config.get('manual_context_limit', 2)))
-       tb.Entry(settings_grid, textvariable=self.manual_context_var, width=10).grid(row=0, column=3, padx=5)
-       
-       tk.Label(settings_grid, text="Rolling Window:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=(10, 0))
-       tb.Checkbutton(settings_grid, text="Keep recent context instead of reset", 
-                     variable=self.glossary_history_rolling_var,
-                     bootstyle="round-toggle").grid(row=1, column=1, columnspan=3, sticky=tk.W, padx=5, pady=(10, 0))
-       
-       tk.Label(settings_grid, text="When context limit is reached, keep recent chapters instead of clearing all history",
-               font=('TkDefaultFont', 11), fg='gray').grid(row=2, column=0, columnspan=4, sticky=tk.W, padx=20, pady=(0, 5))
+        
+        # Settings
+        settings_frame = tk.LabelFrame(manual_container, text="Extraction Settings", padx=10, pady=10)
+        settings_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        settings_grid = tk.Frame(settings_frame)
+        settings_grid.pack()
+        
+        tk.Label(settings_grid, text="Temperature:").grid(row=0, column=0, sticky=tk.W, padx=5)
+        self.manual_temp_var = tk.StringVar(value=str(self.config.get('manual_glossary_temperature', 0.1)))
+        tb.Entry(settings_grid, textvariable=self.manual_temp_var, width=10).grid(row=0, column=1, padx=5)
+        
+        tk.Label(settings_grid, text="Context Limit:").grid(row=0, column=2, sticky=tk.W, padx=5)
+        self.manual_context_var = tk.StringVar(value=str(self.config.get('manual_context_limit', 2)))
+        tb.Entry(settings_grid, textvariable=self.manual_context_var, width=10).grid(row=0, column=3, padx=5)
+        
+        tk.Label(settings_grid, text="Rolling Window:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=(10, 0))
+        tb.Checkbutton(settings_grid, text="Keep recent context instead of reset", 
+                      variable=self.glossary_history_rolling_var,
+                      bootstyle="round-toggle").grid(row=1, column=1, columnspan=3, sticky=tk.W, padx=5, pady=(10, 0))
+        
+        tk.Label(settings_grid, text="When context limit is reached, keep recent chapters instead of clearing all history",
+                font=('TkDefaultFont', 11), fg='gray').grid(row=2, column=0, columnspan=4, sticky=tk.W, padx=20, pady=(0, 5))
 
     def _setup_auto_glossary_tab(self, parent):
         """Setup automatic glossary tab"""
@@ -7017,7 +7153,15 @@ Text:
             self.append_log(f"   Temperature: {temperature}")
             self.append_log(f"   Max tokens: {max_tokens}")
             self.append_log(f"   API delay: {api_delay}s")
-            self.append_log(f"   Format: Simple (type, raw_name, translated_name, gender)")
+            format_parts = ["type", "raw_name", "translated_name", "gender"]
+            custom_fields_json = self.config.get('manual_custom_fields', '[]')
+            try:
+                custom_fields = json.loads(custom_fields_json) if isinstance(custom_fields_json, str) else custom_fields_json
+                if custom_fields:
+                    format_parts.extend(custom_fields)
+            except:
+                custom_fields = []
+            self.append_log(f"   Format: Simple ({', '.join(format_parts)})")
             
             # Check honorifics filter toggle
             honorifics_disabled = self.config.get('glossary_disable_honorifics_filter', False)
@@ -7698,7 +7842,15 @@ Important rules:
                 
                 self.append_log(f"🚀 Extracting glossary from: {os.path.basename(file_path)}")
                 self.append_log(f"📤 Output Token Limit: {self.max_output_tokens}")
-                self.append_log(f"📑 Format: Simple (type, raw_name, translated_name, gender)")
+                format_parts = ["type", "raw_name", "translated_name", "gender"]
+                custom_fields_json = self.config.get('manual_custom_fields', '[]')
+                try:
+                    custom_fields = json.loads(custom_fields_json) if isinstance(custom_fields_json, str) else custom_fields_json
+                    if custom_fields:
+                        format_parts.extend(custom_fields)
+                except:
+                    custom_fields = []
+                self.append_log(f"   Format: Simple ({', '.join(format_parts)})")
                 
                 # Check honorifics filter
                 if self.config.get('glossary_disable_honorifics_filter', False):
@@ -12668,118 +12820,150 @@ Important rules:
         super().__setattr__(name, value)
 
     def load_glossary(self):
-        """Let the user pick a glossary.json and remember its path."""
+        """Let the user pick a glossary file (JSON or CSV) and remember its path."""
+        import json
+        import shutil
+        from tkinter import filedialog, messagebox
+        
         path = filedialog.askopenfilename(
-            title="Select glossary.json",
-            filetypes=[("JSON files", "*.json")]
+            title="Select glossary file",
+            filetypes=[
+                ("Supported files", "*.json;*.csv;*.txt"),
+                ("JSON files", "*.json"),
+                ("CSV files", "*.csv"),
+                ("Text files", "*.txt"),
+                ("All files", "*.*")
+            ]
         )
         if not path:
             return
         
-        # Try to load and fix if needed
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            # Store original content for comparison
-            original_content = content
-            
-            # Try normal JSON load first
-            try:
-                json.loads(content)
-            except json.JSONDecodeError as e:
-                self.append_log(f"⚠️ JSON error detected: {str(e)}")
-                self.append_log("🔧 Attempting comprehensive auto-fix...")
-                
-                # Apply comprehensive auto-fixes
-                fixed_content = self._comprehensive_json_fix(content)
-                
-                # Try to parse the fixed content
-                try:
-                    json.loads(fixed_content)
-                    
-                    # If successful, ask user if they want to save the fixed version
-                    response = messagebox.askyesno(
-                        "JSON Auto-Fix Successful",
-                        f"The JSON file had errors that were automatically fixed.\n\n"
-                        f"Original error: {str(e)}\n\n"
-                        f"Do you want to save the fixed version?\n"
-                        f"(A backup of the original will be created)"
-                    )
-                    
-                    if response:
-                        # Save the fixed version
-                        backup_path = path.replace('.json', '_backup.json')
-                        shutil.copy2(path, backup_path)
-                        
-                        with open(path, 'w', encoding='utf-8') as f:
-                            f.write(fixed_content)
-                        
-                        self.append_log(f"✅ Auto-fixed JSON and saved. Backup created: {os.path.basename(backup_path)}")
-                        content = fixed_content
-                    else:
-                        self.append_log("⚠️ Using original JSON with errors (may cause issues)")
-                    
-                except json.JSONDecodeError as e2:
-                    # Auto-fix failed, show error and options
-                    self.append_log(f"❌ Auto-fix failed: {str(e2)}")
-                    
-                    # Build detailed error message
-                    error_details = self._analyze_json_errors(content, fixed_content, e, e2)
-                    
-                    response = messagebox.askyesnocancel(
-                        "JSON Fix Failed",
-                        f"The JSON file has errors that couldn't be automatically fixed.\n\n"
-                        f"Original error: {str(e)}\n"
-                        f"After auto-fix attempt: {str(e2)}\n\n"
-                        f"{error_details}\n\n"
-                        f"Options:\n"
-                        f"• YES: Open the file in your default editor to fix manually\n"
-                        f"• NO: Try to use the file anyway (may fail)\n"
-                        f"• CANCEL: Cancel loading this glossary"
-                    )
-                    
-                    if response is True:  # YES - open in editor
-                        try:
-                            # Open file in default editor
-                            import subprocess
-                            import sys
-                            
-                            if sys.platform.startswith('win'):
-                                os.startfile(path)
-                            elif sys.platform.startswith('darwin'):
-                                subprocess.run(['open', path])
-                            else:  # linux
-                                subprocess.run(['xdg-open', path])
-                            
-                            messagebox.showinfo(
-                                "Manual Edit",
-                                "Please fix the JSON errors in your editor and save the file.\n"
-                                "Then click OK to retry loading the glossary."
-                            )
-                            
-                            # Recursively call load_glossary to retry
-                            self.load_glossary()
-                            return
-                            
-                        except Exception as editor_error:
-                            messagebox.showerror(
-                                "Error",
-                                f"Failed to open file in editor: {str(editor_error)}\n\n"
-                                f"Please manually edit the file:\n{path}"
-                            )
-                            return
-                    
-                    elif response is False:  # NO - try to use anyway
-                        self.append_log("⚠️ Attempting to use JSON with errors (may cause issues)")
-                        # Continue with the original content
-                        
-                    else:  # CANCEL
-                        self.append_log("❌ Glossary loading cancelled")
-                        return
+        # Determine file type
+        file_extension = os.path.splitext(path)[1].lower()
         
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to read glossary file: {str(e)}")
+        if file_extension == '.csv':
+            # Handle CSV file - just pass it through as-is
+            # The translation system will handle the CSV file format
+            pass
+                
+        elif file_extension == '.txt':
+            # Handle TXT file - just pass it through as-is
+            # The translation system will handle the text file format
+            pass
+                
+        elif file_extension == '.json':
+            # Original JSON handling code
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                # Store original content for comparison
+                original_content = content
+                
+                # Try normal JSON load first
+                try:
+                    json.loads(content)
+                except json.JSONDecodeError as e:
+                    self.append_log(f"⚠️ JSON error detected: {str(e)}")
+                    self.append_log("🔧 Attempting comprehensive auto-fix...")
+                    
+                    # Apply comprehensive auto-fixes
+                    fixed_content = self._comprehensive_json_fix(content)
+                    
+                    # Try to parse the fixed content
+                    try:
+                        json.loads(fixed_content)
+                        
+                        # If successful, ask user if they want to save the fixed version
+                        response = messagebox.askyesno(
+                            "JSON Auto-Fix Successful",
+                            f"The JSON file had errors that were automatically fixed.\n\n"
+                            f"Original error: {str(e)}\n\n"
+                            f"Do you want to save the fixed version?\n"
+                            f"(A backup of the original will be created)"
+                        )
+                        
+                        if response:
+                            # Save the fixed version
+                            backup_path = path.replace('.json', '_backup.json')
+                            shutil.copy2(path, backup_path)
+                            
+                            with open(path, 'w', encoding='utf-8') as f:
+                                f.write(fixed_content)
+                            
+                            self.append_log(f"✅ Auto-fixed JSON and saved. Backup created: {os.path.basename(backup_path)}")
+                            content = fixed_content
+                        else:
+                            self.append_log("⚠️ Using original JSON with errors (may cause issues)")
+                        
+                    except json.JSONDecodeError as e2:
+                        # Auto-fix failed, show error and options
+                        self.append_log(f"❌ Auto-fix failed: {str(e2)}")
+                        
+                        # Build detailed error message
+                        error_details = self._analyze_json_errors(content, fixed_content, e, e2)
+                        
+                        response = messagebox.askyesnocancel(
+                            "JSON Fix Failed",
+                            f"The JSON file has errors that couldn't be automatically fixed.\n\n"
+                            f"Original error: {str(e)}\n"
+                            f"After auto-fix attempt: {str(e2)}\n\n"
+                            f"{error_details}\n\n"
+                            f"Options:\n"
+                            f"• YES: Open the file in your default editor to fix manually\n"
+                            f"• NO: Try to use the file anyway (may fail)\n"
+                            f"• CANCEL: Cancel loading this glossary"
+                        )
+                        
+                        if response is True:  # YES - open in editor
+                            try:
+                                # Open file in default editor
+                                import subprocess
+                                import sys
+                                
+                                if sys.platform.startswith('win'):
+                                    os.startfile(path)
+                                elif sys.platform.startswith('darwin'):
+                                    subprocess.run(['open', path])
+                                else:  # linux
+                                    subprocess.run(['xdg-open', path])
+                                
+                                messagebox.showinfo(
+                                    "Manual Edit",
+                                    "Please fix the JSON errors in your editor and save the file.\n"
+                                    "Then click OK to retry loading the glossary."
+                                )
+                                
+                                # Recursively call load_glossary to retry
+                                self.load_glossary()
+                                return
+                                
+                            except Exception as editor_error:
+                                messagebox.showerror(
+                                    "Error",
+                                    f"Failed to open file in editor: {str(editor_error)}\n\n"
+                                    f"Please manually edit the file:\n{path}"
+                                )
+                                return
+                        
+                        elif response is False:  # NO - try to use anyway
+                            self.append_log("⚠️ Attempting to use JSON with errors (may cause issues)")
+                            # Continue with the original content
+                            
+                        else:  # CANCEL
+                            self.append_log("❌ Glossary loading cancelled")
+                            return
+            
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to read glossary file: {str(e)}")
+                return
+        
+        else:
+            messagebox.showerror(
+                "Error", 
+                f"Unsupported file type: {file_extension}\n"
+                "Please select a JSON, CSV, or TXT file."
+            )
             return
         
         # Clear auto-loaded tracking when manually loading
@@ -12789,6 +12973,9 @@ Important rules:
         self.manual_glossary_path = path
         self.manual_glossary_manually_loaded = True
         self.append_log(f"📑 Loaded manual glossary: {path}")
+        
+        # Save the file extension for later reference
+        self.manual_glossary_file_extension = file_extension
         
         self.append_glossary_var.set(True)
         self.append_log("✅ Automatically enabled 'Append Glossary to System Prompt'")
