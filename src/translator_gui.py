@@ -325,7 +325,7 @@ class UIHelper:
             try:
                 content = text_widget.get(1.0, tk.END)
                 manager.undo_stack.append(content)
-                print(f"[DEBUG] Initial state saved. Content length: {len(content)}")
+                #print(f"[DEBUG] Initial state saved. Content length: {len(content)}")
             except:
                 pass
         
@@ -4012,7 +4012,7 @@ Recent translations to summarize:
            "Glossary Manager",
            width=0,  # Will be auto-sized
            height=None,
-           max_width_ratio=0.8,
+           max_width_ratio=0.9,
            max_height_ratio=0.85
        )
        
@@ -4125,7 +4125,7 @@ Recent translations to summarize:
        ).pack(side=tk.LEFT, padx=5)
        
        # Auto-resize and show
-       self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.8, max_height_ratio=1.5)
+       self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.5)
        
        dialog.protocol("WM_DELETE_WINDOW", 
                       lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
@@ -10112,9 +10112,9 @@ Important rules:
             self.auto_loaded_glossary_for_file = None
         
         # Don't override manually loaded glossaries
-        #if getattr(self, 'manual_glossary_manually_loaded', False) and self.manual_glossary_path:
-        #    self.append_log(f"📑 Keeping manually loaded glossary: {os.path.basename(self.manual_glossary_path)}")
-        #    return
+        if getattr(self, 'manual_glossary_manually_loaded', False) and self.manual_glossary_path:
+            self.append_log(f"📑 Keeping manually loaded glossary: {os.path.basename(self.manual_glossary_path)}")
+            return
         
         file_base = os.path.splitext(os.path.basename(file_path))[0]
         output_dir = file_base
