@@ -23,6 +23,7 @@ from image_translator import ImageTranslator
 from typing import Dict, List, Tuple 
 from txt_processor import TextFileProcessor
 from ai_hunter_enhanced import ImprovedAIHunterDetection
+import csv
 
 def get_chapter_terminology(is_text_file, chapter_data=None):
     """Get appropriate terminology (Chapter/Section) based on source type"""
@@ -5021,11 +5022,17 @@ def build_system_prompt(user_prompt, glossary_path=None):
         try:
             print(f"[DEBUG] ✅ Loading glossary from: {os.path.abspath(actual_glossary_path)}")
             
-            with open(actual_glossary_path, "r", encoding="utf-8") as gf:
-                glossary_data = json.load(gf)
-            
-            # TRUE BRUTE FORCE: Just dump the entire JSON
-            glossary_text = json.dumps(glossary_data, ensure_ascii=False, indent=2)
+            # Try to load as JSON first
+            try:
+                with open(actual_glossary_path, "r", encoding="utf-8") as gf:
+                    glossary_data = json.load(gf)
+                glossary_text = json.dumps(glossary_data, ensure_ascii=False, indent=2)
+                print(f"[DEBUG] Loaded as JSON")
+            except json.JSONDecodeError:
+                # If JSON fails, just read as raw text
+                print(f"[DEBUG] JSON parse failed, reading as raw text")
+                with open(actual_glossary_path, "r", encoding="utf-8") as gf:
+                    glossary_text = gf.read()
             
             if system:
                 system += "\n\n"
@@ -5036,7 +5043,7 @@ def build_system_prompt(user_prompt, glossary_path=None):
             
             system += f"{custom_prompt}\n{glossary_text}"
             
-            print(f"[DEBUG] ✅ BRUTE FORCE: Entire glossary JSON appended!")
+            print(f"[DEBUG] ✅ BRUTE FORCE: Entire glossary appended!")
             print(f"[DEBUG] Glossary text length: {len(glossary_text)} characters")
             print(f"[DEBUG] Final system prompt length: {len(system)} characters")
                 
@@ -5949,13 +5956,12 @@ def main(log_callback=None, stop_callback=None):
                 print(f"⚠️ Unexpected glossary format: {type(glossary_data)}")
                 
         except Exception as e:
-            print(f"⚠️ Glossary file exists but is corrupted: {e}")
-            with open(glossary_path, 'w', encoding='utf-8') as f:
-                json.dump({}, f, ensure_ascii=False, indent=2)
+            print(f"⚠️ Glossary file exists but is not valid JSON: {e}")
+            print(f"📑 Will use as-is (might be CSV/TXT format)")
+            # REMOVED: Don't overwrite the file!
     else:
-        print("⚠️ No glossary file found, creating empty one")
-        with open(glossary_path, 'w', encoding='utf-8') as f:
-            json.dump({}, f, ensure_ascii=False, indent=2)
+        print("📑 No glossary.json file found")
+        # REMOVED: Don't create empty file!
 
     print("="*50)
     print("🚀 STARTING MAIN TRANSLATION PHASE")
