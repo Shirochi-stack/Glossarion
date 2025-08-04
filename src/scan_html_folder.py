@@ -3472,10 +3472,25 @@ def parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, co
     total_comparisons = (len(results) * (len(results) - 1)) // 2
     log(f"   ⚠️ Will check ALL {total_comparisons:,} file pairs - but in parallel!")
     
+    # Add debugging output
+    log(f"   [DEBUG] AI Hunter parallel processing started")
+    log(f"   [DEBUG] Total files to compare: {len(results)}")
+    log(f"   [DEBUG] Total comparisons needed: {total_comparisons:,}")
+    
     # Determine number of workers
     cpu_count = multiprocessing.cpu_count()
-    max_workers = min(cpu_count, 8)  # Cap at 8 to avoid memory issues
-    log(f"   🖥️ Using {max_workers} parallel workers (detected {cpu_count} CPU cores)")
+    
+    # Check if there's a configured limit
+    max_workers_config = config.get('ai_hunter_max_workers', 0)
+    
+    if max_workers_config > 0:
+        max_workers = min(max_workers_config, cpu_count)
+        log(f"   🖥️ Using {max_workers} parallel workers (configured limit of {max_workers_config})")
+    else:
+        max_workers = cpu_count  # No limit - use all available cores!
+        log(f"   🚀 Using ALL {max_workers} CPU cores - MAXIMUM PERFORMANCE!")
+        if cpu_count > 8:
+            log(f"   💡 Tip: You can limit workers by setting 'ai_hunter_max_workers' in config")
     
     # Pre-compute text hashes for all results
     text_hashes = {}
@@ -3601,11 +3616,24 @@ def parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, co
                                     f"      Semantic similarity: {int(result['sem_sim']*100)}% (high)\n"
                                     f"      Structural similarity: {int(result['struct_sim']*100)}% (high)"
                                 )
+                                
+                                # Debug output for retranslations
+                                log(f"\n   [DEBUG] AI Hunter Retranslation Detection:")
+                                log(f"   [DEBUG] File 1: {file1}")
+                                log(f"   [DEBUG] File 2: {file2}")
+                                log(f"   [DEBUG] Text Similarity: {result['text_sim']:.4f}")
+                                log(f"   [DEBUG] Semantic Similarity: {result['sem_sim']:.4f}")
+                                log(f"   [DEBUG] Structural Similarity: {result['struct_sim']:.4f}")
+                                log(f"   [DEBUG] Confidence: {result['confidence']:.4f}")
                             else:
                                 found_duplicates.append(
                                     f"   📄 Found duplicate: {file1} ≈ {file2} "
                                     f"(confidence: {int(result['confidence']*100)}%)"
                                 )
+                                
+                                # Debug output for regular duplicates
+                                if len(found_duplicates) <= 5:  # Only debug first few to avoid spam
+                                    log(f"   [DEBUG] Regular duplicate: {file1} ≈ {file2} (confidence: {result['confidence']:.4f})")
                 
                 # Update progress
                 comparisons_done += len(future_to_batch[future])
@@ -3619,6 +3647,11 @@ def parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, co
                     log(f"   📊 AI Hunter progress: {comparisons_done:,}/{len(comparison_tasks):,} "
                         f"({progress}%) - ~{int(remaining)}s remaining - "
                         f"Speed: {int(rate):,} comparisons/sec")
+                    
+                    # Debug output
+                    log(f"   [DEBUG] Completed batches: {comparisons_done // batch_size}/{len(batches)}")
+                    log(f"   [DEBUG] Active threads: {len([f for f in future_to_batch if not f.done()])}")
+                    log(f"   [DEBUG] Duplicates found so far: {len(duplicate_groups)}")
                     
                     # Log some found duplicates
                     if found_duplicates and len(found_duplicates) <= 5:
@@ -3635,6 +3668,16 @@ def parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, co
     elapsed = time.time() - start_time
     log(f"✅ AI Hunter complete! Processed {total_comparisons:,} comparisons in {int(elapsed)}s")
     log(f"   ⚡ Speed improvement: {int(total_comparisons/elapsed):,} comparisons/sec")
+    
+    # Debug final statistics
+    log(f"\n   [DEBUG] === AI HUNTER FINAL STATISTICS ===")
+    log(f"   [DEBUG] Total comparisons: {total_comparisons:,}")
+    log(f"   [DEBUG] Time taken: {elapsed:.2f} seconds")
+    log(f"   [DEBUG] Comparisons per second: {int(total_comparisons/elapsed):,}")
+    log(f"   [DEBUG] Duplicate groups found: {len(set(duplicate_groups.values()))}")
+    log(f"   [DEBUG] Total duplicate pairs: {len(duplicate_confidence)}")
+    log(f"   [DEBUG] Parallel workers used: {max_workers}")
+    log(f"   [DEBUG] =====================================\n")
     
     # Log remaining duplicates
     for dup_msg in found_duplicates[-10:]:  # Show last 10
