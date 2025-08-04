@@ -1689,6 +1689,9 @@ def detect_duplicates(results, log, should_stop, config):
                 
                 ai_start_time = time.time()  # Use local timer for AI Hunter
                 
+                # Initialize last_progress HERE for AI Hunter mode
+                last_progress = 0  # ADD THIS LINE
+                
                 # Use parallel processing for AI Hunter
                 comparisons_done = parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, 
                                                           config, log, should_stop)
@@ -1704,9 +1707,8 @@ def detect_duplicates(results, log, should_stop, config):
                 
                 total_comparisons = (len(results) * (len(results) - 1)) // 2
                 comparisons_done = 0
-                last_progress = 0
-                ai_start_time = time.time()  # Use local timer
-
+                last_progress = 0  # This is already here for sequential mode
+                ai_start_time = time.time()  # Use local timer           
             
             # Create cached AI Hunter comparison
             @lru_cache(maxsize=10000)
