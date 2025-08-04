@@ -459,7 +459,7 @@ class UnifiedClient:
                 self._multi_key_mode = False
                 print(f"[DEBUG] ❌ Error loading config, falling back to single-key mode")
         else:
-            print(f"[DEBUG] ❌ Multi-key mode is DISABLED for this instance (env var = 0)")
+            #print(f"[DEBUG] ❌ Multi-key mode is DISABLED for this instance (env var = 0)")
             self._multi_key_mode = False
         
         # Initial setup based on THIS INSTANCE's mode
@@ -972,8 +972,9 @@ class UnifiedClient:
                 logger.error(f"Failed to load multi-key config: {e}")
                 # Instance variables already set to defaults
         else:
-            print(f"[DEBUG] ❌ Multi-key mode is DISABLED for this instance (env var = 0)")
+            #print(f"[DEBUG] ❌ Multi-key mode is DISABLED for this instance (env var = 0)")
             # Instance variables already set to defaults
+            pass
         
         # Check for Vertex AI Model Garden models (contain @ symbol)
         if '@' in self.model or self.model.startswith('vertex/'):
@@ -3776,7 +3777,7 @@ class UnifiedClient:
 
     def _send_gemini(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to Gemini API with support for both text and multi-image messages"""
-        
+        response = None
         # Check if we should use OpenAI-compatible endpoint
         use_openai_endpoint = os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"
         gemini_endpoint = os.getenv("GEMINI_OPENAI_ENDPOINT", "")
@@ -5726,6 +5727,7 @@ class UnifiedClient:
     def _send_gemini_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send image request to Gemini API - supports both single and multiple images"""
         try:
+            response = None
             # Check if we should use OpenAI-compatible endpoint
             use_openai_endpoint = os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"
             gemini_endpoint = os.getenv("GEMINI_OPENAI_ENDPOINT", "")
