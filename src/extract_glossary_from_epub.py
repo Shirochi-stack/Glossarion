@@ -49,6 +49,32 @@ def cancel_all_futures(futures):
             cancelled_count += 1
     return cancelled_count
 
+def create_client_with_multi_key_support(api_key, model, output_dir, config):
+    """Create a UnifiedClient with multi API key support if enabled"""
+    
+    # Check if multi API key mode is enabled
+    use_multi_keys = config.get('use_multi_api_keys', False)
+    
+    # Set environment variables for UnifiedClient to pick up
+    if use_multi_keys and 'multi_api_keys' in config and config['multi_api_keys']:
+        print("🔑 Multi API Key mode enabled for glossary extraction")
+        
+        # Set environment variables that UnifiedClient will read
+        os.environ['USE_MULTI_API_KEYS'] = '1'
+        os.environ['MULTI_API_KEYS'] = json.dumps(config['multi_api_keys'])
+        os.environ['FORCE_KEY_ROTATION'] = '1' if config.get('force_key_rotation', True) else '0'
+        os.environ['ROTATION_FREQUENCY'] = str(config.get('rotation_frequency', 1))
+        
+        print(f"   • Keys configured: {len(config['multi_api_keys'])}")
+        print(f"   • Force rotation: {config.get('force_key_rotation', True)}")
+        print(f"   • Rotation frequency: every {config.get('rotation_frequency', 1)} request(s)")
+    else:
+        # Ensure multi-key mode is disabled in environment
+        os.environ['USE_MULTI_API_KEYS'] = '0'
+        
+    # Create UnifiedClient normally - it will check environment variables
+    return UnifiedClient(api_key=api_key, model=model, output_dir=output_dir)
+    
 def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None):
     """Send API request with interrupt capability and optional timeout retry"""
     result_queue = queue.Queue()
@@ -1094,7 +1120,7 @@ def main(log_callback=None, stop_callback=None):
     out = os.path.dirname(args.output) if hasattr(args, 'output') else os.getcwd()
 
     # Use the variables we just retrieved
-    client = UnifiedClient(api_key=api_key, model=model, output_dir=out)
+    client = create_client_with_multi_key_support(api_key, model, out, config)
     
     # Check for batch mode
     batch_enabled = os.getenv("BATCH_TRANSLATION", "0") == "1"
