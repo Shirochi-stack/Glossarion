@@ -1,3 +1,7 @@
+if __name__ == '__main__':
+    import multiprocessing
+    multiprocessing.freeze_support()
+
 # Standard Library
 import io, json, logging, math, os, shutil, sys, threading, time, re
 import tkinter as tk
@@ -11,11 +15,10 @@ from splash_utils import SplashManager
 from api_key_encryption import encrypt_config, decrypt_config
 from metadata_batch_translator import MetadataBatchTranslatorUI
 
+# The frozen check can stay here for other purposes
 if getattr(sys, 'frozen', False):
-    try:
-        import multiprocessing
-        multiprocessing.freeze_support()
-    except: pass
+    # Any other frozen-specific setup
+    pass
     
 # Manga translation support (optional)
 try:
