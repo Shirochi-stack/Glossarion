@@ -60,7 +60,7 @@ class RateLimitCache:
 
 
 class APIKeyEntry:
-    """Simple API key entry for multi-key support"""
+    """Enhanced API key entry with test result storage"""
     def __init__(self, api_key: str, model: str, cooldown: int = 60, enabled: bool = True):
         self.api_key = api_key
         self.model = model
@@ -71,6 +71,11 @@ class APIKeyEntry:
         self.success_count = 0
         self.last_used_time = None
         self.is_cooling_down = False
+        
+        # Add test result storage
+        self.last_test_result = None  # 'passed', 'failed', 'error', 'rate_limited'
+        self.last_test_time = None
+        self.last_test_message = None
     
     def is_available(self) -> bool:
         if not self.enabled:
@@ -93,6 +98,12 @@ class APIKeyEntry:
         self.success_count += 1
         self.last_used_time = time.time()
         self.error_count = 0
+    
+    def set_test_result(self, result: str, message: str = None):
+        """Store test result"""
+        self.last_test_result = result
+        self.last_test_time = time.time()
+        self.last_test_message = message
 
     def to_dict(self):
         """Convert to dictionary for saving"""
@@ -102,16 +113,6 @@ class APIKeyEntry:
             'cooldown': self.cooldown,
             'enabled': self.enabled
         }
-
-    @classmethod
-    def from_dict(cls, data: dict):
-        """Create from dictionary"""
-        return cls(
-            api_key=data.get('api_key', ''),
-            model=data.get('model', ''),
-            cooldown=data.get('cooldown', 60),
-            enabled=data.get('enabled', True)
-        )
 class APIKeyPool:
     """Thread-safe API key pool with proper rotation"""
     def __init__(self):
@@ -415,7 +416,7 @@ class MultiAPIKeyDialog:
         
         # Center dialog
         self.dialog.transient(self.parent)
-        self.dialog.grab_set()
+        #self.dialog.grab_set()
         
         # Handle window close
         self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -468,7 +469,7 @@ class MultiAPIKeyDialog:
                                                sticky=tk.W, padx=(20, 0), pady=5)
     
     def _create_key_list_section(self, parent):
-        """Create the key list section"""
+        """Create the key list section with inline editing"""
         list_frame = tk.LabelFrame(parent, text="API Keys", padx=15, pady=15)
         list_frame.pack(fill=tk.BOTH, expand=True)
         
@@ -510,8 +511,12 @@ class MultiAPIKeyDialog:
         self.tree.heading('Last Used', text='Last Used')
         self.tree.column('Last Used', width=120)
         
-        # Context menu
+        # Bind events for inline editing
+        self.tree.bind('<Button-1>', self._on_click)
         self.tree.bind('<Button-3>', self._show_context_menu)
+        
+        # Track editing state
+        self.edit_widget = None
         
         # Action buttons
         action_frame = tk.Frame(list_frame)
@@ -535,6 +540,132 @@ class MultiAPIKeyDialog:
         # Stats label
         self.stats_label = tk.Label(action_frame, text="", font=('TkDefaultFont', 9), fg='gray')
         self.stats_label.pack(side=tk.RIGHT)
+
+    def _on_click(self, event):
+        """Handle click on tree item for inline editing"""
+        # Close any existing edit widget
+        if self.edit_widget:
+            self.edit_widget.destroy()
+            self.edit_widget = None
+        
+        # Identify what was clicked
+        region = self.tree.identify_region(event.x, event.y)
+        if region != "cell":
+            return
+        
+        item = self.tree.identify_row(event.y)
+        column = self.tree.identify_column(event.x)
+        
+        if not item:
+            return
+        
+        # Get column index
+        col_index = int(column.replace('#', ''))
+        
+        # Get the key index
+        index = self.tree.index(item)
+        if index >= len(self.key_pool.keys):
+            return
+        
+        key = self.key_pool.keys[index]
+        
+        # Only allow editing Model (column #1) and Cooldown (column #2)
+        if col_index == 1:  # Model column
+            self._edit_model_inline(item, column, key)
+        elif col_index == 2:  # Cooldown column
+            self._edit_cooldown_inline(item, column, key)
+
+    def _edit_model_inline(self, item, column, key):
+        """Create inline editor for model name"""
+        # Get the bounding box of the cell
+        x, y, width, height = self.tree.bbox(item, column)
+        
+        # Create entry widget
+        edit_var = tk.StringVar(value=key.model)
+        self.edit_widget = tb.Entry(self.tree, textvariable=edit_var)
+        
+        def save_edit():
+            new_value = edit_var.get().strip()
+            if new_value and new_value != key.model:
+                key.model = new_value
+                self._refresh_key_list()
+                self._show_status(f"Updated model to: {new_value}")
+            if self.edit_widget:
+                self.edit_widget.destroy()
+                self.edit_widget = None
+        
+        def cancel_edit(event=None):
+            if self.edit_widget:
+                self.edit_widget.destroy()
+                self.edit_widget = None
+        
+        # Place and configure the entry
+        self.edit_widget.place(x=x, y=y, width=width, height=height)
+        self.edit_widget.focus()
+        self.edit_widget.select_range(0, tk.END)
+        
+        # Bind events
+        self.edit_widget.bind('<Return>', lambda e: save_edit())
+        self.edit_widget.bind('<Escape>', cancel_edit)
+        self.edit_widget.bind('<FocusOut>', lambda e: save_edit())
+        
+        # Prevent the click from selecting the item
+        return "break"
+
+    def _edit_cooldown_inline(self, item, column, key):
+        """Create inline editor for cooldown"""
+        # Get the bounding box of the cell
+        x, y, width, height = self.tree.bbox(item, column)
+        
+        # Create spinbox widget
+        edit_var = tk.IntVar(value=key.cooldown)
+        self.edit_widget = tb.Spinbox(self.tree, from_=10, to=3600, 
+                                      textvariable=edit_var, width=10)
+        
+        def save_edit():
+            new_value = edit_var.get()
+            if new_value != key.cooldown:
+                key.cooldown = new_value
+                self._refresh_key_list()
+                self._show_status(f"Updated cooldown to: {new_value}s")
+            if self.edit_widget:
+                self.edit_widget.destroy()
+                self.edit_widget = None
+        
+        def cancel_edit(event=None):
+            if self.edit_widget:
+                self.edit_widget.destroy()
+                self.edit_widget = None
+        
+        # Place and configure the spinbox
+        self.edit_widget.place(x=x, y=y, width=width, height=height)
+        self.edit_widget.focus()
+        
+        # Bind events
+        self.edit_widget.bind('<Return>', lambda e: save_edit())
+        self.edit_widget.bind('<Escape>', cancel_edit)
+        self.edit_widget.bind('<FocusOut>', lambda e: save_edit())
+        
+        # Prevent the click from selecting the item
+        return "break"
+
+    def _show_context_menu(self, event):
+        """Show simplified context menu for tree items"""
+        # Select item under cursor
+        item = self.tree.identify_row(event.y)
+        if item:
+            self.tree.selection_set(item)
+            
+            # Create context menu
+            menu = tk.Menu(self.dialog, tearoff=0)
+            menu.add_command(label="Test", command=self._test_selected)
+            menu.add_command(label="Enable", command=self._enable_selected)
+            menu.add_command(label="Disable", command=self._disable_selected)
+            menu.add_separator()
+            menu.add_command(label="Remove", command=self._remove_selected)
+            
+            # Show menu
+            menu.post(event.x_root, event.y_root)
     
     def _create_button_bar(self, parent):
         """Create the bottom button bar"""
@@ -584,7 +715,7 @@ class MultiAPIKeyDialog:
                 # Re-enable tree interactions
                 self.tree.bind('<Button-1>', lambda e: 'break' if not self.enabled_var.get() else None)
                 self.tree.bind('<Button-3>', self._show_context_menu)
-                self.tree.bind('<Double-Button-1>', self._on_double_click)
+                #self.tree.bind('<Double-Button-1>', self._on_double_click)
             else:
                 # Disable tree interactions
                 self.tree.bind('<Button-1>', lambda e: 'break')
@@ -681,28 +812,9 @@ class MultiAPIKeyDialog:
         total_count = len(keys)
         self.stats_label.config(text=f"Keys: {active_count} active / {total_count} total")
     
-    def _show_context_menu(self, event):
-        """Show context menu for tree items"""
-        # Select item under cursor
-        item = self.tree.identify_row(event.y)
-        if item:
-            self.tree.selection_set(item)
-            
-            # Create context menu
-            menu = tk.Menu(self.dialog, tearoff=0)
-            menu.add_command(label="Test", command=self._test_selected)
-            menu.add_command(label="Enable", command=self._enable_selected)
-            menu.add_command(label="Disable", command=self._disable_selected)
-            menu.add_separator()
-            menu.add_command(label="Edit Cooldown", command=self._edit_cooldown)
-            menu.add_separator()
-            menu.add_command(label="Remove", command=self._remove_selected)
-            
-            # Show menu
-            menu.post(event.x_root, event.y_root)
     
     def _test_selected(self):
-        """Test selected API keys"""
+        """Test selected API keys with inline progress"""
         selected = self.tree.selection()
         if not selected:
             messagebox.showwarning("Warning", "Please select keys to test")
@@ -711,30 +823,286 @@ class MultiAPIKeyDialog:
         # Get selected indices
         indices = [self.tree.index(item) for item in selected]
         
-        # Show progress dialog immediately
-        self._create_progress_dialog()
-        
-        # Run tests in thread
-        thread = threading.Thread(target=self._run_tests, args=(indices,))
+        # Start testing in thread
+        thread = threading.Thread(target=self._run_inline_tests, args=(indices,))
         thread.daemon = True
         thread.start()
 
     def _test_all(self):
-        """Test all API keys"""
+        """Test all API keys with inline progress"""
         if not self.key_pool.keys:
             messagebox.showwarning("Warning", "No keys to test")
             return
         
         indices = list(range(len(self.key_pool.keys)))
         
-        # Show progress dialog immediately
-        self._create_progress_dialog()
-        
-        # Run tests in thread
-        thread = threading.Thread(target=self._run_tests, args=(indices,))
+        # Start testing in thread
+        thread = threading.Thread(target=self._run_inline_tests, args=(indices,))
         thread.daemon = True
         thread.start()
 
+    def _run_inline_tests(self, indices: List[int]):
+        """Run API tests with persistent inline results"""
+        from unified_api_client import UnifiedClient
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import os
+        
+        # Get Gemini endpoint settings
+        use_gemini_endpoint = os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"
+        gemini_endpoint = os.getenv("GEMINI_OPENAI_ENDPOINT", "")
+        
+        # Mark all selected keys as testing
+        for index in indices:
+            if index < len(self.key_pool.keys):
+                key = self.key_pool.keys[index]
+                key.last_test_result = None
+                key._testing = True  # Add temporary testing flag
+        
+        # Refresh once to show "Testing..." status
+        self.dialog.after(0, self._refresh_key_list)
+        
+        # Create thread pool for parallel testing
+        max_workers = min(10, len(indices))
+        
+        def test_single_key(index):
+            """Test a single API key directly"""
+            if index >= len(self.key_pool.keys):
+                return None
+                
+            key = self.key_pool.keys[index]
+            
+            try:
+                # Test based on model type
+                if key.model.lower().startswith('gemini'):
+                    # Test Gemini models
+                    import google.generativeai as genai
+                    
+                    genai.configure(api_key=key.api_key)
+                    model = genai.GenerativeModel(key.model)
+                    
+                    response = model.generate_content("Say 'API test successful' and nothing else.")
+                    
+                    if response and response.text and "test successful" in response.text.lower():
+                        key.mark_success()
+                        key.set_test_result('passed', 'Test successful')
+                        return (index, True, "Test passed")
+                    else:
+                        key.mark_error()
+                        key.set_test_result('failed', 'Unexpected response')
+                        return (index, False, "Unexpected response")
+                        
+                elif key.model.lower().startswith('claude'):
+                    # Test Claude models
+                    import anthropic
+                    
+                    client = anthropic.Anthropic(api_key=key.api_key)
+                    
+                    response = client.messages.create(
+                        model=key.model,
+                        max_tokens=100,
+                        messages=[
+                            {"role": "user", "content": "Say 'API test successful' and nothing else."}
+                        ]
+                    )
+                    
+                    if response and response.content and "test successful" in response.content[0].text.lower():
+                        key.mark_success()
+                        key.set_test_result('passed', 'Test successful')
+                        return (index, True, "Test passed")
+                    else:
+                        key.mark_error()
+                        key.set_test_result('failed', 'Unexpected response')
+                        return (index, False, "Unexpected response")
+                        
+                elif 'gpt' in key.model.lower() or 'o1' in key.model.lower():
+                    # Test OpenAI models
+                    import openai
+                    
+                    client = openai.OpenAI(api_key=key.api_key)
+                    
+                    response = client.chat.completions.create(
+                        model=key.model,
+                        messages=[
+                            {"role": "system", "content": "You are a helpful assistant."},
+                            {"role": "user", "content": "Say 'API test successful' and nothing else."}
+                        ],
+                        max_tokens=100,
+                        temperature=0.7
+                    )
+                    
+                    content = response.choices[0].message.content
+                    if content and "test successful" in content.lower():
+                        key.mark_success()
+                        key.set_test_result('passed', 'Test successful')
+                        return (index, True, "Test passed")
+                    else:
+                        key.mark_error()
+                        key.set_test_result('failed', 'Unexpected response')
+                        return (index, False, "Unexpected response")
+                else:
+                    # Unknown model type
+                    key.set_test_result('error', f'Unknown model type: {key.model}')
+                    return (index, False, f"Unknown model type: {key.model}")
+                    
+            except Exception as e:
+                error_msg = str(e)
+                error_code = None
+                
+                if "429" in error_msg or "rate limit" in error_msg.lower():
+                    error_code = 429
+                    key.set_test_result('rate_limited', 'Rate limited')
+                elif "quota" in error_msg.lower():
+                    key.set_test_result('error', 'Quota exceeded')
+                elif "invalid" in error_msg.lower() and "key" in error_msg.lower():
+                    key.set_test_result('error', 'Invalid API key')
+                else:
+                    key.set_test_result('error', f'{error_msg[:30]}...')
+                    
+                key.mark_error(error_code)
+                return (index, False, f"Error: {error_msg[:50]}...")
+        
+
+
+    def _update_tree_item(self, index: int):
+        """Update a single tree item based on current key state"""
+        def update():
+            # Find the tree item for this index
+            items = self.tree.get_children()
+            if index < len(items):
+                item = items[index]
+                key = self.key_pool.keys[index]
+                
+                # Determine status and tags
+                if key.last_test_result is None:
+                    # Currently testing
+                    status = "⏳ Testing..."
+                    tags = ('testing',)
+                elif not key.enabled:
+                    status = "Disabled"
+                    tags = ('disabled',)
+                elif key.last_test_result == 'passed':
+                    if key.is_cooling_down:
+                        remaining = int(key.cooldown - (time.time() - key.last_error_time))
+                        status = f"✅ Passed (cooling {remaining}s)"
+                        tags = ('passed_cooling',)
+                    else:
+                        status = "✅ Passed"
+                        tags = ('passed',)
+                elif key.last_test_result == 'failed':
+                    status = "❌ Failed"
+                    tags = ('failed',)
+                elif key.last_test_result == 'rate_limited':
+                    remaining = int(key.cooldown - (time.time() - key.last_error_time))
+                    status = f"⚠️ Rate Limited ({remaining}s)"
+                    tags = ('ratelimited',)
+                elif key.last_test_result == 'error':
+                    status = "❌ Error"
+                    if key.last_test_message:
+                        status += f": {key.last_test_message[:20]}..."
+                    tags = ('error',)
+                elif key.is_cooling_down:
+                    remaining = int(key.cooldown - (time.time() - key.last_error_time))
+                    status = f"Cooling ({remaining}s)"
+                    tags = ('cooling',)
+                else:
+                    status = "Active"
+                    tags = ('active',)
+                
+                # Get current values
+                values = list(self.tree.item(item, 'values'))
+                
+                # Update status column
+                values[2] = status
+                
+                # Update success/error counts
+                values[3] = key.success_count
+                values[4] = key.error_count
+                
+                # Update last used
+                if key.last_used_time:
+                    values[5] = datetime.fromtimestamp(key.last_used_time).strftime("%H:%M:%S")
+                
+                # Update the item
+                self.tree.item(item, values=values, tags=tags)
+        
+        # Run in main thread
+        self.dialog.after(0, update)
+
+    def _refresh_key_list(self):
+        """Refresh the key list display preserving test results"""
+        # Clear tree
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        
+        # Add keys
+        keys = self.key_pool.get_all_keys()
+        for i, key in enumerate(keys):
+            # Mask API key for display
+            masked_key = key.api_key[:8] + "..." + key.api_key[-4:] if len(key.api_key) > 12 else key.api_key
+            
+            # Determine status based on test results and current state
+            if key.last_test_result is None and hasattr(key, '_testing'):
+                # Currently testing (temporary flag)
+                status = "⏳ Testing..."
+                tags = ('testing',)
+            elif not key.enabled:
+                status = "Disabled"
+                tags = ('disabled',)
+            elif key.last_test_result == 'passed':
+                status = "✅ Passed"
+                tags = ('passed',)
+            elif key.last_test_result == 'failed':
+                status = "❌ Failed"
+                tags = ('failed',)
+            elif key.last_test_result == 'rate_limited':
+                status = "⚠️ Rate Limited"
+                tags = ('ratelimited',)
+            elif key.last_test_result == 'error':
+                status = "❌ Error"
+                if key.last_test_message:
+                    status += f": {key.last_test_message[:20]}..."
+                tags = ('error',)
+            elif key.is_cooling_down and key.last_error_time:
+                remaining = int(key.cooldown - (time.time() - key.last_error_time))
+                if remaining > 0:
+                    status = f"Cooling ({remaining}s)"
+                    tags = ('cooling',)
+                else:
+                    key.is_cooling_down = False
+                    status = "Active"
+                    tags = ('active',)
+            else:
+                status = "Active"
+                tags = ('active',)
+            
+            # Last used
+            last_used = ""
+            if key.last_used_time:
+                last_used = datetime.fromtimestamp(key.last_used_time).strftime("%H:%M:%S")
+            
+            # Insert into tree
+            self.tree.insert('', 'end', 
+                           text=masked_key,
+                           values=(key.model, f"{key.cooldown}s", status, 
+                                 key.success_count, key.error_count, last_used),
+                           tags=tags)
+        
+        # Configure tags
+        self.tree.tag_configure('active', foreground='green')
+        self.tree.tag_configure('cooling', foreground='orange')
+        self.tree.tag_configure('disabled', foreground='gray')
+        self.tree.tag_configure('testing', foreground='blue', font=('TkDefaultFont', 10, 'italic'))
+        self.tree.tag_configure('passed', foreground='dark green', font=('TkDefaultFont', 10, 'bold'))
+        self.tree.tag_configure('failed', foreground='red')
+        self.tree.tag_configure('ratelimited', foreground='orange')
+        self.tree.tag_configure('error', foreground='dark red')
+        
+        # Update stats
+        active_count = sum(1 for k in keys if k.enabled and not k.is_cooling_down)
+        total_count = len(keys)
+        passed_count = sum(1 for k in keys if k.last_test_result == 'passed')
+        self.stats_label.config(text=f"Keys: {active_count} active / {total_count} total | {passed_count} passed tests")
+    
     def _create_progress_dialog(self):
         """Create simple progress dialog at mouse cursor position"""
         self.progress_dialog = tk.Toplevel(self.dialog)
@@ -938,6 +1306,21 @@ class MultiAPIKeyDialog:
             success_count = sum(1 for _, success, _ in results if success)
             total_count = len(results)
             
+            # Update everything at once after all tests complete
+            def final_update():
+                # Clear testing flags
+                for index in indices:
+                    if index < len(self.key_pool.keys):
+                        key = self.key_pool.keys[index]
+                        if hasattr(key, '_testing'):
+                            delattr(key, '_testing')
+                
+                self._refresh_key_list()
+                self.stats_label.config(text=f"Test complete: {success_count}/{total_count} passed")
+
+            # Use lambda to capture the variables in scope
+            self.dialog.after(0, lambda: final_update())
+            
             # Add summary to the same dialog
             self.progress_text.insert(tk.END, f"\nSummary: {success_count}/{total_count} passed\n")
             self.progress_text.insert(tk.END, "-" * 50 + "\n\n")
@@ -1022,21 +1405,7 @@ class MultiAPIKeyDialog:
         tb.Spinbox(dialog, from_=10, to=3600, textvariable=cooldown_var,
                   width=10).pack(pady=5)
         
-        def save_cooldown():
-            key.cooldown = cooldown_var.get()
-            self._refresh_key_list()
-            dialog.destroy()
-        
-        button_frame = tk.Frame(dialog)
-        button_frame.pack(pady=20)
-        
-        tb.Button(button_frame, text="Save", command=save_cooldown,
-                 bootstyle="success").pack(side=tk.LEFT, padx=5)
-        tb.Button(button_frame, text="Cancel", command=dialog.destroy,
-                 bootstyle="secondary").pack(side=tk.LEFT)
-        
-        dialog.transient(self.dialog)
-        dialog.grab_set()
+
     
     def _import_keys(self):
         """Import keys from JSON file"""
@@ -1097,9 +1466,7 @@ class MultiAPIKeyDialog:
     
     def _show_status(self, message: str):
         """Show status message"""
-        # Could add a status bar, for now just refresh the stats
         self.stats_label.config(text=message)
-        self.dialog.after(3000, self._refresh_key_list)  # Refresh after 3 seconds
     
     def _save_and_close(self):
         """Save configuration and close"""
