@@ -1680,27 +1680,33 @@ def detect_duplicates(results, log, should_stop, config):
     else:
         # AI Hunter mode or fallback: check all pairs
         if config.mode == 'ai-hunter' or not lsh:
-            ai_start_time = time.time()  # Use local timer for AI Hunter
-            
             if config.mode == 'ai-hunter':
-                # Use parallel processing for AI Hunter
                 log("🤖 AI Hunter mode: Enhanced semantic and structural checking active")
                 log("   ⚠️ This will check ALL file pairs - may take several minutes for large datasets")
+                
+                total_comparisons = (len(results) * (len(results) - 1)) // 2
+                log(f"   [DEBUG] Total comparisons to perform: {total_comparisons:,}")
+                
+                ai_start_time = time.time()  # Use local timer for AI Hunter
+                
+                # Use parallel processing for AI Hunter
                 comparisons_done = parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, 
                                                           config, log, should_stop)
                 
                 # Log AI Hunter completion stats
                 ai_time = time.time() - ai_start_time
-                if comparisons_done > 0:
-                    log(f"✅ AI Hunter complete! Processed {comparisons_done:,} comparisons in {int(ai_time)}s")
-                    log(f"   ⚡ Speed improvement: {int(comparisons_done/max(ai_time, 1))} comparisons/sec")
+                log(f"   [DEBUG] AI Hunter took {ai_time:.2f} seconds")
+                if comparisons_done and comparisons_done > 0:
+                    log(f"   [DEBUG] Comparisons/second: {int(comparisons_done/max(ai_time, 1)):,}")
             else:
                 # Keep the original sequential code for when there's no LSH and not in AI Hunter mode
                 log("⚠️ No MinHash index available - checking all pairs (slower)")
                 
                 total_comparisons = (len(results) * (len(results) - 1)) // 2
-                comparisons_done = 0  # Reset it here for non-AI Hunter mode
+                comparisons_done = 0
                 last_progress = 0
+                ai_start_time = time.time()  # Use local timer
+
             
             # Create cached AI Hunter comparison
             @lru_cache(maxsize=10000)
@@ -3633,4 +3639,6 @@ def parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, co
     # Log remaining duplicates
     for dup_msg in found_duplicates[-10:]:  # Show last 10
         log(dup_msg)
-
+    
+    # Return the comparisons count
+    return comparisons_done
