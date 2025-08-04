@@ -227,6 +227,7 @@ class UnifiedClient:
     2. Proper key rotation per request
     3. Thread-safe rate limit handling
     4. Cleaner error handling and retry logic
+    5. INSTANCE-BASED multi-key mode (not class-based)
     """
     
     # Class-level shared resources - properly initialized
@@ -234,11 +235,12 @@ class UnifiedClient:
     _api_key_pool: Optional[APIKeyPool] = None
     _pool_lock = threading.Lock()
     
-    # Multi-key configuration
-    _multi_key_mode = False
-    _multi_key_config = []  # Will be populated from config
-    _force_rotation = True
-    _rotation_frequency = 1
+    # REMOVED ALL CLASS-LEVEL MULTI-KEY STATE VARIABLES
+    # These were causing the persistence issue:
+    # _multi_key_mode = False  # REMOVED
+    # _multi_key_config = []   # REMOVED
+    # _force_rotation = True   # REMOVED
+    # _rotation_frequency = 1  # REMOVED
     
     # Request tracking
     _global_request_counter = 0
@@ -343,7 +345,7 @@ class UnifiedClient:
     @classmethod
     def setup_multi_key_pool(cls, config: List[Dict], force_rotation: bool = True, 
                            rotation_frequency: int = 1):
-        """Setup the shared multi-key pool"""
+        """Setup the shared multi-key pool - BUT DON'T SET CLASS STATE"""
         with cls._pool_lock:
             if cls._api_key_pool is None:
                 cls._api_key_pool = APIKeyPool()
@@ -354,15 +356,15 @@ class UnifiedClient:
             
             cls._api_key_pool.load_from_list(config)
             
-            # Update configuration
-            cls._multi_key_mode = True
-            cls._multi_key_config = config
-            cls._force_rotation = force_rotation
-            cls._rotation_frequency = rotation_frequency
+            # DO NOT SET ANY CLASS-LEVEL STATE VARIABLES HERE!
+            # This was the bug:
+            # cls._multi_key_mode = True  # REMOVED
+            # cls._multi_key_config = config  # REMOVED
+            # cls._force_rotation = force_rotation  # REMOVED
+            # cls._rotation_frequency = rotation_frequency  # REMOVED
             
             print(f"[DEBUG] Multi-key pool initialized with {len(config)} keys")
-            print(f"[DEBUG] Rotation: {'Forced' if force_rotation else 'On-Error'}, "
-                  f"Frequency: every {rotation_frequency} request(s)")
+            print(f"[DEBUG] Pool is ready for use by instances")
     
     @classmethod
     def initialize_key_pool(cls, key_list: list):
@@ -385,6 +387,11 @@ class UnifiedClient:
         # Store original values
         self.original_api_key = api_key
         self.original_model = model
+        
+        # INSTANCE-LEVEL multi-key configuration
+        self._multi_key_mode = False  # INSTANCE variable, not class!
+        self._force_rotation = True
+        self._rotation_frequency = 1
         
         # Instance variables
         self.output_dir = output_dir
@@ -414,27 +421,42 @@ class UnifiedClient:
         else:
             self.request_timeout = 36000  # 10 hours
         
-        # Check if multi-key mode should be enabled
+        # Check if multi-key mode should be enabled FOR THIS INSTANCE
         use_multi_keys_env = os.getenv('USE_MULTI_API_KEYS', '0') == '1'
         print(f"[DEBUG] USE_MULTI_API_KEYS env var: {os.getenv('USE_MULTI_API_KEYS')}")
-        print(f"[DEBUG] MULTI_API_KEYS env var exists: {os.getenv('MULTI_API_KEYS') is not None}")
-        print(f"[DEBUG] use_multi_keys_env: {use_multi_keys_env}")
-        print(f"[DEBUG] self._multi_key_mode: {self._multi_key_mode}")
-        if use_multi_keys_env and not self._multi_key_mode:
+        print(f"[DEBUG] Creating new instance - multi-key mode from env: {use_multi_keys_env}")
+        
+        if use_multi_keys_env:
             # Initialize from environment
             multi_keys_json = os.getenv('MULTI_API_KEYS', '[]')
-            print(f"[DEBUG] multi_keys_json: {multi_keys_json[:100]}...")  # First 100 chars
+            print(f"[DEBUG] Loading multi-keys config...")
             force_rotation = os.getenv('FORCE_KEY_ROTATION', '1') == '1'
             rotation_frequency = int(os.getenv('ROTATION_FREQUENCY', '1'))
             
             try:
                 multi_keys = json.loads(multi_keys_json)
                 if multi_keys:
+                    # Setup the shared pool
                     self.setup_multi_key_pool(multi_keys, force_rotation, rotation_frequency)
+                    
+                    # Enable multi-key mode FOR THIS INSTANCE
+                    self._multi_key_mode = True
+                    self._force_rotation = force_rotation
+                    self._rotation_frequency = rotation_frequency
+                    
+                    print(f"[DEBUG] ✅ This instance has multi-key mode ENABLED")
+                else:
+                    print(f"[DEBUG] ❌ No keys found in config, staying in single-key mode")
+                    self._multi_key_mode = False
             except Exception as e:
                 logger.error(f"Failed to load multi-key config: {e}")
+                self._multi_key_mode = False
+                print(f"[DEBUG] ❌ Error loading config, falling back to single-key mode")
+        else:
+            print(f"[DEBUG] ❌ Multi-key mode is DISABLED for this instance (env var = 0)")
+            self._multi_key_mode = False
         
-        # Initial setup if not in multi-key mode
+        # Initial setup based on THIS INSTANCE's mode
         if not self._multi_key_mode:
             self.api_key = api_key
             self.model = model
@@ -466,7 +488,7 @@ class UnifiedClient:
         tls = self._get_thread_local_client()
         thread_name = threading.current_thread().name
         
-        # Multi-key mode
+        # Check THIS INSTANCE's multi-key mode
         if self._multi_key_mode:
             # Check if we need to rotate
             should_rotate = False
@@ -494,7 +516,7 @@ class UnifiedClient:
                     
                     if key_info:
                         # Successfully got a key
-                        key, key_index, key_id = key_info  # Changed from 2 to 3 values
+                        key, key_index, key_id = key_info
                         
                         # Update thread-local state
                         tls.api_key = key.api_key
@@ -512,7 +534,6 @@ class UnifiedClient:
                         if len(self.api_key) > 12:
                             masked_key = self.api_key[:4] + "..." + self.api_key[-4:]
                         else:
-                            # For short keys, show less characters
                             masked_key = self.api_key[:3] + "..." + self.api_key[-2:] if len(self.api_key) > 5 else "***"
 
                         print(f"[Thread-{thread_name}] 🔑 Using {self.key_identifier} - {masked_key}")
@@ -775,6 +796,9 @@ class UnifiedClient:
 
     def _handle_rate_limit_for_thread(self):
         """Handle rate limit by marking current thread's key and getting a new one"""
+        if not self._multi_key_mode:  # Check INSTANCE variable
+            return
+            
         thread_id = threading.current_thread().ident
         thread_name = threading.current_thread().name
         
@@ -795,7 +819,33 @@ class UnifiedClient:
         # Force reassignment
         self._thread_local.request_count = 0  # Reset rotation counter
         self._assign_thread_key()
-
+    
+    # Helper methods that need to check instance state
+    def _count_available_keys(self) -> int:
+        """Count how many keys are currently available"""
+        if not self._multi_key_mode or not self.__class__._api_key_pool:
+            return 0
+            
+        count = 0
+        for i, key in enumerate(self.__class__._api_key_pool.keys):
+            if key.enabled:
+                key_id = f"Key#{i+1} ({key.model})"
+                if not self.__class__._rate_limit_cache.is_rate_limited(key_id):
+                    count += 1
+        return count
+    
+    def _mark_key_success(self):
+        """Mark the current key as successful"""
+        if self._multi_key_mode:
+            tls = self._get_thread_local_client()
+            if tls.key_index is not None:
+                self.__class__._api_key_pool.mark_key_success(tls.key_index)
+    
+    def _mark_key_error(self, error_code: int = None):
+        """Mark current key as having an error and apply cooldown if rate limited"""
+        if self._multi_key_mode and self.current_key_index is not None and self.__class__._api_key_pool:
+            self.__class__._api_key_pool.mark_key_error(self.current_key_index, error_code)
+    
     def _apply_custom_endpoint_if_needed(self):
         """Apply custom endpoint configuration if needed"""
         use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
@@ -810,6 +860,19 @@ class UnifiedClient:
                 base_url=custom_base_url
             )
             print(f"[DEBUG] Applied custom OpenAI endpoint: {custom_base_url}")
+    
+    # Properties for backward compatibility
+    @property
+    def use_multi_keys(self):
+        """Property for backward compatibility"""
+        return self._multi_key_mode
+    
+    @use_multi_keys.setter
+    def use_multi_keys(self, value):
+        """Property setter for backward compatibility"""
+        self._multi_key_mode = value
+
+
     
 
     def __init__(self, api_key: str, model: str, output_dir: str = None):
@@ -832,8 +895,12 @@ class UnifiedClient:
         self.mistral_client = None
         self.cohere_client = None
         
-        # Multi-key support
-        self.use_multi_keys = False
+        # CRITICAL: Initialize ALL instance-level multi-key variables HERE
+        # These MUST exist for all instances to prevent AttributeError
+        self._multi_key_mode = False  # Instance variable, not class!
+        self._force_rotation = True   # Default to True
+        self._rotation_frequency = 1  # Default to 1
+        self.use_multi_keys = False  # For backward compatibility
         self.current_key_index = None
         self.key_identifier = "Single Key"
         self.request_count = 0  # Instance request counter
@@ -862,14 +929,15 @@ class UnifiedClient:
         # Store Google Cloud credentials path if available
         self.google_creds_path = None
         
-        # Check if multi-key mode is enabled
+        # Check if multi-key mode should be enabled FOR THIS INSTANCE
         use_multi_keys_env = os.getenv('USE_MULTI_API_KEYS', '0') == '1'
         print(f"[DEBUG] USE_MULTI_API_KEYS env var: {os.getenv('USE_MULTI_API_KEYS')}")
         print(f"[DEBUG] MULTI_API_KEYS env var exists: {os.getenv('MULTI_API_KEYS') is not None}")
         print(f"[DEBUG] use_multi_keys_env: {use_multi_keys_env}")
-        print(f"[DEBUG] self._multi_key_mode: {self._multi_key_mode}")
-        if use_multi_keys_env and not self._multi_key_mode:
-            # Initialize from environment if not already done
+        print(f"[DEBUG] Instance _multi_key_mode: {self._multi_key_mode}")
+        
+        if use_multi_keys_env:
+            # Initialize from environment
             multi_keys_json = os.getenv('MULTI_API_KEYS', '[]')
             print(f"[DEBUG] multi_keys_json: {multi_keys_json[:100]}...")
             force_rotation = os.getenv('FORCE_KEY_ROTATION', '1') == '1'
@@ -878,14 +946,28 @@ class UnifiedClient:
             try:
                 multi_keys = json.loads(multi_keys_json)
                 if multi_keys:
+                    # Setup the shared pool (class-level)
                     self.setup_multi_key_pool(multi_keys, force_rotation, rotation_frequency)
-                    self.use_multi_keys = True
-                    print(f"[DEBUG] Multi-key mode enabled with {len(multi_keys)} keys")
+                    
+                    # Enable multi-key mode FOR THIS INSTANCE
+                    self._multi_key_mode = True
+                    self._force_rotation = force_rotation
+                    self._rotation_frequency = rotation_frequency
+                    self.use_multi_keys = True  # Backward compatibility
+                    
+                    print(f"[DEBUG] ✅ Multi-key mode enabled for this instance with {len(multi_keys)} keys")
                     # Don't select a key yet - wait until first request
                     # But DON'T return early - we need to finish initialization
+                else:
+                    print(f"[DEBUG] ❌ No keys found in config, staying in single-key mode")
+                    # Instance variables already set to defaults
             except Exception as e:
                 print(f"[ERROR] Failed to load multi-key config: {e}")
-                self.use_multi_keys = False
+                logger.error(f"Failed to load multi-key config: {e}")
+                # Instance variables already set to defaults
+        else:
+            print(f"[DEBUG] ❌ Multi-key mode is DISABLED for this instance (env var = 0)")
+            # Instance variables already set to defaults
         
         # Check for Vertex AI Model Garden models (contain @ symbol)
         if '@' in self.model or self.model.startswith('vertex/'):
@@ -910,7 +992,7 @@ class UnifiedClient:
         else:
             # Only set up client if not in multi-key mode
             # Multi-key mode will set up the client when a key is selected
-            if not self.use_multi_keys:
+            if not self._multi_key_mode:
                 # Determine client type from model name
                 self._setup_client()
                 print(f"[DEBUG] After setup - client_type: {self.client_type}, openai_client: {self.openai_client}")
@@ -945,12 +1027,6 @@ class UnifiedClient:
                         print(f"[DEBUG] Custom base URL set but model {self.model} uses {self.client_type}, not overriding")
                 elif custom_base_url and not use_custom_endpoint:
                     print(f"[DEBUG] Custom base URL detected but disabled via toggle, using standard client")
-    
-    def _get_next_available_key(self) -> Optional[Tuple]:
-        """Get the next available key from the pool"""
-        if self._api_key_pool:
-            return self._api_key_pool.get_next_available_key()
-        return None
 
     def _ensure_key_rotation(self):
         """Ensure we have a key selected and rotate if in multi-key mode"""
@@ -1036,68 +1112,228 @@ class UnifiedClient:
         
         print(f"[WARNING] No available keys to rotate to")
         return False
-    
-    def _mark_key_success(self):
-        """Mark current key as successful"""
-        if self.use_multi_keys and self.current_key_index is not None and self._api_key_pool:
-            self._api_key_pool.mark_key_success(self.current_key_index)
-    
-    def _mark_key_error(self, error_code: int = None):
-        """Mark current key as having an error and apply cooldown if rate limited"""
-        if self.use_multi_keys and self.current_key_index is not None and self._api_key_pool:
-            self._api_key_pool.mark_key_error(self.current_key_index, error_code)
-    
-    def get_stats(self):
-        """Get enhanced statistics including per-thread information"""
-        stats = self.stats.copy()
-        
+            
+    def cleanup(self):
+        """Cleanup thread resources"""
         if self._multi_key_mode and self._api_key_pool:
-            # Collect key pool statistics
-            key_stats = []
-            for i, key in enumerate(self._api_key_pool.keys):
-                key_info = {
-                    'index': i + 1,
-                    'model': key.model,
-                    'available': key.is_available(),
-                    'cooling_down': key.is_cooling_down,
-                    'success_count': key.success_count,
-                    'error_count': key.error_count,
-                    'last_used': key.last_used_time
-                }
-                key_stats.append(key_info)
+            self._api_key_pool.release_thread_assignment()    
+    
+    def get_stats(self) -> Dict[str, any]:
+        """Get statistics about API usage"""
+        stats = dict(self.stats)
+        
+        # Add multi-key stats if in multi-key mode
+        if self._multi_key_mode:  # Use instance variable
+            stats['multi_key_enabled'] = True
+            stats['force_rotation'] = self._force_rotation  # Use instance variable
+            stats['rotation_frequency'] = self._rotation_frequency  # Use instance variable
             
-            # Thread assignment info
-            thread_info = {}
-            for thread in threading.enumerate():
-                if hasattr(thread, 'ident'):
-                    # Check if this thread has an assignment
-                    with self._api_key_pool.lock:
-                        if thread.ident in self._api_key_pool._thread_assignments:
-                            key_index, _ = self._api_key_pool._thread_assignments[thread.ident]
-                            key = self._api_key_pool.keys[key_index]
-                            thread_info[thread.name] = f"Key#{key_index+1} ({key.model})"
-            
-            stats.update({
-                'multi_key_enabled': True,
-                'total_keys': len(self._api_key_pool.keys),
-                'available_keys': sum(1 for k in self._api_key_pool.keys if k.is_available()),
-                'key_stats': key_stats,
-                'thread_assignments': thread_info,
-                'rotation_config': {
-                    'force_rotation': self._force_rotation,
-                    'rotation_frequency': self._rotation_frequency
-                }
-            })
+            if hasattr(self, '_api_key_pool') and self._api_key_pool:
+                stats['total_keys'] = len(self._api_key_pool.keys)
+                stats['active_keys'] = sum(1 for k in self._api_key_pool.keys if k.enabled and k.is_available())
+                stats['keys_on_cooldown'] = sum(1 for k in self._api_key_pool.keys if k.is_cooling_down)
+                
+                # Per-key stats
+                key_stats = []
+                for i, key in enumerate(self._api_key_pool.keys):
+                    key_stat = {
+                        'index': i,
+                        'model': key.model,
+                        'enabled': key.enabled,
+                        'available': key.is_available(),
+                        'success_count': key.success_count,
+                        'error_count': key.error_count,
+                        'cooling_down': key.is_cooling_down
+                    }
+                    key_stats.append(key_stat)
+                stats['key_details'] = key_stats
         else:
             stats['multi_key_enabled'] = False
         
         return stats
     
-    def cleanup(self):
-        """Cleanup thread resources"""
-        if self._multi_key_mode and self._api_key_pool:
-            self._api_key_pool.release_thread_assignment()
-
+    def reset_stats(self):
+        """Reset usage statistics"""
+        self.stats = {
+            'total_requests': 0,
+            'successful_requests': 0,
+            'failed_requests': 0,
+            'errors': defaultdict(int),
+            'response_times': []
+        }
+    
+    def _rotate_to_next_available_key(self, skip_current: bool = False) -> bool:
+        """
+        Rotate to the next available key that's not rate limited
+        
+        Args:
+            skip_current: If True, skip the current key even if it becomes available
+        """
+        if not self._multi_key_mode or not self._api_key_pool:  # Use instance variable
+            return False
+        
+        old_key_identifier = self.key_identifier
+        start_index = self._api_key_pool.current_index
+        max_attempts = len(self._api_key_pool.keys)
+        attempts = 0
+        
+        while attempts < max_attempts:
+            # Get next key from pool
+            key_info = self._get_next_available_key()
+            if not key_info:
+                attempts += 1
+                continue
+            
+            # Check if this is the same key we started with
+            potential_key_id = f"Key#{key_info[1]+1} ({key_info[0].model})"
+            if skip_current and potential_key_id == old_key_identifier:
+                attempts += 1
+                continue
+            
+            # Check if this key is rate limited
+            if not self._rate_limit_cache.is_rate_limited(potential_key_id):
+                # This key is available, use it
+                self._apply_key_change(key_info, old_key_identifier)
+                return True
+            else:
+                print(f"[DEBUG] Skipping {potential_key_id} (in cooldown)")
+            
+            attempts += 1
+        
+        print(f"[DEBUG] No available keys found after checking all {max_attempts} keys")
+        
+        # All keys are on cooldown - wait for shortest cooldown
+        wait_time = self._get_shortest_cooldown_time()
+        print(f"[DEBUG] All keys on cooldown. Waiting {wait_time}s...")
+        
+        # Wait with cancellation check
+        for i in range(wait_time):
+            if hasattr(self, '_cancelled') and self._cancelled:
+                print(f"[DEBUG] Wait cancelled by user")
+                return False
+            time.sleep(1)
+            if i % 10 == 0 and i > 0:
+                print(f"[DEBUG] Still waiting... {wait_time - i}s remaining")
+        
+        # Clear expired entries and try again
+        self._rate_limit_cache.clear_expired()
+        
+        # Try one more time to find an available key
+        attempts = 0
+        while attempts < max_attempts:
+            key_info = self._get_next_available_key()
+            if key_info:
+                potential_key_id = f"Key#{key_info[1]+1} ({key_info[0].model})"
+                if not self._rate_limit_cache.is_rate_limited(potential_key_id):
+                    self._apply_key_change(key_info, old_key_identifier)
+                    return True
+            attempts += 1
+        
+        return False
+    
+    def _get_next_available_key(self) -> Optional[Tuple]:
+        """Get the next available key from the pool"""
+        if not self._multi_key_mode or not self.__class__._api_key_pool:
+            return None
+        
+        # This should be called within a lock
+        for _ in range(len(self.__class__._api_key_pool.keys)):
+            key = self.__class__._api_key_pool.keys[self.__class__._api_key_pool.current_index]
+            key_index = self.__class__._api_key_pool.current_index
+            
+            # Move to next key for next call
+            self.__class__._api_key_pool.current_index = (self.__class__._api_key_pool.current_index + 1) % len(self.__class__._api_key_pool.keys)
+            
+            if key.is_available():
+                return (key, key_index)
+        
+        # No available keys
+        return None
+        
+        # This should be called within a lock
+        for _ in range(len(self._api_key_pool.keys)):
+            key = self._api_key_pool.keys[self._api_key_pool.current_index]
+            key_index = self._api_key_pool.current_index
+            
+            # Move to next key for next call
+            self._api_key_pool.current_index = (self._api_key_pool.current_index + 1) % len(self._api_key_pool.keys)
+            
+            if key.is_available():
+                return (key, key_index)
+        
+        # No available keys
+        return None
+    
+    def _apply_key_change(self, key_info: tuple, old_key_identifier: str):
+        """Apply the key change and reinitialize clients"""
+        self.api_key = key_info[0].api_key
+        self.model = key_info[0].model
+        self.current_key_index = key_info[1]
+        self.key_identifier = f"Key#{key_info[1]+1} ({key_info[0].model})"
+        
+        masked_key = self.api_key[:8] + "..." + self.api_key[-4:] if len(self.api_key) > 12 else self.api_key
+        print(f"[DEBUG] 🔄 Switched from {old_key_identifier} to {self.key_identifier} - {masked_key}")
+        
+        # Reset clients
+        self.openai_client = None
+        self.gemini_client = None
+        self.mistral_client = None
+        self.cohere_client = None
+        
+        # Re-setup the client with new key
+        self._setup_client()
+        
+        # Re-apply custom endpoint if needed
+        use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+        custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
+        
+        if custom_base_url and use_custom_endpoint and self.client_type == 'openai':
+            if not custom_base_url.startswith(('http://', 'https://')):
+                custom_base_url = 'https://' + custom_base_url
+            
+            self.openai_client = openai.OpenAI(
+                api_key=self.api_key,
+                base_url=custom_base_url
+            )
+            print(f"[DEBUG] Re-created OpenAI client with custom base URL")
+    
+    def _force_rotate_to_untried_key(self, attempted_keys: set) -> bool:
+        """
+        Force rotation to any key that hasn't been tried yet, ignoring cooldown
+        
+        Args:
+            attempted_keys: Set of key identifiers that have already been attempted
+        """
+        if not self._multi_key_mode or not self._api_key_pool:  # Use instance variable
+            return False
+        
+        old_key_identifier = self.key_identifier
+        
+        # Try each key in the pool
+        for i in range(len(self._api_key_pool.keys)):
+            key = self._api_key_pool.keys[i]
+            potential_key_id = f"Key#{i+1} ({key.model})"
+            
+            # Skip if already tried
+            if potential_key_id in attempted_keys:
+                continue
+            
+            # Found an untried key - use it regardless of cooldown
+            key_info = (key, i)
+            self._apply_key_change(key_info, old_key_identifier)
+            print(f"[DEBUG] 🔄 Force-rotated to untried key: {self.key_identifier}")
+            return True
+        
+        return False
+    
+    def get_current_key_info(self) -> str:
+        """Get information about the currently active key"""
+        if self._multi_key_mode and self.current_key_index is not None:  # Use instance variable
+            key = self._api_key_pool.keys[self.current_key_index]
+            status = "Active" if key.is_available() else "Cooling Down"
+            return f"{self.key_identifier} - Status: {status}, Success: {key.success_count}, Errors: {key.error_count}"
+        else:
+            return "Single Key Mode"
             
     def _setup_client(self):
         """Setup the appropriate client based on model type"""
@@ -2236,180 +2472,33 @@ class UnifiedClient:
             raise last_error
         else:
             raise Exception(f"Failed after {max_retries} attempts")
-        
-    def _rotate_to_next_available_key(self, skip_current: bool = False) -> bool:
-        """
-        Rotate to the next available key that's not rate limited
-        
-        Args:
-            skip_current: If True, skip the current key even if it becomes available
-        """
-        if not self.use_multi_keys or not self._api_key_pool:
-            return False
-        
-        old_key_identifier = self.key_identifier
-        start_index = self._api_key_pool.current_index
-        max_attempts = len(self._api_key_pool.keys)
-        attempts = 0
-        
-        while attempts < max_attempts:
-            # Get next key from pool
-            key_info = self._get_next_available_key()
-            if not key_info:
-                attempts += 1
-                continue
-            
-            # Check if this is the same key we started with
-            potential_key_id = f"Key#{key_info[1]+1} ({key_info[0].model})"
-            if skip_current and potential_key_id == old_key_identifier:
-                attempts += 1
-                continue
-            
-            # Check if this key is rate limited
-            if not self._rate_limit_cache.is_rate_limited(potential_key_id):
-                # This key is available, use it
-                self._apply_key_change(key_info, old_key_identifier)
-                return True
-            else:
-                print(f"[DEBUG] Skipping {potential_key_id} (in cooldown)")
-            
-            attempts += 1
-        
-        print(f"[DEBUG] No available keys found after checking all {max_attempts} keys")
-        
-        # All keys are on cooldown - wait for shortest cooldown
-        wait_time = self._get_shortest_cooldown_time()
-        print(f"[DEBUG] All keys on cooldown. Waiting {wait_time}s...")
-        
-        # Wait with cancellation check
-        for i in range(wait_time):
-            if hasattr(self, '_cancelled') and self._cancelled:
-                print(f"[DEBUG] Wait cancelled by user")
-                return False
-            time.sleep(1)
-            if i % 10 == 0 and i > 0:
-                print(f"[DEBUG] Still waiting... {wait_time - i}s remaining")
-        
-        # Clear expired entries and try again
-        self._rate_limit_cache.clear_expired()
-        
-        # Try one more time to find an available key
-        attempts = 0
-        while attempts < max_attempts:
-            key_info = self._get_next_available_key()
-            if key_info:
-                potential_key_id = f"Key#{key_info[1]+1} ({key_info[0].model})"
-                if not self._rate_limit_cache.is_rate_limited(potential_key_id):
-                    self._apply_key_change(key_info, old_key_identifier)
-                    return True
-            attempts += 1
-        
-        return False
 
 
-    def _force_rotate_to_untried_key(self, attempted_keys: set) -> bool:
-        """
-        Force rotation to any key that hasn't been tried yet, ignoring cooldown
-        
-        Args:
-            attempted_keys: Set of key identifiers that have already been attempted
-        """
-        if not self.use_multi_keys or not self._api_key_pool:
-            return False
-        
-        old_key_identifier = self.key_identifier
-        
-        # Try each key in the pool
-        for i in range(len(self._api_key_pool.keys)):
-            key = self._api_key_pool.keys[i]
-            potential_key_id = f"Key#{i+1} ({key.model})"
-            
-            # Skip if already tried
-            if potential_key_id in attempted_keys:
-                continue
-            
-            # Found an untried key - use it regardless of cooldown
-            key_info = (key, i)
-            self._apply_key_change(key_info, old_key_identifier)
-            print(f"[DEBUG] 🔄 Force-rotated to untried key: {self.key_identifier}")
-            return True
-        
-        return False
-
-
-    def _apply_key_change(self, key_info: tuple, old_key_identifier: str):
-        """Apply the key change and reinitialize clients"""
-        self.api_key = key_info[0].api_key
-        self.model = key_info[0].model
-        self.current_key_index = key_info[1]
-        self.key_identifier = f"Key#{key_info[1]+1} ({key_info[0].model})"
-        
-        masked_key = self.api_key[:8] + "..." + self.api_key[-4:] if len(self.api_key) > 12 else self.api_key
-        print(f"[DEBUG] 🔄 Switched from {old_key_identifier} to {self.key_identifier} - {masked_key}")
-        
-        # Reset clients
-        self.openai_client = None
-        self.gemini_client = None
-        self.mistral_client = None
-        self.cohere_client = None
-        
-        # Re-setup the client with new key
-        self._setup_client()
-        
-        # Re-apply custom endpoint if needed
-        use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
-        custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
-        
-        if custom_base_url and use_custom_endpoint and self.client_type == 'openai':
-            if not custom_base_url.startswith(('http://', 'https://')):
-                custom_base_url = 'https://' + custom_base_url
-            
-            self.openai_client = openai.OpenAI(
-                api_key=self.api_key,
-                base_url=custom_base_url
-            )
-            print(f"[DEBUG] Re-created OpenAI client with custom base URL")
-
-
-    def _count_available_keys(self) -> int:
-        """Count how many keys are currently available (not on cooldown)"""
-        if not self.use_multi_keys or not self._api_key_pool:
-            return 0
-        
-        available = 0
-        for i, key in enumerate(self._api_key_pool.keys):
-            key_id = f"Key#{i+1} ({key.model})"
-            if not self._rate_limit_cache.is_rate_limited(key_id) and key.is_available():
-                available += 1
-        
-        return available
-    
     def _get_shortest_cooldown_time(self) -> int:
-        """Get the shortest time until a key becomes available"""
-        if not self.use_multi_keys or not self._api_key_pool:
-            return 30  # Default wait time
-        
-        min_wait = float('inf')
+        """Get the shortest cooldown time among all keys"""
+        if not self._multi_key_mode or not self.__class__._api_key_pool:
+            return 60  # Default cooldown
+            
+        min_cooldown = float('inf')
         now = time.time()
         
-        # Check each key's cooldown
-        for i, key in enumerate(self._api_key_pool.keys):
-            if key.enabled:  # Only check enabled keys
+        for i, key in enumerate(self.__class__._api_key_pool.keys):
+            if key.enabled:
                 key_id = f"Key#{i+1} ({key.model})"
                 
-                # Check rate limit cache first
-                cache_cooldown = self._rate_limit_cache.get_remaining_cooldown(key_id)
+                # Check rate limit cache
+                cache_cooldown = self.__class__._rate_limit_cache.get_remaining_cooldown(key_id)
                 if cache_cooldown > 0:
-                    min_wait = min(min_wait, cache_cooldown)
+                    min_cooldown = min(min_cooldown, cache_cooldown)
                 
                 # Also check key's own cooldown
                 if key.is_cooling_down and key.last_error_time:
                     remaining = key.cooldown - (now - key.last_error_time)
                     if remaining > 0:
-                        min_wait = min(min_wait, remaining)
+                        min_cooldown = min(min_cooldown, remaining)
         
         # Return the minimum wait time, capped at 60 seconds
-        return min(int(min_wait) if min_wait != float('inf') else 30, 60)
+        return min(int(min_cooldown) if min_cooldown != float('inf') else 30, 60)
     
     def _send_internal(self, messages, temperature=None, max_tokens=None, max_completion_tokens=None, context=None) -> Tuple[str, Optional[str]]:
         """
