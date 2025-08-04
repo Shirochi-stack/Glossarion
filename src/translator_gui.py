@@ -10111,9 +10111,9 @@ Important rules:
             self.auto_loaded_glossary_for_file = None
         
         # Don't override manually loaded glossaries
-        if getattr(self, 'manual_glossary_manually_loaded', False) and self.manual_glossary_path:
-            self.append_log(f"📑 Keeping manually loaded glossary: {os.path.basename(self.manual_glossary_path)}")
-            return
+        #if getattr(self, 'manual_glossary_manually_loaded', False) and self.manual_glossary_path:
+        #    self.append_log(f"📑 Keeping manually loaded glossary: {os.path.basename(self.manual_glossary_path)}")
+        #    return
         
         file_base = os.path.splitext(os.path.basename(file_path))[0]
         output_dir = file_base
