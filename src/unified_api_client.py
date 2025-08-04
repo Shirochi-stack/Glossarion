@@ -1339,7 +1339,7 @@ class UnifiedClient:
         """Setup the appropriate client based on model type"""
         model_lower = self.model.lower()
         tls = self._get_thread_local_client()
-        print(f"[DEBUG] _setup_client called with model: {self.model}")
+        #print(f"[DEBUG] _setup_client called with model: {self.model}")
         
         # Check model prefixes FIRST to determine provider
         self.client_type = None
@@ -5471,14 +5471,20 @@ class UnifiedClient:
                 
                 # Check if provider supports vision
                 if self.client_type not in vision_providers:
-                    raise UnifiedClientError(f"Provider {self.client_type} does not support image input")
-                
+                    #print(f"⚠️ WARNING: Provider {self.client_type} not in vision_providers list, attempting anyway...")
+                    # raise UnifiedClientError(f"Provider {self.client_type} does not support image input")
+                    pass
+
                 # Check if specific model supports vision
                 supported_models = vision_providers.get(self.client_type, [])
                 if supported_models != ['any']:
                     model_supported = any(model in self.model.lower() for model in supported_models)
                     if not model_supported:
-                        raise UnifiedClientError(f"Model {self.model} does not support image input")
+                        #print(f"⚠️ WARNING: Model {self.model} not in supported vision models list, attempting anyway...")
+                        #print(f"   Client type: {self.client_type}")
+                        #print(f"   Expected models: {supported_models}")
+                        # raise UnifiedClientError(f"Model {self.model} does not support image input")
+                        pass
                 
                 # Route to appropriate handler based on client type
                 if self.client_type == 'gemini':
