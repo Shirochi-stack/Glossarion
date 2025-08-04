@@ -600,7 +600,7 @@ class UnifiedClient:
             self.model = tls.model
             self.key_identifier = tls.key_identifier
             
-            print(f"🔑 Single-key mode: Using {self.model}")
+            #print(f"🔑 Single-key mode: Using {self.model}")
             self._setup_client()
 
 
@@ -635,27 +635,52 @@ class UnifiedClient:
             return
         
         # Get next available key for this thread
-        with self._pool_lock:
-            key_info = self._get_next_available_key_for_thread()
-            if key_info:
-                key, key_index = key_info
-                self.api_key = key.api_key
-                self.model = key.model
-                self.current_key_index = key_index
-                self.key_identifier = f"Key#{key_index+1} ({self.model})"
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count <= max_retries:
+            with self._pool_lock:
+                key_info = self._get_next_available_key_for_thread()
+                if key_info:
+                    key, key_index = key_info
+                    self.api_key = key.api_key
+                    self.model = key.model
+                    self.current_key_index = key_index
+                    self.key_identifier = f"Key#{key_index+1} ({self.model})"
+                    
+                    # Store assignment
+                    with self._assignment_lock:
+                        self._key_assignments[thread_id] = (key_index, self.key_identifier)
+                    
+                    masked_key = self.api_key[:8] + "..." + self.api_key[-4:] if len(self.api_key) > 12 else self.api_key
+                    print(f"[THREAD-{thread_name}] 🔑 Assigned {self.key_identifier} - {masked_key}")
+                    
+                    # Setup client for this key
+                    self._setup_client()
+                    self._apply_custom_endpoint_if_needed()
+                    return
+            
+            # No key available - all are on cooldown
+            if retry_count < max_retries:
+                wait_time = self._get_shortest_cooldown_time()
+                print(f"[THREAD-{thread_name}] No keys available, waiting {wait_time}s (retry {retry_count + 1}/{max_retries})")
                 
-                # Store assignment
-                with self._assignment_lock:
-                    self._key_assignments[thread_id] = (key_index, self.key_identifier)
+                # Wait with cancellation check
+                for i in range(wait_time):
+                    if hasattr(self, '_cancelled') and self._cancelled:
+                        raise UnifiedClientError("Operation cancelled while waiting for key", error_type="cancelled")
+                    time.sleep(1)
+                    if i % 10 == 0 and i > 0:
+                        print(f"[THREAD-{thread_name}] Still waiting... {wait_time - i}s remaining")
                 
-                masked_key = self.api_key[:8] + "..." + self.api_key[-4:] if len(self.api_key) > 12 else self.api_key
-                print(f"[THREAD-{thread_name}] 🔑 Assigned {self.key_identifier} - {masked_key}")
-                
-                # Setup client for this key
-                self._setup_client()
-                self._apply_custom_endpoint_if_needed()
-            else:
-                raise UnifiedClientError("No available API keys for thread", error_type="no_keys")
+                # Clear expired entries before next attempt
+                if hasattr(self, '_rate_limit_cache') and self._rate_limit_cache:
+                    self._rate_limit_cache.clear_expired()
+            
+            retry_count += 1
+        
+        # If we've exhausted all retries, raise error
+        raise UnifiedClientError(f"No available API keys for thread after {max_retries} retries", error_type="no_keys")
 
     def _get_next_available_key_for_thread(self) -> Optional[Tuple]:
         """Get next available key for thread assignment (thread-safe)"""
@@ -684,6 +709,35 @@ class UnifiedClient:
         for i, key in enumerate(self._api_key_pool.keys):
             key_id = f"Key#{i+1} ({key.model})"
             if not self._rate_limit_cache.is_rate_limited(key_id):
+                return (key, i)
+        
+        # All keys are rate limited - wait for shortest cooldown
+        wait_time = self._get_shortest_cooldown_time()
+        thread_name = threading.current_thread().name
+        
+        print(f"[Thread-{thread_name}] All keys on cooldown. Waiting {wait_time}s...")
+        
+        # Wait with cancellation check
+        for i in range(wait_time):
+            if hasattr(self, '_cancelled') and self._cancelled:
+                print(f"[Thread-{thread_name}] Wait cancelled by user")
+                return None
+            time.sleep(1)
+            if i % 10 == 0 and i > 0:
+                print(f"[Thread-{thread_name}] Still waiting... {wait_time - i}s remaining")
+        
+        # Clear expired entries from cache
+        self._rate_limit_cache.clear_expired()
+        
+        # Try again to find an available key
+        for i, key in enumerate(self._api_key_pool.keys):
+            key_id = f"Key#{i+1} ({key.model})"
+            if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
+                return (key, i)
+        
+        # Still no keys? Return the first enabled one
+        for i, key in enumerate(self._api_key_pool.keys):
+            if key.enabled:
                 return (key, i)
         
         return None
@@ -2172,6 +2226,34 @@ class UnifiedClient:
             attempts += 1
         
         print(f"[DEBUG] No available keys found after checking all {max_attempts} keys")
+        
+        # All keys are on cooldown - wait for shortest cooldown
+        wait_time = self._get_shortest_cooldown_time()
+        print(f"[DEBUG] All keys on cooldown. Waiting {wait_time}s...")
+        
+        # Wait with cancellation check
+        for i in range(wait_time):
+            if hasattr(self, '_cancelled') and self._cancelled:
+                print(f"[DEBUG] Wait cancelled by user")
+                return False
+            time.sleep(1)
+            if i % 10 == 0 and i > 0:
+                print(f"[DEBUG] Still waiting... {wait_time - i}s remaining")
+        
+        # Clear expired entries and try again
+        self._rate_limit_cache.clear_expired()
+        
+        # Try one more time to find an available key
+        attempts = 0
+        while attempts < max_attempts:
+            key_info = self._get_next_available_key()
+            if key_info:
+                potential_key_id = f"Key#{key_info[1]+1} ({key_info[0].model})"
+                if not self._rate_limit_cache.is_rate_limited(potential_key_id):
+                    self._apply_key_change(key_info, old_key_identifier)
+                    return True
+            attempts += 1
+        
         return False
 
 
@@ -2262,15 +2344,19 @@ class UnifiedClient:
         
         # Check each key's cooldown
         for i, key in enumerate(self._api_key_pool.keys):
-            if key.is_cooling_down and key.last_error_time:
-                remaining = key.cooldown - (now - key.last_error_time)
-                if remaining > 0 and remaining < min_wait:
-                    min_wait = remaining
-        
-        # Also check the rate limit cache
-        for key_id in self._rate_limit_cache.get_all_limited():
-            # This is already handled by the cache expiry check
-            pass
+            if key.enabled:  # Only check enabled keys
+                key_id = f"Key#{i+1} ({key.model})"
+                
+                # Check rate limit cache first
+                cache_cooldown = self._rate_limit_cache.get_remaining_cooldown(key_id)
+                if cache_cooldown > 0:
+                    min_wait = min(min_wait, cache_cooldown)
+                
+                # Also check key's own cooldown
+                if key.is_cooling_down and key.last_error_time:
+                    remaining = key.cooldown - (now - key.last_error_time)
+                    if remaining > 0:
+                        min_wait = min(min_wait, remaining)
         
         # Return the minimum wait time, capped at 60 seconds
         return min(int(min_wait) if min_wait != float('inf') else 30, 60)
