@@ -4079,10 +4079,10 @@ class UnifiedClient:
                 error_details[f'attempt_{attempt+1}'] = str(e)
             
             # No automatic retry - let higher level handle retries
-            attempt += 1
-            if attempt < attempts:
-                print(f"❌ Gemini attempt {attempt} failed, no automatic retry")
-                break  # Exit the retry loop
+            #attempt += 1
+            #if attempt < attempts:
+             #   print(f"❌ Gemini attempt {attempt} failed, no automatic retry")
+             #   break  # Exit the retry loop
                 
         # After getting the response, use the enhanced extraction method
         if response is not None:
