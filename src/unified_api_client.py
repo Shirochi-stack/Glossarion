@@ -512,7 +512,7 @@ class UnifiedClient:
             
             if should_rotate:
                 retry_count = 0
-                max_retries = 3
+                max_retries = 7
                 
                 while retry_count < max_retries:
                     # Get a key from the pool
@@ -663,7 +663,7 @@ class UnifiedClient:
             return
         
         # Get next available key for this thread
-        max_retries = 3
+        max_retries = 7
         retry_count = 0
         
         while retry_count <= max_retries:
@@ -2369,10 +2369,10 @@ class UnifiedClient:
                             )
                         
                         # No automatic retry - let higher level handle retries
-                        attempt += 1
-                        if attempt < attempts:
-                            print(f"❌ Gemini attempt {attempt} failed, no automatic retry")
-                            break  # Exit the retry loop
+                        #attempt += 1
+                        #if attempt < attempts:
+                        #    print(f"❌ Gemini attempt {attempt} failed, no automatic retry")
+                        #    break  # Exit the retry loop
                     
                 # Check stop flag after response
                 if is_stop_requested():
@@ -2466,7 +2466,7 @@ class UnifiedClient:
         
         logger.info(f"[{thread_name}] Using {self.key_identifier} for {context or 'unknown'}")
         
-        max_retries = 3
+        max_retries = 7
         retry_count = 0
         last_error = None
         
@@ -2922,8 +2922,12 @@ class UnifiedClient:
         elif self.client_type == 'vertex_model_garden':
             # Vertex AI doesn't use response_name parameter
             return handler(messages, temperature, max_tokens or max_completion_tokens, None, response_name)
+        elif self.client_type == 'gemini':
+            # Gemini handler will check thinking support internally
+            # Don't pass thinking as parameter - let _send_gemini handle it
+            return handler(messages, temperature, max_tokens, response_name)
         else:
-            # Other providers don't use max_completion_tokens yet
+            # Other providers don't use max_completion_tokens or thinking yet
             return handler(messages, temperature, max_tokens, response_name)
 
     def _get_anti_duplicate_params(self, temperature):
@@ -4077,6 +4081,36 @@ class UnifiedClient:
             except Exception as e:
                 print(f"Gemini attempt {attempt+1} failed: {e}")
                 error_details[f'attempt_{attempt+1}'] = str(e)
+                
+                # Check if this is a rate limit error
+                error_str = str(e)
+                if "429" in error_str and "RESOURCE_EXHAUSTED" in error_str:
+                    # Try to extract retryDelay from the error
+                    retry_delay = 60  # Default to 60 seconds
+                    
+                    try:
+                        # Look for retryDelay in the error message
+                        import re
+                        delay_match = re.search(r"'retryDelay':\s*'(\d+)s'", error_str)
+                        if delay_match:
+                            retry_delay = int(delay_match.group(1))
+                            if retry_delay == 0:
+                                retry_delay = 1  # Minimum 1 second delay
+                    except:
+                        pass
+                    
+                    print(f"⏳ Rate limited. Google suggests waiting {retry_delay}s before retry")
+                    
+                    # Create a UnifiedClientError with proper error_type for rate limit
+                    # This ensures the upper level recognizes it as a rate limit
+                    raise UnifiedClientError(
+                        f"Rate limit exceeded (429). Retry after {retry_delay}s", 
+                        error_type="rate_limit",
+                        http_status=429
+                    )
+                
+                # For other errors, just re-raise
+                raise
             
             # No automatic retry - let higher level handle retries
             #attempt += 1
