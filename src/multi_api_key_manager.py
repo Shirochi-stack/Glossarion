@@ -711,11 +711,14 @@ class MultiAPIKeyDialog:
         # Get selected indices
         indices = [self.tree.index(item) for item in selected]
         
+        # Show progress dialog immediately
+        self._create_progress_dialog()
+        
         # Run tests in thread
         thread = threading.Thread(target=self._run_tests, args=(indices,))
         thread.daemon = True
         thread.start()
-    
+
     def _test_all(self):
         """Test all API keys"""
         if not self.key_pool.keys:
@@ -724,74 +727,203 @@ class MultiAPIKeyDialog:
         
         indices = list(range(len(self.key_pool.keys)))
         
+        # Show progress dialog immediately
+        self._create_progress_dialog()
+        
         # Run tests in thread
         thread = threading.Thread(target=self._run_tests, args=(indices,))
         thread.daemon = True
         thread.start()
-    
-    def _run_tests(self, indices: List[int]):
-        """Run API tests for specified keys"""
-        from unified_api_client import UnifiedClient
+
+    def _create_progress_dialog(self):
+        """Create simple progress dialog at mouse cursor position"""
+        self.progress_dialog = tk.Toplevel(self.dialog)
+        self.progress_dialog.title("Testing API Keys")
         
-        for i in indices:
-            if i >= len(self.key_pool.keys):
-                continue
+        # Get mouse position
+        x = self.progress_dialog.winfo_pointerx()
+        y = self.progress_dialog.winfo_pointery()
+        
+        # Set geometry at cursor position (offset slightly so cursor is inside window)
+        self.progress_dialog.geometry(f"500x400+{x-50}+{y-30}")
+        
+        # Add label
+        label = tb.Label(self.progress_dialog, text="Testing in progress...", 
+                        font=('TkDefaultFont', 10, 'bold'))
+        label.pack(pady=10)
+        
+        # Add text widget for results
+        self.progress_text = scrolledtext.ScrolledText(self.progress_dialog, 
+                                                      wrap=tk.WORD, width=60, height=20)
+        self.progress_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        
+        # Add close button (initially disabled)
+        self.close_button = tb.Button(self.progress_dialog, text="Close", 
+                                     command=self.progress_dialog.destroy,
+                                     bootstyle="secondary", state=tk.DISABLED)
+        self.close_button.pack(pady=(0, 10))
+        
+        self.progress_dialog.transient(self.dialog)
+
+    def _run_tests(self, indices: List[int]):
+        """Run API tests for specified keys in parallel"""
+        from unified_api_client import UnifiedClient
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import os
+        
+        # Get Gemini endpoint settings
+        use_gemini_endpoint = os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"
+        gemini_endpoint = os.getenv("GEMINI_OPENAI_ENDPOINT", "")
+        
+        # Create thread pool for parallel testing
+        max_workers = min(10, len(indices))  # Limit to 10 concurrent tests
+        
+        def test_single_key(index):
+            """Test a single API key"""
+            if index >= len(self.key_pool.keys):
+                return None
                 
-            key = self.key_pool.keys[i]
+            key = self.key_pool.keys[index]
+            
+            # Create a key identifier
+            key_preview = f"{key.api_key[:8]}...{key.api_key[-4:]}" if len(key.api_key) > 12 else key.api_key
+            test_label = f"{key.model} [{key_preview}]"
+            
+            # Update UI to show test started
+            self.dialog.after(0, lambda label=test_label: self.progress_text.insert(tk.END, f"Testing {label}... "))
+            self.dialog.after(0, lambda: self.progress_text.see(tk.END))
             
             try:
-                # Create client - NO temperature in __init__!
-                client = UnifiedClient(
-                    api_key=key.api_key,
-                    model=key.model,
-                    output_dir=None  # Not needed for testing
-                )
+                # Check if this is a Gemini model with custom endpoint
+                is_gemini_model = key.model.lower().startswith('gemini')
                 
-                # Simple test message
-                messages = [
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": "Say 'API test successful' and nothing else."}
-                ]
-                
-                # Send request - temperature goes HERE in the send method
-                response = client.send(
-                    messages,
-                    temperature=0.7,  # Temperature goes in send(), not __init__
-                    max_tokens=100
-                )
-                
-                # Check response
-                if response and isinstance(response, tuple):
-                    content, finish_reason = response
-                    if content and "test successful" in content.lower():
-                        # Success
-                        self.test_results.put((i, True, "Test passed"))
-                        key.mark_success()
-                    else:
-                        # Got response but not expected content
-                        self.test_results.put((i, False, f"Unexpected response: {content[:100]}"))
-                        key.mark_error()
-                else:
-                    # Failed
-                    self.test_results.put((i, False, "No response"))
-                    key.mark_error()
+                if is_gemini_model and use_gemini_endpoint and gemini_endpoint:
+                    # Test Gemini with OpenAI-compatible endpoint
+                    import openai
                     
+                    endpoint_url = gemini_endpoint
+                    if not endpoint_url.endswith('/openai/'):
+                        endpoint_url = endpoint_url.rstrip('/') + '/openai/'
+                    
+                    client = openai.OpenAI(
+                        api_key=key.api_key,
+                        base_url=endpoint_url,
+                        timeout=10.0
+                    )
+                    
+                    response = client.chat.completions.create(
+                        model=key.model.replace('gemini/', ''),
+                        messages=[
+                            {"role": "system", "content": "You are a helpful assistant."},
+                            {"role": "user", "content": "Say 'API test successful' and nothing else."}
+                        ],
+                        max_tokens=100,
+                        temperature=0.7
+                    )
+                    
+                    content = response.choices[0].message.content
+                    if content and "test successful" in content.lower():
+                        self.dialog.after(0, lambda label=test_label: self._update_test_result(label, True))
+                        key.mark_success()
+                        return (index, True, "Test passed")
+                    else:
+                        self.dialog.after(0, lambda label=test_label: self._update_test_result(label, False))
+                        key.mark_error()
+                        return (index, False, "Unexpected response")
+                else:
+                    # Use UnifiedClient for non-Gemini or regular Gemini
+                    client = UnifiedClient(
+                        api_key=key.api_key,
+                        model=key.model,
+                        output_dir=None
+                    )
+                    
+                    messages = [
+                        {"role": "system", "content": "You are a helpful assistant."},
+                        {"role": "user", "content": "Say 'API test successful' and nothing else."}
+                    ]
+                    
+                    response = client.send(
+                        messages,
+                        temperature=0.7,
+                        max_tokens=100
+                    )
+                    
+                    if response and isinstance(response, tuple):
+                        content, finish_reason = response
+                        if content and "test successful" in content.lower():
+                            self.dialog.after(0, lambda label=test_label: self._update_test_result(label, True))
+                            key.mark_success()
+                            return (index, True, "Test passed")
+                        else:
+                            self.dialog.after(0, lambda label=test_label: self._update_test_result(label, False))
+                            key.mark_error()
+                            return (index, False, "Unexpected response")
+                    else:
+                        self.dialog.after(0, lambda label=test_label: self._update_test_result(label, False))
+                        key.mark_error()
+                        return (index, False, "No response")
+                        
             except Exception as e:
                 error_msg = str(e)
                 error_code = None
                 
-                # Check for rate limit
                 if "429" in error_msg or "rate limit" in error_msg.lower():
                     error_code = 429
                     
-                self.test_results.put((i, False, f"Error: {error_msg}"))
+                self.dialog.after(0, lambda label=test_label: self._update_test_result(label, False, error=True))
                 key.mark_error(error_code)
+                return (index, False, f"Error: {error_msg}")
         
-        # Update UI
+        # Run tests in parallel
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all test tasks
+            future_to_index = {executor.submit(test_single_key, i): i for i in indices}
+            
+            # Process results as they complete
+            for future in as_completed(future_to_index):
+                result = future.result()
+                if result:
+                    self.test_results.put(result)
+        
+        # Show completion and close button
+        self.dialog.after(0, self._show_completion)
+        
+        # Process final results
         self.dialog.after(0, self._process_test_results)
-    
+
+    def _update_test_result(self, test_label, success, error=False):
+        """Update the progress text with test result"""
+        # Find the line with this test label
+        content = self.progress_text.get("1.0", tk.END)
+        lines = content.split('\n')
+        
+        for i, line in enumerate(lines):
+            if test_label in line and not any(status in line for status in ["✅", "❌"]):
+                # This is our line, update it
+                if error:
+                    result_text = "❌ ERROR"
+                elif success:
+                    result_text = "✅ PASSED"
+                else:
+                    result_text = "❌ FAILED"
+                
+                # Calculate position
+                line_num = i + 1
+                line_end = f"{line_num}.end"
+                
+                self.progress_text.insert(line_end, result_text)
+                self.progress_text.insert(line_end, "\n")
+                self.progress_text.see(tk.END)
+                break
+
+    def _show_completion(self):
+        """Show completion in the same dialog"""
+        self.progress_text.insert(tk.END, "\n--- Testing Complete ---\n")
+        self.progress_text.see(tk.END)
+        
     def _process_test_results(self):
-        """Process test results from queue"""
+        """Process test results and show in the same dialog"""
         results = []
         
         # Get all results
@@ -806,37 +938,27 @@ class MultiAPIKeyDialog:
             success_count = sum(1 for _, success, _ in results if success)
             total_count = len(results)
             
-            message = f"Test Results: {success_count}/{total_count} passed\n\n"
+            # Add summary to the same dialog
+            self.progress_text.insert(tk.END, f"\nSummary: {success_count}/{total_count} passed\n")
+            self.progress_text.insert(tk.END, "-" * 50 + "\n\n")
             
             for i, success, msg in results:
                 key = self.key_pool.keys[i]
+                # Show key identifier in results too
+                key_preview = f"{key.api_key[:8]}...{key.api_key[-4:]}" if len(key.api_key) > 12 else key.api_key
                 status = "✅" if success else "❌"
-                message += f"{status} {key.model}: {msg}\n"
+                self.progress_text.insert(tk.END, f"{status} {key.model} [{key_preview}]: {msg}\n")
             
-            # Show results
-            self._show_test_results(message)
+            self.progress_text.see(tk.END)
+            
+            # Enable close button now that testing is complete
+            self.close_button.config(state=tk.NORMAL)
+            
+            # Update the dialog title
+            self.progress_dialog.title(f"API Test Results - {success_count}/{total_count} passed")
             
             # Refresh list
             self._refresh_key_list()
-    
-    def _show_test_results(self, message: str):
-        """Show test results in a dialog"""
-        dialog = tk.Toplevel(self.dialog)
-        dialog.title("API Test Results")
-        dialog.geometry("500x400")
-        
-        # Text widget
-        text = scrolledtext.ScrolledText(dialog, wrap=tk.WORD, width=60, height=20)
-        text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        text.insert('1.0', message)
-        text.config(state=tk.DISABLED)
-        
-        # Close button
-        tb.Button(dialog, text="Close", command=dialog.destroy,
-                 bootstyle="secondary").pack(pady=(0, 10))
-        
-        dialog.transient(self.dialog)
-        dialog.grab_set()
     
     def _enable_selected(self):
         """Enable selected keys"""
