@@ -6344,13 +6344,11 @@ def main(log_callback=None, stop_callback=None):
             
             # Check if this chapter was processed and has qa_failed status
             content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
-            # Get the status from the progress manager
-            needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
-                idx, actual_num, content_hash, out
-            )
-            # Extract status from the progress data directly
-            chapter_key = progress_manager._get_chapter_key(idx, actual_num, content_hash)
-            status = progress_manager.prog["chapters"].get(chapter_key, {}).get("status")
+            
+            # Check if this chapter exists in progress and has qa_failed status
+            # The chapter key is the content_hash itself
+            chapter_info = progress_manager.prog["chapters"].get(content_hash, {})
+            status = chapter_info.get("status")
             
             if status == "qa_failed":
                 qa_failed_chapters.append(actual_num)
