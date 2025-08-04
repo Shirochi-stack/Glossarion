@@ -9535,7 +9535,6 @@ Important rules:
             UIHelper.disable_spinbox_mousewheel(workers_spinbox)
 
             # CPU count display
-            import multiprocessing
             cpu_count = multiprocessing.cpu_count()
             cpu_label = tk.Label(
                 workers_frame,
