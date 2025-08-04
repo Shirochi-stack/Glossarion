@@ -489,27 +489,31 @@ class MultiAPIKeyDialog:
         
         scrollbar.config(command=self.tree.yview)
         
-        # Configure columns
-        self.tree.heading('#0', text='API Key')
-        self.tree.column('#0', width=300)
+        # Configure columns with better widths and anchoring
+        self.tree.heading('#0', text='API Key', anchor='w')
+        self.tree.column('#0', width=200, minwidth=150, anchor='w')
         
-        self.tree.heading('Model', text='Model')
-        self.tree.column('Model', width=150)
+        self.tree.heading('Model', text='Model', anchor='w')
+        self.tree.column('Model', width=180, minwidth=120, anchor='w')
         
-        self.tree.heading('Cooldown', text='Cooldown')
-        self.tree.column('Cooldown', width=80)
+        self.tree.heading('Cooldown', text='Cooldown', anchor='center')
+        self.tree.column('Cooldown', width=80, minwidth=60, anchor='center')
         
-        self.tree.heading('Status', text='Status')
-        self.tree.column('Status', width=100)
+        self.tree.heading('Status', text='Status', anchor='center')
+        self.tree.column('Status', width=150, minwidth=100, anchor='center')
         
-        self.tree.heading('Success', text='Success')
-        self.tree.column('Success', width=70)
+        self.tree.heading('Success', text='✓', anchor='center')
+        self.tree.column('Success', width=50, minwidth=40, anchor='center')
         
-        self.tree.heading('Errors', text='Errors')
-        self.tree.column('Errors', width=70)
+        self.tree.heading('Errors', text='✗', anchor='center')
+        self.tree.column('Errors', width=50, minwidth=40, anchor='center')
         
-        self.tree.heading('Last Used', text='Last Used')
-        self.tree.column('Last Used', width=120)
+        self.tree.heading('Last Used', text='Last Used', anchor='center')
+        self.tree.column('Last Used', width=90, minwidth=70, anchor='center')
+        
+        # Configure tree style for better appearance
+        style = ttk.Style()
+        style.configure("Treeview.Heading", font=('TkDefaultFont', 11, 'bold'))
         
         # Bind events for inline editing
         self.tree.bind('<Button-1>', self._on_click)
@@ -538,7 +542,7 @@ class MultiAPIKeyDialog:
                  bootstyle="danger").pack(side=tk.LEFT, padx=5)
         
         # Stats label
-        self.stats_label = tk.Label(action_frame, text="", font=('TkDefaultFont', 9), fg='gray')
+        self.stats_label = tk.Label(action_frame, text="", font=('TkDefaultFont', 11), fg='gray')
         self.stats_label.pack(side=tk.RIGHT)
 
     def _on_click(self, event):
@@ -793,7 +797,16 @@ class MultiAPIKeyDialog:
             # Last used
             last_used = ""
             if key.last_used_time:
-                last_used = datetime.fromtimestamp(key.last_used_time).strftime("%H:%M:%S")
+                # Show relative time if recent, otherwise just time
+                time_diff = time.time() - key.last_used_time
+                if time_diff < 60:  # Less than 1 minute
+                    last_used = "Just now"
+                elif time_diff < 3600:  # Less than 1 hour
+                    last_used = f"{int(time_diff/60)}m ago"
+                elif time_diff < 86400:  # Less than 1 day
+                    last_used = datetime.fromtimestamp(key.last_used_time).strftime("%H:%M")
+                else:
+                    last_used = datetime.fromtimestamp(key.last_used_time).strftime("%m/%d")
             
             # Insert into tree
             self.tree.insert('', 'end', 
@@ -1055,8 +1068,8 @@ class MultiAPIKeyDialog:
         self.tree.tag_configure('active', foreground='green')
         self.tree.tag_configure('cooling', foreground='orange')
         self.tree.tag_configure('disabled', foreground='gray')
-        self.tree.tag_configure('testing', foreground='blue', font=('TkDefaultFont', 10, 'italic'))
-        self.tree.tag_configure('passed', foreground='dark green', font=('TkDefaultFont', 10, 'bold'))
+        self.tree.tag_configure('testing', foreground='blue', font=('TkDefaultFont', 14))
+        self.tree.tag_configure('passed', foreground='dark green', font=('TkDefaultFont', 14))
         self.tree.tag_configure('failed', foreground='red')
         self.tree.tag_configure('ratelimited', foreground='orange')
         self.tree.tag_configure('error', foreground='dark red')
