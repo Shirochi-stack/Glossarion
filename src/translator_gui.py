@@ -12549,6 +12549,23 @@ Important rules:
                 fw_model = current_model if current_model.startswith('accounts/') else f"accounts/fireworks/models/{current_model.replace('fireworks/', '')}"
                 endpoints_to_test.append(("Fireworks", fireworks_url, fw_model))
         
+        # Gemini OpenAI-Compatible endpoint
+        if hasattr(self, 'use_gemini_openai_endpoint_var') and self.use_gemini_openai_endpoint_var.get():
+            gemini_url = self.gemini_openai_endpoint_var.get()
+            if gemini_url:
+                # Ensure the endpoint ends with /openai/ for compatibility
+                if not gemini_url.endswith('/openai/'):
+                    if gemini_url.endswith('/'):
+                        gemini_url = gemini_url + 'openai/'
+                    else:
+                        gemini_url = gemini_url + '/openai/'
+                
+                # For Gemini OpenAI-compatible endpoints, use the current model or a suitable default
+                current_model = self.model_var.get() if hasattr(self, 'model_var') else "gemini-2.0-flash-exp"
+                # Remove any 'gemini/' prefix for the OpenAI-compatible endpoint
+                gemini_model = current_model.replace('gemini/', '') if current_model.startswith('gemini/') else current_model
+                endpoints_to_test.append(("Gemini (OpenAI-Compatible)", gemini_url, gemini_model))
+        
         if not endpoints_to_test:
             messagebox.showinfo("Info", "No custom endpoints configured. Using default API endpoints.")
             return
