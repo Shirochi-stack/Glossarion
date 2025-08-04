@@ -67,7 +67,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     api_thread.start()
     
     timeout = chunk_timeout if chunk_timeout is not None else 86400
-    check_interval = 0.1  # Reduced from 0.5 to 0.1 for faster response
+    check_interval = 0.1
     elapsed = 0
     
     while elapsed < timeout:
@@ -645,7 +645,7 @@ def validate_extracted_entry(entry):
     
     # Check if type is enabled
     custom_types = get_custom_entry_types()
-    entry_type = entry['type'].lower()
+    entry_type = entry.get('type', '').lower()
     
     if entry_type not in custom_types:
         return False
@@ -665,21 +665,21 @@ def build_prompt(chapter_text: str) -> tuple:
     """Build the extraction prompt with custom types - returns (system_prompt, user_prompt)"""
     custom_prompt = os.getenv('GLOSSARY_SYSTEM_PROMPT', '').strip()
     
-    # DEBUG: Print what we're getting
-    #print(f"[DEBUG] GLOSSARY_SYSTEM_PROMPT from env: {repr(custom_prompt[:100] if custom_prompt else 'EMPTY')}")
-    
     if not custom_prompt:
         # If no custom prompt, create a default
-        custom_prompt = """"""
+        custom_prompt = """Extract all character names and important terms from the text.
+
+{fields}
+
+Only include entries that appear in the text.
+Return the data in the exact format specified above."""
     
     # Check if the prompt contains {fields} placeholder
     if '{fields}' in custom_prompt:
         # Get enabled types
         custom_types = get_custom_entry_types()
-        #print(f"[DEBUG] custom_types: {custom_types}")
         
         enabled_types = [(t, cfg) for t, cfg in custom_types.items() if cfg.get('enabled', True)]
-        #print(f"[DEBUG] enabled_types: {enabled_types}")
         
         # Get custom fields
         custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
@@ -687,12 +687,10 @@ def build_prompt(chapter_text: str) -> tuple:
             custom_fields = json.loads(custom_fields_json)
         except:
             custom_fields = []
-        #print(f"[DEBUG] custom_fields: {custom_fields}")
         
         # Build fields specification based on what the prompt expects
         # Check if the prompt mentions CSV or JSON to determine format
         if 'CSV' in custom_prompt.upper():
-            #print("[DEBUG] Detected CSV format in prompt")
             # CSV format
             fields_spec = []
             
@@ -718,10 +716,8 @@ def build_prompt(chapter_text: str) -> tuple:
                 
                 fields_spec.append(','.join(example_parts))
             
-            #print(f"[DEBUG] CSV fields_spec: {fields_spec}")
             fields_str = '\n'.join(fields_spec)
         else:
-            #print("[DEBUG] Detected JSON format in prompt")
             # JSON format (default)
             fields_spec = []
             fields_spec.append("Extract entities and return as a JSON array.")
@@ -764,14 +760,10 @@ def build_prompt(chapter_text: str) -> tuple:
                 fields_spec.append(',\n'.join(examples))
                 fields_spec.append(']')
             
-            #print(f"[DEBUG] JSON fields_spec: {fields_spec}")
             fields_str = '\n'.join(fields_spec)
-        
-        #print(f"[DEBUG] fields_str: {repr(fields_str[:200] if fields_str else 'EMPTY')}")
         
         # Replace {fields} placeholder
         system_prompt = custom_prompt.replace('{fields}', fields_str)
-        #print(f"[DEBUG] After replacement - system_prompt preview: {repr(system_prompt[:200])}")
     else:
         # No {fields} placeholder - use the prompt as-is
         system_prompt = custom_prompt
@@ -863,7 +855,7 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
             # Get system and user prompts
             system_prompt, user_prompt = build_prompt(chap)
 
-            # FIX: Build messages correctly with system and user prompts
+            # Build messages correctly with system and user prompts
             if not contextual_enabled:
                 msgs = [
                     {"role": "system", "content": system_prompt},
@@ -883,46 +875,36 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
             futures[future] = (idx, chap)
         
         # Process results with better cancellation
-        try:
-            for future in as_completed(futures, timeout=1):  # Add timeout to as_completed
-                if check_stop():
-                    print("🛑 Stop detected - cancelling all pending operations...")
-                    # Cancel all pending futures immediately
-                    cancelled = cancel_all_futures(list(futures.keys()))
-                    if cancelled > 0:
-                        print(f"✅ Cancelled {cancelled} pending API calls")
-                    # Shutdown executor immediately
-                    executor.shutdown(wait=False)
-                    break
-                    
-                idx, chap = futures[future]
-                try:
-                    result = future.result(timeout=0.5)  # Short timeout on result retrieval
+        for future in as_completed(futures):  # Removed timeout - let futures complete
+            if check_stop():
+                print("🛑 Stop detected - cancelling all pending operations...")
+                # Cancel all pending futures immediately
+                cancelled = cancel_all_futures(list(futures.keys()))
+                if cancelled > 0:
+                    print(f"✅ Cancelled {cancelled} pending API calls")
+                # Shutdown executor immediately
+                executor.shutdown(wait=False)
+                break
+                
+            idx, chap = futures[future]
+            try:
+                result = future.result(timeout=0.5)  # Short timeout on result retrieval
+                # Ensure chap is added to result here if not already present
+                if 'chap' not in result:
                     result['chap'] = chap
-                    results.append(result)
-                except Exception as e:
-                    if "stopped by user" in str(e).lower():
-                        print(f"✅ Chapter {idx+1} stopped by user")
-                    else:
-                        print(f"Error processing chapter {idx+1}: {e}")
-                    results.append({
-                        'idx': idx,
-                        'data': [],
-                        'resp': "",
-                        'chap': chap,
-                        'error': str(e)
-                    })
-        except TimeoutError:
-            # Check for stop more frequently during processing
-            while any(not f.done() for f in futures):
-                if check_stop():
-                    print("🛑 Stop detected during batch processing...")
-                    cancelled = cancel_all_futures(list(futures.keys()))
-                    if cancelled > 0:
-                        print(f"✅ Cancelled {cancelled} pending API calls")
-                    executor.shutdown(wait=False)
-                    break
-                time.sleep(0.1)  # Short sleep to check frequently
+                results.append(result)
+            except Exception as e:
+                if "stopped by user" in str(e).lower():
+                    print(f"✅ Chapter {idx+1} stopped by user")
+                else:
+                    print(f"Error processing chapter {idx+1}: {e}")
+                results.append({
+                    'idx': idx,
+                    'data': [],
+                    'resp': "",
+                    'chap': chap,
+                    'error': str(e)
+                })
     
     # Sort results by chapter index
     results.sort(key=lambda x: x['idx'])
@@ -963,7 +945,17 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             chunk_timeout=chunk_timeout
         )
         
-        resp = raw[0] if isinstance(raw, tuple) else raw
+        # Handle the response - it might be a tuple or a string
+        if isinstance(raw, tuple):
+            resp = raw[0] if raw[0] is not None else ""
+        elif isinstance(raw, str):
+            resp = raw
+        elif hasattr(raw, 'content'):
+            resp = raw.content if raw.content is not None else ""
+        elif hasattr(raw, 'text'):
+            resp = raw.text if raw.text is not None else ""
+        else:
+            resp = str(raw) if raw is not None else ""
         
         # Save the raw response in thread-safe location
         response_file = os.path.join(thread_dir, f"chapter_{idx+1}_response.txt")
@@ -972,6 +964,10 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
         
         # Parse response using the new parser
         data = parse_api_response(resp)
+        
+        # More detailed debug logging
+        print(f"[BATCH] Chapter {idx+1} - Raw response length: {len(resp)} chars")
+        print(f"[BATCH] Chapter {idx+1} - Parsed {len(data)} entries before validation")
         
         # Filter out invalid entries
         valid_data = []
@@ -982,15 +978,16 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
                     entry['raw_name'] = entry['raw_name'].strip()
                 valid_data.append(entry)
             else:
-                print(f"[Debug] Skipped invalid entry in chapter {idx+1}: {entry}")
+                print(f"[BATCH] Chapter {idx+1} - Invalid entry: {entry}")
         
         elapsed = time.time() - start_time
-        print(f"[BATCH] Completed Chapter {idx+1} in {elapsed:.1f}s at {time.strftime('%H:%M:%S')} - Extracted {len(valid_data)} entries")
+        print(f"[BATCH] Completed Chapter {idx+1} in {elapsed:.1f}s at {time.strftime('%H:%M:%S')} - Extracted {len(valid_data)} valid entries")
         
         return {
             'idx': idx,
             'data': valid_data,
             'resp': resp,
+            'chap': chap,  # Include the chapter text in the result
             'error': None
         }
             
@@ -1000,14 +997,18 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             'idx': idx,
             'data': [],
             'resp': "",
+            'chap': chap,  # Include chapter even on error
             'error': str(e)
         }
     except Exception as e:
         print(f"[Error] Unexpected error for chapter {idx+1}: {e}")
+        import traceback
+        print(f"[Error] Traceback: {traceback.format_exc()}")
         return {
             'idx': idx,
             'data': [],
             'resp': "",
+            'chap': chap,  # Include chapter even on error
             'error': str(e)
         }
 
@@ -1041,6 +1042,13 @@ def main(log_callback=None, stop_callback=None):
         epub_path = os.getenv("EPUB_PATH", "")
         if not epub_path and len(sys.argv) > 1:
             epub_path = sys.argv[1]
+        
+        # Create args object for GUI mode
+        import types
+        args = types.SimpleNamespace()
+        args.epub = epub_path
+        args.output = os.getenv("OUTPUT_PATH", "glossary.json")
+        args.config = os.getenv("CONFIG_PATH", "config.json")
 
     is_text_file = epub_path.lower().endswith('.txt')
     
@@ -1240,59 +1248,98 @@ def main(log_callback=None, stop_callback=None):
             
             # Process results from the batch
             batch_glossary_entries = []
+            batch_entry_count = 0  # Track total entries in this batch
             
             for result in batch_results:
                 if check_stop():
                     print(f"❌ Glossary extraction stopped during batch processing")
                     return
                 
-                idx = result['idx']
-                data = result['data']
-                resp = result['resp']
-                chap = result['chap']
+                idx = result.get('idx', -1)
+                data = result.get('data', [])
+                resp = result.get('resp', '')
+                chap = result.get('chap', '')
                 error = result.get('error')
                 
                 if error:
                     print(f"[Chapter {idx+1}] Error: {error}")
                     continue
                 
-                # Log entries
-                total_ent = len(data)
-                for eidx, entry in enumerate(data, start=1):
-                    elapsed = time.time() - start
-                    if idx == 0 and eidx == 1:
-                        eta = 0
-                    else:
-                        avg = elapsed / ((idx * 100) + eidx)
-                        eta = avg * (total_chapters * 100 - ((idx * 100) + eidx))
+                # Process and log entries (similar to sequential mode)
+                if data and len(data) > 0:
+                    total_ent = len(data)
+                    batch_entry_count += total_ent  # Add to batch total
                     
-                    # Get entry info based on new format
-                    entry_type = entry.get("type", "?")
-                    raw_name = entry.get("raw_name", "?")
-                    trans_name = entry.get("translated_name", "?")
+                    for eidx, entry in enumerate(data, start=1):
+                        elapsed = time.time() - start
+                        # Calculate ETA based on all chapters, not just this batch
+                        entries_so_far = sum(len(result.get('data', [])) for result in batch_results[:batch_results.index(result)]) + eidx
+                        total_entries_estimate = (entries_so_far / (batch_results.index(result) + 1)) * len(batch_results) * (total_chapters / len(chapters_to_process))
+                        
+                        if entries_so_far == 1:
+                            eta = 0
+                        else:
+                            avg = elapsed / entries_so_far
+                            eta = avg * (total_entries_estimate - entries_so_far)
+                        
+                        # Get entry info based on new format
+                        entry_type = entry.get("type", "?")
+                        raw_name = entry.get("raw_name", "?")
+                        trans_name = entry.get("translated_name", "?")
+                        
+                        print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → {entry_type}: {raw_name} ({trans_name})')
                     
-                    print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → {entry_type}: {raw_name} ({trans_name})')
+                    # Collect entries for batch merging
+                    batch_glossary_entries.extend(data)
                 
-                # Collect entries for batch merging
-                batch_glossary_entries.extend(data)
                 completed.append(idx)
                 
                 # Only add to history if contextual is enabled
-                if contextual_enabled:
+                if contextual_enabled and resp and chap:
                     # For history, we need to reconstruct what was sent
                     system_prompt, user_prompt = build_prompt(chap)
                     history.append({"user": user_prompt, "assistant": resp})
             
             # Apply skip logic to batch entries
             if batch_glossary_entries:
-                print(f"🔀 Processing {len(batch_glossary_entries)} entries from batch {batch_num+1}")
+                print(f"\n🔀 Processing {len(batch_glossary_entries)} entries from batch {batch_num+1}/{total_batches}")
+                original_glossary_size = len(glossary)
                 glossary.extend(batch_glossary_entries)
                 glossary[:] = skip_duplicate_entries(glossary)
+                new_entries = len(glossary) - original_glossary_size
+                if new_entries > 0:
+                    print(f"✅ Added {new_entries} new unique entries to glossary (total: {len(glossary)})")
+                else:
+                    print(f"ℹ️  All entries in this batch were duplicates (total remains: {len(glossary)})")
+            else:
+                print(f"[BATCH] No entries found in batch {batch_num+1}")
             
             # Save progress after each batch
             save_progress(completed, glossary, history)
             save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
             save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+            
+            # Print batch summary
+            if batch_entry_count > 0:
+                print(f"\n📊 Batch {batch_num+1}/{total_batches} Summary:")
+                print(f"   • Chapters processed: {len(batch_results)}")
+                print(f"   • Total entries extracted: {batch_entry_count}")
+                print(f"   • Glossary size: {len(glossary)} unique entries")
+            
+            # Handle context history
+            if contextual_enabled:
+                # Reset history when limit reached without rolling window
+                if not rolling_window and len(history) >= ctx_limit and ctx_limit > 0:
+                    print(f"🔄 Resetting glossary context (reached {ctx_limit} chapter limit)")
+                    history = []
+                    prog['context_history'] = []
+            
+            # Add delay between batches (but not after the last batch)
+            if batch_num < total_batches - 1:
+                print(f"\n⏱️  Waiting {api_delay}s before next batch...")
+                if not interruptible_sleep(api_delay, check_stop, 0.1):
+                    print(f"❌ Glossary extraction stopped during delay")
+                    return
             
             # Handle context history
             if contextual_enabled:
