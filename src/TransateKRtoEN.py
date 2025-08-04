@@ -6772,12 +6772,21 @@ def main(log_callback=None, stop_callback=None):
                 
                 progress_manager.prog["chapter_chunks"][chapter_key_str]["total"] = len(chunks)
                 
-                if chunk_idx in progress_manager.prog["chapter_chunks"][chapter_key_str]["completed"]:
+                # Get chapter status to check for qa_failed
+                chapter_info = progress_manager.prog["chapters"].get(chapter_key_str, {})
+                chapter_status = chapter_info.get("status")
+
+                # Check if chunk is completed AND chapter is not qa_failed
+                if (chunk_idx in progress_manager.prog["chapter_chunks"][chapter_key_str]["completed"] 
+                    and chapter_status != "qa_failed"):
                     saved_chunk = progress_manager.prog["chapter_chunks"][chapter_key_str]["chunks"].get(str(chunk_idx))
                     if saved_chunk:
                         translated_chunks.append((saved_chunk, chunk_idx, total_chunks))
                         print(f"  [SKIP] Chunk {chunk_idx}/{total_chunks} already translated")
                         continue
+                elif chapter_status == "qa_failed":
+                    # Force retranslation of qa_failed chapters
+                    print(f"  [RETRY] Chunk {chunk_idx}/{total_chunks} - retranslating due to QA failure")
                         
                 if config.CONTEXTUAL and history_manager.will_reset_on_next_append(config.HIST_LIMIT):
                     print(f"  📌 History will reset after this chunk (current: {len(history_manager.load_history())//2}/{config.HIST_LIMIT} exchanges)")
