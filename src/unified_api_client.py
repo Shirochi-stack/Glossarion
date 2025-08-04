@@ -147,8 +147,14 @@ except ImportError:
     class OpenAIError(Exception): pass
 
 # Gemini SDK
-from google import genai
-from google.genai import types
+try:
+    from google import genai
+    from google.genai import types
+    GENAI_AVAILABLE = True
+except ImportError:
+    genai = None
+    types = None
+    GENAI_AVAILABLE = False
 
 # Anthropic SDK (optional - can use requests if not installed)
 try:
@@ -1445,24 +1451,30 @@ class UnifiedClient:
                 self.client_type = 'openai'  # This ensures _send_openai will be called
                 
                 print(f"[DEBUG] Gemini configured to use OpenAI-compatible endpoint: {gemini_endpoint}")
-                print(f"[DEBUG] Using API key ending in: ...{self.api_key[-4:]}")
-                print(f"[DEBUG] Model for API call: {self.model}")
+                #print(f"[DEBUG] Using API key ending in: ...{self.api_key[-4:]}")
+                #print(f"[DEBUG] Model for API call: {self.model}")
             else:
                 # Use native Gemini client
-                print(f"[DEBUG] Setting up native Gemini client")
-                if genai is None:
-                    raise ImportError("Google Generative AI library not installed. Install with: pip install google-generativeai")
+                #print(f"[DEBUG] Setting up native Gemini client")
+                pass
+                if not GENAI_AVAILABLE:
+                    raise ImportError(
+                        "Google Gen AI library not installed. Install with: "
+                        "pip install google-genai"
+                    )
                 
-                # Configure Gemini with the API key
-                genai.configure(api_key=self.api_key)
+                # Create Gemini client with the new API
+                # The new SDK can use API key from environment or passed directly
+                self.gemini_client = genai.Client(api_key=self.api_key)
                 
                 # Store thread-local reference if in multi-key mode
                 if hasattr(tls, 'model'):
                     tls.gemini_configured = True
                     tls.gemini_api_key = self.api_key
+                    tls.gemini_client = self.gemini_client
                 
-                print(f"[DEBUG] Configured native Gemini client for model: {self.model}")
-                print(f"[DEBUG] Using API key ending in: ...{self.api_key[-4:]}")
+                #print(f"[DEBUG] Created native Gemini client for model: {self.model}")
+                #print(f"[DEBUG] Using API key ending in: ...{self.api_key[-4:]}")
             
         elif self.client_type == 'electronhub':
             # ElectronHub uses OpenAI SDK if available
