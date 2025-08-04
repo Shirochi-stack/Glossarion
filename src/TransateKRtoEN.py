@@ -6380,10 +6380,9 @@ def main(log_callback=None, stop_callback=None):
             print(f"   Failed chapters: {', '.join(map(str, sorted(qa_failed_chapters)))}")
         
         # Stop translation completely after batch mode
-        print("\n📌 Batch translation completed. Stopping translation process.")
-        return  # Exit the function completely, preventing sequential processing
+        print("\n📌 Batch translation completed.")
     
-    if not config.BATCH_TRANSLATION:
+    elif not config.BATCH_TRANSLATION:
         translation_processor = TranslationProcessor(config, client, out, log_callback, check_stop, uses_zero_based, is_text_file)
         
         if config.DUPLICATE_DETECTION_MODE == 'ai-hunter':
