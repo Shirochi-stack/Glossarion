@@ -1418,9 +1418,51 @@ class UnifiedClient:
             print(f"[DEBUG] OpenAI client created: {self.openai_client}")
             
         elif self.client_type == 'gemini':
-            if genai is None:
-                raise ImportError("Google Generative AI library not installed. Install with: pip install google-generativeai")
-            self.gemini_client = genai.Client(api_key=self.api_key)
+            # Check if we should use OpenAI-compatible endpoint for Gemini
+            use_gemini_endpoint = os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"
+            gemini_endpoint = os.getenv("GEMINI_OPENAI_ENDPOINT", "")
+            
+            if use_gemini_endpoint and gemini_endpoint:
+                # Use OpenAI client for Gemini with custom endpoint
+                print(f"[DEBUG] Setting up Gemini with OpenAI-compatible endpoint")
+                if openai is None:
+                    raise ImportError("OpenAI library not installed. Install with: pip install openai")
+                
+                # Ensure endpoint has proper format
+                if not gemini_endpoint.endswith('/openai/'):
+                    if gemini_endpoint.endswith('/'):
+                        gemini_endpoint = gemini_endpoint + 'openai/'
+                    else:
+                        gemini_endpoint = gemini_endpoint + '/openai/'
+                
+                self.openai_client = openai.OpenAI(
+                    api_key=self.api_key,
+                    base_url=gemini_endpoint
+                )
+                
+                # Store original client type for logging but use openai for dispatch
+                self._original_client_type = 'gemini'
+                self.client_type = 'openai'  # This ensures _send_openai will be called
+                
+                print(f"[DEBUG] Gemini configured to use OpenAI-compatible endpoint: {gemini_endpoint}")
+                print(f"[DEBUG] Using API key ending in: ...{self.api_key[-4:]}")
+                print(f"[DEBUG] Model for API call: {self.model}")
+            else:
+                # Use native Gemini client
+                print(f"[DEBUG] Setting up native Gemini client")
+                if genai is None:
+                    raise ImportError("Google Generative AI library not installed. Install with: pip install google-generativeai")
+                
+                # Configure Gemini with the API key
+                genai.configure(api_key=self.api_key)
+                
+                # Store thread-local reference if in multi-key mode
+                if hasattr(tls, 'model'):
+                    tls.gemini_configured = True
+                    tls.gemini_api_key = self.api_key
+                
+                print(f"[DEBUG] Configured native Gemini client for model: {self.model}")
+                print(f"[DEBUG] Using API key ending in: ...{self.api_key[-4:]}")
             
         elif self.client_type == 'electronhub':
             # ElectronHub uses OpenAI SDK if available
@@ -1441,6 +1483,72 @@ class UnifiedClient:
                 self.cohere_client = cohere.Client(self.api_key)
             else:
                 logger.info("Cohere SDK not installed, will use HTTP API")
+        
+        elif self.client_type == 'anthropic':
+            if anthropic is None:
+                logger.info("Anthropic SDK not installed, will use HTTP API")
+            else:
+                # Store API key for HTTP fallback
+                self.anthropic_api_key = self.api_key
+                logger.info("Anthropic client configured")
+        
+        elif self.client_type == 'deepseek':
+            # DeepSeek typically uses OpenAI-compatible endpoint
+            if openai is not None:
+                deepseek_url = os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/v1")
+                self.openai_client = openai.OpenAI(
+                    api_key=self.api_key,
+                    base_url=deepseek_url
+                )
+                logger.info(f"DeepSeek client configured with endpoint: {deepseek_url}")
+            else:
+                logger.info("DeepSeek will use HTTP API")
+        
+        elif self.client_type == 'groq':
+            # Groq uses OpenAI-compatible endpoint
+            if openai is not None:
+                groq_url = os.getenv("GROQ_API_URL", "https://api.groq.com/openai/v1")
+                self.openai_client = openai.OpenAI(
+                    api_key=self.api_key,
+                    base_url=groq_url
+                )
+                logger.info(f"Groq client configured with endpoint: {groq_url}")
+            else:
+                logger.info("Groq will use HTTP API")
+        
+        elif self.client_type == 'fireworks':
+            # Fireworks uses OpenAI-compatible endpoint
+            if openai is not None:
+                fireworks_url = os.getenv("FIREWORKS_API_URL", "https://api.fireworks.ai/inference/v1")
+                self.openai_client = openai.OpenAI(
+                    api_key=self.api_key,
+                    base_url=fireworks_url
+                )
+                logger.info(f"Fireworks client configured with endpoint: {fireworks_url}")
+            else:
+                logger.info("Fireworks will use HTTP API")
+        
+        elif self.client_type == 'xai':
+            # xAI (Grok) uses OpenAI-compatible endpoint
+            if openai is not None:
+                xai_url = os.getenv("XAI_API_URL", "https://api.x.ai/v1")
+                self.openai_client = openai.OpenAI(
+                    api_key=self.api_key,
+                    base_url=xai_url
+                )
+                logger.info(f"xAI client configured with endpoint: {xai_url}")
+            else:
+                logger.info("xAI will use HTTP API")
+        
+        # Store thread-local client reference if in multi-key mode
+        if self._multi_key_mode and hasattr(tls, 'model'):
+            tls.client_type = self.client_type
+            if hasattr(self, 'openai_client'):
+                tls.openai_client = self.openai_client
+            if hasattr(self, 'mistral_client'):
+                tls.mistral_client = self.mistral_client
+            if hasattr(self, 'cohere_client'):
+                tls.cohere_client = self.cohere_client
         
         # Log retry feature support
         logger.info(f"✅ Initialized {self.client_type} client for model: {self.model}")
