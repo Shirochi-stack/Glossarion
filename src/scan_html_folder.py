@@ -3521,7 +3521,7 @@ def parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, co
         max_workers = cpu_count  # No limit - use all available cores!
         log(f"   🚀 Using ALL {max_workers} CPU cores - MAXIMUM PERFORMANCE!")
         if cpu_count > 8:
-            log(f"   💡 Tip: You can limit workers by setting 'ai_hunter_max_workers' in config")
+            log(f"   💡 Tip: You can limit CPU cores under the QA scanner settings")
     
     # Pre-compute text hashes for all results
     text_hashes = {}
