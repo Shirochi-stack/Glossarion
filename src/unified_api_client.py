@@ -2413,7 +2413,7 @@ class UnifiedClient:
     
     def _send_internal(self, messages, temperature=None, max_tokens=None, max_completion_tokens=None, context=None) -> Tuple[str, Optional[str]]:
         """
-        Internal send implementation (your existing send method logic)
+        Internal send implementation with integrated 500 error retry logic
         """
         start_time = time.time()
         
@@ -2427,134 +2427,202 @@ class UnifiedClient:
         self.context = context or 'translation'
         self.conversation_message_count += 1
         
-        try:
-            # Validate request
-            valid, error_msg = self._validate_request(messages, max_tokens)
-            if not valid:
-                raise UnifiedClientError(f"Invalid request: {error_msg}", error_type="validation")
-            
-            os.makedirs("Payloads", exist_ok=True)
-            
-            # Apply reinforcement
-            messages = self._apply_pure_reinforcement(messages)
-            
-            # Get file names - IMPORTANT for duplicate detection
-            payload_name, response_name = self._get_file_names(messages, context=self.context)
-            
-            # Save payload for debugging
-            self._save_payload(messages, payload_name)
-            
-            # Check for timeout toggle from GUI
-            retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
-            if retry_timeout_enabled:
-                timeout_seconds = int(os.getenv("CHUNK_TIMEOUT", "180"))
-                logger.info(f"Timeout monitoring enabled: {timeout_seconds}s limit")
-            
-            # Get response
-            response = self._get_response(messages, temperature, max_tokens, max_completion_tokens, response_name)
-            
-            # Check for cancellation (from timeout or stop button)
-            if self._cancelled:
-                logger.info("Operation cancelled (timeout or user stop)")
-                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-            
-            # CRITICAL: Save response for duplicate detection
-            # This must happen even for truncated/empty responses
-            if response.content:
-                self._save_response(response.content, response_name)
-            
-            # Handle empty responses
-            if response.is_error or not response.content or response.content.strip() in ["", "[]"]:
-                print(f"Empty or error response: {response.finish_reason}")
-                self._save_failed_request(messages, "Empty response", context, response.raw_response)
-                # ALWAYS log these failures too
-                self._log_truncation_failure(
-                    messages=messages,
-                    response_content=response.content or "",
-                    finish_reason=response.finish_reason or 'error',
-                    context=context,
-                    error_details=response.error_details
-                )
-                self._track_stats(context, False, "empty_response", time.time() - start_time)
+        # Internal retry logic for 500 errors
+        internal_retries = 3
+        for attempt in range(internal_retries):
+            try:
+                # Validate request
+                valid, error_msg = self._validate_request(messages, max_tokens)
+                if not valid:
+                    raise UnifiedClientError(f"Invalid request: {error_msg}", error_type="validation")
                 
-                # Use fallback
-                fallback_content = self._handle_empty_result(messages, context, response.error_details or "empty")
+                os.makedirs("Payloads", exist_ok=True)
+                
+                # Apply reinforcement
+                messages = self._apply_pure_reinforcement(messages)
+                
+                # Get file names - IMPORTANT for duplicate detection
+                payload_name, response_name = self._get_file_names(messages, context=self.context)
+                
+                # Save payload for debugging
+                self._save_payload(messages, payload_name)
+                
+                # Check for timeout toggle from GUI
+                retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
+                if retry_timeout_enabled:
+                    timeout_seconds = int(os.getenv("CHUNK_TIMEOUT", "180"))
+                    logger.info(f"Timeout monitoring enabled: {timeout_seconds}s limit")
+                
+                # Get response
+                response = self._get_response(messages, temperature, max_tokens, max_completion_tokens, response_name)
+                
+                # Check for cancellation (from timeout or stop button)
+                if self._cancelled:
+                    logger.info("Operation cancelled (timeout or user stop)")
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                
+                # CRITICAL: Save response for duplicate detection
+                # This must happen even for truncated/empty responses
+                if response.content:
+                    self._save_response(response.content, response_name)
+                
+                # Handle empty responses
+                if response.is_error or not response.content or response.content.strip() in ["", "[]"]:
+                    print(f"Empty or error response: {response.finish_reason}")
+                    self._save_failed_request(messages, "Empty response", context, response.raw_response)
+                    # ALWAYS log these failures too
+                    self._log_truncation_failure(
+                        messages=messages,
+                        response_content=response.content or "",
+                        finish_reason=response.finish_reason or 'error',
+                        context=context,
+                        error_details=response.error_details
+                    )
+                    self._track_stats(context, False, "empty_response", time.time() - start_time)
+                    
+                    # Use fallback
+                    fallback_content = self._handle_empty_result(messages, context, response.error_details or "empty")
+                    return fallback_content, 'error'
+                
+                # Track success
+                self._track_stats(context, True, None, time.time() - start_time)
+                
+                # Mark key as successful in multi-key mode
+                self._mark_key_success()
+                
+                # Log important info for retry mechanisms
+                if response.is_truncated:
+                    print(f"Response was truncated: {response.finish_reason}")
+                    print(f"⚠️ Response truncated (finish_reason: {response.finish_reason})")
+                    
+                    # ALWAYS log truncation failures
+                    self._log_truncation_failure(
+                        messages=messages,
+                        response_content=response.content,
+                        finish_reason=response.finish_reason,
+                        context=context,
+                        error_details=response.error_details
+                    )
+                    # The calling code will check finish_reason=='length' for retry
+                
+                # Apply API delay after successful call (even if truncated)
+                # SKIP DELAY DURING CLEANUP
+                if not self._in_cleanup:
+                    api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+                    if api_delay > 0:
+                        print(f"⏳ Waiting {api_delay}s before next API call...")
+                        time.sleep(api_delay)
+                else:
+                    print("⚡ Skipping API delay (cleanup mode)")
+                
+                # Return the response with accurate finish_reason
+                # This is CRITICAL for retry mechanisms to work
+                return response.content, response.finish_reason
+                
+            except UnifiedClientError as e:
+                # Handle cancellation specially for timeout support
+                if e.error_type == "cancelled" or "cancelled" in str(e):
+                    self._in_cleanup = False  # Ensure cleanup flag is set
+                    logger.info("Propagating cancellation to caller")
+                    # Re-raise so send_with_interrupt can handle it
+                    raise
+                
+                print(f"UnifiedClient error: {e}")
+                
+                # Check if it's a rate limit error and re-raise for retry logic
+                error_str = str(e).lower()
+                if "429" in error_str or "rate limit" in error_str or "quota" in error_str:
+                    raise  # Re-raise for multi-key retry logic in outer send() method
+                
+                # Check for prohibited content - never retry these
+                content_filter_indicators = [
+                    "content_filter", "content was blocked", "response was blocked",
+                    "safety filter", "content policy", "harmful content",
+                    "blocked by safety", "harm_category"
+                ]
+                
+                if any(indicator in error_str for indicator in content_filter_indicators):
+                    print(f"❌ Content prohibited - not retrying: {error_str[:100]}")
+                    self._save_failed_request(messages, e, context)
+                    self._track_stats(context, False, type(e).__name__, time.time() - start_time)
+                    fallback_content = self._handle_empty_result(messages, context, str(e))
+                    return fallback_content, 'error'
+                
+                # Check for 500 errors - retry these
+                http_status = getattr(e, 'http_status', None)
+                if http_status == 500 or "500" in error_str or "api_error" in error_str:
+                    if attempt < internal_retries - 1:
+                        wait_time = min(5 * (attempt + 1), 15)  # 5s, 10s, 15s backoff
+                        print(f"🔄 Server error (500) - auto-retrying in {wait_time}s (attempt {attempt + 1}/{internal_retries})")
+                        
+                        # Wait with cancellation check
+                        for i in range(wait_time):
+                            if self._cancelled:
+                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                            time.sleep(1)
+                        continue
+                    else:
+                        print(f"❌ Server error (500) - exhausted {internal_retries} retries")
+                
+                # Save failed request and return fallback
+                self._save_failed_request(messages, e, context)
+                self._track_stats(context, False, type(e).__name__, time.time() - start_time)
+                fallback_content = self._handle_empty_result(messages, context, str(e))
                 return fallback_content, 'error'
-            
-            # Track success
-            self._track_stats(context, True, None, time.time() - start_time)
-            
-            # Mark key as successful in multi-key mode
-            self._mark_key_success()
-            
-            # Log important info for retry mechanisms
-            if response.is_truncated:
-                print(f"Response was truncated: {response.finish_reason}")
-                print(f"⚠️ Response truncated (finish_reason: {response.finish_reason})")
                 
-                # ALWAYS log truncation failures
-                self._log_truncation_failure(
-                    messages=messages,
-                    response_content=response.content,
-                    finish_reason=response.finish_reason,
-                    context=context,
-                    error_details=response.error_details
-                )
-                # The calling code will check finish_reason=='length' for retry
-            
-            # Apply API delay after successful call (even if truncated)
-            # SKIP DELAY DURING CLEANUP
-            if not self._in_cleanup:
-                api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
-                if api_delay > 0:
-                    print(f"⏳ Waiting {api_delay}s before next API call...")
-                    time.sleep(api_delay)
-            else:
-                print("⚡ Skipping API delay (cleanup mode)")
-            
-            # Return the response with accurate finish_reason
-            # This is CRITICAL for retry mechanisms to work
-            return response.content, response.finish_reason
-            
-        except UnifiedClientError as e:
-            # Handle cancellation specially for timeout support
-            if e.error_type == "cancelled" or "cancelled" in str(e):
-                self._in_cleanup = False  # Ensure cleanup flag is set
-                logger.info("Propagating cancellation to caller")
-                # Re-raise so send_with_interrupt can handle it
-                raise
-            
-            print(f"UnifiedClient error: {e}")
-            self._save_failed_request(messages, e, context)
-            self._track_stats(context, False, type(e).__name__, time.time() - start_time)
-            
-            # Check if it's a rate limit error and re-raise for retry logic
-            error_str = str(e).lower()
-            if "429" in error_str or "rate limit" in error_str or "quota" in error_str:
-                raise  # Re-raise for multi-key retry logic
-            
-            # Return fallback
-            fallback_content = self._handle_empty_result(messages, context, str(e))
-            return fallback_content, 'error'
-            
-        except Exception as e:
-            print(f"Unexpected error: {e}")
-            self._save_failed_request(messages, e, context)
-            self._track_stats(context, False, "unexpected_error", time.time() - start_time)
-            
-            # For unexpected errors, check if it's a timeout
-            if "timed out" in str(e).lower():
-                # Re-raise timeout errors so the retry logic can handle them
-                raise UnifiedClientError(f"Request timed out: {e}", error_type="timeout")
-            
-            # Check if it's a rate limit error
-            error_str = str(e).lower()
-            if "429" in error_str or "rate limit" in error_str or "quota" in error_str:
-                raise  # Re-raise for multi-key retry logic
-            
-            # Return fallback for other errors
-            fallback_content = self._handle_empty_result(messages, context, str(e))
-            return fallback_content, 'error'
+            except Exception as e:
+                print(f"Unexpected error: {e}")
+                error_str = str(e).lower()
+                
+                # For unexpected errors, check if it's a timeout
+                if "timed out" in error_str:
+                    # Re-raise timeout errors so the retry logic can handle them
+                    raise UnifiedClientError(f"Request timed out: {e}", error_type="timeout")
+                
+                # Check if it's a rate limit error
+                if "429" in error_str or "rate limit" in error_str or "quota" in error_str:
+                    raise  # Re-raise for multi-key retry logic
+                
+                # Check for prohibited content in unexpected errors
+                content_filter_indicators = [
+                    "content_filter", "content was blocked", "response was blocked",
+                    "safety filter", "content policy", "harmful content",
+                    "blocked by safety", "harm_category"
+                ]
+                
+                if any(indicator in error_str for indicator in content_filter_indicators):
+                    print(f"❌ Content prohibited - not retrying")
+                    self._save_failed_request(messages, e, context)
+                    self._track_stats(context, False, "unexpected_error", time.time() - start_time)
+                    fallback_content = self._handle_empty_result(messages, context, str(e))
+                    return fallback_content, 'error'
+                
+                # Check for 500 errors in unexpected exceptions
+                if "500" in error_str or "internal server error" in error_str:
+                    if attempt < internal_retries - 1:
+                        wait_time = min(5 * (attempt + 1), 15)
+                        print(f"🔄 Server error (500) - auto-retrying in {wait_time}s (attempt {attempt + 1}/{internal_retries})")
+                        
+                        for i in range(wait_time):
+                            if self._cancelled:
+                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                            time.sleep(1)
+                        continue
+                
+                # Check for other transient errors
+                transient_errors = ["502", "503", "504", "connection reset", "connection aborted"]
+                if any(err in error_str for err in transient_errors):
+                    if attempt < internal_retries - 1:
+                        wait_time = min(3 * (attempt + 1), 10)
+                        print(f"🔄 Transient error - retrying in {wait_time}s")
+                        time.sleep(wait_time)
+                        continue
+                
+                # Save failed request and return fallback for other errors
+                self._save_failed_request(messages, e, context)
+                self._track_stats(context, False, "unexpected_error", time.time() - start_time)
+                fallback_content = self._handle_empty_result(messages, context, str(e))
+                return fallback_content, 'error'
     
     def _get_response(self, messages, temperature, max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
         """
@@ -5124,7 +5192,7 @@ class UnifiedClient:
                             max_completion_tokens: Optional[int] = None,
                             context: str = 'image_translation') -> Tuple[str, str]:
         """
-        Internal implementation of send_image (your existing logic)
+        Internal implementation of send_image with integrated 500 error retry logic
         """
         self._cancelled = False
         self.context = context or 'image_translation'
@@ -5159,161 +5227,241 @@ class UnifiedClient:
         else:
             image_base64 = image_data
         
-        try:
-            os.makedirs("Payloads", exist_ok=True)
-            
-            messages = self._apply_pure_reinforcement(messages)
-            
-            # Use proper naming for duplicate detection
-            payload_name, response_name = self._get_file_names(messages, context=self.context)
-            
-            # Log the request details
-            logger.info(f"Sending image request to {self.client_type} ({self.model})")
-            logger.debug(f"Temperature: {temperature}, Max tokens: {max_tokens or max_completion_tokens}")
-            
-            # Check provider vision support with latest models (2025)
-            vision_providers = {
-                'openai': ['gpt-4-vision', 'gpt-4-turbo', 'gpt-4o', 'gpt-4o-mini', 'gpt-4.5', 'gpt-4.1', 
-                          'gpt-4.1-mini', 'o1-vision', 'o3', 'o3-mini', 'o3-pro', 'o4', 'o4-mini'],
-                'anthropic': ['claude-3', 'claude-3.5', 'claude-3-opus', 'claude-3.5-sonnet', 'claude-3-haiku', 
-                             'claude-3.5-haiku', 'claude-3.7-sonnet', 'claude-4-opus', 'claude-4-sonnet',
-                             'claude-opus-4', 'claude-sonnet-4'],
-                'gemini': ['gemini-pro-vision', 'gemini-1.5', 'gemini-2.0', 'gemini-2.5', 'gemini-flash', 
-                          'gemini-flash-lite', 'gemini-2.5-pro', 'gemini-2.5-flash'],
-                'poe': ['claude-3-opus', 'claude-4-opus', 'claude-4-sonnet', 'gpt-4', 'gpt-4o', 'gpt-4.5', 
-                       'gemini-pro', 'claude-3.5-sonnet', 'gemini-2.5-pro'],
-                'openrouter': ['any'],  # Supports routing to any vision model
-                'groq': ['llava', 'vision'],  # Groq supports some vision models
-                'fireworks': ['firellava', 'vision'],  # Fireworks vision models
-                'together': ['llava', 'fuyu', 'cogvlm'],
-                'replicate': ['blip', 'clip', 'llava', 'minigpt4'],
-                'huggingface': ['vision-transformer', 'vit', 'clip', 'blip'],
-                'deepseek': ['deepseek-vl', 'deepseek-r1-vl'],  # DeepSeek vision language models
-                'qwen': ['qwen-vl', 'qwen2-vl', 'qwen2.5-vl'],  # Qwen vision models
-                'yi': ['yi-vl'],  # Yi vision models
-                'moonshot': ['moonshot-v1-vision'],
-                'electronhub': ['any'],  # Can route to any vision model
-                'perplexity': [],  # Perplexity doesn't support direct image input
-                'cohere': ['aya-vision'],  # Cohere's multimodal Aya Vision
-                'tii': ['falcon-2-11b'],  # Falcon 2 with vision support
-                'xai': ['grok-3', 'grok-vision'],  # Grok models with vision
-                'meta': ['llama-4-vision'],  # Meta's Llama 4 with vision
-                'vertex_model_garden': ['gemini', 'imagen', 'claude'],  # Vertex AI Model Garden vision models
-            }
-            
-            # Check if provider supports vision
-            if self.client_type not in vision_providers:
-                raise UnifiedClientError(f"Provider {self.client_type} does not support image input")
-            
-            # Check if specific model supports vision
-            supported_models = vision_providers.get(self.client_type, [])
-            if supported_models != ['any']:
-                model_supported = any(model in self.model.lower() for model in supported_models)
-                if not model_supported:
-                    raise UnifiedClientError(f"Model {self.model} does not support image input")
-            
-            # Route to appropriate handler based on client type
-            if self.client_type == 'gemini':
-                response = self._send_gemini_image(messages, image_base64, temperature, 
-                                                 max_tokens or max_completion_tokens, response_name)
-            elif self.client_type == 'openai':
-                response = self._send_openai_image(messages, image_base64, temperature, 
-                                             max_tokens, max_completion_tokens, response_name)
-            elif self.client_type == 'anthropic':
-                response = self._send_anthropic_image(messages, image_base64, temperature, 
-                                                    max_tokens or max_completion_tokens, response_name)
-            elif self.client_type == 'electronhub':
-                response = self._send_electronhub_image(messages, image_base64, temperature, 
-                                                      max_tokens or max_completion_tokens, response_name)
-            elif self.client_type == 'poe':
-                response = self._send_poe_image(messages, image_base64, temperature,
-                                              max_tokens or max_completion_tokens, response_name)
-            elif self.client_type == 'openrouter':
-                response = self._send_openrouter_image(messages, image_base64, temperature,
+        # Internal retry logic for 500 errors
+        internal_retries = 3
+        for attempt in range(internal_retries):
+            try:
+                os.makedirs("Payloads", exist_ok=True)
+                
+                messages = self._apply_pure_reinforcement(messages)
+                
+                # Use proper naming for duplicate detection
+                payload_name, response_name = self._get_file_names(messages, context=self.context)
+                
+                # Log the request details
+                logger.info(f"Sending image request to {self.client_type} ({self.model})")
+                logger.debug(f"Temperature: {temperature}, Max tokens: {max_tokens or max_completion_tokens}")
+                
+                # Check provider vision support with latest models (2025)
+                vision_providers = {
+                    'openai': ['gpt-4-vision', 'gpt-4-turbo', 'gpt-4o', 'gpt-4o-mini', 'gpt-4.5', 'gpt-4.1', 
+                              'gpt-4.1-mini', 'o1-vision', 'o3', 'o3-mini', 'o3-pro', 'o4', 'o4-mini'],
+                    'anthropic': ['claude-3', 'claude-3.5', 'claude-3-opus', 'claude-3.5-sonnet', 'claude-3-haiku', 
+                                 'claude-3.5-haiku', 'claude-3.7-sonnet', 'claude-4-opus', 'claude-4-sonnet',
+                                 'claude-opus-4', 'claude-sonnet-4'],
+                    'gemini': ['gemini-pro-vision', 'gemini-1.5', 'gemini-2.0', 'gemini-2.5', 'gemini-flash', 
+                              'gemini-flash-lite', 'gemini-2.5-pro', 'gemini-2.5-flash'],
+                    'poe': ['claude-3-opus', 'claude-4-opus', 'claude-4-sonnet', 'gpt-4', 'gpt-4o', 'gpt-4.5', 
+                           'gemini-pro', 'claude-3.5-sonnet', 'gemini-2.5-pro'],
+                    'openrouter': ['any'],  # Supports routing to any vision model
+                    'groq': ['llava', 'vision'],  # Groq supports some vision models
+                    'fireworks': ['firellava', 'vision'],  # Fireworks vision models
+                    'together': ['llava', 'fuyu', 'cogvlm'],
+                    'replicate': ['blip', 'clip', 'llava', 'minigpt4'],
+                    'huggingface': ['vision-transformer', 'vit', 'clip', 'blip'],
+                    'deepseek': ['deepseek-vl', 'deepseek-r1-vl'],  # DeepSeek vision language models
+                    'qwen': ['qwen-vl', 'qwen2-vl', 'qwen2.5-vl'],  # Qwen vision models
+                    'yi': ['yi-vl'],  # Yi vision models
+                    'moonshot': ['moonshot-v1-vision'],
+                    'electronhub': ['any'],  # Can route to any vision model
+                    'perplexity': [],  # Perplexity doesn't support direct image input
+                    'cohere': ['aya-vision'],  # Cohere's multimodal Aya Vision
+                    'tii': ['falcon-2-11b'],  # Falcon 2 with vision support
+                    'xai': ['grok-3', 'grok-vision'],  # Grok models with vision
+                    'meta': ['llama-4-vision'],  # Meta's Llama 4 with vision
+                    'vertex_model_garden': ['gemini', 'imagen', 'claude'],  # Vertex AI Model Garden vision models
+                }
+                
+                # Check if provider supports vision
+                if self.client_type not in vision_providers:
+                    raise UnifiedClientError(f"Provider {self.client_type} does not support image input")
+                
+                # Check if specific model supports vision
+                supported_models = vision_providers.get(self.client_type, [])
+                if supported_models != ['any']:
+                    model_supported = any(model in self.model.lower() for model in supported_models)
+                    if not model_supported:
+                        raise UnifiedClientError(f"Model {self.model} does not support image input")
+                
+                # Route to appropriate handler based on client type
+                if self.client_type == 'gemini':
+                    response = self._send_gemini_image(messages, image_base64, temperature, 
                                                      max_tokens or max_completion_tokens, response_name)
-            elif self.client_type == 'cohere':
-                response = self._send_cohere_image(messages, image_base64, temperature,
-                                                 max_tokens or max_completion_tokens, response_name)
-            elif self.client_type == 'vertex_model_garden':
-                response = self._send_vertex_model_garden_image(messages, image_base64, temperature, 
-                                                               max_tokens or max_completion_tokens, response_name)
-            else:
-                raise UnifiedClientError(f"Image input not supported for {self.client_type}")
-            
-            if self._cancelled:
-                raise UnifiedClientError("Operation cancelled by user")
-            
-            # Save response for duplicate detection
-            if response.content:
-                self._save_response(response.content, response_name)
-                logger.debug(f"Saved response to: {response_name}")
-            
-            # Handle empty responses
-            if not response.content or response.content.strip() == "":
-                print(f"Empty response from {self.client_type}")
+                elif self.client_type == 'openai':
+                    response = self._send_openai_image(messages, image_base64, temperature, 
+                                                 max_tokens, max_completion_tokens, response_name)
+                elif self.client_type == 'anthropic':
+                    response = self._send_anthropic_image(messages, image_base64, temperature, 
+                                                        max_tokens or max_completion_tokens, response_name)
+                elif self.client_type == 'electronhub':
+                    response = self._send_electronhub_image(messages, image_base64, temperature, 
+                                                          max_tokens or max_completion_tokens, response_name)
+                elif self.client_type == 'poe':
+                    response = self._send_poe_image(messages, image_base64, temperature,
+                                                  max_tokens or max_completion_tokens, response_name)
+                elif self.client_type == 'openrouter':
+                    response = self._send_openrouter_image(messages, image_base64, temperature,
+                                                         max_tokens or max_completion_tokens, response_name)
+                elif self.client_type == 'cohere':
+                    response = self._send_cohere_image(messages, image_base64, temperature,
+                                                     max_tokens or max_completion_tokens, response_name)
+                elif self.client_type == 'vertex_model_garden':
+                    response = self._send_vertex_model_garden_image(messages, image_base64, temperature, 
+                                                                   max_tokens or max_completion_tokens, response_name)
+                else:
+                    raise UnifiedClientError(f"Image input not supported for {self.client_type}")
                 
-                # Log empty image responses
-                self._log_truncation_failure(
-                    messages=messages,
-                    response_content="",
-                    finish_reason='error',
-                    context=context or 'image_translation',
-                    error_details={'error': 'empty_image_response'}
-                )
+                if self._cancelled:
+                    raise UnifiedClientError("Operation cancelled by user")
                 
-                fallback = self._handle_empty_result(messages, context, "empty_image_response")
+                # Save response for duplicate detection
+                if response.content:
+                    self._save_response(response.content, response_name)
+                    logger.debug(f"Saved response to: {response_name}")
+                
+                # Handle empty responses
+                if not response.content or response.content.strip() == "":
+                    print(f"Empty response from {self.client_type}")
+                    
+                    # Log empty image responses
+                    self._log_truncation_failure(
+                        messages=messages,
+                        response_content="",
+                        finish_reason='error',
+                        context=context or 'image_translation',
+                        error_details={'error': 'empty_image_response'}
+                    )
+                    
+                    fallback = self._handle_empty_result(messages, context, "empty_image_response")
+                    return fallback, 'error'
+                
+                # Mark key as successful for image request
+                if self.use_multi_keys:
+                    self._mark_key_success()
+                
+                # Log truncation for retry mechanism
+                if response.is_truncated:
+                    print(f"Image response was truncated: {response.finish_reason}")
+                    print(f"⚠️ Image response truncated (finish_reason: {response.finish_reason})")
+                    
+                    # Log image truncation failures
+                    self._log_truncation_failure(
+                        messages=messages,
+                        response_content=response.content,
+                        finish_reason=response.finish_reason,
+                        context=context or 'image_translation',
+                        error_details=response.error_details
+                    )               
+
+                # Apply API delay after successful image call
+                # SKIP DELAY DURING CLEANUP
+                if not self._in_cleanup:
+                    api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+                    if api_delay > 0:
+                        print(f"⏳ Waiting {api_delay}s before next API call...")
+                        time.sleep(api_delay)
+                else:
+                    print("⚡ Skipping API delay (cleanup mode)")
+
+                return response.content, response.finish_reason
+                    
+            except UnifiedClientError as e:
+                # Re-raise our own errors
+                if e.error_type == "cancelled" or "cancelled" in str(e):
+                    self._in_cleanup = False  # Ensure cleanup flag is set
+                    print(f"Image processing cancelled: {e}")
+                    raise
+                
+                print(f"Image processing error: {e}")
+                error_str = str(e).lower()
+                
+                # Check if it's a rate limit that needs to be handled by outer retry logic
+                if "429" in error_str or "rate limit" in error_str or "quota" in error_str:
+                    raise  # Re-raise for multi-key retry logic in outer send_image() method
+                
+                # Check for prohibited content - never retry these
+                content_filter_indicators = [
+                    "content_filter", "content was blocked", "response was blocked",
+                    "safety filter", "content policy", "harmful content",
+                    "blocked by safety", "harm_category", "inappropriate image"
+                ]
+                
+                if any(indicator in error_str for indicator in content_filter_indicators):
+                    print(f"❌ Image content prohibited - not retrying: {error_str[:100]}")
+                    self._save_failed_request(messages, e, context)
+                    raise  # Re-raise without retry
+                
+                # Check for 500 errors - retry these
+                http_status = getattr(e, 'http_status', None)
+                if http_status == 500 or "500" in error_str or "api_error" in error_str:
+                    if attempt < internal_retries - 1:
+                        wait_time = min(5 * (attempt + 1), 15)  # 5s, 10s, 15s backoff
+                        print(f"🔄 Image server error (500) - auto-retrying in {wait_time}s (attempt {attempt + 1}/{internal_retries})")
+                        
+                        # Wait with cancellation check
+                        for i in range(wait_time):
+                            if self._cancelled:
+                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                            time.sleep(1)
+                        continue
+                    else:
+                        print(f"❌ Image server error (500) - exhausted {internal_retries} retries")
+                
+                # Save failed request and raise
+                self._save_failed_request(messages, e, context)
+                raise
+                
+            except Exception as e:
+                # Wrap other errors
+                print(f"Unexpected image processing error: {e}")
+                error_str = str(e).lower()
+                
+                # Check if it's a rate limit that wasn't caught
+                if "429" in error_str or "rate limit" in error_str or "quota" in error_str:
+                    raise  # Re-raise for multi-key retry logic
+                
+                # Check for timeout errors
+                if "timed out" in error_str:
+                    raise UnifiedClientError(f"Image request timed out: {e}", error_type="timeout")
+                
+                # Check for prohibited content in unexpected errors
+                content_filter_indicators = [
+                    "content_filter", "content was blocked", "response was blocked",
+                    "safety filter", "content policy", "harmful content",
+                    "blocked by safety", "harm_category", "inappropriate"
+                ]
+                
+                if any(indicator in error_str for indicator in content_filter_indicators):
+                    print(f"❌ Image content prohibited - not retrying")
+                    self._save_failed_request(messages, e, context)
+                    fallback = self._handle_empty_result(messages, context, str(e))
+                    return fallback, 'error'
+                
+                # Check for 500 errors in unexpected exceptions
+                if "500" in error_str or "internal server error" in error_str:
+                    if attempt < internal_retries - 1:
+                        wait_time = min(5 * (attempt + 1), 15)
+                        print(f"🔄 Image server error (500) - auto-retrying in {wait_time}s (attempt {attempt + 1}/{internal_retries})")
+                        
+                        for i in range(wait_time):
+                            if self._cancelled:
+                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                            time.sleep(1)
+                        continue
+                
+                # Check for other transient errors
+                transient_errors = ["502", "503", "504", "connection reset", "connection aborted"]
+                if any(err in error_str for err in transient_errors):
+                    if attempt < internal_retries - 1:
+                        wait_time = min(3 * (attempt + 1), 10)
+                        print(f"🔄 Image transient error - retrying in {wait_time}s")
+                        time.sleep(wait_time)
+                        continue
+                
+                # Save failed request and return fallback
+                self._save_failed_request(messages, e, context)
+                fallback = self._handle_empty_result(messages, context, str(e))
                 return fallback, 'error'
-            
-            # Mark key as successful for image request
-            if self.use_multi_keys:
-                self._mark_key_success()
-            
-            # Log truncation for retry mechanism
-            if response.is_truncated:
-                print(f"Image response was truncated: {response.finish_reason}")
-                print(f"⚠️ Image response truncated (finish_reason: {response.finish_reason})")
-                
-                # Log image truncation failures
-                self._log_truncation_failure(
-                    messages=messages,
-                    response_content=response.content,
-                    finish_reason=response.finish_reason,
-                    context=context or 'image_translation',
-                    error_details=response.error_details
-                )               
-
-            # Apply API delay after successful image call
-            # SKIP DELAY DURING CLEANUP
-            if not self._in_cleanup:
-                api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
-                if api_delay > 0:
-                    print(f"⏳ Waiting {api_delay}s before next API call...")
-                    time.sleep(api_delay)
-            else:
-                print("⚡ Skipping API delay (cleanup mode)")
-
-            return response.content, response.finish_reason
-                
-        except UnifiedClientError as e:
-            # Re-raise our own errors
-            if e.error_type == "cancelled" or "cancelled" in str(e):
-                self._in_cleanup = False  # Ensure cleanup flag is set
-            print(f"Image processing error: {e}")
-            self._save_failed_request(messages, e, context)
-            raise
-            
-        except Exception as e:
-            # Wrap other errors
-            print(f"Unexpected image processing error: {e}")
-            self._save_failed_request(messages, e, context)
-            
-            # Check if it's a rate limit that wasn't caught
-            error_str = str(e).lower()
-            if "429" in error_str or "rate limit" in error_str or "quota" in error_str:
-                raise  # Re-raise for multi-key retry logic
-            
-            fallback = self._handle_empty_result(messages, context, str(e))
-            return fallback, 'error'
 
     def _send_vertex_model_garden_image(self, messages, image_base64, temperature, max_tokens, response_name):
         """Send image request to Vertex AI Model Garden"""
