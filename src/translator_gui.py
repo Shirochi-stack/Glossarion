@@ -9485,6 +9485,127 @@ Important rules:
                 font=('Arial', 9)
             ).pack(anchor=tk.W, padx=(20, 0), pady=(10, 0))
 
+            # AI Hunter Performance Section
+            ai_hunter_section = tk.LabelFrame(
+                main_frame,
+                text="AI Hunter Performance Settings",
+                font=('Arial', 12, 'bold'),
+                padx=20,
+                pady=15
+            )
+            ai_hunter_section.pack(fill=tk.X, pady=(0, 20))
+
+            # Description
+            tk.Label(
+                ai_hunter_section,
+                text="AI Hunter mode performs exhaustive duplicate detection by comparing every file pair.\n" +
+                     "Parallel processing can significantly speed up this process on multi-core systems.",
+                wraplength=700,
+                justify=tk.LEFT,
+                fg='gray',
+                font=('Arial', 9)
+            ).pack(anchor=tk.W, pady=(0, 10))
+
+            # Parallel workers setting
+            workers_frame = tk.Frame(ai_hunter_section)
+            workers_frame.pack(fill=tk.X, pady=(0, 10))
+
+            tk.Label(
+                workers_frame,
+                text="Maximum parallel workers:",
+                font=('Arial', 10)
+            ).pack(side=tk.LEFT)
+
+            # Get current value from AI Hunter config
+            ai_hunter_config = self.config.get('ai_hunter_config', {})
+            current_max_workers = ai_hunter_config.get('ai_hunter_max_workers', 0)
+
+            ai_hunter_workers_var = tk.IntVar(value=current_max_workers)
+            workers_spinbox = tb.Spinbox(
+                workers_frame,
+                from_=0,
+                to=64,
+                textvariable=ai_hunter_workers_var,
+                width=10,
+                bootstyle="primary"
+            )
+            workers_spinbox.pack(side=tk.LEFT, padx=(10, 0))
+
+            # Disable mousewheel scrolling on spinbox
+            UIHelper.disable_spinbox_mousewheel(workers_spinbox)
+
+            # CPU count display
+            import multiprocessing
+            cpu_count = multiprocessing.cpu_count()
+            cpu_label = tk.Label(
+                workers_frame,
+                text=f"(0 = use all {cpu_count} cores)",
+                font=('Arial', 9),
+                fg='gray'
+            )
+            cpu_label.pack(side=tk.LEFT, padx=(10, 0))
+
+            # Quick preset buttons
+            preset_frame = tk.Frame(ai_hunter_section)
+            preset_frame.pack(fill=tk.X)
+
+            tk.Label(
+                preset_frame,
+                text="Quick presets:",
+                font=('Arial', 9)
+            ).pack(side=tk.LEFT, padx=(0, 10))
+
+            tk.Button(
+                preset_frame,
+                text=f"All cores ({cpu_count})",
+                font=('Arial', 9),
+                command=lambda: ai_hunter_workers_var.set(0)
+            ).pack(side=tk.LEFT, padx=2)
+
+            tk.Button(
+                preset_frame,
+                text="Half cores",
+                font=('Arial', 9),
+                command=lambda: ai_hunter_workers_var.set(max(1, cpu_count // 2))
+            ).pack(side=tk.LEFT, padx=2)
+
+            tk.Button(
+                preset_frame,
+                text="4 cores",
+                font=('Arial', 9),
+                command=lambda: ai_hunter_workers_var.set(4)
+            ).pack(side=tk.LEFT, padx=2)
+
+            tk.Button(
+                preset_frame,
+                text="8 cores",
+                font=('Arial', 9),
+                command=lambda: ai_hunter_workers_var.set(8)
+            ).pack(side=tk.LEFT, padx=2)
+
+            tk.Button(
+                preset_frame,
+                text="Single thread",
+                font=('Arial', 9),
+                command=lambda: ai_hunter_workers_var.set(1)
+            ).pack(side=tk.LEFT, padx=2)
+
+            # Performance tips
+            tips_text = "Performance Tips:\n" + \
+                        f"• Your system has {cpu_count} CPU cores available\n" + \
+                        "• Using all cores provides maximum speed but may slow other applications\n" + \
+                        "• 4-8 cores usually provides good balance of speed and system responsiveness\n" + \
+                        "• Single thread (1) disables parallel processing for debugging"
+
+            tk.Label(
+                ai_hunter_section,
+                text=tips_text,
+                wraplength=700,
+                justify=tk.LEFT,
+                fg='gray',
+                font=('Arial', 9)
+            ).pack(anchor=tk.W, padx=(20, 0), pady=(10, 0))
+
             # Report format
             format_frame = tk.Frame(report_section)
             format_frame.pack(fill=tk.X, pady=(0, 10))
@@ -9552,7 +9673,11 @@ Important rules:
                     # Save individual cache sizes
                     for cache_name, cache_var in cache_vars.items():
                         qa_settings[f'cache_{cache_name}'] = cache_var.get()
-                    
+
+                    if 'ai_hunter_config' not in self.config:
+                        self.config['ai_hunter_config'] = {}
+                    self.config['ai_hunter_config']['ai_hunter_max_workers'] = ai_hunter_workers_var.get()
+        
                     # Validate and save paragraph threshold
                     try:
                         threshold_value = paragraph_threshold_var.get()
@@ -9611,6 +9736,8 @@ Important rules:
                     # Reset cache sizes to defaults
                     for cache_name, default_value in cache_defaults.items():
                         cache_vars[cache_name].set(default_value)
+                        
+                    ai_hunter_workers_var.set(0)
             
             # Create buttons using ttkbootstrap styles
             save_btn = tb.Button(
