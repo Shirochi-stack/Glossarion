@@ -6162,179 +6162,200 @@ def main(log_callback=None, stop_callback=None):
     current_chunk_number = 0
 
     if config.BATCH_TRANSLATION:
-        print(f"\n📦 PARALLEL TRANSLATION MODE ENABLED")
-        print(f"📦 Processing chapters with up to {config.BATCH_SIZE} concurrent API calls")
-        
-        import concurrent.futures
-        from threading import Lock
-        
-        progress_lock = Lock()
-        
-        chapters_to_translate = []
-        
-        # FIX: First pass to set actual chapter numbers for ALL chapters
-        # This ensures batch mode has the same chapter numbering as non-batch mode
-        print("📊 Setting chapter numbers...")
-        for idx, c in enumerate(chapters):
-            raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
+            print(f"\n📦 PARALLEL TRANSLATION MODE ENABLED")
+            print(f"📦 Processing chapters with up to {config.BATCH_SIZE} concurrent API calls")
             
-            # Apply offset if configured
-            offset = config.CHAPTER_NUMBER_OFFSET if hasattr(config, 'CHAPTER_NUMBER_OFFSET') else 0
-            raw_num += offset
+            import concurrent.futures
+            from threading import Lock
             
-            if config.DISABLE_ZERO_DETECTION:
-                # Use raw numbers without adjustment
-                c['actual_chapter_num'] = raw_num
-                c['raw_chapter_num'] = raw_num
-                c['zero_adjusted'] = False
-            else:
-                # Store raw number
-                c['raw_chapter_num'] = raw_num
-                # Apply 0-based adjustment if detected
-                if uses_zero_based:
-                    c['actual_chapter_num'] = raw_num + 1
-                    c['zero_adjusted'] = True
-                else:
+            progress_lock = Lock()
+            
+            chapters_to_translate = []
+            
+            # FIX: First pass to set actual chapter numbers for ALL chapters
+            # This ensures batch mode has the same chapter numbering as non-batch mode
+            print("📊 Setting chapter numbers...")
+            for idx, c in enumerate(chapters):
+                raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
+                
+                # Apply offset if configured
+                offset = config.CHAPTER_NUMBER_OFFSET if hasattr(config, 'CHAPTER_NUMBER_OFFSET') else 0
+                raw_num += offset
+                
+                if config.DISABLE_ZERO_DETECTION:
+                    # Use raw numbers without adjustment
                     c['actual_chapter_num'] = raw_num
+                    c['raw_chapter_num'] = raw_num
                     c['zero_adjusted'] = False
-        
-        # NOW the existing loop continues...
-        for idx, c in enumerate(chapters):
-            chap_num = c["num"]
-            content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
+                else:
+                    # Store raw number
+                    c['raw_chapter_num'] = raw_num
+                    # Apply 0-based adjustment if detected
+                    if uses_zero_based:
+                        c['actual_chapter_num'] = raw_num + 1
+                        c['zero_adjusted'] = True
+                    else:
+                        c['actual_chapter_num'] = raw_num
+                        c['zero_adjusted'] = False
             
-            # Check if this is a pre-split text chunk with decimal number
-            if (is_text_file and c.get('is_chunk', False) and isinstance(c['num'], float)):
-                actual_num = c['num']  # Preserve the decimal for text files only
-            else:
-                actual_num = c.get('actual_chapter_num', c['num'])  # Now this will exist!
+            for idx, c in enumerate(chapters):
+                chap_num = c["num"]
+                content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
+                
+                # Check if this is a pre-split text chunk with decimal number
+                if (is_text_file and c.get('is_chunk', False) and isinstance(c['num'], float)):
+                    actual_num = c['num']  # Preserve the decimal for text files only
+                else:
+                    actual_num = c.get('actual_chapter_num', c['num'])  # Now this will exist!
+                
+                # Skip chapters outside the range
+                if start is not None and not (start <= actual_num <= end):
+                    continue
+                
+                # Check if chapter needs translation
+                needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
+                    idx, actual_num, content_hash, out
+                )
+                
+                if not needs_translation:
+                    # Modify skip_reason to use appropriate terminology
+                    is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
+                    terminology = "Section" if is_text_source else "Chapter"
+                    
+                    # Replace "Chapter" with appropriate terminology in skip_reason
+                    skip_reason_modified = skip_reason.replace("Chapter", terminology)
+                    print(f"[SKIP] {skip_reason_modified}")
+                    chapters_completed += 1
+                    continue
+                
+                # Check for empty or image-only chapters
+                has_images = c.get('has_images', False)
+                has_meaningful_text = ContentProcessor.is_meaningful_text_content(c["body"])
+                text_size = c.get('file_size', 0)
+                
+                is_empty_chapter = (not has_images and text_size < 10)
+                is_image_only_chapter = (has_images and not has_meaningful_text)
+                
+                # Handle empty chapters
+                if is_empty_chapter:
+                    print(f"📄 Empty chapter {chap_num} - will process individually")
+                    
+                    safe_title = make_safe_filename(c['title'], c['num'])
+                    
+                    if isinstance(c['num'], float):
+                        fname = FileUtilities.create_chapter_filename(c, c['num'])
+                    else:
+                        fname = FileUtilities.create_chapter_filename(c, c['num'])
+                    with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                        f.write(c["body"])
+                    progress_manager.update(idx, actual_num, content_hash, fname, status="completed_empty")
+                    progress_manager.save()
+                    chapters_completed += 1
+                    continue
+                
+                # Add to chapters to translate
+                chapters_to_translate.append((idx, c))
             
-            # Skip chapters outside the range
-            if start is not None and not (start <= actual_num <= end):
-                continue
+            print(f"📊 Found {len(chapters_to_translate)} chapters to translate in parallel")
             
-            # Check if chapter needs translation
-            needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
-                idx, actual_num, content_hash, out
+            # Continue with the rest of the existing batch processing code...
+            batch_processor = BatchTranslationProcessor(
+                config, client, base_msg, out, progress_lock,
+                progress_manager.save, 
+                lambda idx, actual_num, content_hash, output_file=None, status="completed", **kwargs: progress_manager.update(idx, actual_num, content_hash, output_file, status, **kwargs),
+                check_stop,
+                image_translator,
+                is_text_file=is_text_file
             )
             
-            if not needs_translation:
-                # Modify skip_reason to use appropriate terminology
-                is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
-                terminology = "Section" if is_text_source else "Chapter"
-                
-                # Replace "Chapter" with appropriate terminology in skip_reason
-                skip_reason_modified = skip_reason.replace("Chapter", terminology)
-                print(f"[SKIP] {skip_reason_modified}")
-                chapters_completed += 1
-                continue
+            total_to_process = len(chapters_to_translate)
+            processed = 0
             
-            # Check for empty or image-only chapters
-            has_images = c.get('has_images', False)
-            has_meaningful_text = ContentProcessor.is_meaningful_text_content(c["body"])
-            text_size = c.get('file_size', 0)
-            
-            is_empty_chapter = (not has_images and text_size < 10)
-            is_image_only_chapter = (has_images and not has_meaningful_text)
-            
-            # Handle empty chapters
-            if is_empty_chapter:
-                print(f"📄 Empty chapter {chap_num} - will process individually")
-                
-                safe_title = make_safe_filename(c['title'], c['num'])
-                
-                if isinstance(c['num'], float):
-                    fname = FileUtilities.create_chapter_filename(c, c['num'])
-                else:
-                    fname = FileUtilities.create_chapter_filename(c, c['num'])
-                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
-                    f.write(c["body"])
-                progress_manager.update(idx, actual_num, content_hash, fname, status="completed_empty")
-                progress_manager.save()
-                chapters_completed += 1
-                continue
-            
-            # Add to chapters to translate
-            chapters_to_translate.append((idx, c))
-        
-        print(f"📊 Found {len(chapters_to_translate)} chapters to translate in parallel")
-        
-        # Continue with the rest of the existing batch processing code...
-        batch_processor = BatchTranslationProcessor(
-            config, client, base_msg, out, progress_lock,
-            progress_manager.save, 
-            lambda idx, actual_num, content_hash, output_file=None, status="completed", **kwargs: progress_manager.update(idx, actual_num, content_hash, output_file, status, **kwargs),
-            check_stop,
-            image_translator,
-            is_text_file=is_text_file
-        )
-        
-        total_to_process = len(chapters_to_translate)
-        processed = 0
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=config.BATCH_SIZE) as executor:
-            for batch_start in range(0, total_to_process, config.BATCH_SIZE * 3):
-                if check_stop():
-                    print("❌ Translation stopped during parallel processing")
-                    executor.shutdown(wait=False)
-                    return
-                
-                batch_end = min(batch_start + config.BATCH_SIZE * 3, total_to_process)
-                current_batch = chapters_to_translate[batch_start:batch_end]
-                
-                print(f"\n📦 Submitting batch {batch_start//config.BATCH_SIZE + 1}: {len(current_batch)} chapters")
-                
-                future_to_chapter = {
-                    executor.submit(batch_processor.process_single_chapter, chapter_data): chapter_data
-                    for chapter_data in current_batch
-                }
-                
-                active_count = 0
-                completed_in_batch = 0
-                failed_in_batch = 0
-                
-                for future in concurrent.futures.as_completed(future_to_chapter):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=config.BATCH_SIZE) as executor:
+                for batch_start in range(0, total_to_process, config.BATCH_SIZE * 3):
                     if check_stop():
-                        print("❌ Translation stopped")
+                        print("❌ Translation stopped during parallel processing")
                         executor.shutdown(wait=False)
                         return
                     
-                    chapter_data = future_to_chapter[future]
-                    idx, chapter = chapter_data
+                    batch_end = min(batch_start + config.BATCH_SIZE * 3, total_to_process)
+                    current_batch = chapters_to_translate[batch_start:batch_end]
                     
-                    try:
-                        success, chap_num = future.result()
-                        if success:
-                            completed_in_batch += 1
-                            print(f"✅ Chapter {chap_num} done ({completed_in_batch + failed_in_batch}/{len(current_batch)} in batch)")
-                        else:
+                    print(f"\n📦 Submitting batch {batch_start//config.BATCH_SIZE + 1}: {len(current_batch)} chapters")
+                    
+                    future_to_chapter = {
+                        executor.submit(batch_processor.process_single_chapter, chapter_data): chapter_data
+                        for chapter_data in current_batch
+                    }
+                    
+                    active_count = 0
+                    completed_in_batch = 0
+                    failed_in_batch = 0
+                    
+                    for future in concurrent.futures.as_completed(future_to_chapter):
+                        if check_stop():
+                            print("❌ Translation stopped")
+                            executor.shutdown(wait=False)
+                            return
+                        
+                        chapter_data = future_to_chapter[future]
+                        idx, chapter = chapter_data
+                        
+                        try:
+                            success, chap_num = future.result()
+                            if success:
+                                completed_in_batch += 1
+                                print(f"✅ Chapter {chap_num} done ({completed_in_batch + failed_in_batch}/{len(current_batch)} in batch)")
+                            else:
+                                failed_in_batch += 1
+                                print(f"❌ Chapter {chap_num} failed ({completed_in_batch + failed_in_batch}/{len(current_batch)} in batch)")
+                        except Exception as e:
                             failed_in_batch += 1
-                            print(f"❌ Chapter {chap_num} failed ({completed_in_batch + failed_in_batch}/{len(current_batch)} in batch)")
-                    except Exception as e:
-                        failed_in_batch += 1
-                        print(f"❌ Chapter thread error: {e}")
+                            print(f"❌ Chapter thread error: {e}")
+                        
+                        processed += 1
+                        
+                        progress_percent = (processed / total_to_process) * 100
+                        print(f"📊 Overall Progress: {processed}/{total_to_process} ({progress_percent:.1f}%)")
                     
-                    processed += 1
+                    print(f"\n📦 Batch Summary:")
+                    print(f"   ✅ Successful: {completed_in_batch}")
+                    print(f"   ❌ Failed: {failed_in_batch}")
                     
-                    progress_percent = (processed / total_to_process) * 100
-                    print(f"📊 Overall Progress: {processed}/{total_to_process} ({progress_percent:.1f}%)")
+                    if batch_end < total_to_process:
+                        print(f"⏳ Waiting {config.DELAY}s before next batch...")
+                        time.sleep(config.DELAY)
+            
+            chapters_completed = batch_processor.chapters_completed
+            chunks_completed = batch_processor.chunks_completed
+            
+            print(f"\n🎉 Parallel translation complete!")
+            print(f"   Total chapters processed: {processed}")
+            print(f"   Successful: {chapters_completed}")
+            
+            # Log any chapters that were marked as qa_failed
+            qa_failed_chapters = []
+            for idx, c in enumerate(chapters):
+                # Get the chapter's actual number
+                if (is_text_file and c.get('is_chunk', False) and isinstance(c['num'], float)):
+                    actual_num = c['num']
+                else:
+                    actual_num = c.get('actual_chapter_num', c['num'])
                 
-                print(f"\n📦 Batch Summary:")
-                print(f"   ✅ Successful: {completed_in_batch}")
-                print(f"   ❌ Failed: {failed_in_batch}")
+                # Check if this chapter was processed and has qa_failed status
+                content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
+                status = progress_manager.get_chapter_status(idx, actual_num, content_hash)
                 
-                if batch_end < total_to_process:
-                    print(f"⏳ Waiting {config.DELAY}s before next batch...")
-                    time.sleep(config.DELAY)
-        
-        chapters_completed = batch_processor.chapters_completed
-        chunks_completed = batch_processor.chunks_completed
-        
-        print(f"\n🎉 Parallel translation complete!")
-        print(f"   Total chapters processed: {processed}")
-        print(f"   Successful: {chapters_completed}")
-        
-        config.BATCH_TRANSLATION = False
+                if status == "qa_failed":
+                    qa_failed_chapters.append(actual_num)
+            
+            if qa_failed_chapters:
+                print(f"\n⚠️ {len(qa_failed_chapters)} chapters failed due to content policy violations:")
+                print(f"   Failed chapters: {', '.join(map(str, sorted(qa_failed_chapters)))}")
+            
+            # Stop translation completely after batch mode
+            print("\n📌 Batch translation completed. Stopping translation process.")
+            return
     
     if not config.BATCH_TRANSLATION:
         translation_processor = TranslationProcessor(config, client, out, log_callback, check_stop, uses_zero_based, is_text_file)
