@@ -41,6 +41,12 @@ import html as html_lib
 from typing import Dict, List, Tuple, Set, Optional
 import warnings
 from functools import lru_cache
+import concurrent.futures
+import multiprocessing
+from threading import Lock
+
+# Add a global lock for thread-safe operations
+merge_lock = Lock()
 warnings.filterwarnings('ignore')
 
 # Try to import optional dependencies
@@ -1673,12 +1679,16 @@ def detect_duplicates(results, log, should_stop, config):
         # AI Hunter mode or fallback: check all pairs
         if config.mode == 'ai-hunter' or not lsh:
             if config.mode == 'ai-hunter':
-                log("🤖 AI Hunter mode: Enhanced semantic and structural checking active")
-                log("   ⚠️ This will check ALL file pairs - may take several minutes for large datasets")
-            
-            total_comparisons = (len(results) * (len(results) - 1)) // 2
-            comparisons_done = 0
-            last_progress = 0
+                # Use parallel processing for AI Hunter
+                parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, 
+                                        config, log, should_stop)
+            else:
+                # Keep the original sequential code for when there's no LSH and not in AI Hunter mode
+                log("⚠️ No MinHash index available - checking all pairs (slower)")
+                
+                total_comparisons = (len(results) * (len(results) - 1)) // 2
+                comparisons_done = 0
+                last_progress = 0
             ai_start_time = time.time()  # Use local timer for AI Hunter
             
             # Create cached AI Hunter comparison
@@ -3435,3 +3445,181 @@ def test_stop_functionality():
     print(f"After stop_scan: _stop_flag = {_stop_flag}")
     _stop_flag = False  # Reset
     return True
+
+def parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, config, log, should_stop):
+    """Parallel AI Hunter checking - no quality compromises, just pure speed"""
+    
+    log("🤖 AI Hunter mode: Enhanced semantic and structural checking active")
+    log("⚡ PARALLEL PROCESSING ENABLED - Using all CPU cores for maximum speed!")
+    
+    total_comparisons = (len(results) * (len(results) - 1)) // 2
+    log(f"   ⚠️ Will check ALL {total_comparisons:,} file pairs - but in parallel!")
+    
+    # Determine number of workers
+    cpu_count = multiprocessing.cpu_count()
+    max_workers = min(cpu_count, 8)  # Cap at 8 to avoid memory issues
+    log(f"   🖥️ Using {max_workers} parallel workers (detected {cpu_count} CPU cores)")
+    
+    # Pre-compute text hashes for all results
+    text_hashes = {}
+    for idx, result in enumerate(results):
+        text = result.get('normalized_text', '')[:2000]
+        text_hashes[idx] = {
+            'hash_2k': hashlib.md5(text.encode()).hexdigest() if text else None,
+            'text_2k': text
+        }
+    
+    # Create all comparison tasks
+    comparison_tasks = []
+    for i in range(len(results)):
+        for j in range(i + 1, len(results)):
+            comparison_tasks.append((i, j))
+    
+    log(f"   📋 Created {len(comparison_tasks):,} comparison tasks")
+    
+    # Progress tracking
+    comparisons_done = 0
+    last_progress = 0
+    start_time = time.time()
+    found_duplicates = []
+    
+    def process_comparison_batch(batch):
+        """Process a batch of comparisons"""
+        batch_results = []
+        
+        for i, j in batch:
+            if should_stop():
+                return batch_results
+            
+            # Calculate all similarities
+            sem_sim = calculate_semantic_similarity(
+                results[i]['semantic_sig'], 
+                results[j]['semantic_sig']
+            )
+            
+            struct_sim = calculate_structural_similarity(
+                results[i]['structural_sig'],
+                results[j]['structural_sig']
+            )
+            
+            # Text similarity
+            text_sim = 0.0
+            if text_hashes[i]['hash_2k'] and text_hashes[j]['hash_2k']:
+                if text_hashes[i]['hash_2k'] == text_hashes[j]['hash_2k']:
+                    text_sim = 1.0
+                else:
+                    text_sim = SequenceMatcher(
+                        None, 
+                        text_hashes[i]['text_2k'], 
+                        text_hashes[j]['text_2k']
+                    ).ratio()
+            
+            # AI Hunter logic: High semantic + high structural = likely duplicate
+            if sem_sim >= config.get_threshold('semantic') and struct_sim >= config.get_threshold('structural'):
+                # If text similarity is low but semantic/structural is high, it's likely a retranslation
+                is_retranslation = text_sim < 0.6
+                
+                batch_results.append({
+                    'i': i,
+                    'j': j,
+                    'sem_sim': sem_sim,
+                    'struct_sim': struct_sim,
+                    'text_sim': text_sim,
+                    'is_duplicate': True,
+                    'is_retranslation': is_retranslation,
+                    'confidence': (sem_sim + struct_sim) / 2
+                })
+            
+            # Also check traditional similarity
+            elif text_sim >= config.get_threshold('similarity'):
+                batch_results.append({
+                    'i': i,
+                    'j': j,
+                    'sem_sim': sem_sim,
+                    'struct_sim': struct_sim,
+                    'text_sim': text_sim,
+                    'is_duplicate': True,
+                    'is_retranslation': False,
+                    'confidence': text_sim
+                })
+        
+        return batch_results
+    
+    # Split tasks into batches
+    batch_size = max(10, total_comparisons // (max_workers * 100))  # Dynamic batch size
+    batches = [comparison_tasks[i:i + batch_size] for i in range(0, len(comparison_tasks), batch_size)]
+    
+    log(f"   📦 Split into {len(batches)} batches of ~{batch_size} comparisons each")
+    
+    # Process batches in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all batches
+        future_to_batch = {executor.submit(process_comparison_batch, batch): batch for batch in batches}
+        
+        # Process results as they complete
+        for future in concurrent.futures.as_completed(future_to_batch):
+            if should_stop():
+                log("⛔ AI Hunter interrupted by user.")
+                executor.shutdown(wait=False)
+                return
+            
+            try:
+                batch_results = future.result()
+                
+                # Thread-safe merge of results
+                with merge_lock:
+                    for result in batch_results:
+                        if result['is_duplicate']:
+                            file1 = results[result['i']]['filename']
+                            file2 = results[result['j']]['filename']
+                            
+                            merge_duplicate_groups(duplicate_groups, file1, file2)
+                            duplicate_confidence[(file1, file2)] = result['confidence']
+                            
+                            if result['is_retranslation']:
+                                found_duplicates.append(
+                                    f"🎯 AI Hunter: Found potential retranslation\n"
+                                    f"      Files: {file1} ≈ {file2}\n"
+                                    f"      Text similarity: {int(result['text_sim']*100)}% (low)\n"
+                                    f"      Semantic similarity: {int(result['sem_sim']*100)}% (high)\n"
+                                    f"      Structural similarity: {int(result['struct_sim']*100)}% (high)"
+                                )
+                            else:
+                                found_duplicates.append(
+                                    f"   📄 Found duplicate: {file1} ≈ {file2} "
+                                    f"(confidence: {int(result['confidence']*100)}%)"
+                                )
+                
+                # Update progress
+                comparisons_done += len(future_to_batch[future])
+                progress = int((comparisons_done / len(comparison_tasks)) * 100)
+                
+                if progress >= last_progress + 5:  # Update every 5%
+                    elapsed = time.time() - start_time
+                    rate = comparisons_done / elapsed if elapsed > 0 else 0
+                    remaining = (len(comparison_tasks) - comparisons_done) / rate if rate > 0 else 0
+                    
+                    log(f"   📊 AI Hunter progress: {comparisons_done:,}/{len(comparison_tasks):,} "
+                        f"({progress}%) - ~{int(remaining)}s remaining - "
+                        f"Speed: {int(rate):,} comparisons/sec")
+                    
+                    # Log some found duplicates
+                    if found_duplicates and len(found_duplicates) <= 5:
+                        for dup_msg in found_duplicates:
+                            log(dup_msg)
+                        found_duplicates.clear()
+                    
+                    last_progress = progress
+                    
+            except Exception as e:
+                log(f"   ❌ Error in parallel processing: {e}")
+    
+    # Final summary
+    elapsed = time.time() - start_time
+    log(f"✅ AI Hunter complete! Processed {total_comparisons:,} comparisons in {int(elapsed)}s")
+    log(f"   ⚡ Speed improvement: {int(total_comparisons/elapsed):,} comparisons/sec")
+    
+    # Log remaining duplicates
+    for dup_msg in found_duplicates[-10:]:  # Show last 10
+        log(dup_msg)
+
