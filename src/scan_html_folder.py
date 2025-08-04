@@ -1434,7 +1434,7 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
                 
                 # Priority: qa_scanner_config > ai_hunter_config
                 max_workers_config = qa_config.get('max_workers',
-                                    ai_hunter_config.get('ai_hunter_max_workers', 0))
+                                    ai_hunter_config.get('ai_hunter_max_workers', 1))
     except:
         max_workers_config = 0
     
@@ -2121,7 +2121,7 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
                 # Priority: deep_check_config > qa_scanner_config > ai_hunter_config
                 max_workers_config = deep_check_config.get('max_workers', 
                                     qa_config.get('max_workers',
-                                    ai_hunter_config.get('ai_hunter_max_workers', 0)))
+                                    ai_hunter_config.get('ai_hunter_max_workers', 1)))
     except:
         max_workers_config = 0
     
@@ -3306,7 +3306,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 
                 # Priority: qa_scanner_config > ai_hunter_config
                 max_workers_config = qa_config.get('max_workers',
-                                    ai_hunter_config.get('ai_hunter_max_workers', 0))
+                                    ai_hunter_config.get('ai_hunter_max_workers', 1))
     except:
         max_workers_config = 0
     
@@ -3985,7 +3985,7 @@ def parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, co
             with open(config_path, 'r', encoding='utf-8') as f:
                 full_config = json.load(f)
                 ai_hunter_config = full_config.get('ai_hunter_config', {})
-                max_workers_config = ai_hunter_config.get('ai_hunter_max_workers', 0)
+                max_workers_config = ai_hunter_config.get('ai_hunter_max_workers', 1)
     except:
         max_workers_config = 0
     
