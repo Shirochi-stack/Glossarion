@@ -1701,6 +1701,9 @@ def detect_duplicates(results, log, should_stop, config):
                 log(f"   [DEBUG] AI Hunter took {ai_time:.2f} seconds")
                 if comparisons_done and comparisons_done > 0:
                     log(f"   [DEBUG] Comparisons/second: {int(comparisons_done/max(ai_time, 1)):,}")
+                    
+                # AI HUNTER IS DONE - DO NOT CONTINUE TO SEQUENTIAL CODE
+                
             else:
                 # Keep the original sequential code for when there's no LSH and not in AI Hunter mode
                 log("⚠️ No MinHash index available - checking all pairs (slower)")
@@ -1708,95 +1711,98 @@ def detect_duplicates(results, log, should_stop, config):
                 total_comparisons = (len(results) * (len(results) - 1)) // 2
                 comparisons_done = 0
                 last_progress = 0  # This is already here for sequential mode
-                ai_start_time = time.time()  # Use local timer           
-            
-            # Create cached AI Hunter comparison
-            @lru_cache(maxsize=10000)
-            def ai_hunter_check_cached(idx1, idx2):
-                """Cached AI Hunter check"""
-                sem_sim = calculate_semantic_similarity(results[idx1]['semantic_sig'], 
-                                                      results[idx2]['semantic_sig'])
-                struct_sim = calculate_structural_similarity(results[idx1]['structural_sig'],
-                                                           results[idx2]['structural_sig'])
+                ai_start_time = time.time()  # Use local timer
                 
-                # Quick text check
-                hash1 = text_hashes[idx1]['hash_2k']
-                hash2 = text_hashes[idx2]['hash_2k']
-                if hash1 and hash2:
-                    if hash1 > hash2:
-                        hash1, hash2 = hash2, hash1
-                    text_sim = compare_texts_cached(hash1, hash2, 2000)
-                else:
-                    text_sim = 0.0
+                # MOVE ALL THE SEQUENTIAL CODE HERE - INDENTED UNDER THIS ELSE BLOCK
                 
-                return sem_sim, struct_sim, text_sim
-            
-            # Check EVERY pair of files
-            for i in range(len(results)):
-                if should_stop():
-                    log("⛔ Semantic check interrupted by user.")
-                    break
-                
-                for j in range(i + 1, len(results)):
-                    comparisons_done += 1
+                # Create cached AI Hunter comparison
+                @lru_cache(maxsize=10000)
+                def ai_hunter_check_cached(idx1, idx2):
+                    """Cached AI Hunter check"""
+                    sem_sim = calculate_semantic_similarity(results[idx1]['semantic_sig'], 
+                                                          results[idx2]['semantic_sig'])
+                    struct_sim = calculate_structural_similarity(results[idx1]['structural_sig'],
+                                                               results[idx2]['structural_sig'])
                     
-                    # Show progress every 5%
-                    progress = int((comparisons_done / total_comparisons) * 100)
-                    if progress >= last_progress + 5:
-                        elapsed = time.time() - ai_start_time
-                        if elapsed > 0 and comparisons_done > 0:
-                            rate = comparisons_done / elapsed
-                            remaining = (total_comparisons - comparisons_done) / rate
-                            log(f"   📊 AI Hunter progress: {comparisons_done}/{total_comparisons} ({progress}%) - ~{int(remaining)}s remaining")
+                    # Quick text check
+                    hash1 = text_hashes[idx1]['hash_2k']
+                    hash2 = text_hashes[idx2]['hash_2k']
+                    if hash1 and hash2:
+                        if hash1 > hash2:
+                            hash1, hash2 = hash2, hash1
+                        text_sim = compare_texts_cached(hash1, hash2, 2000)
+                    else:
+                        text_sim = 0.0
+                    
+                    return sem_sim, struct_sim, text_sim
+                
+                # Check EVERY pair of files
+                for i in range(len(results)):
+                    if should_stop():
+                        log("⛔ Semantic check interrupted by user.")
+                        break
+                    
+                    for j in range(i + 1, len(results)):
+                        comparisons_done += 1
+                        
+                        # Show progress every 5%
+                        progress = int((comparisons_done / total_comparisons) * 100)
+                        if progress >= last_progress + 5:
+                            elapsed = time.time() - ai_start_time
+                            if elapsed > 0 and comparisons_done > 0:
+                                rate = comparisons_done / elapsed
+                                remaining = (total_comparisons - comparisons_done) / rate
+                                log(f"   📊 AI Hunter progress: {comparisons_done}/{total_comparisons} ({progress}%) - ~{int(remaining)}s remaining")
+                            else:
+                                log(f"   📊 AI Hunter progress: {comparisons_done}/{total_comparisons} ({progress}%)")
+                            last_progress = progress
+                        
+                        # Skip if already in same group
+                        if (results[i]['filename'] in duplicate_groups and 
+                            results[j]['filename'] in duplicate_groups and
+                            duplicate_groups[results[i]['filename']] == duplicate_groups[results[j]['filename']]):
+                            continue
+                        
+                        # Get cached comparison results
+                        sem_sim, struct_sim, text_sim = ai_hunter_check_cached(i, j)
+                        
+                        # For AI Hunter, use a combination approach
+                        if config.mode == 'ai-hunter':
+                            # High semantic + high structural = likely same content
+                            if sem_sim >= semantic_threshold and struct_sim >= config.get_threshold('structural'):
+                                # If text similarity is low but semantic/structural is high, it's likely a retranslation
+                                if text_sim < 0.6:  # Different enough text
+                                    log(f"   🎯 AI Hunter: Found potential retranslation")
+                                    log(f"      Files: {results[i]['filename']} ≈ {results[j]['filename']}")
+                                    log(f"      Text similarity: {int(text_sim*100)}% (low)")
+                                    log(f"      Semantic similarity: {int(sem_sim*100)}% (high)")
+                                    log(f"      Structural similarity: {int(struct_sim*100)}% (high)")
+                                    
+                                    merge_duplicate_groups(duplicate_groups, 
+                                                         results[i]['filename'], 
+                                                         results[j]['filename'])
+                                    confidence = (sem_sim + struct_sim) / 2
+                                    duplicate_confidence[(results[i]['filename'], results[j]['filename'])] = confidence
+                                    log(f"   └─ 🤖 Flagged as AI retranslation variant (confidence: {int(confidence*100)}%)")
                         else:
-                            log(f"   📊 AI Hunter progress: {comparisons_done}/{total_comparisons} ({progress}%)")
-                        last_progress = progress
-                    
-                    # Skip if already in same group
-                    if (results[i]['filename'] in duplicate_groups and 
-                        results[j]['filename'] in duplicate_groups and
-                        duplicate_groups[results[i]['filename']] == duplicate_groups[results[j]['filename']]):
-                        continue
-                    
-                    # Get cached comparison results
-                    sem_sim, struct_sim, text_sim = ai_hunter_check_cached(i, j)
-                    
-                    # For AI Hunter, use a combination approach
-                    if config.mode == 'ai-hunter':
-                        # High semantic + high structural = likely same content
-                        if sem_sim >= semantic_threshold and struct_sim >= config.get_threshold('structural'):
-                            # If text similarity is low but semantic/structural is high, it's likely a retranslation
-                            if text_sim < 0.6:  # Different enough text
-                                log(f"   🎯 AI Hunter: Found potential retranslation")
-                                log(f"      Files: {results[i]['filename']} ≈ {results[j]['filename']}")
-                                log(f"      Text similarity: {int(text_sim*100)}% (low)")
-                                log(f"      Semantic similarity: {int(sem_sim*100)}% (high)")
-                                log(f"      Structural similarity: {int(struct_sim*100)}% (high)")
-                                
+                            # Normal semantic checking
+                            if sem_sim >= semantic_threshold and struct_sim >= config.get_threshold('structural'):
                                 merge_duplicate_groups(duplicate_groups, 
                                                      results[i]['filename'], 
                                                      results[j]['filename'])
                                 confidence = (sem_sim + struct_sim) / 2
                                 duplicate_confidence[(results[i]['filename'], results[j]['filename'])] = confidence
-                                log(f"   └─ 🤖 Flagged as AI retranslation variant (confidence: {int(confidence*100)}%)")
-                    else:
-                        # Normal semantic checking
-                        if sem_sim >= semantic_threshold and struct_sim >= config.get_threshold('structural'):
-                            merge_duplicate_groups(duplicate_groups, 
-                                                 results[i]['filename'], 
-                                                 results[j]['filename'])
-                            confidence = (sem_sim + struct_sim) / 2
-                            duplicate_confidence[(results[i]['filename'], results[j]['filename'])] = confidence
-                            log(f"   └─ Semantic match: {results[i]['filename']} ≈ {results[j]['filename']} "
-                                f"(sem: {int(sem_sim*100)}%, struct: {int(struct_sim*100)}%)")
-            
-            # Clear local cache
-            ai_hunter_check_cached.cache_clear()
-    
+                                log(f"   └─ Semantic match: {results[i]['filename']} ≈ {results[j]['filename']} "
+                                    f"(sem: {int(sem_sim*100)}%, struct: {int(struct_sim*100)}%)")
+                
+                # Clear local cache
+                ai_hunter_check_cached.cache_clear()
+
+    # THIS CODE SHOULD BE OUTSIDE ALL THE IF/ELSE BLOCKS - IT RUNS AFTER DUPLICATE DETECTION
     # 5. Deep similarity check (content-based) - Now uses cached function
     perform_deep_similarity_check(results, duplicate_groups, duplicate_confidence, 
                                 config.get_threshold('similarity'), log, should_stop)
-    
+
     # 6. Consecutive chapter check with fuzzy matching
     check_consecutive_chapters(results, duplicate_groups, duplicate_confidence, config, log, should_stop)
     
