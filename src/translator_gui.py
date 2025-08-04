@@ -12507,10 +12507,37 @@ Important rules:
                  
     def test_api_connections(self):
         """Test all configured API connections"""
-        # Ensure we have the openai module
+        # Show immediate feedback
+        progress_dialog = tk.Toplevel(self.current_dialog if hasattr(self, 'current_dialog') else self.master)
+        progress_dialog.title("Testing Connections...")
+        
+        # Set icon
         try:
+            progress_dialog.iconbitmap("halgakos.ico")
+        except:
+            pass  # Icon setting failed, continue without icon
+        
+        # Center the dialog
+        progress_dialog.update_idletasks()
+        width = 300
+        height = 150
+        x = (progress_dialog.winfo_screenwidth() // 2) - (width // 2)
+        y = (progress_dialog.winfo_screenheight() // 2) - (height // 2)
+        progress_dialog.geometry(f"{width}x{height}+{x}+{y}")
+        
+        # Add progress message
+        progress_label = tb.Label(progress_dialog, text="Testing API connections...\nPlease wait...", 
+                                 font=('TkDefaultFont', 10))
+        progress_label.pack(pady=50)
+        
+        # Force update to show dialog immediately
+        progress_dialog.update()
+        
+        try:
+            # Ensure we have the openai module
             import openai
         except ImportError:
+            progress_dialog.destroy()
             messagebox.showerror("Error", "OpenAI library not installed")
             return
         
@@ -12522,14 +12549,14 @@ Important rules:
         # Collect all configured endpoints
         endpoints_to_test = []
         
-        # OpenAI endpoint
+        # OpenAI endpoint - only test if checkbox is enabled
         if self.use_custom_openai_endpoint_var.get():
             openai_url = self.openai_base_url_var.get()
             if openai_url:
                 endpoints_to_test.append(("OpenAI (Custom)", openai_url, self.model_var.get() if hasattr(self, 'model_var') else "gpt-3.5-turbo"))
-        else:
-            # Test default OpenAI endpoint if no custom URL or toggle is off
-            endpoints_to_test.append(("OpenAI (Default)", "https://api.openai.com/v1", self.model_var.get() if hasattr(self, 'model_var') else "gpt-3.5-turbo"))
+            else:
+                # Use default OpenAI endpoint if checkbox is on but no custom URL provided
+                endpoints_to_test.append(("OpenAI (Default)", "https://api.openai.com/v1", self.model_var.get() if hasattr(self, 'model_var') else "gpt-3.5-turbo"))
         
         # Groq endpoint
         if hasattr(self, 'groq_base_url_var'):
@@ -12603,6 +12630,9 @@ Important rules:
         
         # Show results
         result_message = "Connection Test Results:\n\n" + "\n\n".join(results)
+        
+        # Close progress dialog
+        progress_dialog.destroy()
         
         # Determine if all succeeded
         all_success = all("✅" in r for r in results)
