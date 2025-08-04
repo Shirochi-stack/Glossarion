@@ -292,28 +292,103 @@ def load_config(path: str) -> Dict:
 
     return cfg
 
-def save_progress(completed: List[int], glossary: List[Dict], context_history: List[Dict]):
-    with open(PROGRESS_FILE, 'w', encoding='utf-8') as f:
-        json.dump({"completed": completed, "glossary": glossary, "context_history": context_history}, f, ensure_ascii=False, indent=2)
+def get_custom_entry_types():
+    """Get custom entry types configuration from environment"""
+    try:
+        types_json = os.getenv('GLOSSARY_CUSTOM_ENTRY_TYPES', '{}')
+        result = json.loads(types_json)
+        # If empty, return defaults
+        if not result:
+            return {
+                'character': {'enabled': True, 'has_gender': True},
+                'term': {'enabled': True, 'has_gender': False}
+            }
+        return result
+    except:
+        # Default configuration
+        return {
+            'character': {'enabled': True, 'has_gender': True},
+            'term': {'enabled': True, 'has_gender': False}
+        }
 
 def save_glossary_json(glossary: List[Dict], output_path: str):
-    """Save glossary in the new simple format"""
+    """Save glossary in the new simple format with automatic sorting by type"""
+    # Get custom types for sorting order
+    custom_types = get_custom_entry_types()
+    
+    # Create sorting order: character=0, term=1, others alphabetically starting from 2
+    type_order = {'character': 0, 'term': 1}
+    other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
+    for i, t in enumerate(other_types):
+        type_order[t] = i + 2
+    
+    # Sort glossary by type order, then by raw_name
+    sorted_glossary = sorted(glossary, key=lambda x: (
+        type_order.get(x.get('type', 'term'), 999),  # Unknown types go last
+        x.get('raw_name', '').lower()
+    ))
+    
     with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(glossary, f, ensure_ascii=False, indent=2)
+        json.dump(sorted_glossary, f, ensure_ascii=False, indent=2)
 
 def save_glossary_csv(glossary: List[Dict], output_path: str):
-    """Save glossary in CSV format exactly like the example"""
+    """Save glossary in CSV format with header row and automatic sorting by type"""
     import csv
     
     csv_path = output_path.replace('.json', '.csv')
     
+    # Get custom types for sorting order and gender info
+    custom_types = get_custom_entry_types()
+    
+    # Create sorting order
+    type_order = {'character': 0, 'term': 1}
+    other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
+    for i, t in enumerate(other_types):
+        type_order[t] = i + 2
+    
+    # Sort glossary
+    sorted_glossary = sorted(glossary, key=lambda x: (
+        type_order.get(x.get('type', 'term'), 999),
+        x.get('raw_name', '').lower()
+    ))
+    
     with open(csv_path, 'w', encoding='utf-8', newline='') as f:
-        # Write without header, just like the example
-        for entry in glossary:
-            if entry['type'] == 'character':
-                f.write(f"character,{entry['raw_name']},{entry['translated_name']},{entry.get('gender', '')}\n")
+        writer = csv.writer(f)
+        
+        # Build header row
+        header = ['type', 'raw_name', 'translated_name', 'gender']
+        
+        # Add any custom fields to header
+        custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
+        try:
+            custom_fields = json.loads(custom_fields_json)
+            header.extend(custom_fields)
+        except:
+            custom_fields = []
+        
+        # Write header row
+        writer.writerow(header)
+        
+        # Write data rows
+        for entry in sorted_glossary:
+            entry_type = entry.get('type', 'term')
+            type_config = custom_types.get(entry_type, {})
+            
+            # Base row: type, raw_name, translated_name
+            row = [entry_type, entry.get('raw_name', ''), entry.get('translated_name', '')]
+            
+            # Add gender
+            if type_config.get('has_gender', False):
+                row.append(entry.get('gender', ''))
             else:
-                f.write(f"term,{entry['raw_name']},{entry['translated_name']},\n")
+                row.append('')  # Empty gender field for types that don't have gender
+            
+            # Add custom field values
+            for field in custom_fields:
+                row.append(entry.get(field, ''))
+            
+            # Write row
+            writer.writerow(row)
 
 def extract_chapters_from_epub(epub_path: str) -> List[str]:
     chapters = []
@@ -421,8 +496,12 @@ def load_progress() -> Dict:
     return {"completed": [], "glossary": [], "context_history": []}
 
 def parse_api_response(response_text: str) -> List[Dict]:
-    """Parse API response to extract glossary entries - handles both JSON and CSV-like formats"""
+    """Parse API response to extract glossary entries - handles custom types"""
     entries = []
+    
+    # Get enabled types from custom configuration
+    custom_types = get_custom_entry_types()
+    enabled_types = [t for t, cfg in custom_types.items() if cfg.get('enabled', True)]
     
     # First try JSON parsing
     try:
@@ -431,7 +510,6 @@ def parse_api_response(response_text: str) -> List[Dict]:
         
         # Remove markdown code blocks if present
         if '```json' in cleaned_text or '```' in cleaned_text:
-            # Extract content between code blocks
             import re
             code_block_match = re.search(r'```(?:json)?\s*(.*?)\s*```', cleaned_text, re.DOTALL)
             if code_block_match:
@@ -445,111 +523,75 @@ def parse_api_response(response_text: str) -> List[Dict]:
             data = json.loads(json_str)
             
             if isinstance(data, list):
-                # Process each entry to fix structure
                 for item in data:
                     if isinstance(item, dict):
-                        # Fix entries where the model put the type value in the wrong field
-                        if 'character' in item and 'type' not in item:
-                            # Model put raw_name in 'character' field
-                            fixed_entry = {
-                                'type': 'character',
-                                'raw_name': item.get('character', ''),
-                                'translated_name': item.get('translated_name', ''),
-                                'gender': item.get('gender', 'Unknown')
-                            }
-                            # Copy any other fields
-                            for k, v in item.items():
-                                if k not in ['character', 'translated_name', 'gender']:
-                                    fixed_entry[k] = v
-                            entries.append(fixed_entry)
-                        elif 'term' in item and 'type' not in item:
-                            # Model put raw_name in 'term' field
-                            fixed_entry = {
-                                'type': 'term',
-                                'raw_name': item.get('term', item.get('raw_name', '')),
-                                'translated_name': item.get('translated_name', '')
-                            }
-                            # Copy any other fields
-                            for k, v in item.items():
-                                if k not in ['term', 'translated_name']:
-                                    fixed_entry[k] = v
-                            entries.append(fixed_entry)
-                        elif 'type' in item:
-                            # Entry has correct structure
-                            entries.append(item)
+                        # Check if entry type is enabled
+                        entry_type = item.get('type', '').lower()
+                        
+                        # Handle legacy format where type is the key
+                        if not entry_type:
+                            for type_name in enabled_types:
+                                if type_name in item:
+                                    entry_type = type_name
+                                    fixed_entry = {
+                                        'type': type_name,
+                                        'raw_name': item.get(type_name, ''),
+                                        'translated_name': item.get('translated_name', '')
+                                    }
+                                    
+                                    # Add gender if type supports it
+                                    if custom_types.get(type_name, {}).get('has_gender', False):
+                                        fixed_entry['gender'] = item.get('gender', 'Unknown')
+                                    
+                                    # Copy other fields
+                                    for k, v in item.items():
+                                        if k not in [type_name, 'translated_name', 'gender', 'type', 'raw_name']:
+                                            fixed_entry[k] = v
+                                    
+                                    entries.append(fixed_entry)
+                                    break
                         else:
-                            # Try to infer type from other fields
-                            if 'gender' in item:
-                                item['type'] = 'character'
-                            else:
-                                item['type'] = 'term'
-                            entries.append(item)
+                            # Standard format with type field
+                            if entry_type in enabled_types:
+                                entries.append(item)
                 
-                # If we processed entries, return them
-                if entries:
-                    return entries
-                
-                # Otherwise return original data
-                return data
+                return entries
                 
             elif isinstance(data, dict):
-                # It might be a single entry or have a wrapper
-                if 'type' in data and 'raw_name' in data:
-                    # Single entry with correct structure
+                # Handle single entry
+                entry_type = data.get('type', '').lower()
+                if entry_type in enabled_types:
                     return [data]
-                elif 'character' in data or 'term' in data:
-                    # Single entry with wrong structure
-                    if 'character' in data:
-                        fixed_entry = {
-                            'type': 'character',
-                            'raw_name': data.get('character', ''),
-                            'translated_name': data.get('translated_name', ''),
-                            'gender': data.get('gender', 'Unknown')
-                        }
-                    else:
-                        fixed_entry = {
-                            'type': 'term',
-                            'raw_name': data.get('term', data.get('raw_name', '')),
-                            'translated_name': data.get('translated_name', '')
-                        }
-                    # Copy other fields
-                    for k, v in data.items():
-                        if k not in ['character', 'term', 'translated_name', 'gender', 'type', 'raw_name']:
-                            fixed_entry[k] = v
-                    return [fixed_entry]
-                else:
-                    # Check for common wrapper keys
-                    for key in ['entries', 'glossary', 'characters', 'terms', 'data']:
-                        if key in data and isinstance(data[key], list):
-                            # Recursively parse the wrapped data
-                            return parse_api_response(json.dumps(data[key]))
-                    # If no wrapper found but it has valid fields, treat as single entry
-                    if any(k in data for k in ['raw_name', 'translated_name']):
-                        return [data]
+                
+                # Check for wrapper
+                for key in ['entries', 'glossary', 'characters', 'terms', 'data']:
+                    if key in data and isinstance(data[key], list):
+                        return parse_api_response(json.dumps(data[key]))
+                
+                return []
+                
     except (json.JSONDecodeError, AttributeError) as e:
         print(f"[Debug] JSON parsing failed: {e}")
         pass
     
-    # If not JSON, try parsing as CSV-like format
+    # CSV-like format parsing
     lines = response_text.strip().split('\n')
     
     for line in lines:
         line = line.strip()
         if not line or line.startswith('#'):
-            # Skip empty lines and comments
             continue
         
         # Skip header lines
         if 'type' in line.lower() and 'raw_name' in line.lower():
             continue
         
-        # Try to parse CSV-like format
-        # Handle quoted values properly
+        # Parse CSV
         parts = []
         current_part = []
         in_quotes = False
         
-        for char in line + ',':  # Add comma to process last field
+        for char in line + ',':
             if char == '"':
                 in_quotes = not in_quotes
             elif char == ',' and not in_quotes:
@@ -558,98 +600,198 @@ def parse_api_response(response_text: str) -> List[Dict]:
             else:
                 current_part.append(char)
         
-        # Remove last empty part if line ended with comma
         if parts and parts[-1] == '':
             parts = parts[:-1]
         
         if len(parts) >= 3:
             entry_type = parts[0].lower()
             
-            if entry_type in ['character', 'term']:
-                entry = {
-                    'type': entry_type,
-                    'raw_name': parts[1],
-                    'translated_name': parts[2]
-                }
-                
-                # Add gender for characters
-                if entry_type == 'character' and len(parts) > 3 and parts[3]:
-                    entry['gender'] = parts[3]
-                elif entry_type == 'character':
-                    entry['gender'] = 'Unknown'
-                
-                # Add any custom fields
-                custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
-                try:
-                    custom_fields = json.loads(custom_fields_json)
-                    for i, field in enumerate(custom_fields):
-                        if len(parts) > 4 + i:
-                            entry[field] = parts[4 + i]
-                except:
-                    pass
-                
-                entries.append(entry)
+            # Check if type is enabled
+            if entry_type not in enabled_types:
+                continue
+            
+            entry = {
+                'type': entry_type,
+                'raw_name': parts[1],
+                'translated_name': parts[2]
+            }
+            
+            # Add gender if type supports it and it's provided
+            type_config = custom_types.get(entry_type, {})
+            if type_config.get('has_gender', False) and len(parts) > 3 and parts[3]:
+                entry['gender'] = parts[3]
+            elif type_config.get('has_gender', False):
+                entry['gender'] = 'Unknown'
+            
+            # Add any custom fields
+            custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
+            try:
+                custom_fields = json.loads(custom_fields_json)
+                start_idx = 4 if type_config.get('has_gender', False) else 3
+                for i, field in enumerate(custom_fields):
+                    if len(parts) > start_idx + i:
+                        entry[field] = parts[start_idx + i]
+            except:
+                pass
+            
+            entries.append(entry)
     
     return entries
 
 def validate_extracted_entry(entry):
-    """Validate that extracted entry has required fields for simple format"""
-    # Check based on entry type
+    """Validate that extracted entry has required fields and enabled type"""
     if 'type' not in entry:
         return False
     
+    # Check if type is enabled
+    custom_types = get_custom_entry_types()
     entry_type = entry['type'].lower()
     
-    # Must have raw_name and translated_name for all entries
+    if entry_type not in custom_types:
+        return False
+    
+    if not custom_types[entry_type].get('enabled', True):
+        return False
+    
+    # Must have raw_name and translated_name
     if 'raw_name' not in entry or not entry['raw_name']:
         return False
     if 'translated_name' not in entry or not entry['translated_name']:
         return False
     
-    # Characters should have gender, but it's not strictly required
-    # Custom fields are allowed, so we don't reject entries with extra fields
-    
     return True
 
-def build_prompt(chapter_text: str) -> str:
-    """Build the extraction prompt - NO HARDCODED PROMPTS"""
-    # Get custom prompt from environment
+def build_prompt(chapter_text: str) -> tuple:
+    """Build the extraction prompt with custom types - returns (system_prompt, user_prompt)"""
     custom_prompt = os.getenv('GLOSSARY_SYSTEM_PROMPT', '').strip()
     
+    # DEBUG: Print what we're getting
+    #print(f"[DEBUG] GLOSSARY_SYSTEM_PROMPT from env: {repr(custom_prompt[:100] if custom_prompt else 'EMPTY')}")
+    
     if not custom_prompt:
-        # If no custom prompt provided, return minimal instruction
-        return f"Extract glossary from this text:\n\n{chapter_text}"
+        # If no custom prompt, create a default
+        custom_prompt = """"""
     
-    # Build fields specification for {fields} placeholder
-    fields_spec = []
+    # Check if the prompt contains {fields} placeholder
+    if '{fields}' in custom_prompt:
+        # Get enabled types
+        custom_types = get_custom_entry_types()
+        #print(f"[DEBUG] custom_types: {custom_types}")
+        
+        enabled_types = [(t, cfg) for t, cfg in custom_types.items() if cfg.get('enabled', True)]
+        #print(f"[DEBUG] enabled_types: {enabled_types}")
+        
+        # Get custom fields
+        custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
+        try:
+            custom_fields = json.loads(custom_fields_json)
+        except:
+            custom_fields = []
+        #print(f"[DEBUG] custom_fields: {custom_fields}")
+        
+        # Build fields specification based on what the prompt expects
+        # Check if the prompt mentions CSV or JSON to determine format
+        if 'CSV' in custom_prompt.upper():
+            #print("[DEBUG] Detected CSV format in prompt")
+            # CSV format
+            fields_spec = []
+            
+            # Show the header format
+            header_parts = ['type', 'raw_name', 'translated_name', 'gender']
+            if custom_fields:
+                header_parts.extend(custom_fields)
+            fields_spec.append(','.join(header_parts))
+            
+            # Show examples for each type
+            for type_name, type_config in enabled_types:
+                example_parts = [type_name, '<name in original language>', '<English translation>']
+                
+                # Add gender field
+                if type_config.get('has_gender', False):
+                    example_parts.append('<Male/Female/Unknown>')
+                else:
+                    example_parts.append('')  # Empty for non-character types
+                
+                # Add custom field placeholders
+                for field in custom_fields:
+                    example_parts.append(f'<{field} value>')
+                
+                fields_spec.append(','.join(example_parts))
+            
+            #print(f"[DEBUG] CSV fields_spec: {fields_spec}")
+            fields_str = '\n'.join(fields_spec)
+        else:
+            #print("[DEBUG] Detected JSON format in prompt")
+            # JSON format (default)
+            fields_spec = []
+            fields_spec.append("Extract entities and return as a JSON array.")
+            fields_spec.append("Each entry must be a JSON object with these exact fields:")
+            fields_spec.append("")
+            
+            for type_name, type_config in enabled_types:
+                fields_spec.append(f"For {type_name}s:")
+                fields_spec.append(f'  "type": "{type_name}" (required)')
+                fields_spec.append('  "raw_name": the name in original language/script (required)')
+                fields_spec.append('  "translated_name": English translation or romanization (required)')
+                if type_config.get('has_gender', False):
+                    fields_spec.append('  "gender": "Male", "Female", or "Unknown" (required for characters)')
+                fields_spec.append("")
+            
+            # Add custom fields info
+            if custom_fields:
+                fields_spec.append("Additional custom fields to include:")
+                for field in custom_fields:
+                    fields_spec.append(f'  "{field}": appropriate value')
+                fields_spec.append("")
+            
+            # Add example
+            if enabled_types:
+                fields_spec.append("Example output format:")
+                fields_spec.append('[')
+                examples = []
+                if 'character' in [t[0] for t in enabled_types]:
+                    example = '  {"type": "character", "raw_name": "田中太郎", "translated_name": "Tanaka Taro", "gender": "Male"'
+                    for field in custom_fields:
+                        example += f', "{field}": "example value"'
+                    example += '}'
+                    examples.append(example)
+                if 'term' in [t[0] for t in enabled_types]:
+                    example = '  {"type": "term", "raw_name": "東京駅", "translated_name": "Tokyo Station"'
+                    for field in custom_fields:
+                        example += f', "{field}": "example value"'
+                    example += '}'
+                    examples.append(example)
+                fields_spec.append(',\n'.join(examples))
+                fields_spec.append(']')
+            
+            #print(f"[DEBUG] JSON fields_spec: {fields_spec}")
+            fields_str = '\n'.join(fields_spec)
+        
+        #print(f"[DEBUG] fields_str: {repr(fields_str[:200] if fields_str else 'EMPTY')}")
+        
+        # Replace {fields} placeholder
+        system_prompt = custom_prompt.replace('{fields}', fields_str)
+        #print(f"[DEBUG] After replacement - system_prompt preview: {repr(system_prompt[:200])}")
+    else:
+        # No {fields} placeholder - use the prompt as-is
+        system_prompt = custom_prompt
     
-    # Standard format
-    fields_spec.append("For characters: character,raw_name,translated_name,gender")
-    fields_spec.append("For terms/locations: term,raw_name,translated_name,")
+    # Remove any {chapter_text} placeholders from system prompt
+    system_prompt = system_prompt.replace('{chapter_text}', '')
+    system_prompt = system_prompt.replace('{{chapter_text}}', '')
+    system_prompt = system_prompt.replace('{text}', '')
+    system_prompt = system_prompt.replace('{{text}}', '')
     
-    # Add custom fields if any
-    custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
-    try:
-        custom_fields = json.loads(custom_fields_json)
-        if custom_fields:
-            # Add note about custom fields
-            custom_fields_str = ','.join(custom_fields)
-            fields_spec.append(f"Custom fields (add as extra columns): {custom_fields_str}")
-    except:
-        custom_fields = []
+    # Strip any trailing "Text:" or similar
+    system_prompt = system_prompt.rstrip()
+    if system_prompt.endswith('Text:'):
+        system_prompt = system_prompt[:-5].rstrip()
     
-    fields_str = '\n'.join(fields_spec)
+    # User prompt is just the chapter text
+    user_prompt = chapter_text
     
-    # Replace placeholders
-    prompt = custom_prompt
-    prompt = prompt.replace('{fields}', fields_str)
-    prompt = prompt.replace('{chapter_text}', chapter_text)
-    prompt = prompt.replace('{{fields}}', fields_str)
-    prompt = prompt.replace('{{chapter_text}}', chapter_text)
-    prompt = prompt.replace('{text}', chapter_text)
-    prompt = prompt.replace('{{text}}', chapter_text)
-    
-    return prompt
+    return (system_prompt, user_prompt)
+
 
 def skip_duplicate_entries(glossary):
     """
@@ -701,7 +843,6 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
     """
     Process a batch of chapters in parallel with improved interrupt support
     """
-    sys_prompt = config.get('system_prompt', 'You are a helpful assistant.')
     temp = float(os.getenv("GLOSSARY_TEMPERATURE") or config.get('temperature', 0.1))
     
     env_max_output = os.getenv("MAX_OUTPUT_TOKENS")
@@ -719,14 +860,20 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
             if check_stop():
                 break
                 
-            # Build messages for this chapter
+            # Get system and user prompts
+            system_prompt, user_prompt = build_prompt(chap)
+
+            # FIX: Build messages correctly with system and user prompts
             if not contextual_enabled:
-                msgs = [{"role":"system","content":sys_prompt}] \
-                     + [{"role":"user","content":build_prompt(chap)}]
+                msgs = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ]
             else:
-                msgs = [{"role":"system","content":sys_prompt}] \
+                msgs = [{"role": "system", "content": system_prompt}] \
                      + trim_context_history(history, ctx_limit, rolling_window) \
-                     + [{"role":"user","content":build_prompt(chap)}]
+                     + [{"role": "user", "content": user_prompt}]
+
             
             # Submit to thread pool
             future = executor.submit(
@@ -886,7 +1033,6 @@ def main(log_callback=None, stop_callback=None):
         parser.add_argument('--epub', required=True, help='Path to EPUB/TXT file')
         parser.add_argument('--output', required=True, help='Output glossary path')
         parser.add_argument('--config', help='Config file path')
-        # keep any other add_argument lines you have
         
         args = parser.parse_args()
         epub_path = args.epub
@@ -921,7 +1067,7 @@ def main(log_callback=None, stop_callback=None):
     global PROGRESS_FILE
     PROGRESS_FILE = os.path.join(
         glossary_dir,
-        f"{file_base}_glossary_progress.json"  # CHANGED from epub_base
+        f"{file_base}_glossary_progress.json"
     )
 
     config = load_config(args.config)
@@ -974,8 +1120,6 @@ def main(log_callback=None, stop_callback=None):
         mtoks = config.get('max_tokens', 4196)
         print(f"[DEBUG] Output Token Limit: {mtoks} (from config)")
     
-    sys_prompt = config.get('system_prompt', 'You are a helpful assistant.')
-    
     # Get context limit from environment or config
     ctx_limit = int(os.getenv("GLOSSARY_CONTEXT_LIMIT") or config.get('context_limit_chapters', 3))
 
@@ -990,7 +1134,15 @@ def main(log_callback=None, stop_callback=None):
         print(f"⚠️ Invalid chapter range format: {chapter_range} (use format: 5-10)")
 
     # Log settings
-    print("📑 Glossary Format: Simple (type, raw_name, translated_name, gender)")
+    format_parts = ["type", "raw_name", "translated_name", "gender"]
+    custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
+    try:
+        custom_fields = json.loads(custom_fields_json)
+        if custom_fields:
+            format_parts.extend(custom_fields)
+    except:
+        pass
+    print(f"📑 Glossary Format: Simple ({', '.join(format_parts)})")
     
     # Check honorifics filter toggle
     honorifics_disabled = os.getenv('GLOSSARY_DISABLE_HONORIFICS_FILTER', '0') == '1'
@@ -1127,7 +1279,9 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Only add to history if contextual is enabled
                 if contextual_enabled:
-                    history.append({"user": build_prompt(chap), "assistant": resp})
+                    # For history, we need to reconstruct what was sent
+                    system_prompt, user_prompt = build_prompt(chap)
+                    history.append({"user": user_prompt, "assistant": resp})
             
             # Apply skip logic to batch entries
             if batch_glossary_entries:
@@ -1187,15 +1341,20 @@ def main(log_callback=None, stop_callback=None):
                 print(f"  📌 Glossary context will reset after this chapter (current: {len(history)}/{ctx_limit} chapters)")        
 
             try:
+                # Get system and user prompts from build_prompt
+                system_prompt, user_prompt = build_prompt(chap)
+                
                 if not contextual_enabled:
                     # No context at all
-                    msgs = [{"role":"system","content":sys_prompt}] \
-                         + [{"role":"user","content":build_prompt(chap)}]
+                    msgs = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ]
                 else:
                     # Use context with trim_context_history handling the mode
-                    msgs = [{"role":"system","content":sys_prompt}] \
+                    msgs = [{"role": "system", "content": system_prompt}] \
                          + trim_context_history(history, ctx_limit, rolling_window) \
-                         + [{"role":"user","content":build_prompt(chap)}]
+                         + [{"role": "user", "content": user_prompt}]
                 
                 total_tokens = sum(count_tokens(m["content"]) for m in msgs)
                 
@@ -1219,7 +1378,7 @@ def main(log_callback=None, stop_callback=None):
                     print(f"📄 Using ChapterSplitter to split into smaller chunks...")
                     
                     # Calculate available tokens for content
-                    system_tokens = chapter_splitter.count_tokens(sys_prompt)
+                    system_tokens = chapter_splitter.count_tokens(system_prompt)
                     context_tokens = sum(chapter_splitter.count_tokens(m["content"]) for m in trim_context_history(history, ctx_limit, rolling_window))
                     safety_margin = 1000
                     available_tokens = token_limit - system_tokens - context_tokens - safety_margin
@@ -1246,15 +1405,20 @@ def main(log_callback=None, stop_callback=None):
                         soup = BeautifulSoup(chunk_html, 'html.parser')
                         chunk_text = soup.get_text(strip=True)
                         
-                        # Build messages for this chunk (same logic as main chapter)
+                        # Get system and user prompts for chunk
+                        chunk_system_prompt, chunk_user_prompt = build_prompt(chunk_text)
+
+                        # Build chunk messages
                         if not contextual_enabled:
-                            chunk_msgs = [{"role":"system","content":sys_prompt}] \
-                                        + [{"role":"user","content":build_prompt(chunk_text)}]
+                            chunk_msgs = [
+                                {"role": "system", "content": chunk_system_prompt},
+                                {"role": "user", "content": chunk_user_prompt}
+                            ]
                         else:
-                            chunk_msgs = [{"role":"system","content":sys_prompt}] \
-                                        + trim_context_history(history, ctx_limit, rolling_window) \
-                                        + [{"role":"user","content":build_prompt(chunk_text)}]
-                        
+                            chunk_msgs = [{"role": "system", "content": chunk_system_prompt}] \
+                                       + trim_context_history(history, ctx_limit, rolling_window) \
+                                       + [{"role": "user", "content": chunk_user_prompt}]
+
                         # API call for chunk
                         try:
                             chunk_raw = send_with_interrupt(
@@ -1280,7 +1444,32 @@ def main(log_callback=None, stop_callback=None):
                             continue  # Skip this chunk
                         
                         # Process chunk response
-                        chunk_resp = chunk_raw[0] if isinstance(chunk_raw, tuple) else chunk_raw
+                        if chunk_raw is None:
+                            print(f"❌ API returned None for chunk {chunk_idx}")
+                            continue
+
+                        # Handle different response types
+                        if isinstance(chunk_raw, tuple):
+                            chunk_resp = chunk_raw[0] if chunk_raw[0] is not None else ""
+                        elif isinstance(chunk_raw, str):
+                            chunk_resp = chunk_raw
+                        elif hasattr(chunk_raw, 'content'):
+                            chunk_resp = chunk_raw.content if chunk_raw.content is not None else ""
+                        elif hasattr(chunk_raw, 'text'):
+                            chunk_resp = chunk_raw.text if chunk_raw.text is not None else ""
+                        else:
+                            print(f"❌ Unexpected response type for chunk {chunk_idx}: {type(chunk_raw)}")
+                            chunk_resp = str(chunk_raw) if chunk_raw is not None else ""
+
+                        # Ensure resp is a string
+                        if not isinstance(chunk_resp, str):
+                            print(f"⚠️ Converting non-string response to string for chunk {chunk_idx}")
+                            chunk_resp = str(chunk_resp) if chunk_resp is not None else ""
+
+                        # Check if response is empty
+                        if not chunk_resp or chunk_resp.strip() == "":
+                            print(f"⚠️ Empty response for chunk {chunk_idx}, skipping...")
+                            continue
                         
                         # Save chunk response with thread-safe location
                         thread_name = threading.current_thread().name
@@ -1291,21 +1480,22 @@ def main(log_callback=None, stop_callback=None):
                         with open(os.path.join(thread_dir, f"chunk_response_chap{idx+1}_chunk{chunk_idx}.txt"), "w", encoding="utf-8", errors="replace") as f:
                             f.write(chunk_resp)
                         
-                        # Extract JSON from chunk
+                        # Extract data from chunk
                         chunk_resp_data = parse_api_response(chunk_resp)
-                        
+
                         if not chunk_resp_data:
                             print(f"[Warning] No data found in chunk {chunk_idx}, skipping...")
                             continue
-                        
-                        # Parse chunk JSON
+
+                        # The parse_api_response already returns parsed data, no need to parse again
                         try:
-                            chunk_data = json.loads(chunk_json_str)
-                            
-                            # Filter out invalid entries
+                            # Filter out invalid entries directly from chunk_resp_data
                             valid_chunk_data = []
-                            for entry in chunk_data:
+                            for entry in chunk_resp_data:
                                 if validate_extracted_entry(entry):
+                                    # Clean the raw_name
+                                    if 'raw_name' in entry:
+                                        entry['raw_name'] = entry['raw_name'].strip()
                                     valid_chunk_data.append(entry)
                                 else:
                                     print(f"[Debug] Skipped invalid entry in chunk {chunk_idx}: {entry}")
@@ -1315,10 +1505,10 @@ def main(log_callback=None, stop_callback=None):
                             
                             # Add chunk to history if contextual
                             if contextual_enabled:
-                                history.append({"user": build_prompt(chunk_text), "assistant": chunk_resp})
-                                
-                        except json.JSONDecodeError as e:
-                            print(f"[Warning] JSON decode error in chunk {chunk_idx}: {e}")
+                                history.append({"user": chunk_user_prompt, "assistant": chunk_resp})
+
+                        except Exception as e:
+                            print(f"[Warning] Error processing chunk {chunk_idx} data: {e}")
                             continue
                         
                         # Add delay between chunks (but not after last chunk)
@@ -1330,10 +1520,11 @@ def main(log_callback=None, stop_callback=None):
                     
                     # Use the collected data from all chunks
                     data = chapter_glossary_data
+                    resp = ""  # Combined response not needed for progress tracking
                     print(f"✅ Chapter {idx+1} processed in {len(chunks)} chunks, total entries: {len(data)}")
                     
                 else:
-                    # Original single-chapter processing (your existing logic)
+                    # Original single-chapter processing
                     # Check for stop before API call
                     if check_stop():
                         print(f"❌ Glossary extraction stopped before API call for chapter {idx+1}")
@@ -1363,8 +1554,33 @@ def main(log_callback=None, stop_callback=None):
                         print(f"❌ Unexpected error for chapter {idx+1}: {e}")
                         continue
                     
-                    # Process response
-                    resp = raw[0] if isinstance(raw, tuple) else raw
+                    # Handle response
+                    if raw is None:
+                        print(f"❌ API returned None for chapter {idx+1}")
+                        continue
+
+                    # Handle different response types
+                    if isinstance(raw, tuple):
+                        resp = raw[0] if raw[0] is not None else ""
+                    elif isinstance(raw, str):
+                        resp = raw
+                    elif hasattr(raw, 'content'):
+                        resp = raw.content if raw.content is not None else ""
+                    elif hasattr(raw, 'text'):
+                        resp = raw.text if raw.text is not None else ""
+                    else:
+                        print(f"❌ Unexpected response type for chapter {idx+1}: {type(raw)}")
+                        resp = str(raw) if raw is not None else ""
+
+                    # Ensure resp is a string
+                    if not isinstance(resp, str):
+                        print(f"⚠️ Converting non-string response to string for chapter {idx+1}")
+                        resp = str(resp) if resp is not None else ""
+
+                    # Check if response is empty
+                    if not resp or resp.strip() == "":
+                        print(f"⚠️ Empty response for chapter {idx+1}, skipping...")
+                        continue
 
                     # Save the raw response with thread-safe location
                     thread_name = threading.current_thread().name
@@ -1376,12 +1592,20 @@ def main(log_callback=None, stop_callback=None):
                         f.write(resp)
 
                     # Parse response using the new parser
-                    data = parse_api_response(resp)
+                    try:
+                        data = parse_api_response(resp)
+                    except Exception as e:
+                        print(f"❌ Error parsing response for chapter {idx+1}: {e}")
+                        print(f"   Response preview: {resp[:200] if resp else 'None'}...")
+                        continue
                     
                     # Filter out invalid entries
                     valid_data = []
                     for entry in data:
                         if validate_extracted_entry(entry):
+                            # Clean the raw_name
+                            if 'raw_name' in entry:
+                                entry['raw_name'] = entry['raw_name'].strip()
                             valid_data.append(entry)
                         else:
                             print(f"[Debug] Skipped invalid entry: {entry}")
@@ -1415,8 +1639,8 @@ def main(log_callback=None, stop_callback=None):
                 completed.append(idx)
 
                 # Only add to history if contextual is enabled
-                if contextual_enabled:
-                    history.append({"user": build_prompt(chap), "assistant": resp})
+                if contextual_enabled and 'resp' in locals() and resp:
+                    history.append({"user": user_prompt, "assistant": resp})
                     
                     # Reset history when limit reached without rolling window
                     if not rolling_window and len(history) >= ctx_limit and ctx_limit > 0:
@@ -1452,11 +1676,13 @@ def main(log_callback=None, stop_callback=None):
 
             except Exception as e:
                 print(f"Error at chapter {idx+1}: {e}")
+                import traceback
+                print(f"Full traceback: {traceback.format_exc()}")
                 # Check for stop even after error
                 if check_stop():
                     print(f"❌ Glossary extraction stopped after error in chapter {idx+1}")
                     return
-
+    
     print(f"Done. Glossary saved to {args.output}")
     
     # Also save as CSV format for compatibility
@@ -1468,5 +1694,33 @@ def main(log_callback=None, stop_callback=None):
     except Exception as e:
         print(f"[Warning] Could not save CSV format: {e}")
 
+def save_progress(completed: List[int], glossary: List[Dict], context_history: List[Dict]):
+    """Save progress to JSON file"""
+    progress_data = {
+        "completed": completed,
+        "glossary": glossary,
+        "context_history": context_history
+    }
+    
+    try:
+        # Use atomic write to prevent corruption
+        temp_file = PROGRESS_FILE + '.tmp'
+        with open(temp_file, 'w', encoding='utf-8') as f:
+            json.dump(progress_data, f, ensure_ascii=False, indent=2)
+        
+        # Replace the old file with the new one
+        if os.path.exists(PROGRESS_FILE):
+            os.remove(PROGRESS_FILE)
+        os.rename(temp_file, PROGRESS_FILE)
+        
+    except Exception as e:
+        print(f"[Warning] Failed to save progress: {e}")
+        # Try direct write as fallback
+        try:
+            with open(PROGRESS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(progress_data, f, ensure_ascii=False, indent=2)
+        except Exception as e2:
+            print(f"[Error] Could not save progress: {e2}")
+            
 if __name__=='__main__':
     main()
