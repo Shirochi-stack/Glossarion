@@ -2780,7 +2780,7 @@ class UnifiedClient:
                 if "429" in error_str or "rate limit" in error_str or "quota" in error_str:
                     raise  # Re-raise for multi-key retry logic in outer send() method
                 
-                # Check for prohibited content - never retry these
+                # Check for prohibited content
                 content_filter_indicators = [
                     "content_filter", "content was blocked", "response was blocked",
                     "safety filter", "content policy", "harmful content",
@@ -2788,6 +2788,25 @@ class UnifiedClient:
                 ]
                 
                 if any(indicator in error_str for indicator in content_filter_indicators):
+                    # If we're in multi-key mode, try with main key
+                    if self._multi_key_mode and hasattr(self, 'original_api_key'):
+                        print(f"❌ Content prohibited on {self.key_identifier} - retrying with main key")
+                        
+                        try:
+                            # Create a temporary client with main key
+                            main_key_response = self._retry_with_main_key(
+                                messages, temperature, max_tokens, max_completion_tokens, context
+                            )
+                            
+                            if main_key_response:
+                                print(f"✅ Main key succeeded for prohibited content")
+                                return main_key_response
+                            
+                        except Exception as main_key_error:
+                            print(f"❌ Main key also failed: {str(main_key_error)[:100]}")
+                            # Fall through to normal error handling
+                    
+                    # Normal prohibited content handling
                     print(f"❌ Content prohibited - not retrying: {error_str[:100]}")
                     self._save_failed_request(messages, e, context)
                     self._track_stats(context, False, type(e).__name__, time.time() - start_time)
@@ -2842,6 +2861,24 @@ class UnifiedClient:
                 ]
                 
                 if any(indicator in error_str for indicator in content_filter_indicators):
+                    # If we're in multi-key mode, try with main key
+                    if self._multi_key_mode and hasattr(self, 'original_api_key'):
+                        print(f"❌ Content prohibited (unexpected error) - retrying with main key")
+                        
+                        try:
+                            # Create a temporary client with main key
+                            main_key_response = self._retry_with_main_key(
+                                messages, temperature, max_tokens, max_completion_tokens, context
+                            )
+                            
+                            if main_key_response:
+                                print(f"✅ Main key succeeded for prohibited content")
+                                return main_key_response
+                            
+                        except Exception as main_key_error:
+                            print(f"❌ Main key also failed: {str(main_key_error)[:100]}")
+                            # Fall through to normal error handling
+                    
                     print(f"❌ Content prohibited - not retrying")
                     self._save_failed_request(messages, e, context)
                     self._track_stats(context, False, "unexpected_error", time.time() - start_time)
@@ -2886,6 +2923,73 @@ class UnifiedClient:
                 self._track_stats(context, False, "unexpected_error", time.time() - start_time)
                 fallback_content = self._handle_empty_result(messages, context, str(e))
                 return fallback_content, 'error'
+                
+    def _retry_with_main_key(self, messages, temperature=None, max_tokens=None, 
+                            max_completion_tokens=None, context=None) -> Tuple[str, Optional[str]]:
+        """
+        Create a temporary client with the main key and retry the request.
+        This is used for prohibited content errors in multi-key mode.
+        """
+        try:
+            # Create a new temporary UnifiedClient instance with the main key
+            # This ensures thread safety and doesn't affect the current instance
+            temp_client = UnifiedClient(
+                api_key=self.original_api_key,
+                model=self.original_model,
+                output_dir=self.output_dir
+            )
+            
+            # Copy relevant state that might be needed
+            temp_client.context = context
+            temp_client._cancelled = self._cancelled
+            temp_client._in_cleanup = self._in_cleanup
+            temp_client.current_session_context = self.current_session_context
+            temp_client.conversation_message_count = self.conversation_message_count
+            
+            # Disable multi-key mode for this temporary client
+            temp_client._multi_key_mode = False
+            temp_client.use_multi_keys = False
+            
+            print(f"📤 Retrying with main key: {self.original_model}")
+            
+            # Get file names for response tracking
+            payload_name, response_name = self._get_file_names(messages, context=context)
+            
+            # Call _get_response directly on the temp client
+            response = temp_client._get_response(messages, temperature, max_tokens, 
+                                                max_completion_tokens, response_name)
+            
+            # Check for cancellation
+            if self._cancelled:
+                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+            
+            # Save response if successful
+            if response.content:
+                self._save_response(response.content, response_name)
+            
+            # Handle empty responses
+            if response.is_error or not response.content or response.content.strip() in ["", "[]"]:
+                print(f"Main key returned empty response: {response.finish_reason}")
+                return None
+            
+            # Return successful response
+            return response.content, response.finish_reason
+            
+        except Exception as e:
+            print(f"Main key retry failed: {str(e)[:200]}")
+            # Check if it's also a content filter error
+            error_str = str(e).lower()
+            content_filter_indicators = [
+                "content_filter", "content was blocked", "response was blocked",
+                "safety filter", "content policy", "harmful content",
+                "blocked by safety", "harm_category"
+            ]
+            
+            if any(indicator in error_str for indicator in content_filter_indicators):
+                print(f"❌ Main key also hit content filter")
+            
+            # Re-raise the error so the main method can handle it
+            raise
     
     def _get_response(self, messages, temperature, max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
         """
@@ -4082,7 +4186,16 @@ class UnifiedClient:
                         raise Exception("Empty text in response")
                     finish_reason = 'stop'
                 except Exception as text_error:
-                    print(f"Failed to extract text: {text_error}")
+                    # Print the actual error type and full message
+                    print(f"Failed to extract text: {type(text_error).__name__}: {text_error}")
+                    
+                    # Also check if there's more info in the response object
+                    if hasattr(response, '_result'):
+                        print(f"Response _result: {response._result}")
+                    if hasattr(response, 'candidates'):
+                        print(f"Response candidates: {len(response.candidates) if response.candidates else 'None'}")
+                    if hasattr(response, 'prompt_feedback'):
+                        print(f"Response prompt_feedback: {response.prompt_feedback}")
                     
                     # Try to extract from candidates
                     if hasattr(response, 'candidates') and response.candidates:
