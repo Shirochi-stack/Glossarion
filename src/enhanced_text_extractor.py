@@ -12,17 +12,22 @@ import unicodedata
 from typing import Tuple, Optional
 import chardet
 
+# BEAUTIFUL SOUP IMPORT MONKEY FIX - Import BeautifulSoup BEFORE html2text
+# This prevents certain parser initialization issues
+try:
+    from bs4 import BeautifulSoup
+    # Force BeautifulSoup to initialize its parsers
+    _ = BeautifulSoup("", 'html.parser')
+except ImportError:
+    BeautifulSoup = None
+    raise ImportError("BeautifulSoup is required. Install with: pip install beautifulsoup4")
+
+# Now import html2text AFTER BeautifulSoup
 try:
     import html2text
 except ImportError:
     html2text = None
     raise ImportError("html2text is required. Install with: pip install html2text")
-
-try:
-    from bs4 import BeautifulSoup
-except ImportError:
-    BeautifulSoup = None
-    raise ImportError("BeautifulSoup is required. Install with: pip install beautifulsoup4")
 
 
 class EnhancedTextExtractor:
@@ -436,9 +441,9 @@ class EnhancedTextExtractor:
             # Convert to text with error handling
             try:
                 clean_text = self.h2t.handle(content_to_convert)
-            except AssertionError as e:
+            except (AssertionError, UnboundLocalError) as e:
                 error_msg = str(e)
-                if "we should not get here!" in error_msg or "unexpected call to parse_endtag" in error_msg:
+                if "cannot access local variable" in error_msg or "we should not get here!" in error_msg or "unexpected call to parse_endtag" in error_msg:
                     print(f"⚠️ html2text encountered malformed HTML: {error_msg}")
                     print(f"⚠️ Applying minimal fixes...")
                     # Apply minimal fixes
@@ -452,7 +457,7 @@ class EnhancedTextExtractor:
                         clean_text = soup.get_text(separator='\n', strip=True)
                         print(f"✅ Used BeautifulSoup fallback")
                 else:
-                    # Re-raise if it's a different AssertionError
+                    # Re-raise if it's a different error
                     raise
             except Exception as e:
                 print(f"⚠️ Unexpected error in html2text: {e}")
