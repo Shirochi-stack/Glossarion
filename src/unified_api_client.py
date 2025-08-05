@@ -2657,7 +2657,7 @@ class UnifiedClient:
     
     def _send_internal(self, messages, temperature=None, max_tokens=None, max_completion_tokens=None, context=None) -> Tuple[str, Optional[str]]:
         """
-        Internal send implementation with integrated 500 error retry logic
+        Internal send implementation with integrated 500 error retry logic and prohibited content handling
         """
         start_time = time.time()
         
@@ -2674,6 +2674,9 @@ class UnifiedClient:
         # Internal retry logic for 500 errors - INCREASED TO 7
         internal_retries = 7
         base_delay = 5  # Base delay for exponential backoff
+        
+        # Track if we've tried main key for prohibited content
+        main_key_attempted = False
         
         for attempt in range(internal_retries):
             try:
@@ -2784,212 +2787,156 @@ class UnifiedClient:
                 content_filter_indicators = [
                     "content_filter", "content was blocked", "response was blocked",
                     "safety filter", "content policy", "harmful content",
-                    "blocked by safety", "harm_category"
+                    "blocked by safety", "harm_category", "content_policy_violation",
+                    "unsafe content", "violates our usage policies"
                 ]
                 
                 if any(indicator in error_str for indicator in content_filter_indicators):
-                    # If we're in multi-key mode, try with main key
-                    if self._multi_key_mode and hasattr(self, 'original_api_key'):
-                        print(f"❌ Content prohibited on {self.key_identifier} - retrying with main key")
+                    print(f"❌ Prohibited content detected: {error_str[:200]}")
+                    
+                    # Debug current state
+                    self._debug_multi_key_state()
+                    
+                    # Only try main key if:
+                    # 1. We're in multi-key mode
+                    # 2. We haven't tried main key yet
+                    # 3. We have original_api_key and original_model
+                    if (self._multi_key_mode and 
+                        not main_key_attempted and 
+                        hasattr(self, 'original_api_key') and 
+                        hasattr(self, 'original_model') and
+                        self.original_api_key and 
+                        self.original_model):
+                        
+                        print(f"🔄 Attempting main key fallback for prohibited content")
+                        print(f"   Current key: {self.key_identifier}")
+                        print(f"   Main key model: {self.original_model}")
+                        
+                        main_key_attempted = True
                         
                         try:
-                            # Create a temporary client with main key
-                            main_key_response = self._retry_with_main_key(
+                            # Create temporary client with main key
+                            main_response = self._retry_with_main_key(
                                 messages, temperature, max_tokens, max_completion_tokens, context
                             )
                             
-                            if main_key_response:
-                                print(f"✅ Main key succeeded for prohibited content")
-                                return main_key_response
-                            
-                        except Exception as main_key_error:
-                            print(f"❌ Main key also failed: {str(main_key_error)[:100]}")
-                            # Fall through to normal error handling
+                            if main_response:
+                                content, finish_reason = main_response
+                                print(f"✅ Main key succeeded! Returning response")
+                                return content, finish_reason
+                            else:
+                                print(f"❌ Main key returned None")
+                                
+                        except Exception as main_error:
+                            print(f"❌ Main key error: {str(main_error)[:200]}")
+                            # Check if main key also hit content filter
+                            main_error_str = str(main_error).lower()
+                            if any(indicator in main_error_str for indicator in content_filter_indicators):
+                                print(f"❌ Main key also hit content filter")
+                            # Continue to normal error handling
                     
                     # Normal prohibited content handling
-                    print(f"❌ Content prohibited - not retrying: {error_str[:100]}")
+                    print(f"❌ Content prohibited - not retrying further")
                     self._save_failed_request(messages, e, context)
                     self._track_stats(context, False, type(e).__name__, time.time() - start_time)
                     fallback_content = self._handle_empty_result(messages, context, str(e))
                     return fallback_content, 'error'
                 
-                # Check for 500 errors - retry these with exponential backoff
-                http_status = getattr(e, 'http_status', None)
-                if http_status == 500 or "500" in error_str or "api_error" in error_str:
-                    if attempt < internal_retries - 1:
-                        # Exponential backoff with jitter
-                        delay = (base_delay * (2 ** attempt)) + random.uniform(0, 1)
-                        # Cap the maximum delay to prevent extremely long waits
-                        delay = min(delay, 60)  # Max 60 seconds
-                        
-                        print(f"🔄 Server error (500) - auto-retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries})")
-                        
-                        # Wait with cancellation check
-                        wait_start = time.time()
-                        while time.time() - wait_start < delay:
-                            if self._cancelled:
-                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                            time.sleep(0.5)  # Check every 0.5 seconds
-                        continue
-                    else:
-                        print(f"❌ Server error (500) - exhausted {internal_retries} retries")
-                
-                # Save failed request and return fallback
-                self._save_failed_request(messages, e, context)
-                self._track_stats(context, False, type(e).__name__, time.time() - start_time)
-                fallback_content = self._handle_empty_result(messages, context, str(e))
-                return fallback_content, 'error'
-                
-            except Exception as e:
-                print(f"Unexpected error: {e}")
-                error_str = str(e).lower()
-                
-                # For unexpected errors, check if it's a timeout
-                if "timed out" in error_str:
-                    # Re-raise timeout errors so the retry logic can handle them
-                    raise UnifiedClientError(f"Request timed out: {e}", error_type="timeout")
-                
-                # Check if it's a rate limit error
-                if "429" in error_str or "rate limit" in error_str or "quota" in error_str:
-                    raise  # Re-raise for multi-key retry logic
-                
-                # Check for prohibited content in unexpected errors
-                content_filter_indicators = [
-                    "content_filter", "content was blocked", "response was blocked",
-                    "safety filter", "content policy", "harmful content",
-                    "blocked by safety", "harm_category"
-                ]
-                
-                if any(indicator in error_str for indicator in content_filter_indicators):
-                    # If we're in multi-key mode, try with main key
-                    if self._multi_key_mode and hasattr(self, 'original_api_key'):
-                        print(f"❌ Content prohibited (unexpected error) - retrying with main key")
-                        
-                        try:
-                            # Create a temporary client with main key
-                            main_key_response = self._retry_with_main_key(
-                                messages, temperature, max_tokens, max_completion_tokens, context
-                            )
-                            
-                            if main_key_response:
-                                print(f"✅ Main key succeeded for prohibited content")
-                                return main_key_response
-                            
-                        except Exception as main_key_error:
-                            print(f"❌ Main key also failed: {str(main_key_error)[:100]}")
-                            # Fall through to normal error handling
-                    
-                    print(f"❌ Content prohibited - not retrying")
-                    self._save_failed_request(messages, e, context)
-                    self._track_stats(context, False, "unexpected_error", time.time() - start_time)
-                    fallback_content = self._handle_empty_result(messages, context, str(e))
-                    return fallback_content, 'error'
-                
-                # Check for 500 errors in unexpected exceptions
-                if "500" in error_str or "internal server error" in error_str:
-                    if attempt < internal_retries - 1:
-                        # Exponential backoff with jitter
-                        delay = (base_delay * (2 ** attempt)) + random.uniform(0, 1)
-                        delay = min(delay, 60)  # Max 60 seconds
-                        
-                        print(f"🔄 Server error (500) - auto-retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries})")
-                        
-                        wait_start = time.time()
-                        while time.time() - wait_start < delay:
-                            if self._cancelled:
-                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                            time.sleep(0.5)
-                        continue
-                
-                # Check for other transient errors with exponential backoff
-                transient_errors = ["502", "503", "504", "connection reset", "connection aborted"]
-                if any(err in error_str for err in transient_errors):
-                    if attempt < internal_retries - 1:
-                        # Use a slightly less aggressive backoff for transient errors
-                        delay = (base_delay/2 * (2 ** attempt)) + random.uniform(0, 1)
-                        delay = min(delay, 30)  # Max 30 seconds for transient errors
-                        
-                        print(f"🔄 Transient error - retrying in {delay:.1f}s")
-                        
-                        wait_start = time.time()
-                        while time.time() - wait_start < delay:
-                            if self._cancelled:
-                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                            time.sleep(0.5)
-                        continue
-                
-                # Save failed request and return fallback for other errors
-                self._save_failed_request(messages, e, context)
-                self._track_stats(context, False, "unexpected_error", time.time() - start_time)
-                fallback_content = self._handle_empty_result(messages, context, str(e))
-                return fallback_content, 'error'
-                
     def _retry_with_main_key(self, messages, temperature=None, max_tokens=None, 
-                            max_completion_tokens=None, context=None) -> Tuple[str, Optional[str]]:
+                            max_completion_tokens=None, context=None) -> Optional[Tuple[str, Optional[str]]]:
         """
         Create a temporary client with the main key and retry the request.
         This is used for prohibited content errors in multi-key mode.
         """
+        print(f"[MAIN KEY RETRY] Starting retry with main key")
+        print(f"[MAIN KEY RETRY] Original key: {self.original_api_key[:8]}...{self.original_api_key[-4:]}")
+        print(f"[MAIN KEY RETRY] Original model: {self.original_model}")
+        
         try:
             # Create a new temporary UnifiedClient instance with the main key
-            # This ensures thread safety and doesn't affect the current instance
             temp_client = UnifiedClient(
                 api_key=self.original_api_key,
                 model=self.original_model,
                 output_dir=self.output_dir
             )
             
-            # Copy relevant state that might be needed
+            # Copy relevant state
             temp_client.context = context
             temp_client._cancelled = self._cancelled
             temp_client._in_cleanup = self._in_cleanup
             temp_client.current_session_context = self.current_session_context
             temp_client.conversation_message_count = self.conversation_message_count
             
-            # Disable multi-key mode for this temporary client
+            # IMPORTANT: Disable multi-key mode for this temporary client
             temp_client._multi_key_mode = False
             temp_client.use_multi_keys = False
+            temp_client.key_identifier = "Main Key (Fallback)"
             
-            print(f"📤 Retrying with main key: {self.original_model}")
+            print(f"[MAIN KEY RETRY] Created temp client with model: {temp_client.model}")
+            print(f"[MAIN KEY RETRY] Temp client type: {temp_client.client_type}")
             
             # Get file names for response tracking
             payload_name, response_name = self._get_file_names(messages, context=context)
             
-            # Call _get_response directly on the temp client
-            response = temp_client._get_response(messages, temperature, max_tokens, 
-                                                max_completion_tokens, response_name)
+            # Try to send the request
+            print(f"[MAIN KEY RETRY] Sending request...")
             
-            # Check for cancellation
-            if self._cancelled:
-                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+            # Use the send method instead of _get_response for better compatibility
+            result = temp_client.send(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                max_completion_tokens=max_completion_tokens,
+                context=context
+            )
             
-            # Save response if successful
-            if response.content:
-                self._save_response(response.content, response_name)
-            
-            # Handle empty responses
-            if response.is_error or not response.content or response.content.strip() in ["", "[]"]:
-                print(f"Main key returned empty response: {response.finish_reason}")
+            # Check the result
+            if result and isinstance(result, tuple):
+                content, finish_reason = result
+                if content:
+                    print(f"[MAIN KEY RETRY] Success! Got content of length: {len(content)}")
+                    # Save the response using our instance's method
+                    self._save_response(content, response_name)
+                    return content, finish_reason
+                else:
+                    print(f"[MAIN KEY RETRY] Empty content returned")
+                    return None
+            else:
+                print(f"[MAIN KEY RETRY] Unexpected result type: {type(result)}")
                 return None
             
-            # Return successful response
-            return response.content, response.finish_reason
-            
         except Exception as e:
-            print(f"Main key retry failed: {str(e)[:200]}")
+            print(f"[MAIN KEY RETRY] Exception: {type(e).__name__}: {str(e)[:500]}")
+            
             # Check if it's also a content filter error
             error_str = str(e).lower()
             content_filter_indicators = [
                 "content_filter", "content was blocked", "response was blocked",
                 "safety filter", "content policy", "harmful content",
-                "blocked by safety", "harm_category"
+                "blocked by safety", "harm_category", "content_policy_violation",
+                "unsafe content", "violates our usage policies"
             ]
             
             if any(indicator in error_str for indicator in content_filter_indicators):
-                print(f"❌ Main key also hit content filter")
+                print(f"[MAIN KEY RETRY] Main key also hit content filter")
             
-            # Re-raise the error so the main method can handle it
+            # Re-raise so the calling method can handle it
             raise
+
+    def _debug_multi_key_state(self):
+        """Debug method to print current multi-key state"""
+        print("\n=== MULTI-KEY DEBUG INFO ===")
+        print(f"Instance _multi_key_mode: {getattr(self, '_multi_key_mode', 'NOT SET')}")
+        print(f"Instance use_multi_keys: {getattr(self, 'use_multi_keys', 'NOT SET')}")
+        print(f"Has original_api_key: {hasattr(self, 'original_api_key')}")
+        print(f"Has original_model: {hasattr(self, 'original_model')}")
+        if hasattr(self, 'original_api_key') and self.original_api_key:
+            print(f"Original API key: {self.original_api_key[:8]}...{self.original_api_key[-4:]}")
+        if hasattr(self, 'original_model'):
+            print(f"Original model: {self.original_model}")
+        print(f"Current key_identifier: {getattr(self, 'key_identifier', 'NOT SET')}")
+        print(f"Current model: {getattr(self, 'model', 'NOT SET')}")
+        print("===========================\n")
     
     def _get_response(self, messages, temperature, max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
         """
