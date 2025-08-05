@@ -1134,6 +1134,17 @@ class TranslatorGUI:
         self.current_file_index = 0
         self.use_gemini_openai_endpoint_var = tk.BooleanVar(value=self.config.get('use_gemini_openai_endpoint', False))
         self.gemini_openai_endpoint_var = tk.StringVar(value=self.config.get('gemini_openai_endpoint', ''))
+        
+        # Initialize the variables with default values
+        self.enable_parallel_extraction_var = tk.BooleanVar(value=self.config.get('enable_parallel_extraction', True))
+        self.extraction_workers_var = tk.IntVar(value=self.config.get('extraction_workers', 4))
+
+        # Set initial environment variable
+        if self.enable_parallel_extraction_var.get():
+            os.environ["EXTRACTION_WORKERS"] = str(self.extraction_workers_var.get())
+        else:
+            os.environ["EXTRACTION_WORKERS"] = "1"
+
 
         # Initialize compression-related variables
         self.enable_image_compression_var = tk.BooleanVar(value=self.config.get('enable_image_compression', False))
@@ -11209,6 +11220,7 @@ Important rules:
         tk.Label(section_frame, text="Check GitHub for new Glossarion releases\nand download updates",
                 font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 5))
 
+
     def _create_response_handling_section(self, parent):
         """Create response handling section with AI Hunter additions"""
         section_frame = tk.LabelFrame(parent, text="Response Handling & Retry Logic", padx=10, pady=10)
@@ -11235,6 +11247,29 @@ Important rules:
                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
         
         # Add separator after thinking toggle
+        ttk.Separator(section_frame, orient='horizontal').pack(fill='x', pady=10)
+        
+        # ADD EXTRACTION WORKERS CONFIGURATION HERE
+        tk.Label(section_frame, text="Parallel Extraction", 
+                font=('TkDefaultFont', 11, 'bold')).pack(anchor=tk.W)
+        
+        extraction_frame = tk.Frame(section_frame)
+        extraction_frame.pack(anchor=tk.W, padx=20, pady=(5, 0))
+        
+        tb.Checkbutton(extraction_frame, text="Enable Parallel Processing", 
+                      variable=self.enable_parallel_extraction_var,
+                      bootstyle="round-toggle",
+                      command=self.toggle_extraction_workers).pack(side=tk.LEFT)
+        
+        tk.Label(extraction_frame, text="Workers:").pack(side=tk.LEFT, padx=(20, 5))
+        self.extraction_workers_entry = tb.Entry(extraction_frame, width=6, textvariable=self.extraction_workers_var)
+        self.extraction_workers_entry.pack(side=tk.LEFT, padx=5)
+        tk.Label(extraction_frame, text="threads").pack(side=tk.LEFT)
+        
+        tk.Label(section_frame, text="Speed up EPUB extraction using multiple threads.\nRecommended: 4-8 workers (set to 1 to disable)",
+               font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
+        
+        # Add separator after extraction workers
         ttk.Separator(section_frame, orient='horizontal').pack(fill='x', pady=10)
         
         # Multi API Key Management Section
@@ -11477,7 +11512,18 @@ Important rules:
         """Toggle multi-key mode from settings dialog"""
         self.config['use_multi_api_keys'] = self.use_multi_api_keys_var.get()
         # Don't save immediately, let the dialog's save button handle it
-    
+
+    def toggle_extraction_workers(self):
+        """Enable/disable extraction workers entry based on toggle"""
+        if self.enable_parallel_extraction_var.get():
+            self.extraction_workers_entry.config(state='normal')
+            # Set environment variable
+            os.environ["EXTRACTION_WORKERS"] = str(self.extraction_workers_var.get())
+        else:
+            self.extraction_workers_entry.config(state='disabled')
+            # Set to 1 worker (sequential) when disabled
+            os.environ["EXTRACTION_WORKERS"] = "1"
+        
     def create_ai_hunter_section(self, parent_frame):
         """Create the AI Hunter configuration section - without redundant toggle"""
         # AI Hunter Configuration
@@ -12717,6 +12763,8 @@ Important rules:
                     'logit_bias_strength': float(getattr(self, 'logit_bias_strength_var', type('', (), {'get': lambda: -0.5})).get()),
                     'bias_common_words': getattr(self, 'bias_common_words_var', type('', (), {'get': lambda: False})).get(),
                     'bias_repetitive_phrases': getattr(self, 'bias_repetitive_phrases_var', type('', (), {'get': lambda: False})).get(),
+                    'enable_parallel_extraction': self.enable_parallel_extraction_var.get(),
+                    'extraction_workers': safe_int(self.extraction_workers_var.get(), 4),
                     
                     # Batch header translation settings
                     'batch_translate_headers': self.batch_translate_headers_var.get(),
@@ -12831,6 +12879,7 @@ Important rules:
                     'LOGIT_BIAS_STRENGTH': str(self.logit_bias_strength_var.get()) if hasattr(self, 'logit_bias_strength_var') else '-0.5',
                     'BIAS_COMMON_WORDS': '1' if hasattr(self, 'bias_common_words_var') and self.bias_common_words_var.get() else '0',
                     'BIAS_REPETITIVE_PHRASES': '1' if hasattr(self, 'bias_repetitive_phrases_var') and self.bias_repetitive_phrases_var.get() else '0',
+                    'EXTRACTION_WORKERS': str(self.extraction_workers_var.get()) if self.enable_parallel_extraction_var.get() else '1',
                     
                 }
                 os.environ.update(env_updates)
@@ -13378,6 +13427,16 @@ Important rules:
             self.config['disable_chapter_merging'] = self.disable_chapter_merging_var.get()
             self.config['use_gemini_openai_endpoint'] = self.use_gemini_openai_endpoint_var.get()
             self.config['gemini_openai_endpoint'] = self.gemini_openai_endpoint_var.get()
+            # Save extraction worker settings
+            self.config['enable_parallel_extraction'] = self.enable_parallel_extraction_var.get()
+            self.config['extraction_workers'] = self.extraction_workers_var.get()
+
+            # Update environment variable when saving
+            if self.enable_parallel_extraction_var.get():
+                os.environ["EXTRACTION_WORKERS"] = str(self.extraction_workers_var.get())
+            else:
+                os.environ["EXTRACTION_WORKERS"] = "1"
+                
             # New cleaner UI variables
             if hasattr(self, 'text_extraction_method_var'):
                 self.config['text_extraction_method'] = self.text_extraction_method_var.get()
