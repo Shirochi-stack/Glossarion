@@ -351,8 +351,8 @@ class UnifiedClient:
     
     @classmethod
     def setup_multi_key_pool(cls, config: List[Dict], force_rotation: bool = True, 
-                           rotation_frequency: int = 1):
-        """Setup the shared multi-key pool - BUT DON'T SET CLASS STATE"""
+                             rotation_frequency: int = 1):
+        """Setup the shared multi-key pool with decryption validation"""
         with cls._pool_lock:
             if cls._api_key_pool is None:
                 cls._api_key_pool = APIKeyPool()
@@ -361,17 +361,50 @@ class UnifiedClient:
             if cls._rate_limit_cache is None:
                 cls._rate_limit_cache = RateLimitCache()
             
-            cls._api_key_pool.load_from_list(config)
+            # Validate and fix encrypted keys
+            validated_keys = []
+            encrypted_keys_fixed = 0
             
-            # DO NOT SET ANY CLASS-LEVEL STATE VARIABLES HERE!
-            # This was the bug:
-            # cls._multi_key_mode = True  # REMOVED
-            # cls._multi_key_config = config  # REMOVED
-            # cls._force_rotation = force_rotation  # REMOVED
-            # cls._rotation_frequency = rotation_frequency  # REMOVED
+            for i, key_data in enumerate(config):
+                if not isinstance(key_data, dict):
+                    continue
+                    
+                api_key = key_data.get('api_key', '')
+                if not api_key:
+                    continue
+                
+                # Fix encrypted keys
+                if api_key.startswith('ENC:'):
+                    try:
+                        from api_key_encryption import get_handler
+                        handler = get_handler()
+                        decrypted_key = handler.decrypt_value(api_key)
+                        
+                        if decrypted_key != api_key and not decrypted_key.startswith('ENC:'):
+                            # Create a copy with decrypted key
+                            fixed_key_data = key_data.copy()
+                            fixed_key_data['api_key'] = decrypted_key
+                            validated_keys.append(fixed_key_data)
+                            encrypted_keys_fixed += 1
+                    except Exception:
+                        continue
+                else:
+                    # Key is already decrypted
+                    validated_keys.append(key_data)
             
-            print(f"[DEBUG] Multi-key pool initialized with {len(config)} keys")
-            print(f"[DEBUG] Pool is ready for use by instances")
+            if not validated_keys:
+                return False
+            
+            # Load the validated keys
+            cls._api_key_pool.load_from_list(validated_keys)
+            
+            # Single debug message
+            if encrypted_keys_fixed > 0:
+                print(f"🔑 Multi-key pool: {len(validated_keys)} keys loaded ({encrypted_keys_fixed} required decryption fix)")
+            else:
+                print(f"🔑 Multi-key pool: {len(validated_keys)} keys loaded")
+            
+            return True
     
     @classmethod
     def initialize_key_pool(cls, key_list: list):
