@@ -3911,6 +3911,16 @@ class UnifiedClient:
         result = ""
         finish_reason = 'stop'
         
+        # FIRST: Check for prohibited content in finish reasons
+        if hasattr(response, 'candidates') and response.candidates:
+            for i, candidate in enumerate(response.candidates):
+                if hasattr(candidate, 'finish_reason'):
+                    finish_reason_str = str(candidate.finish_reason)
+                    if 'PROHIBITED_CONTENT' in finish_reason_str:
+                        print(f"   🚫 Candidate {i+1} has prohibited content: {finish_reason_str}")
+                        # Return immediately with prohibited_content status
+                        return "", "prohibited_content"
+        
         # Method 1: Try direct text access first
         try:
             if hasattr(response, 'text') and response.text:
@@ -3935,6 +3945,8 @@ class UnifiedClient:
                         finish_reason = 'length'
                     elif 'SAFETY' in finish_reason_str:
                         finish_reason = 'safety'
+                    elif 'PROHIBITED_CONTENT' in finish_reason_str:
+                        finish_reason = 'prohibited_content'
                 
                 # Method 2a: Try candidate.text directly (some models provide this)
                 if hasattr(candidate, 'text'):
@@ -4313,11 +4325,35 @@ class UnifiedClient:
                     thinking_budget=thinking_budget
                 )
                 
+                # Check if finish_reason indicates prohibited content
+                if finish_reason == 'prohibited_content':
+                    print(f"   🚫 Extraction detected prohibited content")
+                    # Raise as UnifiedClientError for retry logic
+                    raise UnifiedClientError(
+                        "Content blocked: FinishReason.PROHIBITED_CONTENT",
+                        error_type="prohibited_content",
+                        details={"finish_reason": "PROHIBITED_CONTENT", "thinking_tokens_wasted": getattr(response.usage_metadata, 'thoughts_token_count', 0) if hasattr(response, 'usage_metadata') else 0}
+                    )
+                
                 # Only break if we successfully extracted content
                 if result and result.strip():
                     break
                 else:
-                    # If extraction returned empty, treat as an error and potentially retry
+                    # If extraction returned empty, check if it was due to prohibited content
+                    # by re-examining the response
+                    if hasattr(response, 'candidates') and response.candidates:
+                        for candidate in response.candidates:
+                            if hasattr(candidate, 'finish_reason'):
+                                finish_reason_str = str(candidate.finish_reason)
+                                if 'PROHIBITED_CONTENT' in finish_reason_str:
+                                    print(f"   🚫 Empty response due to prohibited content: {finish_reason_str}")
+                                    raise UnifiedClientError(
+                                        f"Content blocked: {finish_reason_str}",
+                                        error_type="prohibited_content",
+                                        details={"finish_reason": finish_reason_str, "empty_response": True}
+                                    )
+                    
+                    # If extraction returned empty for other reasons, treat as an error and potentially retry
                     print(f"   ⚠️ Enhanced extraction returned empty result")
                     error_details[f'attempt_{attempt+1}'] = "Empty response after extraction"
                     
