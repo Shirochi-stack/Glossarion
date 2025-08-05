@@ -1454,26 +1454,3 @@ class MultiAPIKeyDialog:
     def _on_close(self):
         """Handle dialog close"""
         self.dialog.destroy()
-
-
-# Integration with translator_gui.py
-def add_multi_api_key_button(translator_gui, parent_frame):
-    """Add multi API key button to the processing section"""
-    
-    def open_multi_key_dialog():
-        """Open the multi API key dialog"""
-        MultiAPIKeyDialog(translator_gui.master, translator_gui)
-    
-    # Create button
-    multi_key_btn = tb.Button(
-        parent_frame,
-        text="🔑 Multi API Keys",
-        command=open_multi_key_dialog,
-        bootstyle="primary-outline",
-        width=15
-    )
-    
-    # Store reference
-    translator_gui.multi_api_key_btn = multi_key_btn
-    
-    return multi_key_btn
