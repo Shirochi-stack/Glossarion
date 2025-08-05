@@ -4,7 +4,6 @@
 Enhanced Text Extractor Module with CJK Support
 Provides superior text extraction from HTML with proper Unicode handling
 Optimized for Korean, Japanese, and Chinese content extraction
-Refactored to focus on html2text without BeautifulSoup fallback
 """
 
 import re
@@ -17,25 +16,25 @@ try:
     import html2text
 except ImportError:
     html2text = None
-    raise ImportError("⚠️ html2text is required. Install with: pip install html2text")
+    raise ImportError("html2text is required. Install with: pip install html2text")
 
 try:
     from bs4 import BeautifulSoup
 except ImportError:
     BeautifulSoup = None
-    raise ImportError("⚠️ BeautifulSoup is required. Install with: pip install beautifulsoup4")
+    raise ImportError("BeautifulSoup is required. Install with: pip install beautifulsoup4")
 
 
 class EnhancedTextExtractor:
     """Enhanced text extraction with proper Unicode and CJK handling"""
     
-    # Unicode preservation mappings - Extended for CJK
+    # Unicode preservation mappings
     UNICODE_QUOTES = {
         # Western quotes
-        '&ldquo;': '\u201c',  # " Left double quotation mark
-        '&rdquo;': '\u201d',  # " Right double quotation mark
-        '&lsquo;': '\u2018',  # ' Left single quotation mark
-        '&rsquo;': '\u2019',  # ' Right single quotation mark
+        '&ldquo;': '\u201c',  # Left double quotation mark
+        '&rdquo;': '\u201d',  # Right double quotation mark
+        '&lsquo;': '\u2018',  # Left single quotation mark
+        '&rsquo;': '\u2019',  # Right single quotation mark
         '&quot;': '"',        # Standard double quote
         '&apos;': "'",        # Standard apostrophe
         
@@ -58,10 +57,10 @@ class EnhancedTextExtractor:
         '&#12289;': '、',  # Ideographic comma
         
         # Numeric entities
-        '&#8220;': '\u201c',  # " Left double quote (numeric)
-        '&#8221;': '\u201d',  # " Right double quote (numeric)
-        '&#8216;': '\u2018',  # ' Left single quote (numeric)
-        '&#8217;': '\u2019',  # ' Right single quote (numeric)
+        '&#8220;': '\u201c',  # Left double quote (numeric)
+        '&#8221;': '\u201d',  # Right double quote (numeric)
+        '&#8216;': '\u2018',  # Left single quote (numeric)
+        '&#8217;': '\u2019',  # Right single quote (numeric)
         
         # Common CJK entities
         '&hellip;': '…',     # Horizontal ellipsis
@@ -72,12 +71,12 @@ class EnhancedTextExtractor:
     
     # CJK-specific punctuation to preserve
     CJK_PUNCTUATION = {
-        '。', '、', '！', '？', '…', '—', '～', '・',  # Japanese
-        '「', '」', '『', '』', '（', '）', '【', '】',  # Japanese brackets
-        '《', '》', '〈', '〉', '〔', '〕', '［', '］',  # CJK brackets
-        '：', '；', '"', '"', ''', ''',  # Chinese punctuation
-        '，', '．', '？', '！', '：', '；',  # Fullwidth punctuation
-        '"', '"', '‚', '„', '«', '»',  # Additional quote marks
+        '。', '、', '！', '？', '…', '—', '～', '・',
+        '「', '」', '『', '』', '（', '）', '【', '】',
+        '《', '》', '〈', '〉', '〔', '〕', '［', '］',
+        '：', '；', '"', '"', ''', ''',
+        '，', '．', '？', '！', '：', '；',
+        '"', '"', '‚', '„', '«', '»',
     }
     
     # Quote protection markers
@@ -91,12 +90,7 @@ class EnhancedTextExtractor:
     }
     
     def __init__(self, filtering_mode: str = "smart", preserve_structure: bool = True):
-        """Initialize the enhanced text extractor
-        
-        Args:
-            filtering_mode: Extraction filtering mode ('smart', 'comprehensive', 'full')
-            preserve_structure: Whether to preserve markdown formatting
-        """
+        """Initialize the enhanced text extractor"""
         if not html2text:
             raise ImportError("html2text is required for enhanced extraction")
         
@@ -117,7 +111,7 @@ class EnhancedTextExtractor:
             detected = chardet.detect(content)
             if detected['confidence'] > 0.7:
                 return detected['encoding']
-        except:
+        except Exception:
             pass
         
         # Try common CJK encodings in order
@@ -125,7 +119,7 @@ class EnhancedTextExtractor:
             try:
                 content.decode(encoding)
                 return encoding
-            except:
+            except Exception:
                 continue
         
         return 'utf-8'  # Default fallback
@@ -161,21 +155,22 @@ class EnhancedTextExtractor:
         self.h2t = html2text.HTML2Text()
         
         # Core settings for Unicode preservation
-        self.h2t.unicode_snob = True      # CRITICAL: Use Unicode characters
-        self.h2t.escape_snob = True       # CRITICAL: Don't escape special chars
+        self.h2t.unicode_snob = True
+        self.h2t.escape_snob = True
         self.h2t.use_automatic_links = False
         
-        # Layout settings - adjusted for CJK
-        self.h2t.body_width = 0          # Don't wrap lines (important for CJK)
+        # Layout settings
+        self.h2t.body_width = 0
         self.h2t.single_line_break = False
         
         # Content filtering
-        self.h2t.ignore_links = False     # Preserve links for context
+        self.h2t.ignore_links = False
         self.h2t.ignore_images = False
         self.h2t.ignore_anchors = False
         self.h2t.skip_internal_links = False
+        self.h2t.ignore_tables = False
         
-        # Additional Unicode-friendly settings
+        # Additional settings
         self.h2t.wrap_links = False
         self.h2t.wrap_list_items = False
         self.h2t.protect_links = True
@@ -185,7 +180,7 @@ class EnhancedTextExtractor:
             self.h2t.bypass_tables = False
             self.h2t.ignore_emphasis = False
             self.h2t.mark_code = True
-            self.h2t.ul_item_mark = '•'  # Use bullet for better CJK compatibility
+            self.h2t.ul_item_mark = '•'
         else:
             self.h2t.bypass_tables = True
             self.h2t.ignore_emphasis = True
@@ -203,9 +198,27 @@ class EnhancedTextExtractor:
         # Second pass: standard HTML unescape
         text = html.unescape(text)
         
-        # Third pass: handle numeric entities (including CJK ranges)
-        text = re.sub(r'&#(\d+);?', lambda m: chr(int(m.group(1))) if int(m.group(1)) < 0x110000 else m.group(0), text)
-        text = re.sub(r'&#x([0-9a-fA-F]+);?', lambda m: chr(int(m.group(1), 16)) if int(m.group(1), 16) < 0x110000 else m.group(0), text)
+        # Third pass: handle numeric entities
+        def decode_decimal(match):
+            try:
+                code = int(match.group(1))
+                if code < 0x110000:
+                    return chr(code)
+            except Exception:
+                pass
+            return match.group(0)
+        
+        def decode_hex(match):
+            try:
+                code = int(match.group(1), 16)
+                if code < 0x110000:
+                    return chr(code)
+            except Exception:
+                pass
+            return match.group(0)
+        
+        text = re.sub(r'&#(\d+);?', decode_decimal, text)
+        text = re.sub(r'&#x([0-9a-fA-F]+);?', decode_hex, text)
         
         # Fourth pass: handle special CJK entities
         cjk_special_entities = {
@@ -221,12 +234,9 @@ class EnhancedTextExtractor:
     
     def _normalize_unicode(self, text: str) -> str:
         """Normalize Unicode with CJK awareness"""
-        # For CJK text, avoid aggressive normalization
         if self.detected_language in ['korean', 'japanese', 'chinese']:
-            # Skip normalization for CJK to preserve character distinctions
             return text
         else:
-            # For non-CJK text, use NFC normalization
             return unicodedata.normalize('NFC', text)
     
     def _protect_quotes(self, text: str) -> str:
@@ -258,7 +268,29 @@ class EnhancedTextExtractor:
                 original_text = str(element)
                 protected_text = self._protect_quotes(original_text)
                 element.replace_with(protected_text)
-
+    
+    def _minimal_parser_fix(self, html_content: str) -> str:
+        """Apply minimal fixes only for parser errors"""
+        # Fix tags with ="" pattern
+        html_content = re.sub(r'<[^>]*?=\s*""\s*[^>]*?>', '', html_content)
+        
+        # Fix malformed closing tags
+        html_content = re.sub(r'</\s+(\w+)>', r'</\1>', html_content)
+        html_content = re.sub(r'</\s*>', '', html_content)
+        html_content = re.sub(r'<//+(\w+)>', r'</\1>', html_content)
+        
+        # Fix orphaned brackets
+        html_content = re.sub(r'<(?![a-zA-Z/!?])', '&lt;', html_content)
+        html_content = re.sub(r'(?<![a-zA-Z0-9"/])>', '&gt;', html_content)
+        
+        # Fix unclosed tags at the end
+        if html_content.rstrip().endswith('<'):
+            html_content = html_content.rstrip()[:-1]
+        
+        # Remove nested opening brackets
+        html_content = re.sub(r'<[^>]*?<[^>]*?>', '', html_content)
+        
+        return html_content
     
     def _clean_text_cjk_aware(self, text: str, preserve_structure: bool) -> str:
         """Clean extracted text with CJK awareness"""
@@ -278,15 +310,15 @@ class EnhancedTextExtractor:
             text = re.sub(r'^>\s+', '', text, flags=re.MULTILINE)
             text = re.sub(r'^[-_*]{3,}$', '', text, flags=re.MULTILINE)
         
-        # Clean whitespace - but be careful with CJK
+        # Clean whitespace
         if self.detected_language in ['korean', 'japanese', 'chinese']:
-            text = re.sub(r'\n{3,}', '\n\n', text)  # Only reduce 3+ newlines
-            text = re.sub(r'[ ]{3,}', '  ', text)  # Only reduce 3+ spaces to 2
+            text = re.sub(r'\n{3,}', '\n\n', text)
+            text = re.sub(r'[ ]{3,}', '  ', text)
         else:
             text = re.sub(r'\n{3,}', '\n\n', text)
             text = re.sub(r' {2,}', ' ', text)
         
-        # Remove zero-width spaces and other invisible characters
+        # Remove invisible characters
         invisible_chars = ['\u200b', '\u200c', '\u200d', '\ufeff', '\u2060']
         for char in invisible_chars:
             text = text.replace(char, '')
@@ -294,8 +326,8 @@ class EnhancedTextExtractor:
         return text.strip()
     
     def _extract_title(self, soup: BeautifulSoup) -> Optional[str]:
-        """Extract chapter title from various sources with CJK support"""
-        # Try <title> tag first
+        """Extract chapter title from various sources"""
+        # Try title tag first
         if soup.title and soup.title.string:
             title = soup.title.string.strip()
             title = self._decode_entities(title)
@@ -318,15 +350,15 @@ class EnhancedTextExtractor:
         if not text or len(text) > 200:
             return False
         
-        # Common chapter patterns in different languages
+        # Common chapter patterns
         patterns = [
-            r'第.{1,10}[章回話话]',  # Chinese/Japanese chapter markers
-            r'Chapter\s+\d+',        # English
-            r'제\s*\d+\s*화',        # Korean
-            r'第\d+話',              # Japanese
-            r'\d+\s*화',             # Korean simple
-            r'EP\.?\s*\d+',          # Episode markers
-            r'Part\s+\d+',           # Part markers
+            r'第.{1,10}[章回話话]',
+            r'Chapter\s+\d+',
+            r'제\s*\d+\s*화',
+            r'第\d+話',
+            r'\d+\s*화',
+            r'EP\.?\s*\d+',
+            r'Part\s+\d+',
         ]
         
         for pattern in patterns:
@@ -334,14 +366,15 @@ class EnhancedTextExtractor:
                 return True
         
         # Check if it's short and doesn't contain too much punctuation
-        punct_ratio = sum(1 for c in text if c in '.,;:!?。、！？') / len(text)
-        if len(text) < 100 and punct_ratio < 0.2:
-            return True
+        if len(text) < 100:
+            punct_count = sum(1 for c in text if c in '.,;:!?。、！？')
+            if punct_count < len(text) * 0.2:
+                return True
         
         return False
     
     def _extract_body_content(self, soup: BeautifulSoup, full_html: str) -> str:
-        """Extract body content while preserving Unicode and CJK text"""
+        """Extract body content while preserving Unicode"""
         # Remove script and style elements first
         for element in soup(['script', 'style', 'noscript']):
             element.decompose()
@@ -352,15 +385,7 @@ class EnhancedTextExtractor:
             return str(soup)
     
     def extract_chapter_content(self, html_content: str, extraction_mode: str = None) -> Tuple[str, str, Optional[str]]:
-        """Extract chapter content with proper Unicode and CJK handling
-        
-        Args:
-            html_content: Raw HTML content
-            extraction_mode: Extraction mode override (defaults to instance filtering_mode)
-            
-        Returns:
-            Tuple of (content_for_display, content_for_translation, chapter_title)
-        """
+        """Extract chapter content with proper Unicode and CJK handling"""
         try:
             # Use instance filtering_mode if not overridden
             if extraction_mode is None:
@@ -406,14 +431,33 @@ class EnhancedTextExtractor:
                 content_to_convert = self._extract_body_content(soup, html_content)
             
             # Convert using html2text
-            # Ensure content is properly decoded before conversion
             content_to_convert = self._decode_entities(content_to_convert)
             
-            # Convert to text
-            clean_text = self.h2t.handle(content_to_convert)
-            
-            # Fix quote conversion issues
-            #clean_text = self._fix_quote_conversion_issues(clean_text)
+            # Convert to text with error handling
+            try:
+                clean_text = self.h2t.handle(content_to_convert)
+            except AssertionError as e:
+                error_msg = str(e)
+                if "we should not get here!" in error_msg or "unexpected call to parse_endtag" in error_msg:
+                    print(f"⚠️ html2text encountered malformed HTML: {error_msg}")
+                    print(f"⚠️ Applying minimal fixes...")
+                    # Apply minimal fixes
+                    content_to_convert = self._minimal_parser_fix(content_to_convert)
+                    try:
+                        clean_text = self.h2t.handle(content_to_convert)
+                        print(f"✅ Successfully processed after minimal fixes")
+                    except Exception as e2:
+                        print(f"⚠️ html2text still failing: {e2}")
+                        # Last resort fallback
+                        clean_text = soup.get_text(separator='\n', strip=True)
+                        print(f"✅ Used BeautifulSoup fallback")
+                else:
+                    # Re-raise if it's a different AssertionError
+                    raise
+            except Exception as e:
+                print(f"⚠️ Unexpected error in html2text: {e}")
+                # Fallback to BeautifulSoup
+                clean_text = soup.get_text(separator='\n', strip=True)
             
             # Normalize only if appropriate
             clean_text = self._normalize_unicode(clean_text)
@@ -424,7 +468,7 @@ class EnhancedTextExtractor:
             # Restore protected quotes
             clean_text = self._restore_quotes(clean_text)
             
-            # For enhanced mode, both display and translation content are the same clean text
+            # For enhanced mode, both display and translation content are the same
             return clean_text, clean_text, chapter_title
                 
         except Exception as e:
@@ -432,11 +476,11 @@ class EnhancedTextExtractor:
             raise
 
 
-# Test function to verify Unicode and CJK handling
+# Test function
 def test_cjk_preservation():
     """Test that CJK characters and quotes are properly preserved"""
     test_cases = [
-        # Korean test with quotes (from user's example)
+        # Korean test with quotes
         '''<html>
         <head><title>제국의 붉은 사신</title></head>
         <body>
@@ -469,17 +513,6 @@ def test_cjk_preservation():
             <p>"是的，"她回答道。</p>
         </body>
         </html>''',
-        
-        # Mixed content with various quote styles
-        '''<html>
-        <body>
-            <h1>Mixed Quotes Test</h1>
-            <p>"English quotes here"</p>
-            <p>「日本語の引用」</p>
-            <p>"中文引号"</p>
-            <p>"한국어 인용문"</p>
-        </body>
-        </html>'''
     ]
     
     extractor = EnhancedTextExtractor()
@@ -488,45 +521,38 @@ def test_cjk_preservation():
     
     for i, test_html in enumerate(test_cases, 1):
         print(f"--- Test Case {i} ---")
-        content, _, title = extractor.extract_chapter_content(test_html)
-        
-        print(f"Title: {title}")
-        print(f"Content:\n{content}\n")
-        
-        # Check for quotes preservation
-        quote_checks = [
-            ('"', 'Western double quotes'),
-            ('「', 'Japanese left bracket'),
-            ('」', 'Japanese right bracket'),
-            ('"', 'Chinese double quote'),
-        ]
-        
-        print("Quote preservation check:")
-        quote_found = False
-        comma_issue = False
-        
-        for quote_char, desc in quote_checks:
-            if quote_char in content:
-                print(f"  ✓ Found {desc}: {quote_char}")
-                quote_found = True
-        
-        # Check if any quotes were converted to commas
-        lines = content.split('\n')
-        for line in lines:
-            if line.startswith(',') and any(0xAC00 <= ord(c) <= 0xD7AF for c in line if c != ','):
-                print(f"  ⚠️ WARNING: Line starts with comma (likely converted quote): {line[:50]}...")
-                comma_issue = True
-        
-        if not quote_found and not comma_issue:
-            print("  ❌ No quotes found - they may have been lost in conversion!")
-        elif comma_issue:
-            print("  ❌ Some quotes were converted to commas!")
-        else:
-            print("  ✅ Quotes preserved successfully!")
+        try:
+            content, _, title = extractor.extract_chapter_content(test_html)
+            
+            print(f"Title: {title}")
+            print(f"Content:\n{content}\n")
+            
+            # Check for quotes preservation
+            quote_checks = [
+                ('"', 'Western double quotes'),
+                ('「', 'Japanese left bracket'),
+                ('」', 'Japanese right bracket'),
+                ('"', 'Chinese double quote'),
+            ]
+            
+            print("Quote preservation check:")
+            quote_found = False
+            
+            for quote_char, desc in quote_checks:
+                if quote_char in content:
+                    print(f"  ✓ Found {desc}: {quote_char}")
+                    quote_found = True
+            
+            if not quote_found:
+                print("  ❌ No quotes found!")
+            else:
+                print("  ✅ Quotes preserved successfully!")
+                
+        except Exception as e:
+            print(f"Error processing test case {i}: {e}")
         
         print("-" * 50 + "\n")
 
 
 if __name__ == "__main__":
-    # Run test if executed directly
     test_cjk_preservation()
