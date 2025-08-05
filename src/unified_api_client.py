@@ -2509,6 +2509,15 @@ class UnifiedClient:
         # Flag to track if we should try main key for prohibited content
         should_try_main_key = False
         
+        # Define content filter indicators at method level
+        content_filter_indicators = [
+            "content_filter", "content was blocked", "response was blocked",
+            "safety filter", "content policy", "harmful content",
+            "blocked by safety", "harm_category", "content_policy_violation",
+            "unsafe content", "violates our usage policies",
+            "prohibited_content", "blockedreason", "content blocked"
+        ]
+        
         while retry_count < max_retries:
             try:
                 # Track current key
@@ -2533,13 +2542,6 @@ class UnifiedClient:
                 logger.error(f"[{thread_name}] ✗ {self.key_identifier} error: {error_str[:100]}")
                 
                 # Check for prohibited content FIRST (before rate limit check)
-                content_filter_indicators = [
-                    "content_filter", "content was blocked", "response was blocked",
-                    "safety filter", "content policy", "harmful content",
-                    "blocked by safety", "harm_category", "content_policy_violation",
-                    "unsafe content", "violates our usage policies"
-                ]
-                
                 if any(indicator in error_str.lower() for indicator in content_filter_indicators):
                     print(f"[Thread-{thread_name}] Prohibited content detected on {self.key_identifier}")
                     
@@ -2814,22 +2816,18 @@ class UnifiedClient:
                 
                 # Check if it's a rate limit error and re-raise for retry logic
                 error_str = str(e).lower()
-                if "429" in error_str or "rate limit" in error_str or "quota" in error_str:
+                if e.error_type == "rate_limit" or "429" in error_str or "rate limit" in error_str or "quota" in error_str:
                     raise  # Re-raise for multi-key retry logic in outer send() method
                 
-                # Check for prohibited content
-                content_filter_indicators = [
+                # Check for prohibited content - check BOTH error_type AND error string
+                if e.error_type == "prohibited_content" or any(indicator in error_str for indicator in [
                     "content_filter", "content was blocked", "response was blocked",
                     "safety filter", "content policy", "harmful content",
                     "blocked by safety", "harm_category", "content_policy_violation",
-                    "unsafe content", "violates our usage policies"
-                ]
-                
-                if any(indicator in error_str for indicator in content_filter_indicators):
+                    "unsafe content", "violates our usage policies",
+                    "prohibited_content", "blockedreason", "content blocked"
+                ]):
                     print(f"❌ Prohibited content detected: {error_str[:200]}")
-                    
-                    # Debug current state
-                    self._debug_multi_key_state()
                     
                     # Only try main key if:
                     # 1. We're in multi-key mode
@@ -2921,7 +2919,8 @@ class UnifiedClient:
                     "content_filter", "content was blocked", "response was blocked",
                     "safety filter", "content policy", "harmful content",
                     "blocked by safety", "harm_category", "content_policy_violation",
-                    "unsafe content", "violates our usage policies"
+                    "unsafe content", "violates our usage policies",
+                    "prohibited_content", "blockedreason", "content blocked"
                 ]
                 
                 if any(indicator in error_str for indicator in content_filter_indicators):
@@ -3010,7 +3009,7 @@ class UnifiedClient:
                 fallback_content = self._handle_empty_result(messages, context, str(e))
                 return fallback_content, 'error'
 
-                
+                    
     def _retry_with_main_key(self, messages, temperature=None, max_tokens=None, 
                             max_completion_tokens=None, context=None) -> Optional[Tuple[str, Optional[str]]]:
         """
@@ -3029,6 +3028,19 @@ class UnifiedClient:
                 output_dir=self.output_dir
             )
             
+            # FORCE single-key mode after initialization
+            # This is thread-safe because we're modifying the instance, not the environment
+            temp_client._multi_key_mode = False
+            temp_client.use_multi_keys = False
+            temp_client.key_identifier = "Main Key (Fallback)"
+            
+            # The client should already be set up from __init__, but verify
+            if not hasattr(temp_client, 'client_type') or temp_client.client_type is None:
+                # Force setup if needed
+                temp_client.api_key = self.original_api_key
+                temp_client.model = self.original_model
+                temp_client._setup_client()
+            
             # Copy relevant state
             temp_client.context = context
             temp_client._cancelled = self._cancelled
@@ -3036,13 +3048,9 @@ class UnifiedClient:
             temp_client.current_session_context = self.current_session_context
             temp_client.conversation_message_count = self.conversation_message_count
             
-            # IMPORTANT: Disable multi-key mode for this temporary client
-            temp_client._multi_key_mode = False
-            temp_client.use_multi_keys = False
-            temp_client.key_identifier = "Main Key (Fallback)"
-            
             print(f"[MAIN KEY RETRY] Created temp client with model: {temp_client.model}")
-            print(f"[MAIN KEY RETRY] Temp client type: {temp_client.client_type}")
+            print(f"[MAIN KEY RETRY] Temp client type: {getattr(temp_client, 'client_type', 'NOT SET')}")
+            print(f"[MAIN KEY RETRY] Multi-key mode: {temp_client._multi_key_mode}")
             
             # Get file names for response tracking
             payload_name, response_name = self._get_file_names(messages, context=context)
@@ -3083,7 +3091,8 @@ class UnifiedClient:
                 "content_filter", "content was blocked", "response was blocked",
                 "safety filter", "content policy", "harmful content",
                 "blocked by safety", "harm_category", "content_policy_violation",
-                "unsafe content", "violates our usage policies"
+                "unsafe content", "violates our usage policies",
+                "prohibited_content", "blockedreason", "content blocked"
             ]
             
             if any(indicator in error_str for indicator in content_filter_indicators):
@@ -3091,21 +3100,6 @@ class UnifiedClient:
             
             # Re-raise so the calling method can handle it
             raise
-
-    def _debug_multi_key_state(self):
-        """Debug method to print current multi-key state"""
-        print("\n=== MULTI-KEY DEBUG INFO ===")
-        print(f"Instance _multi_key_mode: {getattr(self, '_multi_key_mode', 'NOT SET')}")
-        print(f"Instance use_multi_keys: {getattr(self, 'use_multi_keys', 'NOT SET')}")
-        print(f"Has original_api_key: {hasattr(self, 'original_api_key')}")
-        print(f"Has original_model: {hasattr(self, 'original_model')}")
-        if hasattr(self, 'original_api_key') and self.original_api_key:
-            print(f"Original API key: {self.original_api_key[:8]}...{self.original_api_key[-4:]}")
-        if hasattr(self, 'original_model'):
-            print(f"Original model: {self.original_model}")
-        print(f"Current key_identifier: {getattr(self, 'key_identifier', 'NOT SET')}")
-        print(f"Current model: {getattr(self, 'model', 'NOT SET')}")
-        print("===========================\n")
     
     def _get_response(self, messages, temperature, max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
         """
@@ -4264,7 +4258,6 @@ class UnifiedClient:
                     generation_config.safety_settings = safety_settings
                 
                 # Log the request with thinking info
-                #print(f"   📤 Sending text request to Gemini{thinking_status}")
                 print(f"   📊 Temperature: {temperature}, Max tokens: {current_tokens}")
                 
                 if supports_thinking:
@@ -4274,9 +4267,6 @@ class UnifiedClient:
                         print(f"   🧠 Thinking: DYNAMIC (model decides)")
                     else:
                         print(f"   🧠 Thinking Budget: {thinking_budget} tokens")
-                else:
-                    #print(f"   🧠 Model does not support thinking parameter")
-                    pass
 
                 response = self.gemini_client.models.generate_content(
                     model=self.model,
@@ -4293,59 +4283,63 @@ class UnifiedClient:
                             print(f"Content blocked despite safety disabled: {feedback.block_reason}")
                         else:
                             print(f"Content blocked: {feedback.block_reason}")
-                        raise Exception(f"Content blocked: {feedback.block_reason}")
-                
-                # Extract text
-                try:
-                    result = response.text
-                    if not result or result.strip() == "":
-                        raise Exception("Empty text in response")
-                    finish_reason = 'stop'
-                except Exception as text_error:
-                    # Print the actual error type and full message
-                    print(f"Failed to extract text: {type(text_error).__name__}: {text_error}")
-                    
-                    # Also check if there's more info in the response object
-                    if hasattr(response, '_result'):
-                        print(f"Response _result: {response._result}")
-                    if hasattr(response, 'candidates'):
-                        print(f"Response candidates: {len(response.candidates) if response.candidates else 'None'}")
-                    if hasattr(response, 'prompt_feedback'):
-                        print(f"Response prompt_feedback: {response.prompt_feedback}")
-                    
-                    # Try to extract from candidates
-                    if hasattr(response, 'candidates') and response.candidates:
-                        candidate = response.candidates[0]
-                        if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
-                            parts = candidate.content.parts
-                            result = ''.join(part.text for part in (parts or []) if hasattr(part, 'text'))
                         
-                        # Check finish reason
-                        if hasattr(candidate, 'finish_reason'):
-                            finish_reason = str(candidate.finish_reason)
-                            if 'MAX_TOKENS' in finish_reason:
-                                finish_reason = 'length'
+                        # Raise as UnifiedClientError with prohibited_content type
+                        # This will be caught by the retry logic
+                        raise UnifiedClientError(
+                            f"Content blocked: {feedback.block_reason}",
+                            error_type="prohibited_content",
+                            details={"block_reason": str(feedback.block_reason)}
+                        )
                 
-                # Check usage metadata for thinking tokens
+                # IMPORTANT: Skip the early text extraction that causes the error
+                # Go directly to the enhanced extraction method
+                
+                # Check usage metadata for thinking tokens BEFORE extraction
                 if hasattr(response, 'usage_metadata'):
                     usage = response.usage_metadata
                     
-                    # Check if thinking tokens were actually disabled (only if model supports thinking)
+                    # Check if thinking tokens were actually used (only if model supports thinking)
                     if supports_thinking and hasattr(usage, 'thoughts_token_count'):
                         if usage.thoughts_token_count and usage.thoughts_token_count > 0:
                             print(f"   Thinking tokens used: {usage.thoughts_token_count}")
                         else:
                             print(f"   ✅ Thinking successfully disabled (0 thinking tokens)")
                 
-                if result:
+                # Use the enhanced extraction method directly without trying response.text first
+                result, finish_reason = self._extract_gemini_response_text(
+                    response, 
+                    supports_thinking=supports_thinking,
+                    thinking_budget=thinking_budget
+                )
+                
+                # Only break if we successfully extracted content
+                if result and result.strip():
                     break
+                else:
+                    # If extraction returned empty, treat as an error and potentially retry
+                    print(f"   ⚠️ Enhanced extraction returned empty result")
+                    error_details[f'attempt_{attempt+1}'] = "Empty response after extraction"
                     
+
             except Exception as e:
                 print(f"Gemini attempt {attempt+1} failed: {e}")
                 error_details[f'attempt_{attempt+1}'] = str(e)
                 
+                # Check if this is a prohibited content error
+                error_str = str(e).lower()
+                if any(indicator in error_str for indicator in [
+                    "content blocked", "prohibited_content", "blockedreason",
+                    "content_filter", "safety filter", "harmful content"
+                ]):
+                    # Re-raise as UnifiedClientError with proper type
+                    raise UnifiedClientError(
+                        str(e),
+                        error_type="prohibited_content",
+                        details=error_details
+                    )
+                
                 # Check if this is a rate limit error
-                error_str = str(e)
                 if "429" in error_str and "RESOURCE_EXHAUSTED" in error_str:
                     # Try to extract retryDelay from the error
                     retry_delay = 60  # Default to 60 seconds
@@ -4371,22 +4365,16 @@ class UnifiedClient:
                         http_status=429
                     )
                 
-                # For other errors, just re-raise
-                raise
-            
-            # No automatic retry - let higher level handle retries
-            #attempt += 1
-            #if attempt < attempts:
-             #   print(f"❌ Gemini attempt {attempt} failed, no automatic retry")
-             #   break  # Exit the retry loop
-                
-        # After getting the response, use the enhanced extraction method
-        if response is not None:
-            result, finish_reason = self._extract_gemini_response_text(
-                response, 
-                supports_thinking=supports_thinking,
-                thinking_budget=thinking_budget
-            )
+                # For other errors that aren't safety/content blocks, we might want to retry
+                if "Content blocked" not in str(e) and attempt < attempts - 1:
+                    attempt += 1
+                    wait_time = min(2 ** attempt, 10)  # Exponential backoff with max 10s
+                    print(f"⏳ Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    # For content blocks or final attempt, re-raise
+                    raise
         
         if not result:
             print("All Gemini retries failed")
