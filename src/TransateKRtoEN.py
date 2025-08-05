@@ -24,6 +24,8 @@ from typing import Dict, List, Tuple
 from txt_processor import TextFileProcessor
 from ai_hunter_enhanced import ImprovedAIHunterDetection
 import csv
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 
 def get_chapter_terminology(is_text_file, chapter_data=None):
     """Get appropriate terminology (Chapter/Section) based on source type"""
@@ -1310,17 +1312,21 @@ class ChapterExtractor:
         self.progress_callback = progress_callback  # Add progress callback
         
     def extract_chapters(self, zf, output_dir):
-        """Extract chapters and all resources from EPUB"""
+        """Extract chapters and all resources from EPUB using ThreadPoolExecutor"""
         # Check stop at the very beginning
         if is_stop_requested():
             print("❌ Extraction stopped by user")
             return []
             
-        print("🚀 Starting EPUB extraction...")
+        print("🚀 Starting EPUB extraction with ThreadPoolExecutor...")
         
         # Get extraction mode from environment
         extraction_mode = os.getenv("EXTRACTION_MODE", "smart").lower()
         print(f"✅ Using {extraction_mode.capitalize()} extraction mode")
+        
+        # Get number of workers from environment or use default
+        max_workers = int(os.getenv("EXTRACTION_WORKERS", "4"))
+        print(f"🔧 Using {max_workers} workers for parallel processing")
         
         extracted_resources = self._extract_all_resources(zf, output_dir)
         
@@ -1352,33 +1358,71 @@ class ChapterExtractor:
         
         chapters_info_path = os.path.join(output_dir, 'chapters_info.json')
         chapters_info = []
+        chapters_info_lock = threading.Lock()
         
-        for c in chapters:
-            # Check stop in loop
+        def process_chapter(chapter):
+            """Process a single chapter"""
+            # Check stop in worker
             if is_stop_requested():
-                print("❌ Extraction stopped by user")
-                return []
+                return None
                 
             info = {
-                'num': c['num'],
-                'title': c['title'],
-                'original_filename': c.get('filename', ''),
-                'has_images': c.get('has_images', False),
-                'image_count': c.get('image_count', 0),
-                'text_length': c.get('file_size', len(c.get('body', ''))),
-                'detection_method': c.get('detection_method', 'unknown'),
-                'content_hash': c.get('content_hash', '')
+                'num': chapter['num'],
+                'title': chapter['title'],
+                'original_filename': chapter.get('filename', ''),
+                'has_images': chapter.get('has_images', False),
+                'image_count': chapter.get('image_count', 0),
+                'text_length': chapter.get('file_size', len(chapter.get('body', ''))),
+                'detection_method': chapter.get('detection_method', 'unknown'),
+                'content_hash': chapter.get('content_hash', '')
             }
             
-            if c.get('has_images'):
+            if chapter.get('has_images'):
                 try:
-                    soup = BeautifulSoup(c.get('body', ''), 'html.parser')
+                    soup = BeautifulSoup(chapter.get('body', ''), 'html.parser')
                     images = soup.find_all('img')
                     info['images'] = [img.get('src', '') for img in images]
                 except:
                     info['images'] = []
             
-            chapters_info.append(info)
+            return info
+        
+        # Process chapters in parallel
+        print(f"🔄 Processing {len(chapters)} chapters in parallel...")
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            future_to_chapter = {
+                executor.submit(process_chapter, chapter): chapter 
+                for chapter in chapters
+            }
+            
+            # Process completed tasks
+            completed = 0
+            for future in as_completed(future_to_chapter):
+                if is_stop_requested():
+                    print("❌ Extraction stopped by user")
+                    # Cancel remaining futures
+                    for f in future_to_chapter:
+                        f.cancel()
+                    return []
+                
+                try:
+                    result = future.result()
+                    if result:
+                        with chapters_info_lock:
+                            chapters_info.append(result)
+                        completed += 1
+                        if completed % 10 == 0:  # Progress update every 10 chapters
+                            print(f"   📊 Processed {completed}/{len(chapters)} chapters")
+                except Exception as e:
+                    chapter = future_to_chapter[future]
+                    print(f"   ❌ Error processing chapter {chapter['num']}: {e}")
+        
+        # Sort chapters_info by chapter number to maintain order
+        chapters_info.sort(key=lambda x: x['num'])
+        
+        print(f"✅ Successfully processed {len(chapters_info)} chapters")
         
         with open(chapters_info_path, 'w', encoding='utf-8') as f:
             json.dump(chapters_info, f, ensure_ascii=False, indent=2)
@@ -1410,11 +1454,12 @@ class ChapterExtractor:
         self._log_extraction_summary(chapters, extracted_resources, detected_language)
         
         print(f"🔍 VERIFICATION: {extraction_mode.capitalize()} chapter extraction completed successfully")
+        print(f"⚡ Used {max_workers} workers for parallel processing")
         
         return chapters
 
     def _extract_all_resources(self, zf, output_dir):
-        """Extract all resources with duplicate prevention"""
+        """Extract all resources with parallel processing"""
         extracted_resources = {
             'css': [],
             'fonts': [],
@@ -1423,26 +1468,29 @@ class ChapterExtractor:
             'other': []
         }
         
+        # Check if already extracted
         extraction_marker = os.path.join(output_dir, '.resources_extracted')
         if os.path.exists(extraction_marker):
-            print("📦 Resources already extracted, skipping resource extraction...")
+            print("📦 Resources already extracted, skipping...")
             return self._count_existing_resources(output_dir, extracted_resources)
         
         self._cleanup_old_resources(output_dir)
         
+        # Create directories
         for resource_type in ['css', 'fonts', 'images']:
             os.makedirs(os.path.join(output_dir, resource_type), exist_ok=True)
         
-        print(f"📦 Extracting all resources from EPUB...")
+        print(f"📦 Extracting resources in parallel...")
         
-        for file_path in zf.namelist():
-            # Check stop in resource extraction loop
+        # Get list of files to process
+        file_list = [f for f in zf.namelist() if not f.endswith('/') and os.path.basename(f)]
+        
+        # Thread-safe lock for extracted_resources
+        resource_lock = threading.Lock()
+        
+        def extract_single_resource(file_path):
             if is_stop_requested():
-                print("❌ Resource extraction stopped by user")
-                return extracted_resources
-                
-            if file_path.endswith('/') or not os.path.basename(file_path):
-                continue
+                return None
                 
             try:
                 file_data = zf.read(file_path)
@@ -1455,606 +1503,713 @@ class ChapterExtractor:
                     with open(target_path, 'wb') as f:
                         f.write(file_data)
                     
-                    extracted_resources[resource_type].append(safe_filename)
+                    # Thread-safe update
+                    with resource_lock:
+                        extracted_resources[resource_type].append(safe_filename)
                     
-                    if resource_type == 'epub_structure':
-                        print(f"   📋 Extracted EPUB structure: {safe_filename}")
-                    else:
-                        print(f"   📄 Extracted {resource_type}: {safe_filename}")
-                    
+                    return (resource_type, safe_filename)
             except Exception as e:
                 print(f"[WARNING] Failed to extract {file_path}: {e}")
+                return None
         
+        # Process files in parallel
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {executor.submit(extract_single_resource, file_path): file_path 
+                      for file_path in file_list}
+            
+            for future in as_completed(futures):
+                if is_stop_requested():
+                    executor.shutdown(wait=False)
+                    break
+                    
+                result = future.result()
+                if result:
+                    resource_type, filename = result
+                    print(f"   📄 Extracted {resource_type}: {filename}")
+        
+        # Mark as complete
         with open(extraction_marker, 'w') as f:
             f.write(f"Resources extracted at {time.time()}")
         
         self._validate_critical_files(output_dir, extracted_resources)
-        
         return extracted_resources
     
     def _extract_chapters_universal(self, zf, extraction_mode="smart"):
-            """Universal chapter extraction with four modes: smart, comprehensive, full, enhanced
+        """Universal chapter extraction with four modes: smart, comprehensive, full, enhanced
+        
+        All modes now properly merge Section/Chapter pairs
+        Enhanced mode uses html2text for superior text processing
+        Now with parallel processing for improved performance
+        """
+        # Check stop at the beginning
+        if is_stop_requested():
+            print("❌ Chapter extraction stopped by user")
+            return [], 'unknown'
+        
+        # Initialize enhanced extractor if using enhanced mode
+        enhanced_extractor = None
+        enhanced_filtering = extraction_mode  # Default fallback
+        preserve_structure = True
+        
+        if extraction_mode == "enhanced":
+            print("🚀 Initializing Enhanced extraction mode with html2text...")
             
-            All modes now properly merge Section/Chapter pairs
-            Enhanced mode uses html2text for superior text processing
-            """
-            # Check stop at the beginning
+            # Get enhanced mode configuration from environment
+            enhanced_filtering = os.getenv("ENHANCED_FILTERING", "smart")
+            preserve_structure = os.getenv("ENHANCED_PRESERVE_STRUCTURE", "1") == "1"
+            
+            print(f"  • Enhanced filtering level: {enhanced_filtering}")
+            print(f"  • Preserve structure: {preserve_structure}")
+            
+            # Try to initialize enhanced extractor
+            try:
+                # Import our enhanced extractor (assume it's in the same directory or importable)
+                from enhanced_text_extractor import EnhancedTextExtractor
+                enhanced_extractor = EnhancedTextExtractor(
+                    filtering_mode=enhanced_filtering,
+                    preserve_structure=preserve_structure
+                )
+                print("✅ Enhanced text extractor initialized successfully")
+                    
+            except ImportError as e:
+                print(f"❌ Enhanced text extractor module not found: {e}")
+                print(f"❌ Cannot use enhanced extraction mode. Please install enhanced_text_extractor or select a different extraction mode.")
+                raise e
+            except Exception as e:
+                print(f"❌ Enhanced extractor initialization failed: {e}")
+                print(f"❌ Cannot use enhanced extraction mode. Please select a different extraction mode.")
+                raise e
+        
+        chapters = []
+        sample_texts = []
+        
+        # First phase: Collect HTML files
+        html_files = []
+        for name in zf.namelist():
+            # Check stop while collecting files
             if is_stop_requested():
                 print("❌ Chapter extraction stopped by user")
                 return [], 'unknown'
-            
-            # Initialize enhanced extractor if using enhanced mode
-            enhanced_extractor = None
-            enhanced_filtering = extraction_mode  # Default fallback
-            preserve_structure = True
-            
-            if extraction_mode == "enhanced":
-                print("🚀 Initializing Enhanced extraction mode with html2text...")
                 
-                # Get enhanced mode configuration from environment
-                enhanced_filtering = os.getenv("ENHANCED_FILTERING", "smart")
-                preserve_structure = os.getenv("ENHANCED_PRESERVE_STRUCTURE", "1") == "1"
+            if name.lower().endswith(('.xhtml', '.html', '.htm')):
+                # Always skip cover files in ALL modes - check basename exactly
+                basename = os.path.basename(name).lower()
+                if basename in ['cover.html', 'cover.xhtml', 'cover.htm']:
+                    print(f"[SKIP] Cover file excluded from all modes: {name}")
+                    continue
                 
-                print(f"  • Enhanced filtering level: {enhanced_filtering}")
-                print(f"  • Preserve structure: {preserve_structure}")
+                # Apply filtering based on the actual extraction mode (or enhanced_filtering for enhanced mode)
+                current_filtering = enhanced_filtering if extraction_mode == "enhanced" else extraction_mode
                 
-                # Try to initialize enhanced extractor
-                try:
-                    # Import our enhanced extractor (assume it's in the same directory or importable)
-                    from enhanced_text_extractor import EnhancedTextExtractor
-                    enhanced_extractor = EnhancedTextExtractor(
-                        filtering_mode=enhanced_filtering,
-                        preserve_structure=preserve_structure
-                    )
-                    print("✅ Enhanced text extractor initialized successfully")
-                        
-                except ImportError as e:
-                    print(f"❌ Enhanced text extractor module not found: {e}")
-                    print(f"❌ Cannot use enhanced extraction mode. Please install enhanced_text_extractor or select a different extraction mode.")
-                    raise e
-                except Exception as e:
-                    print(f"❌ Enhanced extractor initialization failed: {e}")
-                    print(f"❌ Cannot use enhanced extraction mode. Please select a different extraction mode.")
-                    raise e
-            
-            chapters = []
-            sample_texts = []
-            
-            html_files = []
-            for name in zf.namelist():
-                # Check stop while collecting files
-                if is_stop_requested():
-                    print("❌ Chapter extraction stopped by user")
-                    return [], 'unknown'
-                    
-                if name.lower().endswith(('.xhtml', '.html', '.htm')):
-                    # Always skip cover files in ALL modes - check basename exactly
-                    basename = os.path.basename(name).lower()
-                    if basename in ['cover.html', 'cover.xhtml', 'cover.htm']:
-                        print(f"[SKIP] Cover file excluded from all modes: {name}")
+                if current_filtering == "smart":
+                    # Smart mode: aggressive filtering
+                    lower_name = name.lower()
+                    if any(skip in lower_name for skip in [
+                        'nav', 'toc', 'contents', 'title', 'index',
+                        'copyright', 'acknowledgment', 'dedication'
+                    ]):
                         continue
-                    
-                    # Apply filtering based on the actual extraction mode (or enhanced_filtering for enhanced mode)
-                    current_filtering = enhanced_filtering if extraction_mode == "enhanced" else extraction_mode
-                    
-                    if current_filtering == "smart":
-                        # Smart mode: aggressive filtering
-                        lower_name = name.lower()
-                        if any(skip in lower_name for skip in [
-                            'nav', 'toc', 'contents', 'title', 'index',
-                            'copyright', 'acknowledgment', 'dedication'
-                        ]):
-                            continue
-                    elif current_filtering == "comprehensive":
-                        # Comprehensive mode: moderate filtering
-                        skip_keywords = ['nav.', 'toc.', 'contents.', 'copyright.']
-                        basename = os.path.basename(name.lower())
-                        should_skip = False
-                        for skip in skip_keywords:
-                            if basename == skip + 'xhtml' or basename == skip + 'html' or basename == skip + 'htm':
-                                should_skip = True
-                                break
-                        if should_skip:
-                            print(f"[SKIP] Navigation/TOC file: {name}")
-                            continue
-                    # else: full mode - no filtering at all (except cover which is filtered above)
-                    
-                    html_files.append(name)
-            
-            # Update mode description to include enhanced mode
-            mode_description = {
-                "smart": "potential content files",
-                "comprehensive": "HTML files", 
-                "full": "ALL HTML/XHTML files (no filtering)",
-                "enhanced": f"files (enhanced with {enhanced_filtering} filtering)"
-            }
-            print(f"📚 Found {len(html_files)} {mode_description.get(extraction_mode, 'files')} in EPUB")
-            
-            # Sort files to ensure proper order
-            html_files.sort()
-            
-            # Check if merging is disabled via environment variable
-            disable_merging = os.getenv("DISABLE_CHAPTER_MERGING", "0") == "1"
-            
-            processed_files = set()
-            merge_candidates = {}  # Store potential merges without reading files yet
-            
-            if disable_merging:
-                print("📌 Chapter merging is DISABLED - processing all files independently")
-            else:
-                print("📌 Chapter merging is ENABLED")
+                elif current_filtering == "comprehensive":
+                    # Comprehensive mode: moderate filtering
+                    skip_keywords = ['nav.', 'toc.', 'contents.', 'copyright.']
+                    basename = os.path.basename(name.lower())
+                    should_skip = False
+                    for skip in skip_keywords:
+                        if basename == skip + 'xhtml' or basename == skip + 'html' or basename == skip + 'htm':
+                            should_skip = True
+                            break
+                    if should_skip:
+                        print(f"[SKIP] Navigation/TOC file: {name}")
+                        continue
+                # else: full mode - no filtering at all (except cover which is filtered above)
                 
-                # Only do merging logic if not disabled
-                file_groups = {}
+                html_files.append(name)
+        
+        # Update mode description to include enhanced mode
+        mode_description = {
+            "smart": "potential content files",
+            "comprehensive": "HTML files", 
+            "full": "ALL HTML/XHTML files (no filtering)",
+            "enhanced": f"files (enhanced with {enhanced_filtering} filtering)"
+        }
+        print(f"📚 Found {len(html_files)} {mode_description.get(extraction_mode, 'files')} in EPUB")
+        
+        # Sort files to ensure proper order
+        html_files.sort()
+        
+        # Check if merging is disabled via environment variable
+        disable_merging = os.getenv("DISABLE_CHAPTER_MERGING", "0") == "1"
+        
+        processed_files = set()
+        merge_candidates = {}  # Store potential merges without reading files yet
+        
+        if disable_merging:
+            print("📌 Chapter merging is DISABLED - processing all files independently")
+        else:
+            print("📌 Chapter merging is ENABLED")
+            
+            # Only do merging logic if not disabled
+            file_groups = {}
+            
+            # Group files by their base number to detect Section/Chapter pairs
+            for file_path in html_files:
+                filename = os.path.basename(file_path)
                 
-                # Group files by their base number to detect Section/Chapter pairs
-                for file_path in html_files:
-                    filename = os.path.basename(file_path)
-                    
-                    # Try different patterns to extract base number
-                    base_num = None
-                    
-                    # Pattern 1: "No00014" from "No00014Section.xhtml"
-                    match = re.match(r'(No\d+)', filename)
+                # Try different patterns to extract base number
+                base_num = None
+                
+                # Pattern 1: "No00014" from "No00014Section.xhtml"
+                match = re.match(r'(No\d+)', filename)
+                if match:
+                    base_num = match.group(1)
+                else:
+                    # Pattern 2: "0014" from "0014_section.html" or "0014_chapter.html"
+                    match = re.match(r'^(\d+)[_\-]', filename)
                     if match:
                         base_num = match.group(1)
                     else:
-                        # Pattern 2: "0014" from "0014_section.html" or "0014_chapter.html"
-                        match = re.match(r'^(\d+)[_\-]', filename)
+                        # Pattern 3: Just numbers at the start
+                        match = re.match(r'^(\d+)', filename)
                         if match:
                             base_num = match.group(1)
-                        else:
-                            # Pattern 3: Just numbers at the start
-                            match = re.match(r'^(\d+)', filename)
-                            if match:
-                                base_num = match.group(1)
+                
+                if base_num:
+                    if base_num not in file_groups:
+                        file_groups[base_num] = []
+                    file_groups[base_num].append(file_path)
+            
+            # Identify merge candidates WITHOUT reading files yet
+            for base_num, group_files in sorted(file_groups.items()):
+                if len(group_files) == 2:
+                    # Check if we have a Section/Chapter pair based on filenames only
+                    section_file = None
+                    chapter_file = None
                     
-                    if base_num:
-                        if base_num not in file_groups:
-                            file_groups[base_num] = []
-                        file_groups[base_num].append(file_path)
-                
-                # Identify merge candidates WITHOUT reading files yet
-                for base_num, group_files in sorted(file_groups.items()):
-                    if len(group_files) == 2:
-                        # Check if we have a Section/Chapter pair based on filenames only
-                        section_file = None
-                        chapter_file = None
-                        
-                        for file_path in group_files:
-                            basename = os.path.basename(file_path)
-                            # More strict detection - must have 'section' or 'chapter' in the filename
-                            if 'section' in basename.lower() and 'chapter' not in basename.lower():
-                                section_file = file_path
-                            elif 'chapter' in basename.lower() and 'section' not in basename.lower():
-                                chapter_file = file_path
-                        
-                        if section_file and chapter_file:
-                            # Store as potential merge candidate
-                            merge_candidates[chapter_file] = section_file
-                            processed_files.add(section_file)
-                            print(f"[DEBUG] Potential merge candidate: {base_num}")
-                            print(f"  Section: {os.path.basename(section_file)}")
-                            print(f"  Chapter: {os.path.basename(chapter_file)}")
-            
-            # Continue with regular processing
-            sample_texts = []
-            file_size_groups = {}
-            h1_count = 0
-            h2_count = 0
-            
-            # For smart mode, we'll collect all files first, then assign numbers
-            candidate_chapters = []  # Store potential chapters for smart mode
-            actual_chapter_num = 1  # Track real chapter numbers
-            processed_count = 0  # Track actually processed chapters
-            
-            for idx, file_path in enumerate(html_files):
-                # Check stop in main processing loop
-                if is_stop_requested():
-                    print("❌ Chapter processing stopped by user")
-                    return chapters, 'unknown'
+                    for file_path in group_files:
+                        basename = os.path.basename(file_path)
+                        # More strict detection - must have 'section' or 'chapter' in the filename
+                        if 'section' in basename.lower() and 'chapter' not in basename.lower():
+                            section_file = file_path
+                        elif 'chapter' in basename.lower() and 'section' not in basename.lower():
+                            chapter_file = file_path
                     
-                # Debug merging logic
-                if 'section' in os.path.basename(file_path).lower():
-                    print(f"[DEBUG] Processing section file: {os.path.basename(file_path)}")
-                    print(f"  - In processed_files: {file_path in processed_files}")
-                    print(f"  - Disable merging: {disable_merging}")
-                
-                # Skip files that were marked as section headers
-                if not disable_merging and file_path in processed_files:
-                    print(f"[DEBUG] Skipping section file: {file_path}")
-                    continue
-                
-                # Increment processed count for actual chapters
+                    if section_file and chapter_file:
+                        # Store as potential merge candidate
+                        merge_candidates[chapter_file] = section_file
+                        processed_files.add(section_file)
+                        print(f"[DEBUG] Potential merge candidate: {base_num}")
+                        print(f"  Section: {os.path.basename(section_file)}")
+                        print(f"  Chapter: {os.path.basename(chapter_file)}")
+        
+        # Filter out section files that were marked for merging
+        files_to_process = []
+        for file_path in html_files:
+            if not disable_merging and file_path in processed_files:
+                print(f"[DEBUG] Skipping section file: {file_path}")
+                continue
+            files_to_process.append(file_path)
+        
+        print(f"📚 Processing {len(files_to_process)} files after merge analysis")
+        
+        # Thread-safe collections
+        sample_texts_lock = threading.Lock()
+        file_size_groups_lock = threading.Lock()
+        h1_count_lock = threading.Lock()
+        h2_count_lock = threading.Lock()
+        
+        # Initialize counters
+        file_size_groups = {}
+        h1_count = 0
+        h2_count = 0
+        processed_count = 0
+        processed_count_lock = threading.Lock()
+        
+        # Progress tracking
+        total_files = len(files_to_process)
+        
+        # Function to process a single HTML file
+        def process_single_html_file(file_path, file_index):
+            nonlocal h1_count, h2_count, processed_count
+            
+            # Check stop
+            if is_stop_requested():
+                return None
+            
+            # Update progress
+            with processed_count_lock:
                 processed_count += 1
-                    
-                try:
-                    # Read file data
-                    file_data = zf.read(file_path)
-                    
-                    # Decode the file data
-                    html_content = None
-                    detected_encoding = None
-                    for encoding in ['utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr', 'gbk', 'big5']:
-                        try:
-                            html_content = file_data.decode(encoding)
-                            detected_encoding = encoding
-                            break
-                        except UnicodeDecodeError:
-                            continue
-                    
-                    if not html_content:
-                        print(f"[WARNING] Could not decode {file_path}")
+                current_count = processed_count
+                if self.progress_callback and current_count % 5 == 0:
+                    progress_msg = f"Processing chapters: {current_count}/{total_files} ({current_count*100//total_files}%)"
+                    self.progress_callback(progress_msg)
+            
+            try:
+                # Read file data
+                file_data = zf.read(file_path)
+                
+                # Decode the file data
+                html_content = None
+                detected_encoding = None
+                for encoding in ['utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr', 'gbk', 'big5']:
+                    try:
+                        html_content = file_data.decode(encoding)
+                        detected_encoding = encoding
+                        break
+                    except UnicodeDecodeError:
                         continue
+                
+                if not html_content:
+                    print(f"[WARNING] Could not decode {file_path}")
+                    return None
+                
+                # Check if this file needs merging
+                if not disable_merging and file_path in merge_candidates:
+                    section_file = merge_candidates[file_path]
+                    print(f"[DEBUG] Processing merge for: {file_path}")
                     
-                    # Check if this file needs merging
-                    if not disable_merging and file_path in merge_candidates:
-                        section_file = merge_candidates[file_path]
-                        print(f"[DEBUG] Processing merge for: {file_path}")
+                    try:
+                        # Read section file
+                        section_data = zf.read(section_file)
+                        section_html = None
+                        for encoding in ['utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr', 'gbk', 'big5']:
+                            try:
+                                section_html = section_data.decode(encoding)
+                                break
+                            except UnicodeDecodeError:
+                                continue
                         
-                        try:
-                            # Read section file
-                            section_data = zf.read(section_file)
-                            section_html = None
-                            for encoding in ['utf-8', 'utf-16', 'gb18030', 'shift_jis', 'euc-kr', 'gbk', 'big5']:
-                                try:
-                                    section_html = section_data.decode(encoding)
-                                    break
-                                except UnicodeDecodeError:
-                                    continue
+                        if section_html:
+                            # Quick check if section is small enough to merge
+                            section_soup = BeautifulSoup(section_html, 'html.parser')
+                            section_text = section_soup.get_text(strip=True)
                             
-                            if section_html:
-                                # Quick check if section is small enough to merge
-                                section_soup = BeautifulSoup(section_html, 'html.parser')
-                                section_text = section_soup.get_text(strip=True)
+                            if len(section_text) < 200:  # Merge if section is small
+                                # Extract body content
+                                chapter_soup = BeautifulSoup(html_content, 'html.parser')
                                 
-                                if len(section_text) < 200:  # Merge if section is small
-                                    # Extract body content
-                                    chapter_soup = BeautifulSoup(html_content, 'html.parser')
-                                    
-                                    if section_soup.body:
-                                        section_body_content = ''.join(str(child) for child in section_soup.body.children)
-                                    else:
-                                        section_body_content = section_html
-                                    
-                                    if chapter_soup.body:
-                                        chapter_body_content = ''.join(str(child) for child in chapter_soup.body.children)
-                                    else:
-                                        chapter_body_content = html_content
-                                    
-                                    # Merge content
-                                    html_content = section_body_content + "\n<hr/>\n" + chapter_body_content
-                                    print(f"  → MERGED: Section ({len(section_text)} chars) + Chapter")
+                                if section_soup.body:
+                                    section_body_content = ''.join(str(child) for child in section_soup.body.children)
                                 else:
-                                    print(f"  → NOT MERGED: Section too large ({len(section_text)} chars)")
-                                    # Remove from processed files so it gets processed separately
-                                    processed_files.discard(section_file)
-                            
-                        except Exception as e:
-                            print(f"[WARNING] Failed to merge {file_path}: {e}")
-                    
-                    # === ENHANCED EXTRACTION POINT ===
-                    # Initialize variables that will be set by extraction
-                    content_html = None
-                    content_text = None
-                    chapter_title = None
-                    enhanced_extraction_used = False
-                    
-                    # Use enhanced extractor if available
-                    if enhanced_extractor and extraction_mode == "enhanced":
-                        print(f"🚀 Using enhanced extraction for: {os.path.basename(file_path)}")
-                        # Get clean text from html2text
-                        clean_content, _, chapter_title = enhanced_extractor.extract_chapter_content(
-                            html_content, enhanced_filtering
-                        )
-                        enhanced_extraction_used = True
-                        print(f"✅ Enhanced extraction complete: {len(clean_content)} chars")
+                                    section_body_content = section_html
+                                
+                                if chapter_soup.body:
+                                    chapter_body_content = ''.join(str(child) for child in chapter_soup.body.children)
+                                else:
+                                    chapter_body_content = html_content
+                                
+                                # Merge content
+                                html_content = section_body_content + "\n<hr/>\n" + chapter_body_content
+                                print(f"  → MERGED: Section ({len(section_text)} chars) + Chapter")
+                            else:
+                                print(f"  → NOT MERGED: Section too large ({len(section_text)} chars)")
+                                # Remove from processed files so it gets processed separately
+                                processed_files.discard(section_file)
                         
-                        # For enhanced mode, use clean text as the body
-                        content_html = clean_content  # This is PLAIN TEXT from html2text
-                        content_text = clean_content  # Same clean text for both
+                    except Exception as e:
+                        print(f"[WARNING] Failed to merge {file_path}: {e}")
+                
+                # === ENHANCED EXTRACTION POINT ===
+                # Initialize variables that will be set by extraction
+                content_html = None
+                content_text = None
+                chapter_title = None
+                enhanced_extraction_used = False
+                
+                # Use enhanced extractor if available
+                if enhanced_extractor and extraction_mode == "enhanced":
+                    print(f"🚀 Using enhanced extraction for: {os.path.basename(file_path)}")
+                    # Get clean text from html2text
+                    clean_content, _, chapter_title = enhanced_extractor.extract_chapter_content(
+                        html_content, enhanced_filtering
+                    )
+                    enhanced_extraction_used = True
+                    print(f"✅ Enhanced extraction complete: {len(clean_content)} chars")
                     
-                    # BeautifulSoup method (only for non-enhanced modes)
-                    if not enhanced_extraction_used:
-                        if extraction_mode == "enhanced":
-                            # Enhanced mode failed - skip this file
-                            print(f"❌ Skipping {file_path} - enhanced extraction required but not available")
-                            continue
-                        # Parse the (possibly merged) content
+                    # For enhanced mode, use clean text as the body
+                    content_html = clean_content  # This is PLAIN TEXT from html2text
+                    content_text = clean_content  # Same clean text for both
+                
+                # BeautifulSoup method (only for non-enhanced modes)
+                if not enhanced_extraction_used:
+                    if extraction_mode == "enhanced":
+                        # Enhanced mode failed - skip this file
+                        print(f"❌ Skipping {file_path} - enhanced extraction required but not available")
+                        return None
+                    # Parse the (possibly merged) content
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    
+                    # Get effective mode for filtering
+                    effective_filtering = enhanced_filtering if extraction_mode == "enhanced" else extraction_mode
+                    
+                    # In full mode, keep the entire HTML structure
+                    if effective_filtering == "full":
+                        content_html = html_content  # Keep EVERYTHING
+                        content_text = soup.get_text(strip=True)
+                    else:
+                        # Smart and comprehensive modes extract body content
+                        if soup.body:
+                            content_html = str(soup.body)
+                            content_text = soup.body.get_text(strip=True)
+                        else:
+                            content_html = html_content
+                            content_text = soup.get_text(strip=True)
+                    
+                    # Extract title
+                    chapter_title = None
+                    if soup.title and soup.title.string:
+                        chapter_title = soup.title.string.strip()
+                    
+                    if not chapter_title:
+                        for header_tag in ['h1', 'h2', 'h3']:
+                            header = soup.find(header_tag)
+                            if header:
+                                chapter_title = header.get_text(strip=True)
+                                break
+                    
+                    if not chapter_title:
+                        chapter_title = os.path.splitext(os.path.basename(file_path))[0]
+                
+                # Get the effective extraction mode for processing logic
+                effective_mode = enhanced_filtering if extraction_mode == "enhanced" else extraction_mode
+                
+                # Skip truly empty files in smart mode
+                # BUT: Never skip anything when merging is disabled (to ensure section files are processed)
+                if effective_mode == "smart" and not disable_merging and len(content_text.strip()) < 10:
+                    print(f"[SKIP] Nearly empty file: {file_path} ({len(content_text)} chars)")
+                    return None
+                
+                # Get actual chapter number based on original position
+                actual_chapter_num = files_to_process.index(file_path) + 1
+                
+                # Mode-specific logic
+                if effective_mode == "comprehensive" or effective_mode == "full":
+                    # For comprehensive/full mode, use sequential numbering
+                    chapter_num = actual_chapter_num
+                    
+                    if not chapter_title:
+                        chapter_title = os.path.splitext(os.path.basename(file_path))[0]
+                    
+                    detection_method = f"{extraction_mode}_sequential" if extraction_mode == "enhanced" else f"{effective_mode}_sequential"
+                    
+                elif effective_mode == "smart":
+                    # For smart mode, when merging is disabled, use sequential numbering
+                    if disable_merging:
+                        chapter_num = actual_chapter_num
+                        
+                        if not chapter_title:
+                            chapter_title = os.path.splitext(os.path.basename(file_path))[0]
+                        
+                        detection_method = f"{extraction_mode}_sequential_no_merge" if extraction_mode == "enhanced" else "sequential_no_merge"
+                    else:
+                        # When merging is enabled, try to extract chapter info
                         soup = BeautifulSoup(html_content, 'html.parser')
                         
-                        # Get effective mode for filtering
-                        effective_filtering = enhanced_filtering if extraction_mode == "enhanced" else extraction_mode
-                        
-                        # In full mode, keep the entire HTML structure
-                        if effective_filtering == "full":
-                            content_html = html_content  # Keep EVERYTHING
-                            content_text = soup.get_text(strip=True)
-                        else:
-                            # Smart and comprehensive modes extract body content
-                            if soup.body:
-                                content_html = str(soup.body)
-                                content_text = soup.body.get_text(strip=True)
-                            else:
-                                content_html = html_content
-                                content_text = soup.get_text(strip=True)
-                        
-                        # Extract title
-                        chapter_title = None
-                        if soup.title and soup.title.string:
-                            chapter_title = soup.title.string.strip()
-                        
-                        if not chapter_title:
-                            for header_tag in ['h1', 'h2', 'h3']:
-                                header = soup.find(header_tag)
-                                if header:
-                                    chapter_title = header.get_text(strip=True)
-                                    break
-                        
-                        if not chapter_title:
-                            chapter_title = os.path.splitext(os.path.basename(file_path))[0]
-                    
-                    # Get the effective extraction mode for processing logic
-                    effective_mode = enhanced_filtering if extraction_mode == "enhanced" else extraction_mode
-                    
-                    # Skip truly empty files in smart mode
-                    # BUT: Never skip anything when merging is disabled (to ensure section files are processed)
-                    if effective_mode == "smart" and not disable_merging and len(content_text.strip()) < 10:
-                        print(f"[SKIP] Nearly empty file: {file_path} ({len(content_text)} chars)")
-                        continue
-                    
-                    # Mode-specific logic
-                    if effective_mode == "comprehensive" or effective_mode == "full":
-                        # For comprehensive/full mode, use sequential numbering
-                        chapter_num = processed_count
-                        actual_chapter_num += 1
-                        
-                        if not chapter_title:
-                            chapter_title = os.path.splitext(os.path.basename(file_path))[0]
-                        
-                        detection_method = f"{extraction_mode}_sequential" if extraction_mode == "enhanced" else f"{effective_mode}_sequential"
-                        
-                    elif effective_mode == "smart":
-                        # For smart mode, when merging is disabled, use sequential numbering
-                        if disable_merging:
-                            chapter_num = processed_count
-                            
-                            if not chapter_title:
-                                chapter_title = os.path.splitext(os.path.basename(file_path))[0]
-                            
-                            detection_method = f"{extraction_mode}_sequential_no_merge" if extraction_mode == "enhanced" else "sequential_no_merge"
-                        else:
-                            # When merging is enabled, try to extract chapter info
-                            soup = BeautifulSoup(html_content, 'html.parser')
-                            
-                            h1_tags = soup.find_all('h1')
-                            h2_tags = soup.find_all('h2')
-                            if h1_tags:
+                        # Count headers (thread-safe)
+                        h1_tags = soup.find_all('h1')
+                        h2_tags = soup.find_all('h2')
+                        if h1_tags:
+                            with h1_count_lock:
                                 h1_count += 1
-                            if h2_tags:
+                        if h2_tags:
+                            with h2_count_lock:
                                 h2_count += 1
-                            
-                            # Try to extract chapter number and title
-                            chapter_num, extracted_title, detection_method = self._extract_chapter_info(
-                                soup, file_path, content_text, html_content
-                            )
-                            
-                            # Use extracted title if we don't have one
-                            if extracted_title and not chapter_title:
-                                chapter_title = extracted_title
-                            
-                            # For hash-based filenames, chapter_num might be None
-                            if chapter_num is None:
-                                chapter_num = processed_count  # Use actual chapter count
-                                detection_method = f"{extraction_mode}_sequential_fallback" if extraction_mode == "enhanced" else "sequential_fallback"
-                                print(f"[DEBUG] No chapter number found in {file_path}, assigning: {chapter_num}")
-                    
-                    # Process images and metadata (same for all modes)
-                    soup = BeautifulSoup(html_content, 'html.parser')
-                    images = soup.find_all('img')
-                    has_images = len(images) > 0
-                    is_image_only_chapter = has_images and len(content_text.strip()) < 500
-                    
-                    if is_image_only_chapter:
-                        print(f"[DEBUG] Image-only chapter detected: {file_path} ({len(images)} images, {len(content_text)} chars)")
-                    
-                    content_hash = ContentProcessor.get_content_hash(content_html)
-                    
-                    # Collect file size groups for smart mode
-                    if effective_mode == "smart":
-                        file_size = len(content_text)
+                        
+                        # Try to extract chapter number and title
+                        chapter_num, extracted_title, detection_method = self._extract_chapter_info(
+                            soup, file_path, content_text, html_content
+                        )
+                        
+                        # Use extracted title if we don't have one
+                        if extracted_title and not chapter_title:
+                            chapter_title = extracted_title
+                        
+                        # For hash-based filenames, chapter_num might be None
+                        if chapter_num is None:
+                            chapter_num = actual_chapter_num  # Use actual chapter count
+                            detection_method = f"{extraction_mode}_sequential_fallback" if extraction_mode == "enhanced" else "sequential_fallback"
+                            print(f"[DEBUG] No chapter number found in {file_path}, assigning: {chapter_num}")
+                
+                # Process images and metadata (same for all modes)
+                soup = BeautifulSoup(html_content, 'html.parser')
+                images = soup.find_all('img')
+                has_images = len(images) > 0
+                is_image_only_chapter = has_images and len(content_text.strip()) < 500
+                
+                if is_image_only_chapter:
+                    print(f"[DEBUG] Image-only chapter detected: {file_path} ({len(images)} images, {len(content_text)} chars)")
+                
+                content_hash = ContentProcessor.get_content_hash(content_html)
+                
+                # Collect file size groups for smart mode (thread-safe)
+                if effective_mode == "smart":
+                    file_size = len(content_text)
+                    with file_size_groups_lock:
                         if file_size not in file_size_groups:
                             file_size_groups[file_size] = []
                         file_size_groups[file_size].append(file_path)
-                        
+                    
+                    # Collect sample texts (thread-safe)
+                    with sample_texts_lock:
                         if len(sample_texts) < 5:
                             sample_texts.append(content_text[:1000])
+                
+                # Ensure chapter_num is always an integer
+                if isinstance(chapter_num, float):
+                    chapter_num = int(chapter_num)
+                
+                # Create chapter info
+                chapter_info = {
+                    "num": chapter_num,  # Now guaranteed to have a value
+                    "title": chapter_title or f"Chapter {chapter_num}",
+                    "body": content_html,
+                    "filename": file_path,
+                    "original_basename": os.path.splitext(os.path.basename(file_path))[0],
+                    "content_hash": content_hash,
+                    "detection_method": detection_method if detection_method else "pending",
+                    "file_size": len(content_text),
+                    "has_images": has_images,
+                    "image_count": len(images),
+                    "is_empty": len(content_text.strip()) == 0,
+                    "is_image_only": is_image_only_chapter,
+                    "extraction_mode": extraction_mode,
+                    "file_index": file_index  # Store original file index for sorting
+                }
+                
+                # Add enhanced extraction info if used
+                if enhanced_extraction_used:
+                    chapter_info["enhanced_extraction"] = True
+                    chapter_info["enhanced_filtering"] = enhanced_filtering
+                    chapter_info["preserve_structure"] = preserve_structure
+                
+                # Add merge info if applicable
+                if not disable_merging and file_path in merge_candidates:
+                    chapter_info["was_merged"] = True
+                    chapter_info["merged_with"] = merge_candidates[file_path]
+                
+                if effective_mode == "smart":
+                    chapter_info["language_sample"] = content_text[:500]
+                    # Debug for section files
+                    if 'section' in chapter_info['original_basename'].lower():
+                        print(f"[DEBUG] Added section file to candidates: {chapter_info['original_basename']} (size: {chapter_info['file_size']})")
+                
+                return chapter_info
+                        
+            except Exception as e:
+                print(f"[ERROR] Failed to process {file_path}: {e}")
+                import traceback
+                traceback.print_exc()
+                return None
+        
+        # Process files in parallel or sequentially based on file count
+        print(f"🚀 Processing {len(files_to_process)} HTML files...")
+        
+        # Initial progress
+        if self.progress_callback:
+            self.progress_callback(f"Processing {len(files_to_process)} chapters...")
+        
+        candidate_chapters = []  # For smart mode
+        chapters_direct = []      # For other modes
+        
+        # Decide whether to use parallel processing
+        use_parallel = len(files_to_process) > 10
+        
+        if use_parallel:
+            print("📦 Using parallel processing for better performance...")
+            
+            # Process files in parallel
+            with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 4)) as executor:
+                # Submit all files for processing
+                future_to_file = {
+                    executor.submit(process_single_html_file, file_path, idx): (file_path, idx)
+                    for idx, file_path in enumerate(files_to_process)
+                }
+                
+                # Collect results as they complete
+                for future in as_completed(future_to_file):
+                    if is_stop_requested():
+                        print("❌ Chapter processing stopped by user")
+                        executor.shutdown(wait=False)
+                        return [], 'unknown'
                     
-                    # Ensure chapter_num is always an integer
-                    if isinstance(chapter_num, float):
-                        chapter_num = int(chapter_num)
-                    
-                    # Create chapter info
-                    chapter_info = {
-                        "num": chapter_num,  # Now guaranteed to have a value
-                        "title": chapter_title or f"Chapter {chapter_num}",
-                        "body": content_html,
-                        "filename": file_path,
-                        "original_basename": os.path.splitext(os.path.basename(file_path))[0],
-                        "content_hash": content_hash,
-                        "detection_method": detection_method if detection_method else "pending",
-                        "file_size": len(content_text),
-                        "has_images": has_images,
-                        "image_count": len(images),
-                        "is_empty": len(content_text.strip()) == 0,
-                        "is_image_only": is_image_only_chapter,
-                        "extraction_mode": extraction_mode,
-                        "file_index": idx  # Store original file index for sorting
-                    }
-                    
-                    # Add enhanced extraction info if used
-                    if enhanced_extraction_used:
-                        chapter_info["enhanced_extraction"] = True
-                        chapter_info["enhanced_filtering"] = enhanced_filtering
-                        chapter_info["preserve_structure"] = preserve_structure
-                    
-                    # Add merge info if applicable
-                    if not disable_merging and file_path in merge_candidates:
-                        chapter_info["was_merged"] = True
-                        chapter_info["merged_with"] = merge_candidates[file_path]
-                    
-                    if effective_mode == "smart":
-                        chapter_info["language_sample"] = content_text[:500]
-                        # Debug for section files
-                        if 'section' in chapter_info['original_basename'].lower():
-                            print(f"[DEBUG] Added section file to candidates: {chapter_info['original_basename']} (size: {chapter_info['file_size']})")
+                    try:
+                        chapter_info = future.result()
+                        if chapter_info:
+                            effective_mode = enhanced_filtering if extraction_mode == "enhanced" else extraction_mode
+                            
+                            # For smart mode when merging is enabled, collect candidates
+                            # Otherwise, add directly to chapters
+                            if effective_mode == "smart" and not disable_merging:
+                                candidate_chapters.append(chapter_info)
+                            else:
+                                chapters_direct.append(chapter_info)
+                    except Exception as e:
+                        file_path, idx = future_to_file[future]
+                        print(f"[ERROR] Thread error processing {file_path}: {e}")
+        else:
+            print("📦 Using sequential processing (small file count)...")
+            
+            # Process files sequentially for small EPUBs
+            for idx, file_path in enumerate(files_to_process):
+                if is_stop_requested():
+                    print("❌ Chapter processing stopped by user")
+                    return [], 'unknown'
+                
+                chapter_info = process_single_html_file(file_path, idx)
+                if chapter_info:
+                    effective_mode = enhanced_filtering if extraction_mode == "enhanced" else extraction_mode
                     
                     # For smart mode when merging is enabled, collect candidates
                     # Otherwise, add directly to chapters
                     if effective_mode == "smart" and not disable_merging:
                         candidate_chapters.append(chapter_info)
                     else:
-                        # For comprehensive/full mode, or smart mode with merging disabled
-                        chapters.append(chapter_info)
-                        
-                except Exception as e:
-                    print(f"[ERROR] Failed to process {file_path}: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    continue
+                        chapters_direct.append(chapter_info)
+        
+        # Final progress update
+        if self.progress_callback:
+            self.progress_callback(f"Chapter processing complete: {len(candidate_chapters) + len(chapters_direct)} chapters")
+        
+        # Sort direct chapters by file index to maintain order
+        chapters_direct.sort(key=lambda x: x["file_index"])
+        
+        # Post-process smart mode candidates (only when merging is enabled)
+        effective_mode = enhanced_filtering if extraction_mode == "enhanced" else extraction_mode
+        if effective_mode == "smart" and candidate_chapters and not disable_merging:
+            # Check stop before post-processing
+            if is_stop_requested():
+                print("❌ Chapter post-processing stopped by user")
+                return chapters, 'unknown'
+                
+            print(f"\n[SMART MODE] Processing {len(candidate_chapters)} candidate files...")
             
-            # Post-process smart mode candidates (only when merging is enabled)
-            effective_mode = enhanced_filtering if extraction_mode == "enhanced" else extraction_mode
-            if effective_mode == "smart" and candidate_chapters and not disable_merging:
-                # Check stop before post-processing
-                if is_stop_requested():
-                    print("❌ Chapter post-processing stopped by user")
-                    return chapters, 'unknown'
-                    
-                print(f"\n[SMART MODE] Processing {len(candidate_chapters)} candidate files...")
-                
-                # Debug: Show what files we have
-                section_files = [c for c in candidate_chapters if 'section' in c['original_basename'].lower()]
-                chapter_files = [c for c in candidate_chapters if 'chapter' in c['original_basename'].lower() and 'section' not in c['original_basename'].lower()]
-                other_files = [c for c in candidate_chapters if c not in section_files and c not in chapter_files]
-                
-                print(f"  📊 File breakdown:")
-                print(f"    • Section files: {len(section_files)}")
-                print(f"    • Chapter files: {len(chapter_files)}")
-                print(f"    • Other files: {len(other_files)}")
-                
-                # Original smart mode logic when merging is enabled
-                # First, separate files with detected chapter numbers from those without
-                numbered_chapters = []
-                unnumbered_chapters = []
-                
-                for chapter in candidate_chapters:
-                    if chapter["num"] is not None:
-                        numbered_chapters.append(chapter)
-                    else:
-                        unnumbered_chapters.append(chapter)
-                
-                print(f"  • Files with chapter numbers: {len(numbered_chapters)}")
-                print(f"  • Files without chapter numbers: {len(unnumbered_chapters)}")
-                
-                # Check if we have hash-based filenames (no numbered chapters found)
-                if not numbered_chapters and unnumbered_chapters:
-                    print("  ⚠️ No chapter numbers found - likely hash-based filenames")
-                    print("  → Using file order as chapter sequence")
-                    
-                    # Sort by file index to maintain order
-                    unnumbered_chapters.sort(key=lambda x: x["file_index"])
-                    
-                    # Assign sequential numbers
-                    for i, chapter in enumerate(unnumbered_chapters, 1):
-                        chapter["num"] = i
-                        chapter["detection_method"] = f"{extraction_mode}_hash_filename_sequential" if extraction_mode == "enhanced" else "hash_filename_sequential"
-                        if not chapter["title"] or chapter["title"] == chapter["original_basename"]:
-                            chapter["title"] = f"Chapter {i}"
-                    
-                    chapters = unnumbered_chapters
+            # Sort candidates by file index to maintain order
+            candidate_chapters.sort(key=lambda x: x["file_index"])
+            
+            # Debug: Show what files we have
+            section_files = [c for c in candidate_chapters if 'section' in c['original_basename'].lower()]
+            chapter_files = [c for c in candidate_chapters if 'chapter' in c['original_basename'].lower() and 'section' not in c['original_basename'].lower()]
+            other_files = [c for c in candidate_chapters if c not in section_files and c not in chapter_files]
+            
+            print(f"  📊 File breakdown:")
+            print(f"    • Section files: {len(section_files)}")
+            print(f"    • Chapter files: {len(chapter_files)}")
+            print(f"    • Other files: {len(other_files)}")
+            
+            # Original smart mode logic when merging is enabled
+            # First, separate files with detected chapter numbers from those without
+            numbered_chapters = []
+            unnumbered_chapters = []
+            
+            for chapter in candidate_chapters:
+                if chapter["num"] is not None:
+                    numbered_chapters.append(chapter)
                 else:
-                    # We have some numbered chapters
-                    chapters = numbered_chapters
+                    unnumbered_chapters.append(chapter)
+            
+            print(f"  • Files with chapter numbers: {len(numbered_chapters)}")
+            print(f"  • Files without chapter numbers: {len(unnumbered_chapters)}")
+            
+            # Check if we have hash-based filenames (no numbered chapters found)
+            if not numbered_chapters and unnumbered_chapters:
+                print("  ⚠️ No chapter numbers found - likely hash-based filenames")
+                print("  → Using file order as chapter sequence")
+                
+                # Sort by file index to maintain order
+                unnumbered_chapters.sort(key=lambda x: x["file_index"])
+                
+                # Assign sequential numbers
+                for i, chapter in enumerate(unnumbered_chapters, 1):
+                    chapter["num"] = i
+                    chapter["detection_method"] = f"{extraction_mode}_hash_filename_sequential" if extraction_mode == "enhanced" else "hash_filename_sequential"
+                    if not chapter["title"] or chapter["title"] == chapter["original_basename"]:
+                        chapter["title"] = f"Chapter {i}"
+                
+                chapters = unnumbered_chapters
+            else:
+                # We have some numbered chapters
+                chapters = numbered_chapters
+                
+                # For unnumbered files, check if they might be duplicates or appendices
+                if unnumbered_chapters:
+                    print(f"  → Analyzing {len(unnumbered_chapters)} unnumbered files...")
                     
-                    # For unnumbered files, check if they might be duplicates or appendices
-                    if unnumbered_chapters:
-                        print(f"  → Analyzing {len(unnumbered_chapters)} unnumbered files...")
+                    # Get the max chapter number
+                    max_num = max(c["num"] for c in numbered_chapters)
+                    
+                    # Check each unnumbered file
+                    for chapter in unnumbered_chapters:
+                        # Check stop in post-processing loop
+                        if is_stop_requested():
+                            print("❌ Chapter post-processing stopped by user")
+                            return chapters, 'unknown'
+                            
+                        # Check if it's very small (might be a separator or note)
+                        if chapter["file_size"] < 200:
+                            print(f"    [SKIP] Very small file: {chapter['filename']} ({chapter['file_size']} chars)")
+                            continue
                         
-                        # Get the max chapter number
-                        max_num = max(c["num"] for c in numbered_chapters)
+                        # Check if it has similar size to existing chapters (might be duplicate)
+                        size = chapter["file_size"]
+                        similar_chapters = [c for c in numbered_chapters 
+                                          if abs(c["file_size"] - size) < 50]
                         
-                        # Check each unnumbered file
-                        for chapter in unnumbered_chapters:
-                            # Check stop in post-processing loop
-                            if is_stop_requested():
-                                print("❌ Chapter post-processing stopped by user")
-                                return chapters, 'unknown'
-                                
-                            # Check if it's very small (might be a separator or note)
-                            if chapter["file_size"] < 200:
-                                print(f"    [SKIP] Very small file: {chapter['filename']} ({chapter['file_size']} chars)")
-                                continue
-                            
-                            # Check if it has similar size to existing chapters (might be duplicate)
-                            size = chapter["file_size"]
-                            similar_chapters = [c for c in numbered_chapters 
-                                              if abs(c["file_size"] - size) < 50]
-                            
-                            if similar_chapters:
-                                # Might be a duplicate, skip it
-                                print(f"    [SKIP] Possible duplicate: {chapter['filename']} (similar size to {len(similar_chapters)} chapters)")
-                                continue
-                            
-                            # Otherwise, add as appendix
-                            max_num += 1
-                            chapter["num"] = max_num
-                            chapter["detection_method"] = f"{extraction_mode}_appendix_sequential" if extraction_mode == "enhanced" else "appendix_sequential"
-                            if not chapter["title"] or chapter["title"] == chapter["original_basename"]:
-                                chapter["title"] = f"Appendix {max_num}"
-                            chapters.append(chapter)
-                            print(f"    [ADD] Added as chapter {max_num}: {chapter['filename']}")
+                        if similar_chapters:
+                            # Might be a duplicate, skip it
+                            print(f"    [SKIP] Possible duplicate: {chapter['filename']} (similar size to {len(similar_chapters)} chapters)")
+                            continue
+                        
+                        # Otherwise, add as appendix
+                        max_num += 1
+                        chapter["num"] = max_num
+                        chapter["detection_method"] = f"{extraction_mode}_appendix_sequential" if extraction_mode == "enhanced" else "appendix_sequential"
+                        if not chapter["title"] or chapter["title"] == chapter["original_basename"]:
+                            chapter["title"] = f"Appendix {max_num}"
+                        chapters.append(chapter)
+                        print(f"    [ADD] Added as chapter {max_num}: {chapter['filename']}")
+        else:
+            # For other modes or smart mode with merging disabled
+            chapters = chapters_direct
+        
+        # Sort chapters by number
+        chapters.sort(key=lambda x: x["num"])
+        
+        # Ensure chapter numbers are integers
+        # When merging is disabled, all chapters should have integer numbers anyway
+        for chapter in chapters:
+            if isinstance(chapter["num"], float):
+                chapter["num"] = int(chapter["num"])
+        
+        # Final validation
+        if chapters:
+            print(f"\n✅ Final chapter count: {len(chapters)}")
+            print(f"   • Chapter range: {chapters[0]['num']} - {chapters[-1]['num']}")
             
-            # Sort chapters by number
-            chapters.sort(key=lambda x: x["num"])
+            # Enhanced mode summary
+            if extraction_mode == "enhanced":
+                enhanced_count = sum(1 for c in chapters if c.get('enhanced_extraction', False))
+                print(f"   🚀 Enhanced extraction used: {enhanced_count}/{len(chapters)} chapters")
             
-            # Ensure chapter numbers are integers
-            # When merging is disabled, all chapters should have integer numbers anyway
-            for chapter in chapters:
-                if isinstance(chapter["num"], float):
-                    chapter["num"] = int(chapter["num"])
-            
-            # Final validation
-            if chapters:
-                print(f"\n✅ Final chapter count: {len(chapters)}")
-                print(f"   • Chapter range: {chapters[0]['num']} - {chapters[-1]['num']}")
-                
-                # Enhanced mode summary
-                if extraction_mode == "enhanced":
-                    enhanced_count = sum(1 for c in chapters if c.get('enhanced_extraction', False))
-                    print(f"   🚀 Enhanced extraction used: {enhanced_count}/{len(chapters)} chapters")
-                
-                # Check for gaps
-                chapter_nums = [c["num"] for c in chapters]
-                expected_nums = list(range(min(chapter_nums), max(chapter_nums) + 1))
-                missing = set(expected_nums) - set(chapter_nums)
-                if missing:
-                    print(f"   ⚠️ Missing chapter numbers: {sorted(missing)}")
-            
-            # Language detection
-            combined_sample = ' '.join(sample_texts) if effective_mode == "smart" else ''
-            detected_language = self._detect_content_language(combined_sample) if combined_sample else 'unknown'
-            
-            if chapters:
-                self._print_extraction_summary(chapters, detected_language, extraction_mode, 
-                                             h1_count if effective_mode == "smart" else 0, 
-                                             h2_count if effective_mode == "smart" else 0,
-                                             file_size_groups if effective_mode == "smart" else {})
-            
-            return chapters, detected_language
+            # Check for gaps
+            chapter_nums = [c["num"] for c in chapters]
+            expected_nums = list(range(min(chapter_nums), max(chapter_nums) + 1))
+            missing = set(expected_nums) - set(chapter_nums)
+            if missing:
+                print(f"   ⚠️ Missing chapter numbers: {sorted(missing)}")
+        
+        # Language detection
+        combined_sample = ' '.join(sample_texts) if effective_mode == "smart" else ''
+        detected_language = self._detect_content_language(combined_sample) if combined_sample else 'unknown'
+        
+        if chapters:
+            self._print_extraction_summary(chapters, detected_language, extraction_mode, 
+                                         h1_count if effective_mode == "smart" else 0, 
+                                         h2_count if effective_mode == "smart" else 0,
+                                         file_size_groups if effective_mode == "smart" else {})
+        
+        return chapters, detected_language
     
     def _extract_chapter_info(self, soup, file_path, content_text, html_content):
-        """Extract chapter number and title from various sources"""
+        """Extract chapter number and title from various sources with parallel pattern matching"""
         chapter_num = None
         chapter_title = None
         detection_method = None
@@ -2092,9 +2247,48 @@ class ChapterExtractor:
         
         # If not handled by special logic, continue with normal extraction
         if not chapter_num:
-            # Try filename first
-            for pattern, flags, method in self.pattern_manager.CHAPTER_PATTERNS:
-                if method.endswith('_number'):
+            # Try filename first - use parallel pattern matching for better performance
+            chapter_patterns = [(pattern, flags, method) for pattern, flags, method in self.pattern_manager.CHAPTER_PATTERNS 
+                              if method.endswith('_number')]
+            
+            if len(chapter_patterns) > 3:  # Only parallelize if we have enough patterns
+                # Parallel pattern matching for filename
+                with ThreadPoolExecutor(max_workers=min(4, len(chapter_patterns))) as executor:
+                    def try_pattern(pattern_info):
+                        pattern, flags, method = pattern_info
+                        match = re.search(pattern, file_path, flags)
+                        if match:
+                            try:
+                                num_str = match.group(1)
+                                if num_str.isdigit():
+                                    return int(num_str), f"filename_{method}"
+                                elif method == 'chinese_chapter_cn':
+                                    converted = self._convert_chinese_number(num_str)
+                                    if converted:
+                                        return converted, f"filename_{method}"
+                            except (ValueError, IndexError):
+                                pass
+                        return None, None
+                    
+                    # Submit all patterns
+                    futures = [executor.submit(try_pattern, pattern_info) for pattern_info in chapter_patterns]
+                    
+                    # Check results as they complete
+                    for future in as_completed(futures):
+                        try:
+                            num, method = future.result()
+                            if num:
+                                chapter_num = num
+                                detection_method = method
+                                # Cancel remaining futures
+                                for f in futures:
+                                    f.cancel()
+                                break
+                        except Exception:
+                            continue
+            else:
+                # Sequential processing for small pattern sets
+                for pattern, flags, method in chapter_patterns:
                     match = re.search(pattern, file_path, flags)
                     if match:
                         try:
@@ -2114,47 +2308,104 @@ class ChapterExtractor:
         
         # Try content if not found in filename
         if not chapter_num:
-            # Check title tag
+            # Prepare all text sources to check in parallel
+            text_sources = []
+            
+            # Add title tag
             if soup.title and soup.title.string:
                 title_text = soup.title.string.strip()
-                chapter_num, detection_method = self._extract_from_text(title_text, "title")
-                if chapter_num:
-                    chapter_title = title_text
+                text_sources.append(("title", title_text, True))  # True means this can be chapter_title
             
-            # Check headers
-            if not chapter_num:
-                for header_tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
-                    headers = soup.find_all(header_tag)
-                    for header in headers:
-                        header_text = header.get_text(strip=True)
-                        if header_text:
-                            chapter_num, method = self._extract_from_text(header_text, f"header_{header_tag}")
-                            if chapter_num:
-                                chapter_title = header_text
+            # Add headers
+            for header_tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                headers = soup.find_all(header_tag)
+                for header in headers[:3]:  # Limit to first 3 of each type
+                    header_text = header.get_text(strip=True)
+                    if header_text:
+                        text_sources.append((f"header_{header_tag}", header_text, True))
+            
+            # Add first paragraphs
+            first_elements = soup.find_all(['p', 'div'])[:5]
+            for elem in first_elements:
+                elem_text = elem.get_text(strip=True)
+                if elem_text:
+                    text_sources.append(("content", elem_text, False))  # False means don't use as chapter_title
+            
+            # Process text sources in parallel if we have many
+            if len(text_sources) > 5:
+                with ThreadPoolExecutor(max_workers=min(6, len(text_sources))) as executor:
+                    def extract_from_source(source_info):
+                        source_type, text, can_be_title = source_info
+                        num, method = self._extract_from_text(text, source_type)
+                        return num, method, text if (num and can_be_title) else None
+                    
+                    # Submit all text sources
+                    future_to_source = {executor.submit(extract_from_source, source): source 
+                                      for source in text_sources}
+                    
+                    # Process results as they complete
+                    for future in as_completed(future_to_source):
+                        try:
+                            num, method, title = future.result()
+                            if num:
+                                chapter_num = num
                                 detection_method = method
+                                if title and not chapter_title:
+                                    chapter_title = title
+                                # Cancel remaining futures
+                                for f in future_to_source:
+                                    f.cancel()
                                 break
-                    if chapter_num:
+                        except Exception:
+                            continue
+            else:
+                # Sequential processing for small text sets
+                for source_type, text, can_be_title in text_sources:
+                    num, method = self._extract_from_text(text, source_type)
+                    if num:
+                        chapter_num = num
+                        detection_method = method
+                        if can_be_title and not chapter_title:
+                            chapter_title = text
                         break
             
-            # Check first paragraphs
-            if not chapter_num:
-                first_elements = soup.find_all(['p', 'div'])[:5]
-                for elem in first_elements:
-                    elem_text = elem.get_text(strip=True)
-                    if elem_text:
-                        chapter_num, detection_method = self._extract_from_text(elem_text, "content")
-                        if chapter_num:
-                            break
-            
-            # Final fallback to filename
+            # Final fallback to filename patterns
             if not chapter_num:
                 filename_base = os.path.basename(file_path)
-                for pattern in self.pattern_manager.FILENAME_EXTRACT_PATTERNS:
-                    match = re.search(pattern, filename_base, re.IGNORECASE)
-                    if match:
-                        chapter_num = int(match.group(1))
-                        detection_method = "filename_number"
-                        break
+                # Parallel pattern matching for filename extraction
+                if len(self.pattern_manager.FILENAME_EXTRACT_PATTERNS) > 3:
+                    with ThreadPoolExecutor(max_workers=min(4, len(self.pattern_manager.FILENAME_EXTRACT_PATTERNS))) as executor:
+                        def try_filename_pattern(pattern):
+                            match = re.search(pattern, filename_base, re.IGNORECASE)
+                            if match:
+                                try:
+                                    return int(match.group(1))
+                                except (ValueError, IndexError):
+                                    pass
+                            return None
+                        
+                        futures = [executor.submit(try_filename_pattern, pattern) 
+                                 for pattern in self.pattern_manager.FILENAME_EXTRACT_PATTERNS]
+                        
+                        for future in as_completed(futures):
+                            try:
+                                num = future.result()
+                                if num:
+                                    chapter_num = num
+                                    detection_method = "filename_number"
+                                    for f in futures:
+                                        f.cancel()
+                                    break
+                            except Exception:
+                                continue
+                else:
+                    # Sequential for small pattern sets
+                    for pattern in self.pattern_manager.FILENAME_EXTRACT_PATTERNS:
+                        match = re.search(pattern, filename_base, re.IGNORECASE)
+                        if match:
+                            chapter_num = int(match.group(1))
+                            detection_method = "filename_number"
+                            break
         
         # Extract title if not already found
         if not chapter_title:
@@ -2173,24 +2424,63 @@ class ChapterExtractor:
         chapter_title = re.sub(r'\s+', ' ', chapter_title).strip() if chapter_title else None
         
         return chapter_num, chapter_title, detection_method
-    
+
+
     def _extract_from_text(self, text, source_type):
-        """Extract chapter number from text using patterns"""
-        for pattern, flags, method in self.pattern_manager.CHAPTER_PATTERNS:
-            if method.endswith('_number'):
-                continue
-            match = re.search(pattern, text, flags)
-            if match:
-                try:
-                    num_str = match.group(1)
-                    if num_str.isdigit():
-                        return int(num_str), f"{source_type}_{method}"
-                    elif method == 'chinese_chapter_cn':
-                        converted = self._convert_chinese_number(num_str)
-                        if converted:
-                            return converted, f"{source_type}_{method}"
-                except (ValueError, IndexError):
-                    continue
+        """Extract chapter number from text using patterns with parallel matching for large pattern sets"""
+        # Get patterns that don't end with '_number'
+        text_patterns = [(pattern, flags, method) for pattern, flags, method in self.pattern_manager.CHAPTER_PATTERNS 
+                        if not method.endswith('_number')]
+        
+        # Only use parallel processing if we have many patterns
+        if len(text_patterns) > 5:
+            with ThreadPoolExecutor(max_workers=min(4, len(text_patterns))) as executor:
+                def try_text_pattern(pattern_info):
+                    pattern, flags, method = pattern_info
+                    match = re.search(pattern, text, flags)
+                    if match:
+                        try:
+                            num_str = match.group(1)
+                            if num_str.isdigit():
+                                return int(num_str), f"{source_type}_{method}"
+                            elif method == 'chinese_chapter_cn':
+                                converted = self._convert_chinese_number(num_str)
+                                if converted:
+                                    return converted, f"{source_type}_{method}"
+                        except (ValueError, IndexError):
+                            pass
+                    return None, None
+                
+                # Submit all patterns
+                futures = [executor.submit(try_text_pattern, pattern_info) for pattern_info in text_patterns]
+                
+                # Check results as they complete
+                for future in as_completed(futures):
+                    try:
+                        num, method = future.result()
+                        if num:
+                            # Cancel remaining futures
+                            for f in futures:
+                                f.cancel()
+                            return num, method
+                    except Exception:
+                        continue
+        else:
+            # Sequential processing for small pattern sets
+            for pattern, flags, method in text_patterns:
+                match = re.search(pattern, text, flags)
+                if match:
+                    try:
+                        num_str = match.group(1)
+                        if num_str.isdigit():
+                            return int(num_str), f"{source_type}_{method}"
+                        elif method == 'chinese_chapter_cn':
+                            converted = self._convert_chinese_number(num_str)
+                            if converted:
+                                return converted, f"{source_type}_{method}"
+                    except (ValueError, IndexError):
+                        continue
+        
         return None, None
     
     def _convert_chinese_number(self, cn_num):
@@ -2208,28 +2498,88 @@ class ChapterExtractor:
         return None
     
     def _detect_content_language(self, text_sample):
-        """Detect the primary language of content"""
-        scripts = {
-            'korean': 0,
-            'japanese_hiragana': 0,
-            'japanese_katakana': 0,
-            'chinese': 0,
-            'latin': 0
-        }
+        """Detect the primary language of content with parallel processing for large texts"""
         
-        for char in text_sample:
-            code = ord(char)
-            if 0xAC00 <= code <= 0xD7AF:
-                scripts['korean'] += 1
-            elif 0x3040 <= code <= 0x309F:
-                scripts['japanese_hiragana'] += 1
-            elif 0x30A0 <= code <= 0x30FF:
-                scripts['japanese_katakana'] += 1
-            elif 0x4E00 <= code <= 0x9FFF:
-                scripts['chinese'] += 1
-            elif 0x0020 <= code <= 0x007F:
-                scripts['latin'] += 1
+        # For very short texts, use sequential processing
+        if len(text_sample) < 1000:
+            scripts = {
+                'korean': 0,
+                'japanese_hiragana': 0,
+                'japanese_katakana': 0,
+                'chinese': 0,
+                'latin': 0
+            }
+            
+            for char in text_sample:
+                code = ord(char)
+                if 0xAC00 <= code <= 0xD7AF:
+                    scripts['korean'] += 1
+                elif 0x3040 <= code <= 0x309F:
+                    scripts['japanese_hiragana'] += 1
+                elif 0x30A0 <= code <= 0x30FF:
+                    scripts['japanese_katakana'] += 1
+                elif 0x4E00 <= code <= 0x9FFF:
+                    scripts['chinese'] += 1
+                elif 0x0020 <= code <= 0x007F:
+                    scripts['latin'] += 1
+        else:
+            # For longer texts, use parallel processing
+            # Split text into chunks for parallel processing
+            chunk_size = max(500, len(text_sample) // (os.cpu_count() or 4))
+            chunks = [text_sample[i:i + chunk_size] for i in range(0, len(text_sample), chunk_size)]
+            
+            # Thread-safe accumulator
+            scripts_lock = threading.Lock()
+            scripts = {
+                'korean': 0,
+                'japanese_hiragana': 0,
+                'japanese_katakana': 0,
+                'chinese': 0,
+                'latin': 0
+            }
+            
+            def process_chunk(text_chunk):
+                """Process a chunk of text and return script counts"""
+                local_scripts = {
+                    'korean': 0,
+                    'japanese_hiragana': 0,
+                    'japanese_katakana': 0,
+                    'chinese': 0,
+                    'latin': 0
+                }
+                
+                for char in text_chunk:
+                    code = ord(char)
+                    if 0xAC00 <= code <= 0xD7AF:
+                        local_scripts['korean'] += 1
+                    elif 0x3040 <= code <= 0x309F:
+                        local_scripts['japanese_hiragana'] += 1
+                    elif 0x30A0 <= code <= 0x30FF:
+                        local_scripts['japanese_katakana'] += 1
+                    elif 0x4E00 <= code <= 0x9FFF:
+                        local_scripts['chinese'] += 1
+                    elif 0x0020 <= code <= 0x007F:
+                        local_scripts['latin'] += 1
+                
+                return local_scripts
+            
+            # Process chunks in parallel
+            with ThreadPoolExecutor(max_workers=min(os.cpu_count() or 4, len(chunks))) as executor:
+                # Submit all chunks
+                futures = [executor.submit(process_chunk, chunk) for chunk in chunks]
+                
+                # Collect results
+                for future in as_completed(futures):
+                    try:
+                        chunk_scripts = future.result()
+                        # Thread-safe accumulation
+                        with scripts_lock:
+                            for script, count in chunk_scripts.items():
+                                scripts[script] += count
+                    except Exception as e:
+                        print(f"[WARNING] Error processing chunk in language detection: {e}")
         
+        # Language determination logic (same as original)
         total_cjk = scripts['korean'] + scripts['japanese_hiragana'] + scripts['japanese_katakana'] + scripts['chinese']
         
         if scripts['korean'] > total_cjk * 0.3:
