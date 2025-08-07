@@ -60,7 +60,7 @@ class RateLimitCache:
 
 
 class APIKeyEntry:
-    """Enhanced API key entry with test result storage"""
+    """Enhanced API key entry with thread-safe operations"""
     def __init__(self, api_key: str, model: str, cooldown: int = 60, enabled: bool = True):
         self.api_key = api_key
         self.model = model
@@ -72,39 +72,46 @@ class APIKeyEntry:
         self.last_used_time = None
         self.is_cooling_down = False
         
+        # Add lock for thread-safe modifications
+        self._lock = threading.Lock()
+        
         # Add test result storage
-        self.last_test_result = None  # 'passed', 'failed', 'error', 'rate_limited'
+        self.last_test_result = None
         self.last_test_time = None
         self.last_test_message = None
     
     def is_available(self) -> bool:
-        if not self.enabled:
-            return False
-        if self.last_error_time and self.is_cooling_down:
-            time_since_error = time.time() - self.last_error_time
-            if time_since_error < self.cooldown:
+        with self._lock:
+            if not self.enabled:
                 return False
-            else:
-                self.is_cooling_down = False
-        return True
+            if self.last_error_time and self.is_cooling_down:
+                time_since_error = time.time() - self.last_error_time
+                if time_since_error < self.cooldown:
+                    return False
+                else:
+                    self.is_cooling_down = False
+            return True
     
     def mark_error(self, error_code: int = None):
-        self.error_count += 1
-        self.last_error_time = time.time()
-        if error_code == 429:
-            self.is_cooling_down = True
+        with self._lock:
+            self.error_count += 1
+            self.last_error_time = time.time()
+            if error_code == 429:
+                self.is_cooling_down = True
     
     def mark_success(self):
-        self.success_count += 1
-        self.last_used_time = time.time()
-        self.error_count = 0
+        with self._lock:
+            self.success_count += 1
+            self.last_used_time = time.time()
+            self.error_count = 0
     
     def set_test_result(self, result: str, message: str = None):
         """Store test result"""
-        self.last_test_result = result
-        self.last_test_time = time.time()
-        self.last_test_message = message
-
+        with self._lock:
+            self.last_test_result = result
+            self.last_test_time = time.time()
+            self.last_test_message = message
+            
     def to_dict(self):
         """Convert to dictionary for saving"""
         return {
@@ -142,12 +149,12 @@ class APIKeyPool:
         thread_id = threading.current_thread().ident
         thread_name = threading.current_thread().name
         
+        # Clear expired rate limits first (do this before acquiring lock)
+        self._rate_limit_cache.clear_expired()
+        
         with self.lock:
             if not self.keys:
                 return None
-            
-            # Clear expired rate limits
-            self._rate_limit_cache.clear_expired()
             
             # Check if thread already has an assignment
             if thread_id in self._thread_assignments and not force_rotation:
@@ -158,62 +165,89 @@ class APIKeyPool:
                     
                     # Check if the assigned key is still available
                     if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
+                        logger.debug(f"[Thread-{thread_name}] Reusing assigned {key_id}")
                         return key, key_index, key_id
+                    else:
+                        # Remove invalid assignment
+                        del self._thread_assignments[thread_id]
             
-            # Find next available key
+            # Find next available key using round-robin
+            start_index = self._rotation_index
             attempts = 0
+            
             while attempts < len(self.keys):
-                # Use round-robin rotation
+                # Get current index and immediately increment for next thread
                 key_index = self._rotation_index
                 self._rotation_index = (self._rotation_index + 1) % len(self.keys)
                 
                 key = self.keys[key_index]
                 key_id = f"Key#{key_index+1} ({key.model})"
                 
-                # Check availability
+                # Check availability (key.is_available() is now thread-safe)
                 if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
                     # Assign to thread
                     self._thread_assignments[thread_id] = (key_index, time.time())
+                    
+                    # Clean up old assignments while we have the lock
+                    current_time = time.time()
+                    expired_threads = [
+                        tid for tid, (_, ts) in self._thread_assignments.items()
+                        if current_time - ts > 300  # 5 minutes
+                    ]
+                    for tid in expired_threads:
+                        del self._thread_assignments[tid]
+                    
                     logger.info(f"[Thread-{thread_name}] Assigned {key_id}")
                     return key, key_index, key_id
                 
                 attempts += 1
             
-            # No available keys - try to find one with shortest cooldown
+            # No available keys - find one with shortest cooldown
             best_key_index = None
             min_cooldown = float('inf')
             
             for i, key in enumerate(self.keys):
-                key_id = f"Key#{i+1} ({key.model})"
-                cooldown = self._rate_limit_cache.get_remaining_cooldown(key_id)
-                if cooldown < min_cooldown:
-                    min_cooldown = cooldown
-                    best_key_index = i
+                if key.enabled:  # At least check if enabled
+                    key_id = f"Key#{i+1} ({key.model})"
+                    remaining = self._rate_limit_cache.get_remaining_cooldown(key_id)
+                    
+                    # Also check key's own cooldown
+                    if key.is_cooling_down and key.last_error_time:
+                        key_cooldown = key.cooldown - (time.time() - key.last_error_time)
+                        remaining = max(remaining, key_cooldown)
+                    
+                    if remaining < min_cooldown:
+                        min_cooldown = remaining
+                        best_key_index = i
             
             if best_key_index is not None:
                 key = self.keys[best_key_index]
                 key_id = f"Key#{best_key_index+1} ({key.model})"
-                logger.warning(f"All keys on cooldown, using {key_id} (cooldown: {min_cooldown:.1f}s)")
+                logger.warning(f"[Thread-{thread_name}] All keys on cooldown, using {key_id} (cooldown: {min_cooldown:.1f}s)")
                 self._thread_assignments[thread_id] = (best_key_index, time.time())
                 return key, best_key_index, key_id
             
+            logger.error(f"[Thread-{thread_name}] No keys available at all")
             return None
     
     def mark_key_error(self, key_index: int, error_code: int = None):
-        with self.lock:
-            if 0 <= key_index < len(self.keys):
-                self.keys[key_index].mark_error(error_code)
-                
-                # Add to rate limit cache if it's a 429
-                if error_code == 429:
+        """Mark a key as having an error (thread-safe)"""
+        if 0 <= key_index < len(self.keys):
+            # Mark error on the key itself (now thread-safe)
+            self.keys[key_index].mark_error(error_code)
+            
+            # Add to rate limit cache if it's a 429
+            if error_code == 429:
+                with self.lock:
                     key = self.keys[key_index]
                     key_id = f"Key#{key_index+1} ({key.model})"
                     self._rate_limit_cache.add_rate_limit(key_id, key.cooldown)
-    
+
     def mark_key_success(self, key_index: int):
-        with self.lock:
-            if 0 <= key_index < len(self.keys):
-                self.keys[key_index].mark_success()
+        """Mark a key as successful (thread-safe)"""
+        if 0 <= key_index < len(self.keys):
+            # This is now thread-safe due to lock in mark_success
+            self.keys[key_index].mark_success()
     
     def release_thread_assignment(self, thread_id: int = None):
         """Release key assignment for a thread"""
