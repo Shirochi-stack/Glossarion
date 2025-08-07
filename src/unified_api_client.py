@@ -530,131 +530,92 @@ class UnifiedClient:
         return self._thread_local
     
     def _ensure_thread_client(self):
-        """Ensure the current thread has a properly initialized client"""
+        """Ensure the current thread has a properly initialized client with thread safety"""
         tls = self._get_thread_local_client()
         thread_name = threading.current_thread().name
+        thread_id = threading.current_thread().ident
         
-        # Check THIS INSTANCE's multi-key mode
+        # Multi-key mode
         if self._multi_key_mode:
             # Check if we need to rotate
             should_rotate = False
             
             if not tls.initialized:
                 should_rotate = True
-                print(f"[Thread-{thread_name}] Initializing with multi-key mode")
+                logger.info(f"[Thread-{thread_name}] Initializing with multi-key mode")
             elif self._force_rotation:
-                tls.request_count += 1
+                tls.request_count = getattr(tls, 'request_count', 0) + 1
                 if tls.request_count >= self._rotation_frequency:
                     should_rotate = True
                     tls.request_count = 0
-                    print(f"[Thread-{thread_name}] Rotating key (reached {self._rotation_frequency} requests)")
+                    logger.info(f"[Thread-{thread_name}] Rotating key (reached {self._rotation_frequency} requests)")
             
             if should_rotate:
-                retry_count = 0
-                max_retries = 7
+                # Get a key using thread-safe method
+                key_info = None
                 
-                while retry_count < max_retries:
-                    # Get a key from the pool
-                    key_info = self._api_key_pool.get_key_for_thread(
-                        force_rotation=should_rotate,
-                        rotation_frequency=self._rotation_frequency
-                    )
+                # First try using the pool's method if available
+                if hasattr(self._api_key_pool, 'get_key_for_thread'):
+                    try:
+                        key_info = self._api_key_pool.get_key_for_thread(
+                            force_rotation=should_rotate,
+                            rotation_frequency=self._rotation_frequency
+                        )
+                        if key_info:
+                            key, key_index, key_id = key_info
+                            # Convert to tuple format expected below
+                            key_info = (key, key_index)
+                    except Exception as e:
+                        logger.error(f"[Thread-{thread_name}] Error getting key from pool: {e}")
+                        key_info = None
+                
+                # Fallback to our method
+                if not key_info:
+                    key_info = self._get_next_available_key_for_thread()
+                
+                if key_info:
+                    key, key_index = key_info[:2]  # Handle both tuple formats
                     
-                    if key_info:
-                        # Successfully got a key
-                        key, key_index, key_id = key_info
-                        
-                        # Update thread-local state
-                        tls.api_key = key.api_key
-                        tls.model = key.model
-                        tls.key_index = key_index
-                        tls.key_identifier = key_id
-                        tls.initialized = True
-                        
-                        # Copy to instance for compatibility
-                        self.api_key = tls.api_key
-                        self.model = tls.model
-                        self.key_identifier = tls.key_identifier
-                        self.current_key_index = key_index
-                        
-                        if len(self.api_key) > 12:
-                            masked_key = self.api_key[:4] + "..." + self.api_key[-4:]
-                        else:
-                            masked_key = self.api_key[:3] + "..." + self.api_key[-2:] if len(self.api_key) > 5 else "***"
-
-                        print(f"[Thread-{thread_name}] 🔑 Using {self.key_identifier} - {masked_key}")
-                        
-                        # Setup client
-                        self._setup_client()
-                        return  # Success!
+                    # Generate key identifier
+                    key_id = f"Key#{key_index+1} ({key.model})"
+                    if hasattr(key, 'identifier') and key.identifier:
+                        key_id = key.identifier
                     
-                    # No key available - check why
-                    if not self._api_key_pool or not self._api_key_pool.keys:
-                        raise UnifiedClientError("No API keys configured", error_type="no_keys")
+                    # Update thread-local state
+                    tls.api_key = key.api_key
+                    tls.model = key.model
+                    tls.key_index = key_index
+                    tls.key_identifier = key_id
+                    tls.initialized = True
+                    tls.last_rotation = time.time()
                     
-                    # All keys must be cooling down
-                    print(f"[Thread-{thread_name}] No available keys, all cooling down")
+                    # Copy to instance for compatibility
+                    self.api_key = tls.api_key
+                    self.model = tls.model
+                    self.key_identifier = tls.key_identifier
+                    self.current_key_index = key_index
                     
-                    # Get shortest cooldown time
-                    cooldown_time = self._get_shortest_cooldown_time()
-                    
-                    if retry_count < max_retries - 1:
-                        print(f"[Thread-{thread_name}] Waiting {cooldown_time}s for key to become available...")
-                        
-                        # Wait with cancellation check
-                        for i in range(cooldown_time):
-                            if self._cancelled:
-                                raise UnifiedClientError("Operation cancelled", error_type="cancelled")
-                            time.sleep(1)
-                            if i % 10 == 0 and i > 0:
-                                print(f"[Thread-{thread_name}] Still waiting... {cooldown_time - i}s remaining")
-                        
-                        retry_count += 1
-                        continue
+                    # Log key assignment
+                    if len(self.api_key) > 12:
+                        masked_key = self.api_key[:4] + "..." + self.api_key[-4:]
                     else:
-                        # Final attempt - try to get ANY key, even if on cooldown
-                        print(f"[Thread-{thread_name}] Final attempt - trying to get any key")
-                        
-                        # Find key with shortest remaining cooldown
-                        best_key_index = None
-                        min_cooldown = float('inf')
-                        
-                        for i, key in enumerate(self._api_key_pool.keys):
-                            if key.enabled:  # At least check if enabled
-                                key_id = f"Key#{i+1} ({key.model})"
-                                remaining = self._rate_limit_cache.get_remaining_cooldown(key_id)
-                                if remaining < min_cooldown:
-                                    min_cooldown = remaining
-                                    best_key_index = i
-                        
-                        if best_key_index is not None:
-                            key = self._api_key_pool.keys[best_key_index]
-                            print(f"[Thread-{thread_name}] Using key on cooldown (remaining: {min_cooldown:.1f}s)")
-                            
-                            # Force assign this key
-                            tls.api_key = key.api_key
-                            tls.model = key.model
-                            tls.key_index = best_key_index
-                            tls.key_identifier = f"Key#{best_key_index+1} ({key.model})"
-                            tls.initialized = True
-                            
-                            self.api_key = tls.api_key
-                            self.model = tls.model
-                            self.key_identifier = tls.key_identifier
-                            self.current_key_index = best_key_index
-                            
-                            if len(self.api_key) > 12:
-                                masked_key = self.api_key[:4] + "..." + self.api_key[-4:]
-                            else:
-                                masked_key = self.api_key[:3] + "..." + self.api_key[-2:] if len(self.api_key) > 5 else "***"
-                            
-                            print(f"[Thread-{thread_name}] 🔑 Forced using {self.key_identifier} - {masked_key}")
-                            
-                            self._setup_client()
-                            return
-                        
-                        # Really no keys available at all
-                        raise UnifiedClientError("No available API keys for thread", error_type="no_keys")
+                        masked_key = self.api_key[:3] + "..." + self.api_key[-2:] if len(self.api_key) > 5 else "***"
+                    
+                    logger.info(f"[Thread-{thread_name}] 🔑 Using {self.key_identifier} - {masked_key}")
+                    
+                    # Setup client with new key
+                    self._setup_client()
+                    return
+                else:
+                    # No keys available
+                    raise UnifiedClientError("No available API keys for thread", error_type="no_keys")
+            else:
+                # Not rotating, ensure instance variables match thread-local
+                if tls.initialized:
+                    self.api_key = tls.api_key
+                    self.model = tls.model
+                    self.key_identifier = tls.key_identifier
+                    self.current_key_index = getattr(tls, 'key_index', None)
         
         # Single key mode
         elif not tls.initialized:
@@ -662,12 +623,13 @@ class UnifiedClient:
             tls.model = self.original_model
             tls.key_identifier = "Single Key"
             tls.initialized = True
+            tls.request_count = 0
             
             self.api_key = tls.api_key
             self.model = tls.model
             self.key_identifier = tls.key_identifier
             
-            #print(f"🔑 Single-key mode: Using {self.model}")
+            logger.debug(f"[Thread-{thread_name}] Single-key mode: Using {self.model}")
             self._setup_client()
 
 
@@ -750,62 +712,104 @@ class UnifiedClient:
         raise UnifiedClientError(f"No available API keys for thread after {max_retries} retries", error_type="no_keys")
 
     def _get_next_available_key_for_thread(self) -> Optional[Tuple]:
-        """Get next available key for thread assignment (thread-safe)"""
+        """Get next available key for thread assignment with proper thread safety"""
         if not self._api_key_pool:
             return None
         
-        # Try each key starting from current pool index
-        start_index = self._api_key_pool.current_index
-        attempts = 0
-        
-        while attempts < len(self._api_key_pool.keys):
-            key = self._api_key_pool.keys[self._api_key_pool.current_index]
-            key_index = self._api_key_pool.current_index
-            
-            # Always advance for next thread
-            self._api_key_pool.current_index = (self._api_key_pool.current_index + 1) % len(self._api_key_pool.keys)
-            
-            # Check if key is available
-            key_id = f"Key#{key_index+1} ({key.model})"
-            if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
-                return (key, key_index)
-            
-            attempts += 1
-        
-        # No available keys found, try to find any key not on cooldown
-        for i, key in enumerate(self._api_key_pool.keys):
-            key_id = f"Key#{i+1} ({key.model})"
-            if not self._rate_limit_cache.is_rate_limited(key_id):
-                return (key, i)
-        
-        # All keys are rate limited - wait for shortest cooldown
-        wait_time = self._get_shortest_cooldown_time()
         thread_name = threading.current_thread().name
+        
+        # Use class-level pool lock to ensure thread safety
+        with self.__class__._pool_lock:
+            # Try each key starting from current pool index
+            attempts = 0
+            start_index = self._api_key_pool.current_index
+            
+            while attempts < len(self._api_key_pool.keys):
+                current_idx = self._api_key_pool.current_index
+                key = self._api_key_pool.keys[current_idx]
+                
+                # Always advance for next thread (round-robin)
+                self._api_key_pool.current_index = (current_idx + 1) % len(self._api_key_pool.keys)
+                
+                # Check if key is available
+                key_id = f"Key#{current_idx+1} ({key.model})"
+                
+                # Check both availability and rate limit status
+                if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
+                    logger.info(f"[{thread_name}] Assigned {key_id}")
+                    return (key, current_idx)
+                
+                attempts += 1
+            
+            # No available keys in round-robin, check all keys
+            for i, key in enumerate(self._api_key_pool.keys):
+                if i == start_index:
+                    continue  # Already checked this one
+                    
+                key_id = f"Key#{i+1} ({key.model})"
+                if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
+                    logger.info(f"[{thread_name}] Found available key outside round-robin: {key_id}")
+                    return (key, i)
+        
+        # No keys available - handle cooldown outside the lock
+        return self._wait_for_available_key()
+
+    def _wait_for_available_key(self) -> Optional[Tuple]:
+        """Wait for a key to become available (called outside lock)"""
+        thread_name = threading.current_thread().name
+        
+        # Get shortest cooldown time
+        wait_time = self._get_shortest_cooldown_time()
+        
+        if wait_time <= 0:
+            # Keys should be available now
+            with self.__class__._pool_lock:
+                for i, key in enumerate(self._api_key_pool.keys):
+                    key_id = f"Key#{i+1} ({key.model})"
+                    if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
+                        return (key, i)
         
         print(f"[Thread-{thread_name}] All keys on cooldown. Waiting {wait_time}s...")
         
         # Wait with cancellation check
-        for i in range(wait_time):
+        wait_start = time.time()
+        while time.time() - wait_start < wait_time:
             if hasattr(self, '_cancelled') and self._cancelled:
                 print(f"[Thread-{thread_name}] Wait cancelled by user")
                 return None
+            
+            # Check every second if a key became available early
+            with self.__class__._pool_lock:
+                for i, key in enumerate(self._api_key_pool.keys):
+                    key_id = f"Key#{i+1} ({key.model})"
+                    if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
+                        print(f"[Thread-{thread_name}] Key became available early: {key_id}")
+                        return (key, i)
+            
             time.sleep(1)
-            if i % 10 == 0 and i > 0:
-                print(f"[Thread-{thread_name}] Still waiting... {wait_time - i}s remaining")
+            
+            # Progress indicator
+            elapsed = int(time.time() - wait_start)
+            if elapsed % 10 == 0 and elapsed > 0:
+                remaining = wait_time - elapsed
+                print(f"[Thread-{thread_name}] Still waiting... {remaining}s remaining")
         
         # Clear expired entries from cache
         self._rate_limit_cache.clear_expired()
         
-        # Try again to find an available key
-        for i, key in enumerate(self._api_key_pool.keys):
-            key_id = f"Key#{i+1} ({key.model})"
-            if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
-                return (key, i)
-        
-        # Still no keys? Return the first enabled one
-        for i, key in enumerate(self._api_key_pool.keys):
-            if key.enabled:
-                return (key, i)
+        # Final attempt after wait
+        with self.__class__._pool_lock:
+            # Try to find an available key
+            for i, key in enumerate(self._api_key_pool.keys):
+                key_id = f"Key#{i+1} ({key.model})"
+                if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
+                    return (key, i)
+            
+            # Still no keys? Return the first enabled one (last resort)
+            for i, key in enumerate(self._api_key_pool.keys):
+                if key.enabled:
+                    print(f"[Thread-{thread_name}] WARNING: Using potentially rate-limited key as last resort")
+                    return (key, i)
         
         return None
 
@@ -891,6 +895,83 @@ class UnifiedClient:
         """Mark current key as having an error and apply cooldown if rate limited"""
         if self._multi_key_mode and self.current_key_index is not None and self.__class__._api_key_pool:
             self.__class__._api_key_pool.mark_key_error(self.current_key_index, error_code)
+
+    def _check_and_wait_for_duplicate(self, request_hash: str, context: str) -> Optional[Tuple[str, str]]:
+        """Check for duplicate requests and wait for results if found"""
+        thread_name = threading.current_thread().name
+        
+        # First check cache
+        cached_result = self._get_cached_response(request_hash)
+        if cached_result:
+            logger.info(f"[{thread_name}] Using cached response for {request_hash[:8]}")
+            return cached_result
+        
+        # Check if another thread is processing this request
+        with self._active_requests_lock:
+            if request_hash in self._active_requests:
+                # Another thread is processing, get the event
+                event = self._active_requests[request_hash]
+                logger.info(f"[{thread_name}] Waiting for another thread to complete request {request_hash[:8]}")
+            else:
+                # We're the first, create an event for others to wait on
+                event = threading.Event()
+                self._active_requests[request_hash] = event
+                return None  # We should process this request
+        
+        # Wait for the other thread to complete (outside the lock)
+        if event.wait(timeout=300):  # 5 minute timeout
+            # Check cache again after waiting
+            cached_result = self._get_cached_response(request_hash)
+            if cached_result:
+                logger.info(f"[{thread_name}] Got result from other thread for {request_hash[:8]}")
+                return cached_result
+        
+        # Timeout or no result, we'll process it ourselves
+        logger.warning(f"[{thread_name}] Other thread didn't complete, processing request ourselves")
+        return None
+
+    def _get_cached_response(self, request_hash: str) -> Optional[Tuple[str, str]]:
+        """Get cached response if available and not expired"""
+        with self._request_cache_lock:
+            if request_hash in self._request_cache:
+                content, finish_reason, timestamp = self._request_cache[request_hash]
+                if time.time() - timestamp < self._cache_expiry_seconds:
+                    return content, finish_reason
+                else:
+                    # Expired, remove it
+                    del self._request_cache[request_hash]
+        return None
+
+    def _cache_response(self, request_hash: str, content: str, finish_reason: str):
+        """Cache a response with timestamp"""
+        with self._request_cache_lock:
+            self._request_cache[request_hash] = (content, finish_reason, time.time())
+            
+            # Cleanup old entries if cache is too large
+            if len(self._request_cache) > 1000:
+                # Remove oldest 100 entries
+                sorted_items = sorted(
+                    self._request_cache.items(),
+                    key=lambda x: x[1][2]  # Sort by timestamp
+                )
+                for key, _ in sorted_items[:100]:
+                    del self._request_cache[key]
+
+    def _complete_request(self, request_hash: str):
+        """Mark a request as complete and notify waiting threads"""
+        with self._active_requests_lock:
+            if request_hash in self._active_requests:
+                event = self._active_requests[request_hash]
+                event.set()  # Wake up waiting threads
+                
+                # Schedule cleanup after a delay
+                threading.Timer(5.0, self._cleanup_active_request, args=[request_hash]).start()
+
+    def _cleanup_active_request(self, request_hash: str):
+        """Remove completed request from active tracking"""
+        with self._active_requests_lock:
+            self._active_requests.pop(request_hash, None)
+        
     
     def _apply_custom_endpoint_if_needed(self):
         """Apply custom endpoint configuration if needed"""
@@ -943,12 +1024,37 @@ class UnifiedClient:
         self.context = None
         self.current_session_context = None
         
-        # Request tracking with thread safety
-        self._request_count = 0
-        self._thread_request_count = 0
-        self._request_history = {}  # Store recent request hashes
+        # Thread coordination for key assignment
+        self._key_assignment_lock = RLock()
+        self._thread_key_assignments = {}  # {thread_id: (key_index, timestamp)}
         
-        # Stats tracking
+        # ===== ENHANCED THREAD SAFETY STRUCTURES =====
+        
+        # Thread-safe request deduplication with caching
+        self._request_cache = {}  # {request_hash: (content, finish_reason, timestamp)}
+        self._request_cache_lock = RLock()
+        self._cache_expiry_seconds = 300  # 5 minutes
+        
+        # Active request tracking to prevent duplicate processing
+        self._active_requests = {}  # {request_hash: threading.Event}
+        self._active_requests_lock = RLock()
+        
+        # Thread-local storage for client instances
+        self._thread_local = threading.local()
+        
+        # Thread-specific request counters
+        self._thread_request_counters = defaultdict(int)
+        self._counter_lock = RLock()
+        
+        # File write coordination
+        self._file_write_locks = {}  # {filepath: RLock}
+        self._file_write_locks_lock = RLock()
+        
+        # Duplicate request tracking (existing but enhanced)
+        self._chapter_request_tracker = {}  # {request_hash: {timestamp, thread, context}}
+        self._tracker_lock = RLock()
+        
+        # Stats tracking (existing)
         self.stats = {
             'total_requests': 0,
             'successful_requests': 0,
@@ -1288,39 +1394,6 @@ class UnifiedClient:
         
         return False
     
-    def _get_next_available_key(self) -> Optional[Tuple]:
-        """Get the next available key from the pool"""
-        if not self._multi_key_mode or not self.__class__._api_key_pool:
-            return None
-        
-        # This should be called within a lock
-        for _ in range(len(self.__class__._api_key_pool.keys)):
-            key = self.__class__._api_key_pool.keys[self.__class__._api_key_pool.current_index]
-            key_index = self.__class__._api_key_pool.current_index
-            
-            # Move to next key for next call
-            self.__class__._api_key_pool.current_index = (self.__class__._api_key_pool.current_index + 1) % len(self.__class__._api_key_pool.keys)
-            
-            if key.is_available():
-                return (key, key_index)
-        
-        # No available keys
-        return None
-        
-        # This should be called within a lock
-        for _ in range(len(self._api_key_pool.keys)):
-            key = self._api_key_pool.keys[self._api_key_pool.current_index]
-            key_index = self._api_key_pool.current_index
-            
-            # Move to next key for next call
-            self._api_key_pool.current_index = (self._api_key_pool.current_index + 1) % len(self._api_key_pool.keys)
-            
-            if key.is_available():
-                return (key, key_index)
-        
-        # No available keys
-        return None
-    
     def _apply_key_change(self, key_info: tuple, old_key_identifier: str):
         """Apply the key change and reinitialize clients"""
         self.api_key = key_info[0].api_key
@@ -1405,30 +1478,49 @@ class UnifiedClient:
         os.makedirs(thread_dir, exist_ok=True)
         return thread_dir
 
-    def _get_request_hash(self, messages: list) -> str:
-        """
-        Generate a hash of the request content.
-        This should be unique per chapter/chunk to catch true duplicates.
-        """
-        content_parts = []
+    def _get_request_hash(self, messages) -> str:
+        """Generate a unique hash for request deduplication"""
+        # Create a normalized representation
+        normalized_messages = []
         
         for msg in messages:
-            role = msg.get('role', '')
-            content = msg.get('content', '')
+            normalized_msg = {
+                'role': msg.get('role', ''),
+                'content': msg.get('content', '')
+            }
             
-            # Handle different content types
-            if isinstance(content, list):
-                # For image messages, include a marker
-                content_str = "IMAGE_MESSAGE"
-            else:
-                # For text, use the actual content but limit length
-                # This ensures different chapters get different hashes
-                content_str = str(content)[:2000]  # Use first 2000 chars
+            # For image messages, include image size/hash instead of full data
+            if isinstance(normalized_msg['content'], list):
+                content_parts = []
+                for part in normalized_msg['content']:
+                    if isinstance(part, dict) and 'image_url' in part:
+                        # Hash the image data
+                        image_data = part.get('image_url', {}).get('url', '')
+                        if image_data.startswith('data:'):
+                            # Extract just the data part
+                            image_hash = hashlib.md5(image_data.encode()).hexdigest()
+                            content_parts.append(f"image:{image_hash}")
+                        else:
+                            content_parts.append(f"image_url:{image_data}")
+                    else:
+                        content_parts.append(str(part))
+                normalized_msg['content'] = '|'.join(content_parts)
             
-            content_parts.append(f"{role}:{content_str}")
+            normalized_messages.append(normalized_msg)
         
-        content_str = "|".join(content_parts)
-        return hashlib.md5(content_str.encode()).hexdigest()
+        # Include model and temperature in hash
+        hash_data = {
+            'messages': normalized_messages,
+            'model': self.model,
+            'temperature': getattr(self, 'temperature', 0.3),
+            'max_tokens': getattr(self, 'max_tokens', 8192)
+        }
+        
+        # Create stable JSON representation
+        hash_str = json.dumps(hash_data, sort_keys=True, ensure_ascii=False)
+        
+        # Use SHA256 for better distribution
+        return hashlib.sha256(hash_str.encode()).hexdigest()
 
     def _check_duplicate_request(self, request_hash: str, context: str) -> bool:
         """
@@ -2045,13 +2137,16 @@ class UnifiedClient:
         if hasattr(response, 'candidates') and response.candidates:
             num_candidates = len(response.candidates)
             if provider == 'gemini':
-                print(f"   🔍 [Gemini] Attempting extraction from {num_candidates} candidates...")
+                #print(f"   🔍 [Gemini] Attempting extraction from {num_candidates} candidates...")
+                pass
             else:
-                print(f"   🔍 Attempting candidates-style extraction from {num_candidates} candidates...")
+                #print(f"   🔍 Attempting candidates-style extraction from {num_candidates} candidates...")
+                pass
             
             for i, candidate in enumerate(response.candidates):
                 if provider == 'gemini':
-                    print(f"   🔍 [Gemini] Checking candidate {i+1}")
+                    #print(f"   🔍 [Gemini] Checking candidate {i+1}")
+                    pass
                 
                 # Check finish reason with detailed logging for Gemini
                 if hasattr(candidate, 'finish_reason'):
@@ -2122,7 +2217,8 @@ class UnifiedClient:
         
         # Method 5: Gemini thinking-specific response structure
         if provider == 'gemini' and supports_thinking and thinking_budget != 0:
-            print("   🔍 [Gemini] Checking for thinking-specific response structure...")
+            #print("   🔍 [Gemini] Checking for thinking-specific response structure...")
+            pass
             
             # Some models might have a separate 'output' or 'response' field when thinking is enabled
             if hasattr(response, 'output') and response.output:
@@ -2138,9 +2234,11 @@ class UnifiedClient:
         # Method 6: String representation extraction (last resort)
         if not result:
             if provider == 'gemini':
-                print("   🔍 [Gemini] Attempting string extraction as last resort...")
+                #print("   🔍 [Gemini] Attempting string extraction as last resort...")
+                pass
             else:
-                print("   🔍 Attempting string extraction as last resort...")
+                #print("   🔍 Attempting string extraction as last resort...")
+                pass
             
             result = self._extract_from_string(response, provider=provider)
             if result:
@@ -2246,7 +2344,8 @@ class UnifiedClient:
                     text = text.replace('\\\\', '\\')
                     
                     if provider == 'gemini' and part_index:
-                        print(f"   🔧 [Gemini] Part {part_index} extracted via regex pattern: {len(text)} chars")
+                        #print(f"   🔧 [Gemini] Part {part_index} extracted via regex pattern: {len(text)} chars")
+                        pass
                     
                     return text
         
@@ -2295,7 +2394,8 @@ class UnifiedClient:
                     text = text.replace('\\\\', '\\')
                     
                     if provider == 'gemini':
-                        print(f"   🔧 [Gemini] Extracted from string using pattern: {pattern[:30]}...")
+                        #print(f"   🔧 [Gemini] Extracted from string using pattern: {pattern[:30]}...")
+                        pass
                     
                     return text
         except Exception as e:
@@ -2428,7 +2528,7 @@ class UnifiedClient:
 
 
     def _save_response(self, content: str, filename: str):
-        """Save API response with proper thread organization"""
+        """Save API response with enhanced thread safety and deduplication"""
         if not content or not os.getenv("SAVE_PAYLOAD", "1") == "1":
             return
         
@@ -2437,47 +2537,78 @@ class UnifiedClient:
             logger.debug(f"Skipping HTML response save to Payloads: {filename}")
             return
         
-        # Get stable thread directory
+        # Get thread-specific directory
         thread_dir = self._get_thread_directory()
+        thread_id = threading.current_thread().ident
         
         try:
-            # Generate content hash for uniqueness
-            content_hash = hashlib.md5(content.encode()).hexdigest()[:6]
+            # Generate content hash for deduplication
+            content_hash = hashlib.sha256(content.encode()).hexdigest()[:12]
             
             # Clean up filename
-            safe_filename = filename.replace("\\", "/")
-            if "/" in safe_filename:
-                safe_filename = safe_filename.split("/")[-1]
-            
-            # Make filename unique with timestamp and hash
+            safe_filename = os.path.basename(filename)
             base_name, ext = os.path.splitext(safe_filename)
-            timestamp = datetime.now().strftime("%H%M%S")
-            unique_filename = f"{base_name}_{timestamp}_{content_hash}{ext}"
+            
+            # Create unique filename with thread ID and content hash
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]  # Include microseconds
+            unique_filename = f"{base_name}_T{thread_id}_{timestamp}_{content_hash}{ext}"
             filepath = os.path.join(thread_dir, unique_filename)
             
-            # Thread-safe file writing
-            with self._file_write_lock:
-                # For JSON responses, ensure proper formatting
-                if filename.endswith('.json'):
-                    try:
-                        json_content = json.loads(content) if isinstance(content, str) else content
-                        with open(filepath, 'w', encoding='utf-8') as f:
-                            json.dump(json_content, f, indent=2, ensure_ascii=False)
-                    except json.JSONDecodeError:
-                        # If not valid JSON, save as text
-                        with open(filepath, 'w', encoding='utf-8') as f:
+            # Get file-specific lock
+            file_lock = self._get_file_lock(filepath)
+            
+            with file_lock:
+                # Check if this exact content was already saved (deduplication)
+                if self._is_duplicate_file(thread_dir, content_hash):
+                    logger.debug(f"Skipping duplicate response save: {content_hash[:8]}")
+                    return
+                
+                # Write atomically with temp file
+                temp_filepath = filepath + '.tmp'
+                
+                try:
+                    os.makedirs(thread_dir, exist_ok=True)
+                    
+                    if filename.endswith('.json'):
+                        try:
+                            json_content = json.loads(content) if isinstance(content, str) else content
+                            with open(temp_filepath, 'w', encoding='utf-8') as f:
+                                json.dump(json_content, f, indent=2, ensure_ascii=False)
+                        except json.JSONDecodeError:
+                            with open(temp_filepath, 'w', encoding='utf-8') as f:
+                                f.write(content)
+                    else:
+                        with open(temp_filepath, 'w', encoding='utf-8') as f:
                             f.write(content)
-                else:
-                    # Save as text
-                    with open(filepath, 'w', encoding='utf-8') as f:
-                        f.write(content)
-                
-                logger.debug(f"Saved response to: {filepath}")
-                
+                    
+                    # Atomic rename
+                    os.replace(temp_filepath, filepath)
+                    logger.debug(f"Saved response: {filepath}")
+                    
+                except Exception as e:
+                    if os.path.exists(temp_filepath):
+                        os.remove(temp_filepath)
+                    raise
+                    
         except Exception as e:
             logger.error(f"Failed to save response: {e}")
 
+    def _get_file_lock(self, filepath: str) -> RLock:
+        """Get or create a lock for a specific file"""
+        with self._file_write_locks_lock:
+            if filepath not in self._file_write_locks:
+                self._file_write_locks[filepath] = RLock()
+            return self._file_write_locks[filepath]
 
+    def _is_duplicate_file(self, directory: str, content_hash: str) -> bool:
+        """Check if a file with this content hash already exists"""
+        try:
+            for filename in os.listdir(directory):
+                if content_hash in filename and filename.endswith('.json'):
+                    return True
+        except:
+            pass
+        return False
 
     def set_output_filename(self, filename: str):
         """Set the actual output filename for truncation logging
@@ -3123,10 +3254,42 @@ class UnifiedClient:
         
         # Return the minimum wait time, capped at 60 seconds
         return min(int(min_cooldown) if min_cooldown != float('inf') else 30, 60)
+        
+    def _get_thread_assigned_key(self) -> Optional[int]:
+        """Get the key index assigned to current thread"""
+        thread_id = threading.current_thread().ident
+        
+        with self._key_assignment_lock:
+            if thread_id in self._thread_key_assignments:
+                key_index, timestamp = self._thread_key_assignments[thread_id]
+                # Check if assignment is still valid (not expired)
+                if time.time() - timestamp < 300:  # 5 minute expiry
+                    return key_index
+                else:
+                    # Expired, remove it
+                    del self._thread_key_assignments[thread_id]
+        
+        return None
+
+    def _assign_key_to_thread(self, key_index: int):
+        """Assign a key to the current thread"""
+        thread_id = threading.current_thread().ident
+        
+        with self._key_assignment_lock:
+            self._thread_key_assignments[thread_id] = (key_index, time.time())
+            
+            # Cleanup old assignments
+            current_time = time.time()
+            expired_threads = [
+                tid for tid, (_, ts) in self._thread_key_assignments.items()
+                if current_time - ts > 300
+            ]
+            for tid in expired_threads:
+                del self._thread_key_assignments[tid]
                 
     def send(self, messages, temperature=None, max_tokens=None, 
              max_completion_tokens=None, context=None) -> Tuple[str, Optional[str]]:
-        """Thread-safe send with proper key management for batch translation"""
+        """Thread-safe send with proper key management and deduplication for batch translation"""
         thread_name = threading.current_thread().name
         
         # Generate request hash for duplicate detection
@@ -3140,6 +3303,19 @@ class UnifiedClient:
             if chapter_info['chunk']:
                 context_str += f" Chunk {chapter_info['chunk']}/{chapter_info['total_chunks']}"
         
+        # === SAFER DEDUPLICATION START ===
+        
+        # Check cache first (quick check without waiting)
+        if context in ['translation', 'glossary', 'image_translation']:
+            with self._request_cache_lock:
+                if request_hash in self._request_cache:
+                    content, finish_reason, timestamp = self._request_cache[request_hash]
+                    if time.time() - timestamp < self._cache_expiry_seconds:
+                        logger.info(f"[{thread_name}] Cache HIT for {context_str}, returning cached response")
+                        return content, finish_reason
+                    else:
+                        del self._request_cache[request_hash]
+        
         # Check for duplicates ONLY for same content from different threads
         is_duplicate = False
         if context in ['translation', 'glossary', 'image_translation']:
@@ -3147,16 +3323,31 @@ class UnifiedClient:
             
             if is_duplicate:
                 # Wait a bit to let the other thread finish
-                wait_time = 2.5
+                wait_time = 3.0  # Slightly longer wait
                 logger.warning(f"[{thread_name}] Duplicate detected for {context_str}, waiting {wait_time}s...")
-                time.sleep(wait_time)
+                
+                # Check cache periodically while waiting
+                wait_intervals = 0.5
+                total_waited = 0
+                
+                while total_waited < wait_time:
+                    time.sleep(wait_intervals)
+                    total_waited += wait_intervals
+                    
+                    # Check cache again
+                    with self._request_cache_lock:
+                        if request_hash in self._request_cache:
+                            content, finish_reason, timestamp = self._request_cache[request_hash]
+                            if time.time() - timestamp < self._cache_expiry_seconds:
+                                logger.info(f"[{thread_name}] Found cached response while waiting for {context_str}")
+                                return content, finish_reason
                 
                 # After waiting, check if it's still being processed
                 with self._tracker_lock:
                     if request_hash in self._chapter_request_tracker:
                         existing = self._chapter_request_tracker[request_hash]
                         time_diff = time.time() - existing['timestamp']
-                        if time_diff > 2:
+                        if time_diff > 3:
                             # The other thread likely finished, we can proceed
                             logger.info(f"[{thread_name}] Other thread finished, proceeding with {context_str}")
                             # Update our entry
@@ -3166,6 +3357,16 @@ class UnifiedClient:
                                 'thread': thread_name,
                                 'chapter_info': chapter_info
                             }
+                    else:
+                        # Not being processed anymore, add our entry
+                        self._chapter_request_tracker[request_hash] = {
+                            'timestamp': time.time(),
+                            'context': context,
+                            'thread': thread_name,
+                            'chapter_info': chapter_info
+                        }
+        
+        # === SAFER DEDUPLICATION END ===
         
         # Call debug if enabled via environment variable
         if os.getenv("DEBUG_PARALLEL_REQUESTS", "0") == "1":
@@ -3181,6 +3382,7 @@ class UnifiedClient:
         retry_count = 0
         last_error = None
         retry_reason = None  # Track retry reason
+        successful_response = None  # Track successful response for caching
         
         # Track current attempt for payload
         self._current_retry_attempt = 0
@@ -3201,172 +3403,201 @@ class UnifiedClient:
             "prohibited_content", "blockedreason", "content blocked"
         ]
         
-        while retry_count < max_retries:
-            try:
-                # Update current attempt
-                self._current_retry_attempt = retry_count
-                
-                # Track current key
-                attempted_keys.add(self.key_identifier)
-                
-                # Call the actual implementation with retry reason
-                result = self._send_internal(messages, temperature, max_tokens, 
-                                           max_completion_tokens, context, retry_reason=retry_reason)
-                
-                # Mark success
-                if self._multi_key_mode:
-                    tls = self._get_thread_local_client()
-                    if tls.key_index is not None:
-                        self._api_key_pool.mark_key_success(tls.key_index)
-                
-                logger.info(f"[{thread_name}] ✓ Request completed with {self.key_identifier}")
-                return result
-                
-            except Exception as e:
-                last_error = e
-                error_str = str(e)
-                logger.error(f"[{thread_name}] ✗ {self.key_identifier} error: {error_str[:100]}")
-                
-                # Check for prohibited content FIRST (before rate limit check)
-                if any(indicator in error_str.lower() for indicator in content_filter_indicators):
-                    retry_reason = "prohibited_content"
-                    print(f"[Thread-{thread_name}] Prohibited content detected on {self.key_identifier}")
+        try:
+            while retry_count < max_retries:
+                try:
+                    # Update current attempt
+                    self._current_retry_attempt = retry_count
                     
-                    # If we're in multi-key mode and haven't tried main key yet
-                    if (self._multi_key_mode and 
-                        hasattr(self, 'original_api_key') and 
-                        hasattr(self, 'original_model') and
-                        self.original_api_key and 
-                        self.original_model and
-                        not should_try_main_key):
-                        
-                        print(f"[Thread-{thread_name}] Will retry with main key for prohibited content")
-                        should_try_main_key = True
-                        
-                        # Don't count this as a retry, just continue to trigger main key retry
-                        retry_count += 1
-                        continue
-                    else:
-                        # Either not in multi-key mode, or already tried main key
-                        print(f"[Thread-{thread_name}] Prohibited content - cannot retry")
-                        raise
-                
-                # Check for rate limit
-                elif "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
-                    retry_reason = "rate_limit"
-                    if self._multi_key_mode:
-                        print(f"[Thread-{thread_name}] Rate limit hit on {self.key_identifier}")
-                        
-                        # Handle rate limit for this thread
-                        self._handle_rate_limit_for_thread()
-                        
-                        # Check if we have any available keys
-                        available_count = self._count_available_keys()
-                        if available_count == 0:
-                            logger.error(f"[{thread_name}] All API keys are cooling down")
-                            
-                            # If we still have retries left, wait for the shortest cooldown
-                            if retry_count < max_retries - 1:
-                                cooldown_time = self._get_shortest_cooldown_time()
-                                print(f"⏳ [Thread-{thread_name}] All keys cooling down, waiting {cooldown_time}s...")
-                                
-                                # Wait with cancellation check
-                                for i in range(cooldown_time):
-                                    if self._cancelled:
-                                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                                    time.sleep(1)
-                                    if i % 10 == 0 and i > 0:
-                                        print(f"⏳ [Thread-{thread_name}] Still waiting... {cooldown_time - i}s remaining")
-                                
-                                # Force re-initialization after cooldown
-                                tls = self._get_thread_local_client()
-                                tls.initialized = False
-                                self._ensure_thread_client()
-                                
-                                retry_count += 1
-                                continue
-                            else:
-                                # No more retries, raise the error
-                                raise UnifiedClientError("All API keys are cooling down", error_type="rate_limit")
-                        
-                        # Check if we've tried too many keys
-                        if len(attempted_keys) >= len(self._api_key_pool.keys):
-                            logger.error(f"[{thread_name}] Attempted all {len(self._api_key_pool.keys)} keys")
-                            raise UnifiedClientError("All API keys rate limited", error_type="rate_limit")
-                        
-                        retry_count += 1
-                        logger.info(f"[{thread_name}] Retrying with new key, attempt {retry_count}/{max_retries}")
-                        continue
-                    else:
-                        # Single key mode - wait and retry
-                        if retry_count < max_retries - 1:
-                            wait_time = min(30 * (retry_count + 1), 120)
-                            logger.info(f"[{thread_name}] Rate limit, waiting {wait_time}s")
-                            
-                            for i in range(wait_time):
-                                if self._cancelled:
-                                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                                time.sleep(1)
-                                
-                            retry_count += 1
-                            continue
-                        else:
-                            raise UnifiedClientError("Rate limit exceeded", error_type="rate_limit")
-                
-                # Check for cancellation
-                elif isinstance(e, UnifiedClientError) and e.error_type in ["cancelled", "timeout"]:
-                    retry_reason = f"cancelled_{e.error_type}"
-                    raise
-                
-                # Other errors
-                elif retry_count < max_retries - 1:
-                    # Determine retry reason based on error type
-                    if "timeout" in error_str.lower():
-                        retry_reason = "timeout_error"
-                    elif "connection" in error_str.lower():
-                        retry_reason = "connection_error"
-                    elif "500" in error_str or "502" in error_str or "503" in error_str:
-                        retry_reason = f"server_error_{error_str[:3]}"
-                    else:
-                        # Generic error with exception type
-                        retry_reason = f"error_{type(e).__name__}"[:30]  # Limit length for filename
+                    # Track current key
+                    attempted_keys.add(self.key_identifier)
                     
+                    # Call the actual implementation with retry reason
+                    result = self._send_internal(messages, temperature, max_tokens, 
+                                               max_completion_tokens, context, retry_reason=retry_reason)
+                    
+                    # Mark success
                     if self._multi_key_mode:
                         tls = self._get_thread_local_client()
                         if tls.key_index is not None:
-                            self._api_key_pool.mark_key_error(tls.key_index)
+                            self._api_key_pool.mark_key_success(tls.key_index)
+                    
+                    logger.info(f"[{thread_name}] ✓ Request completed with {self.key_identifier}")
+                    successful_response = result
+                    break  # Success, exit retry loop
+                    
+                except Exception as e:
+                    last_error = e
+                    error_str = str(e)
+                    logger.error(f"[{thread_name}] ✗ {self.key_identifier} error: {error_str[:100]}")
+                    
+                    # Check for prohibited content FIRST (before rate limit check)
+                    if any(indicator in error_str.lower() for indicator in content_filter_indicators):
+                        retry_reason = "prohibited_content"
+                        print(f"[Thread-{thread_name}] Prohibited content detected on {self.key_identifier}")
                         
-                        if not self._force_rotation:
-                            # Error-based rotation - try a different key
-                            logger.info(f"[{thread_name}] Error occurred ({retry_reason}), rotating to new key...")
+                        # If we're in multi-key mode and haven't tried main key yet
+                        if (self._multi_key_mode and 
+                            hasattr(self, 'original_api_key') and 
+                            hasattr(self, 'original_model') and
+                            self.original_api_key and 
+                            self.original_model and
+                            not should_try_main_key):
                             
-                            # Force reassignment
-                            tls.initialized = False
-                            tls.request_count = 0
-                            self._ensure_thread_client()
+                            print(f"[Thread-{thread_name}] Will retry with main key for prohibited content")
+                            should_try_main_key = True
+                            
+                            # Don't count this as a retry, just continue to trigger main key retry
+                            retry_count += 1
+                            continue
+                        else:
+                            # Either not in multi-key mode, or already tried main key
+                            print(f"[Thread-{thread_name}] Prohibited content - cannot retry")
+                            raise
+                    
+                    # Check for rate limit
+                    elif "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
+                        retry_reason = "rate_limit"
+                        if self._multi_key_mode:
+                            print(f"[Thread-{thread_name}] Rate limit hit on {self.key_identifier}")
+                            
+                            # Handle rate limit for this thread
+                            self._handle_rate_limit_for_thread()
+                            
+                            # Check if we have any available keys
+                            available_count = self._count_available_keys()
+                            if available_count == 0:
+                                logger.error(f"[{thread_name}] All API keys are cooling down")
+                                
+                                # If we still have retries left, wait for the shortest cooldown
+                                if retry_count < max_retries - 1:
+                                    cooldown_time = self._get_shortest_cooldown_time()
+                                    print(f"⏳ [Thread-{thread_name}] All keys cooling down, waiting {cooldown_time}s...")
+                                    
+                                    # Wait with cancellation check
+                                    for i in range(cooldown_time):
+                                        if self._cancelled:
+                                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                        time.sleep(1)
+                                        if i % 10 == 0 and i > 0:
+                                            print(f"⏳ [Thread-{thread_name}] Still waiting... {cooldown_time - i}s remaining")
+                                    
+                                    # Force re-initialization after cooldown
+                                    tls = self._get_thread_local_client()
+                                    tls.initialized = False
+                                    self._ensure_thread_client()
+                                    
+                                    retry_count += 1
+                                    continue
+                                else:
+                                    # No more retries, raise the error
+                                    raise UnifiedClientError("All API keys are cooling down", error_type="rate_limit")
+                            
+                            # Check if we've tried too many keys
+                            if len(attempted_keys) >= len(self._api_key_pool.keys):
+                                logger.error(f"[{thread_name}] Attempted all {len(self._api_key_pool.keys)} keys")
+                                raise UnifiedClientError("All API keys rate limited", error_type="rate_limit")
                             
                             retry_count += 1
-                            logger.info(f"[{thread_name}] Rotated to {self.key_identifier} after error")
+                            logger.info(f"[{thread_name}] Retrying with new key, attempt {retry_count}/{max_retries}")
                             continue
+                        else:
+                            # Single key mode - wait and retry
+                            if retry_count < max_retries - 1:
+                                wait_time = min(30 * (retry_count + 1), 120)
+                                logger.info(f"[{thread_name}] Rate limit, waiting {wait_time}s")
+                                
+                                for i in range(wait_time):
+                                    if self._cancelled:
+                                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                    time.sleep(1)
+                                    
+                                retry_count += 1
+                                continue
+                            else:
+                                raise UnifiedClientError("Rate limit exceeded", error_type="rate_limit")
                     
-                    # Retry with same key (or if rotation disabled)
-                    logger.info(f"[{thread_name}] Retrying after {retry_reason} (attempt {retry_count + 1}/{max_retries})")
-                    retry_count += 1
-                    time.sleep(2)
-                    continue
+                    # Check for cancellation
+                    elif isinstance(e, UnifiedClientError) and e.error_type in ["cancelled", "timeout"]:
+                        retry_reason = f"cancelled_{e.error_type}"
+                        raise
+                    
+                    # Other errors
+                    elif retry_count < max_retries - 1:
+                        # Determine retry reason based on error type
+                        if "timeout" in error_str.lower():
+                            retry_reason = "timeout_error"
+                        elif "connection" in error_str.lower():
+                            retry_reason = "connection_error"
+                        elif "500" in error_str or "502" in error_str or "503" in error_str:
+                            retry_reason = f"server_error_{error_str[:3]}"
+                        else:
+                            # Generic error with exception type
+                            retry_reason = f"error_{type(e).__name__}"[:30]  # Limit length for filename
+                        
+                        if self._multi_key_mode:
+                            tls = self._get_thread_local_client()
+                            if tls.key_index is not None:
+                                self._api_key_pool.mark_key_error(tls.key_index)
+                            
+                            if not self._force_rotation:
+                                # Error-based rotation - try a different key
+                                logger.info(f"[{thread_name}] Error occurred ({retry_reason}), rotating to new key...")
+                                
+                                # Force reassignment
+                                tls.initialized = False
+                                tls.request_count = 0
+                                self._ensure_thread_client()
+                                
+                                retry_count += 1
+                                logger.info(f"[{thread_name}] Rotated to {self.key_identifier} after error")
+                                continue
+                        
+                        # Retry with same key (or if rotation disabled)
+                        logger.info(f"[{thread_name}] Retrying after {retry_reason} (attempt {retry_count + 1}/{max_retries})")
+                        retry_count += 1
+                        time.sleep(2)
+                        continue
+                    
+                    # Can't retry - final error
+                    else:
+                        retry_reason = f"final_error_{type(e).__name__}"
+                        logger.error(f"[{thread_name}] Cannot retry request: {retry_reason}")
+                        raise
+            
+            # === SIMPLE CACHE UPDATE ===
+            if successful_response and context in ['translation', 'glossary', 'image_translation']:
+                content, finish_reason = successful_response
+                with self._request_cache_lock:
+                    self._request_cache[request_hash] = (content, finish_reason, time.time())
+                    
+                    # Cleanup old cache entries if too many
+                    if len(self._request_cache) > 1000:
+                        sorted_items = sorted(self._request_cache.items(), key=lambda x: x[1][2])
+                        for key, _ in sorted_items[:100]:
+                            del self._request_cache[key]
                 
-                # Can't retry - final error
-                else:
-                    retry_reason = f"final_error_{type(e).__name__}"
-                    logger.error(f"[{thread_name}] Cannot retry request: {retry_reason}")
-                    raise
-        
-        # Exhausted retries
-        if last_error:
-            logger.error(f"[{thread_name}] Exhausted {max_retries} retries, last reason: {retry_reason}")
-            raise last_error
-        else:
-            raise Exception(f"Failed after {max_retries} attempts")
+                logger.info(f"[{thread_name}] Cached successful response for {context_str}")
+            
+            # Remove from tracker
+            with self._tracker_lock:
+                self._chapter_request_tracker.pop(request_hash, None)
+            
+            if successful_response:
+                return successful_response
+            
+            # Exhausted retries
+            if last_error:
+                logger.error(f"[{thread_name}] Exhausted {max_retries} retries, last reason: {retry_reason}")
+                raise last_error
+            else:
+                raise Exception(f"Failed after {max_retries} attempts")
+                
+        except Exception as e:
+            # Clean up tracker on error
+            with self._tracker_lock:
+                self._chapter_request_tracker.pop(request_hash, None)
+            raise
 
     def _send_internal(self, messages, temperature=None, max_tokens=None, 
                        max_completion_tokens=None, context=None, retry_reason=None) -> Tuple[str, Optional[str]]:
@@ -6250,12 +6481,17 @@ class UnifiedClient:
                   max_tokens: Optional[int] = None,
                   max_completion_tokens: Optional[int] = None,
                   context: str = 'image_translation') -> Tuple[str, str]:
-        """Thread-safe image send with proper key management for batch translation"""
+        """Thread-safe image send with proper key management and deduplication for batch translation"""
         thread_name = threading.current_thread().name
 
-        # Generate request hash for duplicate detection (include image size)
+        # Generate request hash for duplicate detection (include image hash for better uniqueness)
         image_size = len(image_data) if isinstance(image_data, (bytes, str)) else 0
-        request_hash = self._get_request_hash(messages) + f"_img{image_size}"
+        # Create a more unique hash by including actual image data hash
+        if image_data:
+            image_hash = hashlib.md5(str(image_data).encode()).hexdigest()[:12]
+        else:
+            image_hash = "empty"
+        request_hash = self._get_request_hash(messages) + f"_img_{image_size}_{image_hash}"
         
         # Extract any chapter/context info from messages
         chapter_info = self._extract_chapter_info(messages)
@@ -6273,6 +6509,19 @@ class UnifiedClient:
                 if filename_match:
                     context_str = f"Image: {filename_match.group(1)}"
         
+        # === SAFER DEDUPLICATION START ===
+        
+        # Check cache first (quick check without waiting)
+        if context in ['image_translation', 'glossary']:
+            with self._request_cache_lock:
+                if request_hash in self._request_cache:
+                    content, finish_reason, timestamp = self._request_cache[request_hash]
+                    if time.time() - timestamp < self._cache_expiry_seconds:
+                        logger.info(f"[{thread_name}] Cache HIT for {context_str}, returning cached image response")
+                        return content, finish_reason
+                    else:
+                        del self._request_cache[request_hash]
+        
         # Check for duplicates ONLY for same image from different threads
         is_duplicate = False
         if context in ['image_translation', 'glossary']:
@@ -6280,16 +6529,31 @@ class UnifiedClient:
             
             if is_duplicate:
                 # Wait a bit to let the other thread finish
-                wait_time = 2.5
+                wait_time = 3.0  # Slightly longer wait
                 logger.warning(f"[{thread_name}] Duplicate image detected for {context_str}, waiting {wait_time}s...")
-                time.sleep(wait_time)
+                
+                # Check cache periodically while waiting
+                wait_intervals = 0.5
+                total_waited = 0
+                
+                while total_waited < wait_time:
+                    time.sleep(wait_intervals)
+                    total_waited += wait_intervals
+                    
+                    # Check cache again
+                    with self._request_cache_lock:
+                        if request_hash in self._request_cache:
+                            content, finish_reason, timestamp = self._request_cache[request_hash]
+                            if time.time() - timestamp < self._cache_expiry_seconds:
+                                logger.info(f"[{thread_name}] Found cached image response while waiting")
+                                return content, finish_reason
                 
                 # After waiting, check if it's still being processed
                 with self._tracker_lock:
                     if request_hash in self._chapter_request_tracker:
                         existing = self._chapter_request_tracker[request_hash]
                         time_diff = time.time() - existing['timestamp']
-                        if time_diff > 2:
+                        if time_diff > 3:
                             # The other thread likely finished, we can proceed
                             logger.info(f"[{thread_name}] Other thread finished image, proceeding with {context_str}")
                             # Update our entry
@@ -6299,9 +6563,19 @@ class UnifiedClient:
                                 'thread': thread_name,
                                 'chapter_info': chapter_info
                             }
+                    else:
+                        # Not being processed anymore, add our entry
+                        self._chapter_request_tracker[request_hash] = {
+                            'timestamp': time.time(),
+                            'context': context,
+                            'thread': thread_name,
+                            'chapter_info': chapter_info
+                        }
+        
+        # === SAFER DEDUPLICATION END ===
         
         # Call debug if enabled via environment variable
-        if os.getenv("DEBUG_PARALLEL_REQUESTS", "0") == "1":  # Changed default to "0"
+        if os.getenv("DEBUG_PARALLEL_REQUESTS", "0") == "1":
             self._debug_active_requests()
         
         # Ensure thread has a client
@@ -6313,6 +6587,7 @@ class UnifiedClient:
         retry_count = 0
         last_error = None
         retry_reason = None  # Track retry reason
+        successful_response = None  # Track successful response for caching
         
         # Track current attempt for payload
         self._current_retry_attempt = 0
@@ -6334,173 +6609,202 @@ class UnifiedClient:
             "inappropriate image", "inappropriate content"
         ]
         
-        while retry_count < max_retries:
-            try:
-                # Update current attempt
-                self._current_retry_attempt = retry_count
-                
-                # Track current key
-                attempted_keys.add(self.key_identifier)
-                
-                # Call the actual implementation with retry reason
-                result = self._send_image_internal(messages, image_data, temperature,
-                                                 max_tokens, max_completion_tokens, context,
-                                                 retry_reason=retry_reason)
-                
-                # Mark success
-                if self._multi_key_mode:
-                    tls = self._get_thread_local_client()
-                    if tls.key_index is not None:
-                        self._api_key_pool.mark_key_success(tls.key_index)
-                
-                logger.info(f"[{thread_name}] ✓ Image request completed with {self.key_identifier}")
-                return result
-                
-            except Exception as e:
-                last_error = e
-                error_str = str(e)
-                logger.error(f"[{thread_name}] ✗ {self.key_identifier} image error: {error_str[:100]}")
-                
-                # Check for prohibited content FIRST (before rate limit check)
-                if any(indicator in error_str.lower() for indicator in content_filter_indicators):
-                    retry_reason = "prohibited_image_content"
-                    print(f"[Thread-{thread_name}] Prohibited image content detected on {self.key_identifier}")
+        try:
+            while retry_count < max_retries:
+                try:
+                    # Update current attempt
+                    self._current_retry_attempt = retry_count
                     
-                    # If we're in multi-key mode and haven't tried main key yet
-                    if (self._multi_key_mode and 
-                        hasattr(self, 'original_api_key') and 
-                        hasattr(self, 'original_model') and
-                        self.original_api_key and 
-                        self.original_model and
-                        not should_try_main_key):
-                        
-                        print(f"[Thread-{thread_name}] Will retry with main key for prohibited image content")
-                        should_try_main_key = True
-                        
-                        # Don't count this as a retry, just continue to trigger main key retry
-                        retry_count += 1
-                        continue
-                    else:
-                        # Either not in multi-key mode, or already tried main key
-                        print(f"[Thread-{thread_name}] Prohibited image content - cannot retry")
-                        raise
-                
-                # Check for rate limit
-                elif "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
-                    retry_reason = "rate_limit_image"
-                    if self._multi_key_mode:
-                        print(f"[Thread-{thread_name}] Image rate limit hit on {self.key_identifier}")
-                        
-                        # Handle rate limit for this thread
-                        self._handle_rate_limit_for_thread()
-                        
-                        # Check if we have any available keys
-                        available_count = self._count_available_keys()
-                        if available_count == 0:
-                            logger.error(f"[{thread_name}] All API keys are cooling down for images")
-                            
-                            # If we still have retries left, wait for the shortest cooldown
-                            if retry_count < max_retries - 1:
-                                cooldown_time = self._get_shortest_cooldown_time()
-                                print(f"⏳ [Thread-{thread_name}] All keys cooling down for image, waiting {cooldown_time}s...")
-                                
-                                # Wait with cancellation check
-                                for i in range(cooldown_time):
-                                    if self._cancelled:
-                                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                                    time.sleep(1)
-                                    if i % 10 == 0 and i > 0:
-                                        print(f"⏳ [Thread-{thread_name}] Still waiting... {cooldown_time - i}s remaining")
-                                
-                                # Force re-initialization after cooldown
-                                tls = self._get_thread_local_client()
-                                tls.initialized = False
-                                self._ensure_thread_client()
-                                
-                                retry_count += 1
-                                continue
-                            else:
-                                # No more retries, raise the error
-                                raise UnifiedClientError("All API keys are cooling down", error_type="rate_limit")
-                        
-                        # Check if we've tried too many keys
-                        if len(attempted_keys) >= len(self._api_key_pool.keys):
-                            logger.error(f"[{thread_name}] Attempted all {len(self._api_key_pool.keys)} keys for image")
-                            raise UnifiedClientError("All API keys rate limited for image requests", error_type="rate_limit")
-                        
-                        retry_count += 1
-                        logger.info(f"[{thread_name}] Retrying image with new key, attempt {retry_count}/{max_retries}")
-                        continue
-                    else:
-                        # Single key mode - wait and retry
-                        if retry_count < max_retries - 1:
-                            wait_time = min(30 * (retry_count + 1), 120)
-                            logger.info(f"[{thread_name}] Image rate limit, waiting {wait_time}s")
-                            
-                            for i in range(wait_time):
-                                if self._cancelled:
-                                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                                time.sleep(1)
-                                
-                            retry_count += 1
-                            continue
-                        else:
-                            raise UnifiedClientError("Image rate limit exceeded", error_type="rate_limit")
-                
-                # Check for cancellation
-                elif isinstance(e, UnifiedClientError) and e.error_type in ["cancelled", "timeout"]:
-                    retry_reason = f"cancelled_{e.error_type}"
-                    raise
-                
-                # Other errors
-                elif retry_count < max_retries - 1:
-                    # Determine retry reason based on error type
-                    if "timeout" in error_str.lower():
-                        retry_reason = "timeout_error"
-                    elif "connection" in error_str.lower():
-                        retry_reason = "connection_error"
-                    elif "500" in error_str or "502" in error_str or "503" in error_str:
-                        retry_reason = f"server_error_{error_str[:3]}"
-                    else:
-                        # Generic error with exception type
-                        retry_reason = f"error_{type(e).__name__}"[:30]  # Limit length for filename
+                    # Track current key
+                    attempted_keys.add(self.key_identifier)
                     
+                    # Call the actual implementation with retry reason
+                    result = self._send_image_internal(messages, image_data, temperature,
+                                                     max_tokens, max_completion_tokens, context,
+                                                     retry_reason=retry_reason)
+                    
+                    # Mark success
                     if self._multi_key_mode:
                         tls = self._get_thread_local_client()
                         if tls.key_index is not None:
-                            self._api_key_pool.mark_key_error(tls.key_index)
+                            self._api_key_pool.mark_key_success(tls.key_index)
+                    
+                    logger.info(f"[{thread_name}] ✓ Image request completed with {self.key_identifier}")
+                    successful_response = result
+                    break  # Success, exit retry loop
+                    
+                except Exception as e:
+                    last_error = e
+                    error_str = str(e)
+                    logger.error(f"[{thread_name}] ✗ {self.key_identifier} image error: {error_str[:100]}")
+                    
+                    # Check for prohibited content FIRST (before rate limit check)
+                    if any(indicator in error_str.lower() for indicator in content_filter_indicators):
+                        retry_reason = "prohibited_image_content"
+                        print(f"[Thread-{thread_name}] Prohibited image content detected on {self.key_identifier}")
                         
-                        if not self._force_rotation:
-                            # Error-based rotation - try a different key
-                            logger.info(f"[{thread_name}] Image error occurred ({retry_reason}), rotating to new key...")
+                        # If we're in multi-key mode and haven't tried main key yet
+                        if (self._multi_key_mode and 
+                            hasattr(self, 'original_api_key') and 
+                            hasattr(self, 'original_model') and
+                            self.original_api_key and 
+                            self.original_model and
+                            not should_try_main_key):
                             
-                            # Force reassignment
-                            tls.initialized = False
-                            tls.request_count = 0
-                            self._ensure_thread_client()
+                            print(f"[Thread-{thread_name}] Will retry with main key for prohibited image content")
+                            should_try_main_key = True
+                            
+                            # Don't count this as a retry, just continue to trigger main key retry
+                            retry_count += 1
+                            continue
+                        else:
+                            # Either not in multi-key mode, or already tried main key
+                            print(f"[Thread-{thread_name}] Prohibited image content - cannot retry")
+                            raise
+                    
+                    # Check for rate limit
+                    elif "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
+                        retry_reason = "rate_limit_image"
+                        if self._multi_key_mode:
+                            print(f"[Thread-{thread_name}] Image rate limit hit on {self.key_identifier}")
+                            
+                            # Handle rate limit for this thread
+                            self._handle_rate_limit_for_thread()
+                            
+                            # Check if we have any available keys
+                            available_count = self._count_available_keys()
+                            if available_count == 0:
+                                logger.error(f"[{thread_name}] All API keys are cooling down for images")
+                                
+                                # If we still have retries left, wait for the shortest cooldown
+                                if retry_count < max_retries - 1:
+                                    cooldown_time = self._get_shortest_cooldown_time()
+                                    print(f"⏳ [Thread-{thread_name}] All keys cooling down for image, waiting {cooldown_time}s...")
+                                    
+                                    # Wait with cancellation check
+                                    for i in range(cooldown_time):
+                                        if self._cancelled:
+                                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                        time.sleep(1)
+                                        if i % 10 == 0 and i > 0:
+                                            print(f"⏳ [Thread-{thread_name}] Still waiting... {cooldown_time - i}s remaining")
+                                    
+                                    # Force re-initialization after cooldown
+                                    tls = self._get_thread_local_client()
+                                    tls.initialized = False
+                                    self._ensure_thread_client()
+                                    
+                                    retry_count += 1
+                                    continue
+                                else:
+                                    # No more retries, raise the error
+                                    raise UnifiedClientError("All API keys are cooling down", error_type="rate_limit")
+                            
+                            # Check if we've tried too many keys
+                            if len(attempted_keys) >= len(self._api_key_pool.keys):
+                                logger.error(f"[{thread_name}] Attempted all {len(self._api_key_pool.keys)} keys for image")
+                                raise UnifiedClientError("All API keys rate limited for image requests", error_type="rate_limit")
                             
                             retry_count += 1
-                            logger.info(f"[{thread_name}] Rotated to {self.key_identifier} after image error")
+                            logger.info(f"[{thread_name}] Retrying image with new key, attempt {retry_count}/{max_retries}")
                             continue
+                        else:
+                            # Single key mode - wait and retry
+                            if retry_count < max_retries - 1:
+                                wait_time = min(30 * (retry_count + 1), 120)
+                                logger.info(f"[{thread_name}] Image rate limit, waiting {wait_time}s")
+                                
+                                for i in range(wait_time):
+                                    if self._cancelled:
+                                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                    time.sleep(1)
+                                    
+                                retry_count += 1
+                                continue
+                            else:
+                                raise UnifiedClientError("Image rate limit exceeded", error_type="rate_limit")
                     
-                    # Retry with same key (or if rotation disabled)
-                    logger.info(f"[{thread_name}] Retrying image after {retry_reason} (attempt {retry_count + 1}/{max_retries})")
-                    retry_count += 1
-                    time.sleep(2)
-                    continue
+                    # Check for cancellation
+                    elif isinstance(e, UnifiedClientError) and e.error_type in ["cancelled", "timeout"]:
+                        retry_reason = f"cancelled_{e.error_type}"
+                        raise
+                    
+                    # Other errors
+                    elif retry_count < max_retries - 1:
+                        # Determine retry reason based on error type
+                        if "timeout" in error_str.lower():
+                            retry_reason = "timeout_error"
+                        elif "connection" in error_str.lower():
+                            retry_reason = "connection_error"
+                        elif "500" in error_str or "502" in error_str or "503" in error_str:
+                            retry_reason = f"server_error_{error_str[:3]}"
+                        else:
+                            # Generic error with exception type
+                            retry_reason = f"error_{type(e).__name__}"[:30]  # Limit length for filename
+                        
+                        if self._multi_key_mode:
+                            tls = self._get_thread_local_client()
+                            if tls.key_index is not None:
+                                self._api_key_pool.mark_key_error(tls.key_index)
+                            
+                            if not self._force_rotation:
+                                # Error-based rotation - try a different key
+                                logger.info(f"[{thread_name}] Image error occurred ({retry_reason}), rotating to new key...")
+                                
+                                # Force reassignment
+                                tls.initialized = False
+                                tls.request_count = 0
+                                self._ensure_thread_client()
+                                
+                                retry_count += 1
+                                logger.info(f"[{thread_name}] Rotated to {self.key_identifier} after image error")
+                                continue
+                        
+                        # Retry with same key (or if rotation disabled)
+                        logger.info(f"[{thread_name}] Retrying image after {retry_reason} (attempt {retry_count + 1}/{max_retries})")
+                        retry_count += 1
+                        time.sleep(2)
+                        continue
+                    
+                    # Can't retry - final error
+                    else:
+                        retry_reason = f"final_error_{type(e).__name__}"
+                        logger.error(f"[{thread_name}] Cannot retry image request: {retry_reason}")
+                        raise
+            
+            # === SIMPLE CACHE UPDATE ===
+            if successful_response and context in ['image_translation', 'glossary']:
+                content, finish_reason = successful_response
+                with self._request_cache_lock:
+                    self._request_cache[request_hash] = (content, finish_reason, time.time())
+                    
+                    # Cleanup old cache entries if too many
+                    if len(self._request_cache) > 1000:
+                        sorted_items = sorted(self._request_cache.items(), key=lambda x: x[1][2])
+                        for key, _ in sorted_items[:100]:
+                            del self._request_cache[key]
                 
-                # Can't retry - final error
-                else:
-                    retry_reason = f"final_error_{type(e).__name__}"
-                    logger.error(f"[{thread_name}] Cannot retry image request: {retry_reason}")
-                    raise
-        
-        # Exhausted retries
-        if last_error:
-            logger.error(f"[{thread_name}] Exhausted {max_retries} image retries, last reason: {retry_reason}")
-            raise last_error
-        else:
-            raise Exception(f"Image request failed after {max_retries} attempts")
+                logger.info(f"[{thread_name}] Cached successful image response for {context_str}")
+            
+            # Remove from tracker
+            with self._tracker_lock:
+                self._chapter_request_tracker.pop(request_hash, None)
+            
+            if successful_response:
+                return successful_response
+            
+            # Exhausted retries
+            if last_error:
+                logger.error(f"[{thread_name}] Exhausted {max_retries} image retries, last reason: {retry_reason}")
+                raise last_error
+            else:
+                raise Exception(f"Image request failed after {max_retries} attempts")
+                
+        except Exception as e:
+            # Clean up tracker on error
+            with self._tracker_lock:
+                self._chapter_request_tracker.pop(request_hash, None)
+            raise
 
 
     def _send_image_internal(self, messages: List[Dict[str, Any]], image_data: Any,
