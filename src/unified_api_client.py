@@ -729,41 +729,50 @@ class UnifiedClient:
         
         thread_name = threading.current_thread().name
         
-        # Use class-level pool lock to ensure thread safety
-        with self.__class__._pool_lock:
-            # Try each key starting from current pool index
-            attempts = 0
-            start_index = self._api_key_pool.current_index
+        # Use the APIKeyPool's built-in thread-safe method
+        if hasattr(self._api_key_pool, 'get_key_for_thread'):
+            # Let the pool handle all the thread assignment logic
+            key_info = self._api_key_pool.get_key_for_thread(
+                force_rotation=getattr(self, '_force_rotation', True),
+                rotation_frequency=getattr(self, '_rotation_frequency', 1)
+            )
             
-            while attempts < len(self._api_key_pool.keys):
-                current_idx = self._api_key_pool.current_index
+            if key_info:
+                key, key_index, key_id = key_info
+                logger.info(f"[{thread_name}] Got {key_id} from pool")
+                return (key, key_index)
+            else:
+                # Pool couldn't provide a key, all are on cooldown
+                logger.warning(f"[{thread_name}] No keys available from pool")
+                return None
+        
+        # Fallback: If pool doesn't have the method, use simpler logic
+        logger.warning("APIKeyPool missing get_key_for_thread method, using fallback")
+        
+        with self.__class__._pool_lock:
+            # Simple round-robin without complex thread tracking
+            for _ in range(len(self._api_key_pool.keys)):
+                current_idx = getattr(self._api_key_pool, 'current_index', 0)
+                
+                # Ensure index is valid
+                if current_idx >= len(self._api_key_pool.keys):
+                    current_idx = 0
+                    self._api_key_pool.current_index = 0
+                
                 key = self._api_key_pool.keys[current_idx]
-                
-                # Always advance for next thread (round-robin)
-                self._api_key_pool.current_index = (current_idx + 1) % len(self._api_key_pool.keys)
-                
-                # Check if key is available
                 key_id = f"Key#{current_idx+1} ({key.model})"
                 
-                # Check both availability and rate limit status
-                if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
-                    logger.info(f"[{thread_name}] Assigned {key_id}")
-                    return (key, current_idx)
+                # Advance index for next call
+                self._api_key_pool.current_index = (current_idx + 1) % len(self._api_key_pool.keys)
                 
-                attempts += 1
-            
-            # No available keys in round-robin, check all keys
-            for i, key in enumerate(self._api_key_pool.keys):
-                if i == start_index:
-                    continue  # Already checked this one
-                    
-                key_id = f"Key#{i+1} ({key.model})"
+                # Check availability
                 if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
-                    logger.info(f"[{thread_name}] Found available key outside round-robin: {key_id}")
-                    return (key, i)
-        
-        # No keys available - handle cooldown outside the lock
-        return self._wait_for_available_key()
+                    logger.info(f"[{thread_name}] Assigned {key_id} (fallback)")
+                    return (key, current_idx)
+            
+            # No available keys
+            logger.warning(f"[{thread_name}] All keys unavailable in fallback")
+            return None
 
     def _wait_for_available_key(self) -> Optional[Tuple]:
         """Wait for a key to become available (called outside lock)"""
