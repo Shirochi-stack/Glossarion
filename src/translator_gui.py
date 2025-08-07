@@ -1027,7 +1027,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.7.8"
+        __version__ = "3.7.9"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1663,27 +1663,16 @@ class TranslatorGUI:
         
     def _init_default_prompts(self):
         """Initialize all default prompt templates"""
-        self.default_manual_glossary_prompt = """Use {fields} for field list and {chapter_text} for content placeholder
+        self.default_manual_glossary_prompt = """Extract character names and important terms from the following text.
 
-Output exactly a JSON array of objects and nothing else.
-You are a glossary extractor for Korean, Japanese, or Chinese novels.
-- Extract character information with the following fields:
-  • original name in source language  
-  • English/romanized name translation  
-  • character gender  
-  • title (with untranslated text in brackets)  
-  • organization/group affiliation  
-  • character traits and descriptions  
-  • how they address other characters  
-  • place names mentioned (with untranslated text in bracekts) 
-- Romanize all honorifics (e.g., 님 to '-nim', さん to '-san').
-- All output must be in English, unless specified otherwise.
-For each character, provide JSON fields:
+Output format:
 {fields}
-Sort by appearance order; respond with a JSON array only.
 
-Text:
-{chapter_text}
+Rules:
+- Output ONLY CSV lines in the exact format shown above
+- No headers, no extra text, no JSON
+- One entry per line
+- Leave gender empty for terms (just end with comma)
 """
         
         self.default_auto_glossary_prompt = """You are extracting a targeted glossary from a {language} novel.
@@ -1845,7 +1834,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.7.8 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.7.9 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def create_file_section(self):
@@ -13538,7 +13527,7 @@ Important rules:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.7.8...")
+    print("🚀 Starting Glossarion v3.7.9...")
     
     # Initialize splash screen
     splash_manager = None
