@@ -191,7 +191,32 @@ except ImportError:
 from functools import lru_cache
 from datetime import datetime, timedelta
 import threading
-            
+ 
+def truncate_error_message(error_str: str, first_chars: int = 50, last_chars: int = 50) -> str:
+    """
+    Truncate long error messages, keeping first and last parts (only for 429 errors)
+    
+    Args:
+        error_str: The error message to truncate
+        first_chars: Number of characters to keep from the beginning
+        last_chars: Number of characters to keep from the end
+    
+    Returns:
+        Truncated error message if it's a 429 error, otherwise returns original
+    """
+    error_str = str(error_str)
+    
+    # Only truncate if it's a 429 error
+    if "429" not in error_str:
+        return error_str
+    
+    # If the error is short enough, return as is
+    if len(error_str) <= (first_chars + last_chars + 5):  # +5 for " ... "
+        return error_str
+    
+    # Truncate: keep first 100 chars and last 50 chars
+    return f"{error_str[:first_chars]} ... {error_str[-last_chars:]}"
+    
 @dataclass
 class UnifiedResponse:
     """Standardized response format for all API providers"""
@@ -553,13 +578,13 @@ class UnifiedClient:
             
             if not tls.initialized:
                 should_rotate = True
-                logger.info(f"[Thread-{thread_name}] Initializing with multi-key mode")
+                print(f"[Thread-{thread_name}] Initializing with multi-key mode")
             elif self._force_rotation:
                 tls.request_count = getattr(tls, 'request_count', 0) + 1
                 if tls.request_count >= self._rotation_frequency:
                     should_rotate = True
                     tls.request_count = 0
-                    logger.info(f"[Thread-{thread_name}] Rotating key (reached {self._rotation_frequency} requests)")
+                    print(f"[Thread-{thread_name}] Rotating key (reached {self._rotation_frequency} requests)")
             
             if should_rotate:
                 # Get a key using thread-safe method
@@ -612,7 +637,7 @@ class UnifiedClient:
                     else:
                         masked_key = self.api_key[:3] + "..." + self.api_key[-2:] if len(self.api_key) > 5 else "***"
                     
-                    logger.info(f"[Thread-{thread_name}] 🔑 Using {self.key_identifier} - {masked_key}")
+                    print(f"[Thread-{thread_name}] 🔑 Using {self.key_identifier} - {masked_key}")
                     
                     # Setup client with new key
                     self._setup_client()
@@ -739,7 +764,7 @@ class UnifiedClient:
             
             if key_info:
                 key, key_index, key_id = key_info
-                logger.info(f"[{thread_name}] Got {key_id} from pool")
+                print(f"[{thread_name}] Got {key_id} from pool")
                 return (key, key_index)
             else:
                 # Pool couldn't provide a key, all are on cooldown
@@ -767,7 +792,7 @@ class UnifiedClient:
                 
                 # Check availability
                 if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
-                    logger.info(f"[{thread_name}] Assigned {key_id} (fallback)")
+                    print(f"[{thread_name}] Assigned {key_id} (fallback)")
                     return (key, current_idx)
             
             # No available keys
@@ -923,7 +948,7 @@ class UnifiedClient:
         # First check cache
         cached_result = self._get_cached_response(request_hash)
         if cached_result:
-            logger.info(f"[{thread_name}] Using cached response for {request_hash[:8]}")
+            print(f"[{thread_name}] Using cached response for {request_hash[:8]}")
             return cached_result
         
         # Check if another thread is processing this request
@@ -931,7 +956,7 @@ class UnifiedClient:
             if request_hash in self._active_requests:
                 # Another thread is processing, get the event
                 event = self._active_requests[request_hash]
-                logger.info(f"[{thread_name}] Waiting for another thread to complete request {request_hash[:8]}")
+                print(f"[{thread_name}] Waiting for another thread to complete request {request_hash[:8]}")
             else:
                 # We're the first, create an event for others to wait on
                 event = threading.Event()
@@ -943,7 +968,7 @@ class UnifiedClient:
             # Check cache again after waiting
             cached_result = self._get_cached_response(request_hash)
             if cached_result:
-                logger.info(f"[{thread_name}] Got result from other thread for {request_hash[:8]}")
+                print(f"[{thread_name}] Got result from other thread for {request_hash[:8]}")
                 return cached_result
         
         # Timeout or no result, we'll process it ourselves
@@ -988,9 +1013,10 @@ class UnifiedClient:
                 threading.Timer(5.0, self._cleanup_active_request, args=[request_hash]).start()
 
     def _cleanup_active_request(self, request_hash: str):
-        """Remove completed request from active tracking"""
+        """Remove completed request from active tracking after delay"""
         with self._active_requests_lock:
             self._active_requests.pop(request_hash, None)
+            logger.debug(f"Cleaned up active request {request_hash[:8]}")
         
     
     def _apply_custom_endpoint_if_needed(self):
@@ -1294,12 +1320,7 @@ class UnifiedClient:
             return True
         
         print(f"[WARNING] No available keys to rotate to")
-        return False
-            
-    def cleanup(self):
-        """Cleanup thread resources"""
-        if self._multi_key_mode and self._api_key_pool:
-            self._api_key_pool.release_thread_assignment()    
+        return False  
     
     def get_stats(self) -> Dict[str, any]:
         """Get statistics about API usage"""
@@ -1544,52 +1565,204 @@ class UnifiedClient:
 
     def _check_duplicate_request(self, request_hash: str, context: str) -> bool:
         """
-        Check if this EXACT request is being processed by ANOTHER thread.
-        This is designed to catch true duplicates while allowing parallel processing.
+        Enhanced duplicate detection that properly handles parallel requests.
+        Returns True only if this exact request is actively being processed.
         """
         
-        # Only check for duplicates in translation/glossary contexts
+        # Only check for duplicates in specific contexts
         if context not in ['translation', 'glossary', 'image_translation']:
             return False
         
-        with self._tracker_lock:
-            current_time = time.time()
-            thread_name = threading.current_thread().name
-            
-            # Clean old entries (older than 10 seconds - reduced window)
-            self._chapter_request_tracker = {
-                k: v for k, v in self._chapter_request_tracker.items()
-                if current_time - v['timestamp'] < 10
-            }
-            
-            # Check if this EXACT request exists from ANOTHER thread
-            if request_hash in self._chapter_request_tracker:
-                existing = self._chapter_request_tracker[request_hash]
-                existing_thread = existing.get('thread', 'unknown')
-                time_diff = current_time - existing['timestamp']
-                
-                # Only flag as duplicate if:
-                # 1. It's from a DIFFERENT thread
-                # 2. The request is still "active" (within 2 seconds)
-                # 3. It's the EXACT same content (same hash)
-                if existing_thread != thread_name and time_diff < 2:
-                    # Extract chapter info for better logging
-                    chapter_info = existing.get('chapter_info', {})
-                    chapter_str = f"Chapter {chapter_info.get('chapter', '?')}" if chapter_info.get('chapter') else "content"
-                    
-                    print(f"⚠️ [{thread_name}] DUPLICATE: Same {chapter_str} being processed by {existing_thread}")
-                    print(f"   Hash: {request_hash[:8]}... | Time diff: {time_diff:.1f}s")
-                    return True
-            
-            # Track this request with more metadata
-            self._chapter_request_tracker[request_hash] = {
-                'timestamp': current_time,
-                'context': context,
-                'thread': thread_name,
-                'chapter_info': self._extract_chapter_info([])  # Store chapter info if available
-            }
-            return False
+        thread_name = threading.current_thread().name
+        
+        # This method is now deprecated in favor of the active_requests tracking
+        # We keep it for backward compatibility but it just returns False
+        # The real duplicate detection happens in the send() method using _active_requests
+        return False
 
+    def _debug_active_requests(self):
+        """Debug method to show current active requests"""
+        with self._active_requests_lock:
+            active_count = len(self._active_requests)
+            if active_count > 0:
+                logger.debug(f"Active requests: {active_count}")
+                for hash_key in list(self._active_requests.keys())[:5]:  # Show first 5
+                    logger.debug(f"  - {hash_key[:8]}...")
+
+    def _get_request_hash_with_context(self, messages, context=None) -> str:
+        """
+        Generate a unique hash that includes context for better deduplication.
+        This ensures that the same content in different contexts gets different hashes.
+        """
+        # Create normalized representation
+        normalized_messages = []
+        
+        for msg in messages:
+            normalized_msg = {
+                'role': msg.get('role', ''),
+                'content': msg.get('content', '')
+            }
+            
+            # Handle image messages
+            if isinstance(normalized_msg['content'], list):
+                content_parts = []
+                for part in normalized_msg['content']:
+                    if isinstance(part, dict) and 'image_url' in part:
+                        image_data = part.get('image_url', {}).get('url', '')
+                        if image_data.startswith('data:'):
+                            # Use first 1000 chars of image data for hash
+                            image_sample = image_data[:1000]
+                            image_hash = hashlib.md5(image_sample.encode()).hexdigest()
+                            content_parts.append(f"image:{image_hash}")
+                        else:
+                            content_parts.append(f"image_url:{image_data}")
+                    elif isinstance(part, dict):
+                        content_parts.append(json.dumps(part, sort_keys=True))
+                    else:
+                        content_parts.append(str(part))
+                normalized_msg['content'] = '|'.join(content_parts)
+            
+            normalized_messages.append(normalized_msg)
+        
+        # Include context in hash to differentiate same content in different contexts
+        hash_data = {
+            'messages': normalized_messages,
+            'model': self.model,
+            'context': context,  # Include context
+            'temperature': getattr(self, 'temperature', 0.3),
+            'max_tokens': getattr(self, 'max_tokens', 8192)
+        }
+        
+        # Create stable JSON representation
+        hash_str = json.dumps(hash_data, sort_keys=True, ensure_ascii=False)
+        
+        # Use SHA256 for better distribution
+        return hashlib.sha256(hash_str.encode()).hexdigest()
+
+    def _ensure_thread_safety_init(self):
+        """
+        Ensure all thread safety structures are properly initialized.
+        Call this during __init__ or before parallel processing.
+        """
+        # Request deduplication structures
+        if not hasattr(self, '_request_cache'):
+            self._request_cache = {}
+        if not hasattr(self, '_request_cache_lock'):
+            self._request_cache_lock = RLock()
+        if not hasattr(self, '_cache_expiry_seconds'):
+            self._cache_expiry_seconds = 300  # 5 minutes
+        
+        # Active request tracking
+        if not hasattr(self, '_active_requests'):
+            self._active_requests = {}  # {request_hash: threading.Event}
+        if not hasattr(self, '_active_requests_lock'):
+            self._active_requests_lock = RLock()
+        
+        # Thread-local storage
+        if not hasattr(self, '_thread_local'):
+            self._thread_local = threading.local()
+        
+        # File operation locks
+        if not hasattr(self, '_file_write_locks'):
+            self._file_write_locks = {}
+        if not hasattr(self, '_file_write_locks_lock'):
+            self._file_write_locks_lock = RLock()
+        
+        # Legacy tracker (for backward compatibility)
+        if not hasattr(self, '_chapter_request_tracker'):
+            self._chapter_request_tracker = {}
+        if not hasattr(self, '_tracker_lock'):
+            self._tracker_lock = RLock()
+
+    def _periodic_cache_cleanup(self):
+        """
+        Periodically clean up expired cache entries and active requests.
+        Should be called periodically or scheduled with a timer.
+        """
+        current_time = time.time()
+        
+        # Clean up expired cache entries
+        with self._request_cache_lock:
+            expired_keys = [
+                key for key, (_, _, timestamp) in self._request_cache.items()
+                if current_time - timestamp > self._cache_expiry_seconds
+            ]
+            for key in expired_keys:
+                del self._request_cache[key]
+            
+            if expired_keys:
+                logger.debug(f"Cleaned up {len(expired_keys)} expired cache entries")
+        
+        # Clean up stuck active requests (older than 5 minutes)
+        with self._active_requests_lock:
+            stuck_timeout = 300  # 5 minutes
+            stuck_requests = []
+            
+            for request_hash, event in list(self._active_requests.items()):
+                # Note: We can't easily track creation time of events,
+                # so we rely on the cleanup timer approach in the main send() method
+                # This is just a safety cleanup for any that got stuck
+                if not event.is_set():
+                    # Check if any thread is waiting on this event
+                    # If no waiters after timeout, remove it
+                    # This is a simplified check - in production you might track timestamps
+                    pass
+
+    def _get_thread_status(self) -> dict:
+        """
+        Get current status of thread-related structures for debugging.
+        """
+        status = {
+            'thread_name': threading.current_thread().name,
+            'thread_id': threading.current_thread().ident,
+            'cache_size': len(self._request_cache) if hasattr(self, '_request_cache') else 0,
+            'active_requests': len(self._active_requests) if hasattr(self, '_active_requests') else 0,
+            'multi_key_mode': self._multi_key_mode,
+            'current_key': self.key_identifier if hasattr(self, 'key_identifier') else 'Unknown'
+        }
+        
+        # Add thread-local info if available
+        if hasattr(self, '_thread_local'):
+            tls = self._get_thread_local_client()
+            status['thread_local'] = {
+                'initialized': getattr(tls, 'initialized', False),
+                'key_index': getattr(tls, 'key_index', None),
+                'request_count': getattr(tls, 'request_count', 0)
+            }
+        
+        return status
+
+    def cleanup(self):
+        """
+        Enhanced cleanup method to properly release all resources.
+        Should be called when done with the client or on shutdown.
+        """
+        thread_name = threading.current_thread().name
+        logger.info(f"[{thread_name}] Cleaning up UnifiedClient resources")
+        
+        # Release thread key assignment if in multi-key mode
+        if self._multi_key_mode and self._api_key_pool:
+            thread_id = threading.current_thread().ident
+            self._api_key_pool.release_thread_assignment(thread_id)
+        
+        # Clear any pending active requests for this client
+        with self._active_requests_lock:
+            # Set all events to release waiting threads
+            for event in self._active_requests.values():
+                event.set()
+            # Note: We don't clear the dict here as other threads might still be using it
+        
+        # Clear thread-local storage
+        if hasattr(self, '_thread_local'):
+            # Reset thread-local state
+            self._thread_local.initialized = False
+            self._thread_local.api_key = None
+            self._thread_local.model = None
+            self._thread_local.key_index = None
+            self._thread_local.request_count = 0
+        
+        logger.info(f"[{thread_name}] Cleanup complete")
+    
     def _get_safe_filename(self, base_filename: str, content_hash: str = None) -> str:
         """Generate a safe, unique filename"""
         # Add content hash if provided
@@ -1635,6 +1808,94 @@ class UnifiedClient:
             info['total_chunks'] = chunk_match.group(2)
         
         return info
+
+    def get_current_key_info(self) -> str:
+        """Get information about the currently active key"""
+        if self.use_multi_keys and self.current_key_index is not None:
+            key = self._api_key_pool.keys[self.current_key_index]
+            status = "Active" if key.is_available() else "Cooling Down"
+            return f"{self.key_identifier} - Status: {status}, Success: {key.success_count}, Errors: {key.error_count}"
+        else:
+            return "Single Key Mode"
+ 
+    def _should_rotate(self) -> bool:
+        """Check if we should rotate keys based on settings"""
+        if not self.use_multi_keys:
+            return False
+        
+        if not self._force_rotation:
+            # Only rotate on errors
+            return False
+        
+        # Check frequency
+        with self._counter_lock:
+            self._request_counter += 1
+            
+            # Check if it's time to rotate
+            if self._request_counter >= self._rotation_frequency:
+                self._request_counter = 0
+                return True
+            else:
+                return False
+
+    def _get_shortest_cooldown_time(self) -> int:
+        """Get the shortest cooldown time among all keys"""
+        if not self._multi_key_mode or not self.__class__._api_key_pool:
+            return 60  # Default cooldown
+            
+        min_cooldown = float('inf')
+        now = time.time()
+        
+        for i, key in enumerate(self.__class__._api_key_pool.keys):
+            if key.enabled:
+                key_id = f"Key#{i+1} ({key.model})"
+                
+                # Check rate limit cache
+                cache_cooldown = self.__class__._rate_limit_cache.get_remaining_cooldown(key_id)
+                if cache_cooldown > 0:
+                    min_cooldown = min(min_cooldown, cache_cooldown)
+                
+                # Also check key's own cooldown
+                if key.is_cooling_down and key.last_error_time:
+                    remaining = key.cooldown - (now - key.last_error_time)
+                    if remaining > 0:
+                        min_cooldown = min(min_cooldown, remaining)
+        
+        # Return the minimum wait time, capped at 60 seconds
+        return min(int(min_cooldown) if min_cooldown != float('inf') else 30, 60)
+        
+    def _get_thread_assigned_key(self) -> Optional[int]:
+        """Get the key index assigned to current thread"""
+        thread_id = threading.current_thread().ident
+        
+        with self._key_assignment_lock:
+            if thread_id in self._thread_key_assignments:
+                key_index, timestamp = self._thread_key_assignments[thread_id]
+                # Check if assignment is still valid (not expired)
+                if time.time() - timestamp < 300:  # 5 minute expiry
+                    return key_index
+                else:
+                    # Expired, remove it
+                    del self._thread_key_assignments[thread_id]
+        
+        return None
+
+    def _assign_key_to_thread(self, key_index: int):
+        """Assign a key to the current thread"""
+        thread_id = threading.current_thread().ident
+        
+        with self._key_assignment_lock:
+            self._thread_key_assignments[thread_id] = (key_index, time.time())
+            
+            # Cleanup old assignments
+            current_time = time.time()
+            expired_threads = [
+                tid for tid, (_, ts) in self._thread_key_assignments.items()
+                if current_time - ts > 300
+            ]
+            for tid in expired_threads:
+                del self._thread_key_assignments[tid]
+                
             
     def _setup_client(self):
         """Setup the appropriate client based on model type"""
@@ -1647,7 +1908,7 @@ class UnifiedClient:
         for prefix, provider in self.MODEL_PROVIDERS.items():
             if model_lower.startswith(prefix):
                 self.client_type = provider
-                print(f"[DEBUG] Matched prefix '{prefix}' -> provider '{provider}'")
+                #print(f"[DEBUG] Matched prefix '{prefix}' -> provider '{provider}'")
                 break
         
         # Check if we're using a custom OpenAI base URL
@@ -1725,7 +1986,8 @@ class UnifiedClient:
             
             if use_gemini_endpoint and gemini_endpoint:
                 # Use OpenAI client for Gemini with custom endpoint
-                print(f"[DEBUG] Setting up Gemini with OpenAI-compatible endpoint")
+                #print(f"[DEBUG] Setting up Gemini with OpenAI-compatible endpoint")
+                pass
                 if openai is None:
                     raise ImportError("OpenAI library not installed. Install with: pip install openai")
                 
@@ -1860,7 +2122,1772 @@ class UnifiedClient:
         # Log retry feature support
         logger.info(f"✅ Initialized {self.client_type} client for model: {self.model}")
         logger.debug("✅ GUI retry features supported: truncation detection, timeout handling, duplicate detection")
+ 
+    def send(self, messages, temperature=None, max_tokens=None, 
+             max_completion_tokens=None, context=None) -> Tuple[str, Optional[str]]:
+        """Thread-safe send with proper key management and deduplication for batch translation"""
+        thread_name = threading.current_thread().name
+        
+        # Generate request hash for duplicate detection
+        request_hash = self._get_request_hash(messages)
+        
+        # Extract chapter info for better logging
+        chapter_info = self._extract_chapter_info(messages)
+        context_str = context or 'unknown'
+        if chapter_info['chapter']:
+            context_str = f"Chapter {chapter_info['chapter']}"
+            if chapter_info['chunk']:
+                context_str += f" Chunk {chapter_info['chunk']}/{chapter_info['total_chunks']}"
+        
+        # === IMPROVED DEDUPLICATION WITH PROPER SYNCHRONIZATION ===
+        
+        # Only check for duplicates in specific contexts
+        if context in ['translation', 'glossary', 'image_translation']:
+            # Step 1: Try to get from cache first (atomic check)
+            with self._request_cache_lock:
+                if request_hash in self._request_cache:
+                    content, finish_reason, timestamp = self._request_cache[request_hash]
+                    if time.time() - timestamp < self._cache_expiry_seconds:
+                        logger.info(f"[{thread_name}] Cache HIT for {context_str}, returning cached response")
+                        return content, finish_reason
+                    else:
+                        # Expired, remove it
+                        del self._request_cache[request_hash]
+            
+            # Step 2: Check if another thread is processing this request (atomic check-and-set)
+            processing_by_other = False
+            event_to_wait = None
+            
+            with self._active_requests_lock:
+                if request_hash in self._active_requests:
+                    # Another thread is processing
+                    event_to_wait = self._active_requests[request_hash]
+                    processing_by_other = True
+                    logger.info(f"[{thread_name}] Request {request_hash[:8]} is being processed by another thread")
+                else:
+                    # We're the first, create an event for others
+                    event = threading.Event()
+                    self._active_requests[request_hash] = event
+                    logger.debug(f"[{thread_name}] Taking ownership of request {request_hash[:8]}")
+            
+            # Step 3: If another thread is processing, wait for it
+            if processing_by_other and event_to_wait:
+                logger.info(f"[{thread_name}] Waiting for {context_str} to be processed by another thread...")
+                
+                # Wait with timeout and periodic cache checks
+                wait_timeout = 60  # Maximum wait time
+                check_interval = 0.5
+                total_waited = 0
+                
+                while total_waited < wait_timeout:
+                    # Check if event is set
+                    if event_to_wait.wait(timeout=check_interval):
+                        # Event was set, check cache
+                        with self._request_cache_lock:
+                            if request_hash in self._request_cache:
+                                content, finish_reason, timestamp = self._request_cache[request_hash]
+                                if time.time() - timestamp < self._cache_expiry_seconds:
+                                    logger.info(f"[{thread_name}] Got cached result after waiting for {context_str}")
+                                    return content, finish_reason
+                        
+                        # No cache entry found despite event being set, break and process ourselves
+                        logger.warning(f"[{thread_name}] Event set but no cache entry, processing {context_str} ourselves")
+                        break
+                    
+                    total_waited += check_interval
+                    
+                    # Periodic cache check even if event not set
+                    if total_waited % 2 == 0:  # Check every 2 seconds
+                        with self._request_cache_lock:
+                            if request_hash in self._request_cache:
+                                content, finish_reason, timestamp = self._request_cache[request_hash]
+                                if time.time() - timestamp < self._cache_expiry_seconds:
+                                    logger.info(f"[{thread_name}] Found cached result while waiting for {context_str}")
+                                    return content, finish_reason
+                
+                if total_waited >= wait_timeout:
+                    logger.warning(f"[{thread_name}] Timeout waiting for {context_str}, processing ourselves")
+        
+        # === END OF IMPROVED DEDUPLICATION ===
+        
+        # Call debug if enabled via environment variable
+        if os.getenv("DEBUG_PARALLEL_REQUESTS", "0") == "1":
+            self._debug_active_requests()
+        
+        # Ensure thread has a client
+        self._ensure_thread_client()
+        
+        # Log the processing
+        logger.info(f"[{thread_name}] Processing {context_str} with {self.key_identifier}")
+        
+        max_retries = 7
+        retry_count = 0
+        last_error = None
+        retry_reason = None
+        successful_response = None
+        
+        # Track current attempt for payload
+        self._current_retry_attempt = 0
+        self._max_retries = max_retries
+        
+        # Track which keys we've already tried
+        attempted_keys = set()
+        
+        # Flag to track if we should try main key for prohibited content
+        should_try_main_key = False
+        
+        # Define content filter indicators
+        content_filter_indicators = [
+            "content_filter", "content was blocked", "response was blocked",
+            "safety filter", "content policy", "harmful content",
+            "blocked by safety", "harm_category", "content_policy_violation",
+            "unsafe content", "violates our usage policies",
+            "prohibited_content", "blockedreason", "content blocked"
+        ]
+        
+        try:
+            while retry_count < max_retries:
+                try:
+                    # Update current attempt
+                    self._current_retry_attempt = retry_count
+                    
+                    # Track current key
+                    attempted_keys.add(self.key_identifier)
+                    
+                    # Call the actual implementation with retry reason
+                    result = self._send_internal(messages, temperature, max_tokens, 
+                                               max_completion_tokens, context, retry_reason=retry_reason)
+                    
+                    # Mark success
+                    if self._multi_key_mode:
+                        tls = self._get_thread_local_client()
+                        if tls.key_index is not None:
+                            self._api_key_pool.mark_key_success(tls.key_index)
+                    
+                    logger.info(f"[{thread_name}] ✓ Request completed with {self.key_identifier}")
+                    successful_response = result
+                    break  # Success, exit retry loop
+                    
+                except Exception as e:
+                    last_error = e
+                    error_str = str(e)
+                    logger.error(f"[{thread_name}] ✗ {self.key_identifier} error: {error_str[:100]}")
+                    
+                    # Check for prohibited content FIRST
+                    if any(indicator in error_str.lower() for indicator in content_filter_indicators):
+                        retry_reason = "prohibited_content"
+                        print(f"[Thread-{thread_name}] Prohibited content detected on {self.key_identifier}")
+                        
+                        # Try main key if conditions are met
+                        if (self._multi_key_mode and 
+                            hasattr(self, 'original_api_key') and 
+                            hasattr(self, 'original_model') and
+                            self.original_api_key and 
+                            self.original_model and
+                            not should_try_main_key):
+                            
+                            print(f"[Thread-{thread_name}] Will retry with main key for prohibited content")
+                            should_try_main_key = True
+                            retry_count += 1
+                            continue
+                        else:
+                            print(f"[Thread-{thread_name}] Prohibited content - cannot retry")
+                            raise
+                    
+                    # Check for rate limit
+                    elif "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
+                        retry_reason = "rate_limit"
+                        if self._multi_key_mode:
+                            print(f"[Thread-{thread_name}] Rate limit hit on {self.key_identifier}")
+                            
+                            # Handle rate limit for this thread
+                            self._handle_rate_limit_for_thread()
+                            
+                            # Check if we have any available keys
+                            available_count = self._count_available_keys()
+                            if available_count == 0:
+                                logger.error(f"[{thread_name}] All API keys are cooling down")
+                                
+                                if retry_count < max_retries - 1:
+                                    cooldown_time = self._get_shortest_cooldown_time()
+                                    print(f"⏳ [Thread-{thread_name}] All keys cooling down, waiting {cooldown_time}s...")
+                                    
+                                    # Wait with cancellation check
+                                    for i in range(cooldown_time):
+                                        if self._cancelled:
+                                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                        time.sleep(1)
+                                        if i % 10 == 0 and i > 0:
+                                            print(f"⏳ [Thread-{thread_name}] Still waiting... {cooldown_time - i}s remaining")
+                                    
+                                    # Force re-initialization after cooldown
+                                    tls = self._get_thread_local_client()
+                                    tls.initialized = False
+                                    self._ensure_thread_client()
+                                    
+                                    retry_count += 1
+                                    continue
+                                else:
+                                    raise UnifiedClientError("All API keys are cooling down", error_type="rate_limit")
+                            
+                            # Check if we've tried too many keys
+                            if len(attempted_keys) >= len(self._api_key_pool.keys):
+                                logger.error(f"[{thread_name}] Attempted all {len(self._api_key_pool.keys)} keys")
+                                raise UnifiedClientError("All API keys rate limited", error_type="rate_limit")
+                            
+                            retry_count += 1
+                            logger.info(f"[{thread_name}] Retrying with new key, attempt {retry_count}/{max_retries}")
+                            continue
+                        else:
+                            # Single key mode - wait and retry
+                            if retry_count < max_retries - 1:
+                                wait_time = min(30 * (retry_count + 1), 120)
+                                logger.info(f"[{thread_name}] Rate limit, waiting {wait_time}s")
+                                
+                                for i in range(wait_time):
+                                    if self._cancelled:
+                                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                    time.sleep(1)
+                                
+                                retry_count += 1
+                                continue
+                            else:
+                                raise UnifiedClientError("Rate limit exceeded", error_type="rate_limit")
+                    
+                    # Check for cancellation
+                    elif isinstance(e, UnifiedClientError) and e.error_type in ["cancelled", "timeout"]:
+                        retry_reason = f"cancelled_{e.error_type}"
+                        raise
+                    
+                    # Other errors - retry logic
+                    elif retry_count < max_retries - 1:
+                        # Determine retry reason
+                        if "timeout" in error_str.lower():
+                            retry_reason = "timeout_error"
+                        elif "connection" in error_str.lower():
+                            retry_reason = "connection_error"
+                        elif "500" in error_str or "502" in error_str or "503" in error_str:
+                            retry_reason = f"server_error_{error_str[:3]}"
+                        else:
+                            retry_reason = f"error_{type(e).__name__}"[:30]
+                        
+                        if self._multi_key_mode:
+                            tls = self._get_thread_local_client()
+                            if tls.key_index is not None:
+                                self._api_key_pool.mark_key_error(tls.key_index)
+                            
+                            if not self._force_rotation:
+                                # Error-based rotation
+                                logger.info(f"[{thread_name}] Error occurred ({retry_reason}), rotating to new key...")
+                                tls.initialized = False
+                                tls.request_count = 0
+                                self._ensure_thread_client()
+                                retry_count += 1
+                                logger.info(f"[{thread_name}] Rotated to {self.key_identifier} after error")
+                                continue
+                        
+                        # Retry with same key
+                        logger.info(f"[{thread_name}] Retrying after {retry_reason} (attempt {retry_count + 1}/{max_retries})")
+                        retry_count += 1
+                        time.sleep(2)
+                        continue
+                    
+                    # Can't retry - final error
+                    else:
+                        retry_reason = f"final_error_{type(e).__name__}"
+                        logger.error(f"[{thread_name}] Cannot retry request: {retry_reason}")
+                        raise
+            
+            # === IMPROVED CACHE UPDATE AND CLEANUP ===
+            if successful_response and context in ['translation', 'glossary', 'image_translation']:
+                content, finish_reason = successful_response
+                
+                # Cache the successful response
+                with self._request_cache_lock:
+                    self._request_cache[request_hash] = (content, finish_reason, time.time())
+                    
+                    # Cleanup old cache entries if too many
+                    if len(self._request_cache) > 1000:
+                        sorted_items = sorted(self._request_cache.items(), key=lambda x: x[1][2])
+                        for key, _ in sorted_items[:100]:
+                            del self._request_cache[key]
+                
+                logger.info(f"[{thread_name}] Cached successful response for {context_str}")
+                
+                # Signal waiting threads BEFORE cleanup
+                with self._active_requests_lock:
+                    if request_hash in self._active_requests:
+                        event = self._active_requests[request_hash]
+                        event.set()  # Wake up waiting threads
+                        logger.debug(f"[{thread_name}] Signaled completion of {request_hash[:8]}")
+                        
+                        # Schedule cleanup after a delay to ensure waiters get the result
+                        threading.Timer(5.0, self._cleanup_active_request, args=[request_hash]).start()
+            
+            if successful_response:
+                return successful_response
+            
+            # Exhausted retries
+            if last_error:
+                logger.error(f"[{thread_name}] Exhausted {max_retries} retries, last reason: {retry_reason}")
+                
+                # Clean up on failure too
+                with self._active_requests_lock:
+                    if request_hash in self._active_requests:
+                        event = self._active_requests.pop(request_hash, None)
+                        if event:
+                            event.set()  # Signal failure to waiters
+                
+                raise last_error
+            else:
+                raise Exception(f"Failed after {max_retries} attempts")
+                
+        except Exception as e:
+            # Clean up on any exception
+            with self._active_requests_lock:
+                if request_hash in self._active_requests:
+                    event = self._active_requests.pop(request_hash, None)
+                    if event:
+                        event.set()  # Signal error to waiters
+            raise
+
+    def _send_internal(self, messages, temperature=None, max_tokens=None, 
+                       max_completion_tokens=None, context=None, retry_reason=None) -> Tuple[str, Optional[str]]:
+        """
+        Internal send implementation with integrated 500 error retry logic and prohibited content handling
+        """
+        start_time = time.time()
+        
+        # Generate request hash early
+        request_hash = self._get_request_hash(messages)
+        thread_name = threading.current_thread().name
+        
+        # Log with hash for tracking
+        logger.debug(f"[{thread_name}] _send_internal starting for {context} (hash: {request_hash[:8]}...) retry_reason: {retry_reason}")
+        
+        # Reset cancelled flag
+        self._cancelled = False
+        
+        # Reset counters when context changes
+        if context != self.current_session_context:
+            self.reset_conversation_for_new_context(context)
+        
+        self.context = context or 'translation'
+        self.conversation_message_count += 1
+        
+        # Internal retry logic for 500 errors - INCREASED TO 7
+        internal_retries = 7
+        base_delay = 5  # Base delay for exponential backoff
+        
+        # Track if we've tried main key for prohibited content
+        main_key_attempted = False
+        
+        # Define content filter indicators locally for consistency
+        content_filter_indicators = [
+            "content_filter", "content was blocked", "response was blocked",
+            "safety filter", "content policy", "harmful content",
+            "blocked by safety", "harm_category", "content_policy_violation",
+            "unsafe content", "violates our usage policies",
+            "prohibited_content", "blockedreason", "content blocked"
+        ]
+        
+        for attempt in range(internal_retries):
+            try:
+                # Validate request
+                valid, error_msg = self._validate_request(messages, max_tokens)
+                if not valid:
+                    raise UnifiedClientError(f"Invalid request: {error_msg}", error_type="validation")
+                
+                os.makedirs("Payloads", exist_ok=True)
+                
+                # Apply reinforcement
+                messages = self._apply_pure_reinforcement(messages)
+                
+                # Get file names - IMPORTANT for duplicate detection
+                payload_name, response_name = self._get_file_names(messages, context=self.context)
+                
+                # Save payload with retry reason
+                # On internal retries (500 errors), add that info too
+                if attempt > 0:
+                    internal_retry_reason = f"500_error_attempt_{attempt}"
+                    if retry_reason:
+                        combined_reason = f"{retry_reason}_{internal_retry_reason}"
+                    else:
+                        combined_reason = internal_retry_reason
+                    self._save_payload(messages, payload_name, retry_reason=combined_reason)
+                else:
+                    self._save_payload(messages, payload_name, retry_reason=retry_reason)
+                
+                # FIX: Define payload_messages BEFORE using it
+                # Create a sanitized version for payload (without actual image data)
+                payload_messages = [
+                    {**msg, 'content': 'IMAGE_DATA_OMITTED' if isinstance(msg.get('content'), list) else msg.get('content')}
+                    for msg in messages
+                ]
+                
+                # Now save the payload (payload_messages is now defined)
+                self._save_payload(payload_messages, payload_name)
+                
+                # Check for timeout toggle from GUI
+                retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
+                if retry_timeout_enabled:
+                    timeout_seconds = int(os.getenv("CHUNK_TIMEOUT", "180"))
+                    logger.info(f"Timeout monitoring enabled: {timeout_seconds}s limit")
+                
+                # Get response
+                response = self._get_response(messages, temperature, max_tokens, max_completion_tokens, response_name)
+                
+                # Check for cancellation (from timeout or stop button)
+                if self._cancelled:
+                    logger.info("Operation cancelled (timeout or user stop)")
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                
+                # ====== UNIVERSAL EXTRACTION INTEGRATION ======
+                # Use universal extraction instead of assuming response.content exists
+                extracted_content = ""
+                finish_reason = 'stop'
+
+                if response:
+                    # Prepare provider-specific parameters
+                    extraction_kwargs = {}
+                    
+                    # Add Gemini-specific parameters if applicable
+                    if self.client_type == 'gemini':
+                        # Check if this model supports thinking
+                        extraction_kwargs['supports_thinking'] = self._supports_thinking()
+                        # Get thinking budget from environment
+                        extraction_kwargs['thinking_budget'] = int(os.getenv("THINKING_BUDGET", "-1"))
+                    
+                    # Try universal extraction with provider-specific parameters
+                    extracted_content, finish_reason = self._extract_response_text(
+                        response, 
+                        provider=self.client_type,
+                        **extraction_kwargs
+                    )
+                    
+                    # If extraction failed but we have a response object
+                    if not extracted_content and response:
+                        print(f"⚠️ Failed to extract text from {self.client_type} response")
+                        print(f"   Response type: {type(response)}")
+                        
+                        # Provider-specific guidance
+                        if self.client_type == 'gemini':
+                            print(f"   Consider checking Gemini response structure")
+                            print(f"   Response attributes: {dir(response)[:5]}...")  # Show first 5 attributes
+                        else:
+                            print(f"   Consider checking response extraction for this provider")
+                        
+                        # Log the response structure for debugging
+                        self._save_failed_request(messages, "Extraction failed", context, response)
+                        
+                        # Check if response has any common attributes we missed
+                        if hasattr(response, 'content') and response.content:
+                            extracted_content = str(response.content)
+                            print(f"   Fallback: Using response.content directly")
+                        elif hasattr(response, 'text') and response.text:
+                            extracted_content = str(response.text)
+                            print(f"   Fallback: Using response.text directly")
+                    
+                    # Update response object with extracted content
+                    if extracted_content and hasattr(response, 'content'):
+                        response.content = extracted_content
+                    elif extracted_content:
+                        # Create a new response object if needed
+                        response = UnifiedResponse(
+                            content=extracted_content,
+                            finish_reason=finish_reason,
+                            raw_response=response
+                        )
+                
+                # CRITICAL: Save response for duplicate detection
+                # This must happen even for truncated/empty responses
+                if extracted_content:
+                    self._save_response(extracted_content, response_name)
+                
+                # Handle empty responses
+                if not extracted_content or extracted_content.strip() in ["", "[]"]:
+                    print(f"Empty or error response: {finish_reason}")
+                    self._save_failed_request(messages, "Empty response", context, response)
+                    
+                    # ALWAYS log these failures too
+                    self._log_truncation_failure(
+                        messages=messages,
+                        response_content=extracted_content or "",
+                        finish_reason=finish_reason or 'error',
+                        context=context,
+                        error_details=getattr(response, 'error_details', None) if response else None
+                    )
+                    self._track_stats(context, False, "empty_response", time.time() - start_time)
+                    
+                    # Use fallback
+                    fallback_content = self._handle_empty_result(messages, context, 
+                        getattr(response, 'error_details', "empty") if response else "empty")
+                    return fallback_content, 'error'
+                
+                # Track success
+                self._track_stats(context, True, None, time.time() - start_time)
+                
+                # Mark key as successful in multi-key mode
+                self._mark_key_success()
+                
+                # Log important info for retry mechanisms
+                if finish_reason in ['length', 'max_tokens']:
+                    print(f"Response was truncated: {finish_reason}")
+                    print(f"⚠️ Response truncated (finish_reason: {finish_reason})")
+                    
+                    # ALWAYS log truncation failures
+                    self._log_truncation_failure(
+                        messages=messages,
+                        response_content=extracted_content,
+                        finish_reason=finish_reason,
+                        context=context,
+                        error_details=getattr(response, 'error_details', None) if response else None
+                    )
+                    # The calling code will check finish_reason=='length' for retry
+                
+                # Apply API delay after successful call (even if truncated)
+                # SKIP DELAY DURING CLEANUP
+                if not self._in_cleanup:
+                    api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+                    if api_delay > 0:
+                        print(f"⏳ Waiting {api_delay}s before next API call...")
+                        time.sleep(api_delay)
+                else:
+                    print("⚡ Skipping API delay (cleanup mode)")
+                
+                # Return the response with accurate finish_reason
+                # This is CRITICAL for retry mechanisms to work
+                return extracted_content, finish_reason
+                
+            except UnifiedClientError as e:
+                # Handle cancellation specially for timeout support
+                if e.error_type == "cancelled" or "cancelled" in str(e):
+                    self._in_cleanup = False  # Ensure cleanup flag is set
+                    logger.info("Propagating cancellation to caller")
+                    # Re-raise so send_with_interrupt can handle it
+                    raise
+                
+                print(f"UnifiedClient error: {e}")
+                
+                # Check if it's a rate limit error and re-raise for retry logic
+                error_str = str(e).lower()
+                if e.error_type == "rate_limit" or "429" in error_str or "rate limit" in error_str or "quota" in error_str:
+                    raise  # Re-raise for multi-key retry logic in outer send() method
+                
+                # Check for prohibited content - check BOTH error_type AND error string
+                if e.error_type == "prohibited_content" or any(indicator in error_str for indicator in content_filter_indicators):
+                    print(f"❌ Prohibited content detected: {error_str[:200]}")
+                    
+                    # Only try main key if conditions are met
+                    if (self._multi_key_mode and 
+                        not main_key_attempted and 
+                        hasattr(self, 'original_api_key') and 
+                        hasattr(self, 'original_model') and
+                        self.original_api_key and 
+                        self.original_model):
+                        
+                        print(f"🔄 Attempting main key fallback for prohibited content")
+                        print(f"   Current key: {self.key_identifier}")
+                        print(f"   Main key model: {self.original_model}")
+                        
+                        main_key_attempted = True
+                        
+                        try:
+                            # Create temporary client with main key
+                            main_response = self._retry_with_main_key(
+                                messages, temperature, max_tokens, max_completion_tokens, context
+                            )
+                            
+                            if main_response:
+                                content, finish_reason = main_response
+                                print(f"✅ Main key succeeded! Returning response")
+                                return content, finish_reason
+                            else:
+                                print(f"❌ Main key returned None")
+                                
+                        except Exception as main_error:
+                            print(f"❌ Main key error: {str(main_error)[:200]}")
+                            # Check if main key also hit content filter
+                            main_error_str = str(main_error).lower()
+                            if any(indicator in main_error_str for indicator in content_filter_indicators):
+                                print(f"❌ Main key also hit content filter")
+                            # Continue to normal error handling
+                    
+                    # Normal prohibited content handling
+                    print(f"❌ Content prohibited - not retrying further")
+                    self._save_failed_request(messages, e, context)
+                    self._track_stats(context, False, type(e).__name__, time.time() - start_time)
+                    fallback_content = self._handle_empty_result(messages, context, str(e))
+                    return fallback_content, 'error'
+                
+                # Check for 500 errors - retry these with exponential backoff
+                http_status = getattr(e, 'http_status', None)
+                if http_status == 500 or "500" in error_str or "api_error" in error_str:
+                    if attempt < internal_retries - 1:
+                        # Exponential backoff with jitter
+                        delay = (base_delay * (2 ** attempt)) + random.uniform(0, 1)
+                        # Cap the maximum delay to prevent extremely long waits
+                        delay = min(delay, 60)  # Max 60 seconds
+                        
+                        print(f"🔄 Server error (500) - auto-retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries})")
+                        
+                        # Wait with cancellation check
+                        wait_start = time.time()
+                        while time.time() - wait_start < delay:
+                            if self._cancelled:
+                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                            time.sleep(0.5)  # Check every 0.5 seconds
+                        continue
+                    else:
+                        print(f"❌ Server error (500) - exhausted {internal_retries} retries")
+                
+                # Save failed request and return fallback
+                self._save_failed_request(messages, e, context)
+                self._track_stats(context, False, type(e).__name__, time.time() - start_time)
+                fallback_content = self._handle_empty_result(messages, context, str(e))
+                return fallback_content, 'error'
+                
+            except Exception as e:
+                print(f"Unexpected error: {e}")
+                error_str = str(e).lower()
+                
+                # For unexpected errors, check if it's a timeout
+                if "timed out" in error_str:
+                    # Re-raise timeout errors so the retry logic can handle them
+                    raise UnifiedClientError(f"Request timed out: {e}", error_type="timeout")
+                
+                # Check if it's a rate limit error
+                if "429" in error_str or "rate limit" in error_str or "quota" in error_str:
+                    raise  # Re-raise for multi-key retry logic
+                
+                # Check for prohibited content in unexpected errors
+                if any(indicator in error_str for indicator in content_filter_indicators):
+                    print(f"❌ Content prohibited in unexpected error: {error_str[:200]}")
+                    
+                    # Debug current state
+                    self._debug_multi_key_state()
+                    
+                    # If we're in multi-key mode and haven't tried the main key yet
+                    if (self._multi_key_mode and 
+                        not main_key_attempted and 
+                        hasattr(self, 'original_api_key') and 
+                        hasattr(self, 'original_model') and
+                        self.original_api_key and 
+                        self.original_model):
+                        
+                        print(f"🔄 Attempting main key fallback for prohibited content (from unexpected error)")
+                        print(f"   Current key: {self.key_identifier}")
+                        print(f"   Main key model: {self.original_model}")
+                        
+                        main_key_attempted = True
+                        
+                        try:
+                            # Create temporary client with main key
+                            main_response = self._retry_with_main_key(
+                                messages, temperature, max_tokens, max_completion_tokens, context
+                            )
+                            
+                            if main_response:
+                                content, finish_reason = main_response
+                                print(f"✅ Main key succeeded! Returning response")
+                                return content, finish_reason
+                            else:
+                                print(f"❌ Main key returned None")
+                                
+                        except Exception as main_error:
+                            print(f"❌ Main key error: {str(main_error)[:200]}")
+                            # Check if main key also hit content filter
+                            main_error_str = str(main_error).lower()
+                            if any(indicator in main_error_str for indicator in content_filter_indicators):
+                                print(f"❌ Main key also hit content filter")
+                    
+                    # Fall through to normal error handling
+                    print(f"❌ Content prohibited - not retrying")
+                    self._save_failed_request(messages, e, context)
+                    self._track_stats(context, False, "unexpected_error", time.time() - start_time)
+                    fallback_content = self._handle_empty_result(messages, context, str(e))
+                    return fallback_content, 'error'
+                
+                # Check for 500 errors in unexpected exceptions
+                if "500" in error_str or "internal server error" in error_str:
+                    if attempt < internal_retries - 1:
+                        # Exponential backoff with jitter
+                        delay = (base_delay * (2 ** attempt)) + random.uniform(0, 1)
+                        delay = min(delay, 60)  # Max 60 seconds
+                        
+                        print(f"🔄 Server error (500) - auto-retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries})")
+                        
+                        wait_start = time.time()
+                        while time.time() - wait_start < delay:
+                            if self._cancelled:
+                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                            time.sleep(0.5)
+                        continue
+                
+                # Check for other transient errors with exponential backoff
+                transient_errors = ["502", "503", "504", "connection reset", "connection aborted"]
+                if any(err in error_str for err in transient_errors):
+                    if attempt < internal_retries - 1:
+                        # Use a slightly less aggressive backoff for transient errors
+                        delay = (base_delay/2 * (2 ** attempt)) + random.uniform(0, 1)
+                        delay = min(delay, 30)  # Max 30 seconds for transient errors
+                        
+                        print(f"🔄 Transient error - retrying in {delay:.1f}s")
+                        
+                        wait_start = time.time()
+                        while time.time() - wait_start < delay:
+                            if self._cancelled:
+                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                            time.sleep(0.5)
+                        continue
+                
+                # Save failed request and return fallback for other errors
+                self._save_failed_request(messages, e, context)
+                self._track_stats(context, False, "unexpected_error", time.time() - start_time)
+                fallback_content = self._handle_empty_result(messages, context, str(e))
+                return fallback_content, 'error'
+
+                    
+    def _retry_with_main_key(self, messages, temperature=None, max_tokens=None, 
+                            max_completion_tokens=None, context=None) -> Optional[Tuple[str, Optional[str]]]:
+        """
+        Create a temporary client with the main key and retry the request.
+        This is used for prohibited content errors in multi-key mode.
+        """
+        print(f"[MAIN KEY RETRY] Starting retry with main key")
+        print(f"[MAIN KEY RETRY] Original key: {self.original_api_key[:8]}...{self.original_api_key[-4:]}")
+        print(f"[MAIN KEY RETRY] Original model: {self.original_model}")
+        
+        try:
+            # Create a new temporary UnifiedClient instance with the main key
+            temp_client = UnifiedClient(
+                api_key=self.original_api_key,
+                model=self.original_model,
+                output_dir=self.output_dir
+            )
+            
+            # FORCE single-key mode after initialization
+            # This is thread-safe because we're modifying the instance, not the environment
+            temp_client._multi_key_mode = False
+            temp_client.use_multi_keys = False
+            temp_client.key_identifier = "Main Key (Fallback)"
+            
+            # The client should already be set up from __init__, but verify
+            if not hasattr(temp_client, 'client_type') or temp_client.client_type is None:
+                # Force setup if needed
+                temp_client.api_key = self.original_api_key
+                temp_client.model = self.original_model
+                temp_client._setup_client()
+            
+            # Copy relevant state
+            temp_client.context = context
+            temp_client._cancelled = self._cancelled
+            temp_client._in_cleanup = self._in_cleanup
+            temp_client.current_session_context = self.current_session_context
+            temp_client.conversation_message_count = self.conversation_message_count
+            
+            print(f"[MAIN KEY RETRY] Created temp client with model: {temp_client.model}")
+            print(f"[MAIN KEY RETRY] Temp client type: {getattr(temp_client, 'client_type', 'NOT SET')}")
+            print(f"[MAIN KEY RETRY] Multi-key mode: {temp_client._multi_key_mode}")
+            
+            # Get file names for response tracking
+            payload_name, response_name = self._get_file_names(messages, context=context)
+            
+            # Try to send the request
+            print(f"[MAIN KEY RETRY] Sending request...")
+            
+            # Use the send method instead of _get_response for better compatibility
+            result = temp_client.send(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                max_completion_tokens=max_completion_tokens,
+                context=context
+            )
+            
+            # Check the result
+            if result and isinstance(result, tuple):
+                content, finish_reason = result
+                if content:
+                    print(f"[MAIN KEY RETRY] Success! Got content of length: {len(content)}")
+                    # Save the response using our instance's method
+                    self._save_response(content, response_name)
+                    return content, finish_reason
+                else:
+                    print(f"[MAIN KEY RETRY] Empty content returned")
+                    return None
+            else:
+                print(f"[MAIN KEY RETRY] Unexpected result type: {type(result)}")
+                return None
+            
+        except Exception as e:
+            print(f"[MAIN KEY RETRY] Exception: {type(e).__name__}: {str(e)[:500]}")
+            
+            # Check if it's also a content filter error
+            error_str = str(e).lower()
+            content_filter_indicators = [
+                "content_filter", "content was blocked", "response was blocked",
+                "safety filter", "content policy", "harmful content",
+                "blocked by safety", "harm_category", "content_policy_violation",
+                "unsafe content", "violates our usage policies",
+                "prohibited_content", "blockedreason", "content blocked"
+            ]
+            
+            if any(indicator in error_str for indicator in content_filter_indicators):
+                print(f"[MAIN KEY RETRY] Main key also hit content filter")
+            
+            # Re-raise so the calling method can handle it
+            raise
     
+    
+    # Image handling methods
+    def send_image(self, messages: List[Dict[str, Any]], image_data: Any,
+                  temperature: Optional[float] = None, 
+                  max_tokens: Optional[int] = None,
+                  max_completion_tokens: Optional[int] = None,
+                  context: str = 'image_translation') -> Tuple[str, str]:
+        """Thread-safe image send with proper key management and deduplication for batch translation"""
+        thread_name = threading.current_thread().name
+
+        # Generate request hash for duplicate detection with better image hashing
+        image_size = len(image_data) if isinstance(image_data, (bytes, str)) else 0
+        
+        # Create a more unique hash by including actual image data hash
+        if image_data:
+            if isinstance(image_data, bytes):
+                # Hash the actual bytes
+                image_hash = hashlib.md5(image_data).hexdigest()[:12]
+            else:
+                # Hash string representation (base64)
+                image_hash = hashlib.md5(str(image_data).encode()).hexdigest()[:12]
+        else:
+            image_hash = "empty"
+        
+        # Include image hash in request hash for better uniqueness
+        messages_hash = self._get_request_hash(messages)
+        request_hash = f"{messages_hash}_img_{image_size}_{image_hash}"
+        
+        # Extract any chapter/context info from messages
+        chapter_info = self._extract_chapter_info(messages)
+        context_str = context or 'image_translation'
+        
+        # Try to get image filename if available
+        if chapter_info['chapter']:
+            context_str = f"Image Chapter {chapter_info['chapter']}"
+        else:
+            # Try to extract filename from messages
+            messages_str = str(messages)
+            if 'image' in messages_str.lower():
+                import re
+                filename_match = re.search(r'(\w+\.(png|jpg|jpeg|gif|bmp|webp))', messages_str, re.IGNORECASE)
+                if filename_match:
+                    context_str = f"Image: {filename_match.group(1)}"
+        
+        # === IMPROVED IMAGE DEDUPLICATION WITH PROPER SYNCHRONIZATION ===
+        
+        # Only check for duplicates in specific contexts
+        if context in ['image_translation', 'glossary']:
+            # Step 1: Try to get from cache first (atomic check)
+            with self._request_cache_lock:
+                if request_hash in self._request_cache:
+                    content, finish_reason, timestamp = self._request_cache[request_hash]
+                    if time.time() - timestamp < self._cache_expiry_seconds:
+                        logger.info(f"[{thread_name}] Cache HIT for {context_str}, returning cached image response")
+                        return content, finish_reason
+                    else:
+                        # Expired, remove it
+                        del self._request_cache[request_hash]
+            
+            # Step 2: Check if another thread is processing this image (atomic check-and-set)
+            processing_by_other = False
+            event_to_wait = None
+            
+            with self._active_requests_lock:
+                if request_hash in self._active_requests:
+                    # Another thread is processing this image
+                    event_to_wait = self._active_requests[request_hash]
+                    processing_by_other = True
+                    logger.info(f"[{thread_name}] Image request {request_hash[:8]} is being processed by another thread")
+                else:
+                    # We're the first, create an event for others
+                    event = threading.Event()
+                    self._active_requests[request_hash] = event
+                    logger.debug(f"[{thread_name}] Taking ownership of image request {request_hash[:8]}")
+            
+            # Step 3: If another thread is processing, wait for it
+            if processing_by_other and event_to_wait:
+                logger.info(f"[{thread_name}] Waiting for {context_str} to be processed by another thread...")
+                
+                # Wait with timeout and periodic cache checks
+                wait_timeout = 60  # Maximum wait time for images
+                check_interval = 0.5
+                total_waited = 0
+                
+                while total_waited < wait_timeout:
+                    # Check if event is set
+                    if event_to_wait.wait(timeout=check_interval):
+                        # Event was set, check cache
+                        with self._request_cache_lock:
+                            if request_hash in self._request_cache:
+                                content, finish_reason, timestamp = self._request_cache[request_hash]
+                                if time.time() - timestamp < self._cache_expiry_seconds:
+                                    logger.info(f"[{thread_name}] Got cached image result after waiting")
+                                    return content, finish_reason
+                        
+                        # No cache entry found despite event being set
+                        logger.warning(f"[{thread_name}] Event set but no cache entry for image, processing ourselves")
+                        break
+                    
+                    total_waited += check_interval
+                    
+                    # Periodic cache check
+                    if total_waited % 2 == 0:  # Check every 2 seconds
+                        with self._request_cache_lock:
+                            if request_hash in self._request_cache:
+                                content, finish_reason, timestamp = self._request_cache[request_hash]
+                                if time.time() - timestamp < self._cache_expiry_seconds:
+                                    logger.info(f"[{thread_name}] Found cached image result while waiting")
+                                    return content, finish_reason
+                
+                if total_waited >= wait_timeout:
+                    logger.warning(f"[{thread_name}] Timeout waiting for image {context_str}, processing ourselves")
+        
+        # === END OF IMPROVED IMAGE DEDUPLICATION ===
+        
+        # Call debug if enabled
+        if os.getenv("DEBUG_PARALLEL_REQUESTS", "0") == "1":
+            self._debug_active_requests()
+        
+        # Ensure thread has a client
+        self._ensure_thread_client()
+        
+        logger.info(f"[{thread_name}] Processing {context_str} with {self.key_identifier}")
+
+        max_retries = 7
+        retry_count = 0
+        last_error = None
+        retry_reason = None
+        successful_response = None
+        
+        # Track current attempt for payload
+        self._current_retry_attempt = 0
+        self._max_retries = max_retries
+        
+        # Track which keys we've already tried to avoid infinite loops
+        attempted_keys = set()
+        
+        # Flag to track if we should try main key for prohibited content
+        should_try_main_key = False
+        
+        # Define content filter indicators at method level
+        content_filter_indicators = [
+            "content_filter", "content was blocked", "response was blocked",
+            "safety filter", "content policy", "harmful content",
+            "blocked by safety", "harm_category", "content_policy_violation",
+            "unsafe content", "violates our usage policies",
+            "prohibited_content", "blockedreason", "content blocked",
+            "inappropriate image", "inappropriate content"
+        ]
+        
+        try:
+            while retry_count < max_retries:
+                try:
+                    # Update current attempt
+                    self._current_retry_attempt = retry_count
+                    
+                    # Track current key
+                    attempted_keys.add(self.key_identifier)
+                    
+                    # Call the actual implementation with retry reason
+                    result = self._send_image_internal(messages, image_data, temperature,
+                                                     max_tokens, max_completion_tokens, context,
+                                                     retry_reason=retry_reason)
+                    
+                    # Mark success
+                    if self._multi_key_mode:
+                        tls = self._get_thread_local_client()
+                        if tls.key_index is not None:
+                            self._api_key_pool.mark_key_success(tls.key_index)
+                    
+                    logger.info(f"[{thread_name}] ✓ Image request completed with {self.key_identifier}")
+                    successful_response = result
+                    break  # Success, exit retry loop
+                    
+                except Exception as e:
+                    last_error = e
+                    error_str = str(e)
+                    logger.error(f"[{thread_name}] ✗ {self.key_identifier} image error: {error_str[:100]}")
+                    
+                    # Check for prohibited content FIRST (before rate limit check)
+                    if any(indicator in error_str.lower() for indicator in content_filter_indicators):
+                        retry_reason = "prohibited_image_content"
+                        print(f"[Thread-{thread_name}] Prohibited image content detected on {self.key_identifier}")
+                        
+                        # If we're in multi-key mode and haven't tried main key yet
+                        if (self._multi_key_mode and 
+                            hasattr(self, 'original_api_key') and 
+                            hasattr(self, 'original_model') and
+                            self.original_api_key and 
+                            self.original_model and
+                            not should_try_main_key):
+                            
+                            print(f"[Thread-{thread_name}] Will retry with main key for prohibited image content")
+                            should_try_main_key = True
+                            
+                            # Try with main key
+                            try:
+                                main_response = self._retry_image_with_main_key(
+                                    messages, image_data, temperature, max_tokens, max_completion_tokens, context
+                                )
+                                
+                                if main_response:
+                                    content, finish_reason = main_response
+                                    print(f"✅ Main key succeeded for image! Returning response")
+                                    successful_response = main_response
+                                    break  # Exit retry loop with success
+                                else:
+                                    print(f"❌ Main key returned None for image")
+                                    
+                            except Exception as main_error:
+                                print(f"❌ Main key image error: {str(main_error)[:200]}")
+                                # Check if main key also hit content filter
+                                main_error_str = str(main_error).lower()
+                                if any(indicator in main_error_str for indicator in content_filter_indicators):
+                                    print(f"❌ Main key also hit content filter for image")
+                            
+                            # Don't count this as a retry, just continue
+                            retry_count += 1
+                            continue
+                        else:
+                            # Either not in multi-key mode, or already tried main key
+                            print(f"[Thread-{thread_name}] Prohibited image content - cannot retry")
+                            raise
+                    
+                    # Check for rate limit
+                    elif "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
+                        retry_reason = "rate_limit_image"
+                        if self._multi_key_mode:
+                            print(f"[Thread-{thread_name}] Image rate limit hit on {self.key_identifier}")
+                            
+                            # Handle rate limit for this thread
+                            self._handle_rate_limit_for_thread()
+                            
+                            # Check if we have any available keys
+                            available_count = self._count_available_keys()
+                            if available_count == 0:
+                                logger.error(f"[{thread_name}] All API keys are cooling down for images")
+                                
+                                # If we still have retries left, wait for the shortest cooldown
+                                if retry_count < max_retries - 1:
+                                    cooldown_time = self._get_shortest_cooldown_time()
+                                    print(f"⏳ [Thread-{thread_name}] All keys cooling down for image, waiting {cooldown_time}s...")
+                                    
+                                    # Wait with cancellation check
+                                    for i in range(cooldown_time):
+                                        if self._cancelled:
+                                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                        time.sleep(1)
+                                        if i % 10 == 0 and i > 0:
+                                            print(f"⏳ [Thread-{thread_name}] Still waiting... {cooldown_time - i}s remaining")
+                                    
+                                    # Force re-initialization after cooldown
+                                    tls = self._get_thread_local_client()
+                                    tls.initialized = False
+                                    self._ensure_thread_client()
+                                    
+                                    retry_count += 1
+                                    continue
+                                else:
+                                    # No more retries, raise the error
+                                    raise UnifiedClientError("All API keys are cooling down", error_type="rate_limit")
+                            
+                            # Check if we've tried too many keys
+                            if len(attempted_keys) >= len(self._api_key_pool.keys):
+                                logger.error(f"[{thread_name}] Attempted all {len(self._api_key_pool.keys)} keys for image")
+                                raise UnifiedClientError("All API keys rate limited for image requests", error_type="rate_limit")
+                            
+                            retry_count += 1
+                            logger.info(f"[{thread_name}] Retrying image with new key, attempt {retry_count}/{max_retries}")
+                            continue
+                        else:
+                            # Single key mode - wait and retry
+                            if retry_count < max_retries - 1:
+                                wait_time = min(30 * (retry_count + 1), 120)
+                                logger.info(f"[{thread_name}] Image rate limit, waiting {wait_time}s")
+                                
+                                for i in range(wait_time):
+                                    if self._cancelled:
+                                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                    time.sleep(1)
+                                    
+                                retry_count += 1
+                                continue
+                            else:
+                                raise UnifiedClientError("Image rate limit exceeded", error_type="rate_limit")
+                    
+                    # Check for cancellation
+                    elif isinstance(e, UnifiedClientError) and e.error_type in ["cancelled", "timeout"]:
+                        retry_reason = f"cancelled_{e.error_type}"
+                        raise
+                    
+                    # Other errors
+                    elif retry_count < max_retries - 1:
+                        # Determine retry reason based on error type
+                        if "timeout" in error_str.lower():
+                            retry_reason = "timeout_error"
+                        elif "connection" in error_str.lower():
+                            retry_reason = "connection_error"
+                        elif "500" in error_str or "502" in error_str or "503" in error_str:
+                            retry_reason = f"server_error_{error_str[:3]}"
+                        else:
+                            # Generic error with exception type
+                            retry_reason = f"error_{type(e).__name__}"[:30]  # Limit length for filename
+                        
+                        if self._multi_key_mode:
+                            tls = self._get_thread_local_client()
+                            if tls.key_index is not None:
+                                self._api_key_pool.mark_key_error(tls.key_index)
+                            
+                            if not self._force_rotation:
+                                # Error-based rotation - try a different key
+                                logger.info(f"[{thread_name}] Image error occurred ({retry_reason}), rotating to new key...")
+                                
+                                # Force reassignment
+                                tls.initialized = False
+                                tls.request_count = 0
+                                self._ensure_thread_client()
+                                
+                                retry_count += 1
+                                logger.info(f"[{thread_name}] Rotated to {self.key_identifier} after image error")
+                                continue
+                        
+                        # Retry with same key (or if rotation disabled)
+                        logger.info(f"[{thread_name}] Retrying image after {retry_reason} (attempt {retry_count + 1}/{max_retries})")
+                        retry_count += 1
+                        time.sleep(2)
+                        continue
+                    
+                    # Can't retry - final error
+                    else:
+                        retry_reason = f"final_error_{type(e).__name__}"
+                        logger.error(f"[{thread_name}] Cannot retry image request: {retry_reason}")
+                        raise
+            
+            # === IMPROVED CACHE UPDATE AND CLEANUP FOR IMAGES ===
+            if successful_response and context in ['image_translation', 'glossary']:
+                content, finish_reason = successful_response
+                
+                # Cache the successful response
+                with self._request_cache_lock:
+                    self._request_cache[request_hash] = (content, finish_reason, time.time())
+                    
+                    # Cleanup old cache entries if too many
+                    if len(self._request_cache) > 1000:
+                        sorted_items = sorted(self._request_cache.items(), key=lambda x: x[1][2])
+                        for key, _ in sorted_items[:100]:
+                            del self._request_cache[key]
+                
+                logger.info(f"[{thread_name}] Cached successful image response for {context_str}")
+                
+                # Signal waiting threads BEFORE cleanup
+                with self._active_requests_lock:
+                    if request_hash in self._active_requests:
+                        event = self._active_requests[request_hash]
+                        event.set()  # Wake up waiting threads
+                        logger.debug(f"[{thread_name}] Signaled completion of image {request_hash[:8]}")
+                        
+                        # Schedule cleanup after delay to ensure waiters get the result
+                        threading.Timer(5.0, self._cleanup_active_request, args=[request_hash]).start()
+            
+            if successful_response:
+                return successful_response
+            
+            # Exhausted retries
+            if last_error:
+                logger.error(f"[{thread_name}] Exhausted {max_retries} image retries, last reason: {retry_reason}")
+                
+                # Clean up on failure too
+                with self._active_requests_lock:
+                    if request_hash in self._active_requests:
+                        event = self._active_requests.pop(request_hash, None)
+                        if event:
+                            event.set()  # Signal failure to waiters
+                
+                raise last_error
+            else:
+                raise Exception(f"Image request failed after {max_retries} attempts")
+                
+        except Exception as e:
+            # Clean up on any exception
+            with self._active_requests_lock:
+                if request_hash in self._active_requests:
+                    event = self._active_requests.pop(request_hash, None)
+                    if event:
+                        event.set()  # Signal error to waiters
+            raise
+
+    def _send_image_internal(self, messages: List[Dict[str, Any]], image_data: Any,
+                            temperature: Optional[float] = None, 
+                            max_tokens: Optional[int] = None,
+                            max_completion_tokens: Optional[int] = None,
+                            context: str = 'image_translation',
+                            retry_reason: Optional[str] = None) -> Tuple[str, str]:
+        """
+        Internal implementation of send_image with integrated 500 error retry logic and universal extraction
+        """
+        start_time = time.time()
+        
+        # Generate request hash early (with image size)
+        image_size = len(image_data) if isinstance(image_data, (bytes, str)) else 0
+        request_hash = self._get_request_hash(messages) + f"_img{image_size}"
+        thread_name = threading.current_thread().name
+        
+        # Log with hash for tracking
+        logger.debug(f"[{thread_name}] _send_image_internal starting for {context} (hash: {request_hash[:8]}...) retry_reason: {retry_reason}")
+        
+        # Reset cancelled flag
+        self._cancelled = False
+        
+        # Reset counters when context changes
+        if context != self.current_session_context:
+            self.reset_conversation_for_new_context(context)
+        
+        self.context = context or 'image_translation'
+        self.conversation_message_count += 1
+        
+        # Internal retry logic for 500 errors - INCREASED TO 7
+        internal_retries = 7
+        base_delay = 5  # Base delay for exponential backoff
+        
+        # Track if we've tried main key for prohibited content
+        main_key_attempted = False
+        
+        # Define content filter indicators locally for consistency
+        content_filter_indicators = [
+            "content_filter", "content was blocked", "response was blocked",
+            "safety filter", "content policy", "harmful content",
+            "blocked by safety", "harm_category", "content_policy_violation",
+            "unsafe content", "violates our usage policies",
+            "prohibited_content", "blockedreason", "content blocked",
+            "inappropriate image", "inappropriate content"
+        ]
+        
+        # Use GUI values if not explicitly overridden
+        if temperature is None:
+            temperature = getattr(self, 'default_temperature', 0.3)
+            logger.debug(f"Using default temperature: {temperature}")
+    
+        
+        # Determine if this is an o-series model
+        is_o_series = self._is_o_series_model()
+        
+        # Handle token limits based on model type
+        if is_o_series:
+            # o-series models use max_completion_tokens
+            if max_completion_tokens is None:
+                max_completion_tokens = max_tokens if max_tokens is not None else getattr(self, 'default_max_tokens', 8192)
+            max_tokens = None  # Clear max_tokens for o-series
+            logger.info(f"Using o-series model {self.model} with max_completion_tokens: {max_completion_tokens}")
+        else:
+            # Regular models use max_tokens
+            if max_tokens is None:
+                max_tokens = max_completion_tokens if max_completion_tokens is not None else getattr(self, 'default_max_tokens', 8192)
+            max_completion_tokens = None  # Clear max_completion_tokens for regular models
+            logger.debug(f"Using regular model {self.model} with max_tokens: {max_tokens}")
+        
+        # Convert to base64 if needed
+        if isinstance(image_data, bytes):
+            image_base64 = base64.b64encode(image_data).decode('utf-8')
+            logger.debug(f"Converted {len(image_data)} bytes to base64")
+        else:
+            image_base64 = image_data
+                
+        for attempt in range(internal_retries):
+            try:
+                # Validate request (basic validation for images)
+                if not messages:
+                    raise UnifiedClientError("No messages provided for image request", error_type="validation")
+                
+                os.makedirs("Payloads", exist_ok=True)
+                
+                # Apply reinforcement
+                messages = self._apply_pure_reinforcement(messages)
+                
+                # Get file names - IMPORTANT for duplicate detection
+                payload_name, response_name = self._get_file_names(messages, context=self.context)
+                
+                # Create a sanitized version for payload (without actual image data)
+                payload_messages = [
+                    {**msg, 'content': 'IMAGE_DATA_OMITTED' if isinstance(msg.get('content'), list) else msg.get('content')}
+                    for msg in messages
+                ]
+                
+                # Save payload with retry reason
+                # On internal retries (500 errors), add that info too
+                if attempt > 0:
+                    internal_retry_reason = f"500_error_image_attempt_{attempt}"
+                    if retry_reason:
+                        combined_reason = f"{retry_reason}_{internal_retry_reason}"
+                    else:
+                        combined_reason = internal_retry_reason
+                    self._save_payload(payload_messages, payload_name, retry_reason=combined_reason)
+                else:
+                    self._save_payload(payload_messages, payload_name, retry_reason=retry_reason)
+                
+                # FIX: Define payload_messages BEFORE using it
+                # Create a sanitized version for payload (without actual image data)
+                payload_messages = [
+                    {**msg, 'content': 'IMAGE_DATA_OMITTED' if isinstance(msg.get('content'), list) else msg.get('content')}
+                    for msg in messages
+                ]
+                
+                # Now save the payload (payload_messages is now defined)
+                self._save_payload(payload_messages, payload_name)
+        
+                # Check for timeout toggle from GUI
+                retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
+                if retry_timeout_enabled:
+                    timeout_seconds = int(os.getenv("CHUNK_TIMEOUT", "180"))
+                    logger.info(f"Image timeout monitoring enabled: {timeout_seconds}s limit")
+                
+                # Log the request details
+                logger.info(f"Sending image request to {self.client_type} ({self.model})")
+                logger.debug(f"Temperature: {temperature}, Max tokens: {max_tokens or max_completion_tokens}")
+                
+                # Route to appropriate handler based on client type
+                if self.client_type == 'gemini':
+                    response = self._send_gemini_image(messages, image_base64, temperature, 
+                                                     max_tokens or max_completion_tokens, response_name)
+                elif self.client_type == 'openai':
+                    response = self._send_openai_image(messages, image_base64, temperature, 
+                                                 max_tokens, max_completion_tokens, response_name)
+                elif self.client_type == 'anthropic':
+                    response = self._send_anthropic_image(messages, image_base64, temperature, 
+                                                        max_tokens or max_completion_tokens, response_name)
+                elif self.client_type == 'electronhub':
+                    response = self._send_electronhub_image(messages, image_base64, temperature, 
+                                                          max_tokens or max_completion_tokens, response_name)
+                elif self.client_type == 'poe':
+                    response = self._send_poe_image(messages, image_base64, temperature,
+                                                  max_tokens or max_completion_tokens, response_name)
+                elif self.client_type == 'openrouter':
+                    response = self._send_openrouter_image(messages, image_base64, temperature,
+                                                         max_tokens or max_completion_tokens, response_name)
+                elif self.client_type == 'cohere':
+                    response = self._send_cohere_image(messages, image_base64, temperature,
+                                                     max_tokens or max_completion_tokens, response_name)
+                elif self.client_type == 'vertex_model_garden':
+                    response = self._send_vertex_model_garden_image(messages, image_base64, temperature, 
+                                                                   max_tokens or max_completion_tokens, response_name)
+                else:
+                    # Try OpenAI-compatible endpoint as fallback
+                    print(f"⚠️ No specific image handler for {self.client_type}, trying OpenAI-compatible endpoint")
+                    response = self._send_openai_image(messages, image_base64, temperature,
+                                                     max_tokens, max_completion_tokens, response_name)
+                
+                # Check for cancellation (from timeout or stop button)
+                if self._cancelled:
+                    logger.info("Image operation cancelled (timeout or user stop)")
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                
+                # ====== UNIVERSAL EXTRACTION INTEGRATION ======
+                # Use universal extraction instead of assuming response.content exists
+                extracted_content = ""
+                finish_reason = 'stop'
+                
+                if response:
+                    # Prepare provider-specific parameters
+                    extraction_kwargs = {}
+                    
+                    # Add Gemini-specific parameters if applicable
+                    if self.client_type == 'gemini':
+                        # Check if this model supports thinking
+                        extraction_kwargs['supports_thinking'] = self._supports_thinking()
+                        # Get thinking budget from environment
+                        extraction_kwargs['thinking_budget'] = int(os.getenv("THINKING_BUDGET", "-1"))
+                    
+                    # Try universal extraction with provider-specific parameters
+                    extracted_content, finish_reason = self._extract_response_text(
+                        response, 
+                        provider=self.client_type,
+                        **extraction_kwargs
+                    )
+                    
+                    # If extraction failed but we have a response object
+                    if not extracted_content and response:
+                        print(f"⚠️ Failed to extract text from {self.client_type} image response")
+                        print(f"   Response type: {type(response)}")
+                        print(f"   Consider checking image response extraction for this provider")
+                        
+                        # Log the response structure for debugging
+                        self._save_failed_request(messages, "Image extraction failed", context, response)
+                        
+                        # Check if response has any common attributes we missed
+                        if hasattr(response, 'content') and response.content:
+                            extracted_content = str(response.content)
+                            print(f"   Fallback: Using response.content directly")
+                        elif hasattr(response, 'text') and response.text:
+                            extracted_content = str(response.text)
+                            print(f"   Fallback: Using response.text directly")
+                    
+                    # Update response object with extracted content
+                    if extracted_content and hasattr(response, 'content'):
+                        response.content = extracted_content
+                    elif extracted_content:
+                        # Create a new response object if needed
+                        response = UnifiedResponse(
+                            content=extracted_content,
+                            finish_reason=finish_reason,
+                            raw_response=response
+                        )
+                
+                # CRITICAL: Save response for duplicate detection
+                # This must happen even for truncated/empty responses
+                if extracted_content:
+                    self._save_response(extracted_content, response_name)
+                    logger.debug(f"Saved image response to: {response_name}")
+                
+                # Handle empty responses
+                if not extracted_content or extracted_content.strip() in ["", "[]", "[IMAGE TRANSLATION FAILED]"]:
+                    print(f"Empty or error image response: {finish_reason}")
+                    self._save_failed_request(messages, "Empty image response", context, response)
+                    
+                    # ALWAYS log these failures too
+                    self._log_truncation_failure(
+                        messages=messages,
+                        response_content=extracted_content or "",
+                        finish_reason=finish_reason or 'error',
+                        context=context,
+                        error_details=getattr(response, 'error_details', None) if response else None
+                    )
+                    self._track_stats(context, False, "empty_image_response", time.time() - start_time)
+                    
+                    # Use fallback
+                    fallback_content = self._handle_empty_result(messages, context, 
+                        getattr(response, 'error_details', "empty_image") if response else "empty_image")
+                    return fallback_content, 'error'
+                
+                # Track success
+                self._track_stats(context, True, None, time.time() - start_time)
+                
+                # Mark key as successful in multi-key mode
+                self._mark_key_success()
+                
+                # Log important info for retry mechanisms
+                if finish_reason in ['length', 'max_tokens']:
+                    print(f"Image response was truncated: {finish_reason}")
+                    print(f"⚠️ Image response truncated (finish_reason: {finish_reason})")
+                    
+                    # ALWAYS log truncation failures
+                    self._log_truncation_failure(
+                        messages=messages,
+                        response_content=extracted_content,
+                        finish_reason=finish_reason,
+                        context=context,
+                        error_details=getattr(response, 'error_details', None) if response else None
+                    )
+                    # The calling code will check finish_reason=='length' for retry
+                
+                # Apply API delay after successful call (even if truncated)
+                # SKIP DELAY DURING CLEANUP
+                if not self._in_cleanup:
+                    api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+                    if api_delay > 0:
+                        print(f"⏳ Waiting {api_delay}s before next API call...")
+                        time.sleep(api_delay)
+                else:
+                    print("⚡ Skipping API delay (cleanup mode)")
+                
+                # Return the response with accurate finish_reason
+                # This is CRITICAL for retry mechanisms to work
+                return extracted_content, finish_reason
+                
+            except UnifiedClientError as e:
+                # Handle cancellation specially for timeout support
+                if e.error_type == "cancelled" or "cancelled" in str(e):
+                    self._in_cleanup = False  # Ensure cleanup flag is set
+                    logger.info("Propagating image cancellation to caller")
+                    # Re-raise so send_with_interrupt can handle it
+                    raise
+                
+                print(f"UnifiedClient image error: {e}")
+                
+                # Check if it's a rate limit error and re-raise for retry logic
+                error_str = str(e).lower()
+                if e.error_type == "rate_limit" or "429" in error_str or "rate limit" in error_str or "quota" in error_str:
+                    raise  # Re-raise for multi-key retry logic in outer send_image() method
+                
+                # Check for prohibited content - check BOTH error_type AND error string
+                if e.error_type == "prohibited_content" or any(indicator in error_str for indicator in content_filter_indicators):
+                    print(f"❌ Prohibited image content detected: {error_str[:200]}")
+                    
+                    # Only try main key if conditions are met
+                    if (self._multi_key_mode and 
+                        not main_key_attempted and 
+                        hasattr(self, 'original_api_key') and 
+                        hasattr(self, 'original_model') and
+                        self.original_api_key and 
+                        self.original_model):
+                        
+                        print(f"🔄 Attempting main key fallback for prohibited image content")
+                        print(f"   Current key: {self.key_identifier}")
+                        print(f"   Main key model: {self.original_model}")
+                        
+                        main_key_attempted = True
+                        
+                        try:
+                            # Create temporary client with main key for image
+                            main_response = self._retry_image_with_main_key(
+                                messages, image_data, temperature, max_tokens, max_completion_tokens, context
+                            )
+                            
+                            if main_response:
+                                content, finish_reason = main_response
+                                print(f"✅ Main key succeeded for image! Returning response")
+                                return content, finish_reason
+                            else:
+                                print(f"❌ Main key returned None for image")
+                                
+                        except Exception as main_error:
+                            print(f"❌ Main key image error: {str(main_error)[:200]}")
+                            # Check if main key also hit content filter
+                            main_error_str = str(main_error).lower()
+                            if any(indicator in main_error_str for indicator in content_filter_indicators):
+                                print(f"❌ Main key also hit content filter for image")
+                            # Continue to normal error handling
+                    
+                    # Normal prohibited content handling
+                    print(f"❌ Image content prohibited - not retrying further")
+                    self._save_failed_request(messages, e, context)
+                    self._track_stats(context, False, type(e).__name__, time.time() - start_time)
+                    fallback_content = self._handle_empty_result(messages, context, str(e))
+                    return fallback_content, 'error'
+                
+                # Check for 500 errors - retry these with exponential backoff
+                http_status = getattr(e, 'http_status', None)
+                if http_status == 500 or "500" in error_str or "api_error" in error_str:
+                    if attempt < internal_retries - 1:
+                        # Exponential backoff with jitter
+                        delay = (base_delay * (2 ** attempt)) + random.uniform(0, 1)
+                        # Cap the maximum delay to prevent extremely long waits
+                        delay = min(delay, 60)  # Max 60 seconds
+                        
+                        print(f"🔄 Image server error (500) - auto-retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries})")
+                        
+                        # Wait with cancellation check
+                        wait_start = time.time()
+                        while time.time() - wait_start < delay:
+                            if self._cancelled:
+                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                            time.sleep(0.5)  # Check every 0.5 seconds
+                        continue
+                    else:
+                        print(f"❌ Image server error (500) - exhausted {internal_retries} retries")
+                
+                # Save failed request and return fallback
+                self._save_failed_request(messages, e, context)
+                self._track_stats(context, False, type(e).__name__, time.time() - start_time)
+                fallback_content = self._handle_empty_result(messages, context, str(e))
+                return fallback_content, 'error'
+                
+            except Exception as e:
+                print(f"Unexpected image error: {e}")
+                error_str = str(e).lower()
+                
+                # For unexpected errors, check if it's a timeout
+                if "timed out" in error_str:
+                    # Re-raise timeout errors so the retry logic can handle them
+                    raise UnifiedClientError(f"Image request timed out: {e}", error_type="timeout")
+                
+                # Check if it's a rate limit error
+                if "429" in error_str or "rate limit" in error_str or "quota" in error_str:
+                    raise  # Re-raise for multi-key retry logic
+                
+                # Check for prohibited content in unexpected errors
+                if any(indicator in error_str for indicator in content_filter_indicators):
+                    print(f"❌ Image content prohibited in unexpected error: {error_str[:200]}")
+                    
+                    # Debug current state
+                    self._debug_multi_key_state()
+                    
+                    # If we're in multi-key mode and haven't tried the main key yet
+                    if (self._multi_key_mode and 
+                        not main_key_attempted and 
+                        hasattr(self, 'original_api_key') and 
+                        hasattr(self, 'original_model') and
+                        self.original_api_key and 
+                        self.original_model):
+                        
+                        print(f"🔄 Attempting main key fallback for prohibited image (from unexpected error)")
+                        print(f"   Current key: {self.key_identifier}")
+                        print(f"   Main key model: {self.original_model}")
+                        
+                        main_key_attempted = True
+                        
+                        try:
+                            # Create temporary client with main key for image
+                            main_response = self._retry_image_with_main_key(
+                                messages, image_data, temperature, max_tokens, max_completion_tokens, context
+                            )
+                            
+                            if main_response:
+                                content, finish_reason = main_response
+                                print(f"✅ Main key succeeded for image! Returning response")
+                                return content, finish_reason
+                            else:
+                                print(f"❌ Main key returned None for image")
+                                
+                        except Exception as main_error:
+                            print(f"❌ Main key image error: {str(main_error)[:200]}")
+                            # Check if main key also hit content filter
+                            main_error_str = str(main_error).lower()
+                            if any(indicator in main_error_str for indicator in content_filter_indicators):
+                                print(f"❌ Main key also hit content filter for image")
+                    
+                    # Fall through to normal error handling
+                    print(f"❌ Image content prohibited - not retrying")
+                    self._save_failed_request(messages, e, context)
+                    self._track_stats(context, False, "unexpected_error", time.time() - start_time)
+                    fallback_content = self._handle_empty_result(messages, context, str(e))
+                    return fallback_content, 'error'
+                
+                # Check for 500 errors in unexpected exceptions
+                if "500" in error_str or "internal server error" in error_str:
+                    if attempt < internal_retries - 1:
+                        # Exponential backoff with jitter
+                        delay = (base_delay * (2 ** attempt)) + random.uniform(0, 1)
+                        delay = min(delay, 60)  # Max 60 seconds
+                        
+                        print(f"🔄 Image server error (500) - auto-retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries})")
+                        
+                        wait_start = time.time()
+                        while time.time() - wait_start < delay:
+                            if self._cancelled:
+                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                            time.sleep(0.5)
+                        continue
+                
+                # Check for other transient errors with exponential backoff
+                transient_errors = ["502", "503", "504", "connection reset", "connection aborted"]
+                if any(err in error_str for err in transient_errors):
+                    if attempt < internal_retries - 1:
+                        # Use a slightly less aggressive backoff for transient errors
+                        delay = (base_delay/2 * (2 ** attempt)) + random.uniform(0, 1)
+                        delay = min(delay, 30)  # Max 30 seconds for transient errors
+                        
+                        print(f"🔄 Image transient error - retrying in {delay:.1f}s")
+                        
+                        wait_start = time.time()
+                        while time.time() - wait_start < delay:
+                            if self._cancelled:
+                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                            time.sleep(0.5)
+                        continue
+                
+                # Save failed request and return fallback for other errors
+                self._save_failed_request(messages, e, context)
+                self._track_stats(context, False, "unexpected_error", time.time() - start_time)
+                fallback_content = self._handle_empty_result(messages, context, str(e))
+                return fallback_content, 'error'
+
+    def _retry_image_with_main_key(self, messages, image_data, temperature=None, max_tokens=None, 
+                                   max_completion_tokens=None, context=None) -> Optional[Tuple[str, Optional[str]]]:
+        """
+        Create a temporary client with the main key and retry the image request.
+        This is used for prohibited content errors in multi-key mode.
+        """
+        print(f"[MAIN KEY IMAGE RETRY] Starting image retry with main key")
+        print(f"[MAIN KEY IMAGE RETRY] Original key: {self.original_api_key[:8]}...{self.original_api_key[-4:]}")
+        print(f"[MAIN KEY IMAGE RETRY] Original model: {self.original_model}")
+        
+        try:
+            # Create a new temporary UnifiedClient instance with the main key
+            temp_client = UnifiedClient(
+                api_key=self.original_api_key,
+                model=self.original_model,
+                output_dir=self.output_dir
+            )
+            
+            # FORCE single-key mode after initialization
+            # This is thread-safe because we're modifying the instance, not the environment
+            temp_client._multi_key_mode = False
+            temp_client.use_multi_keys = False
+            temp_client.key_identifier = "Main Key (Image Fallback)"
+            
+            # The client should already be set up from __init__, but verify
+            if not hasattr(temp_client, 'client_type') or temp_client.client_type is None:
+                # Force setup if needed
+                temp_client.api_key = self.original_api_key
+                temp_client.model = self.original_model
+                temp_client._setup_client()
+            
+            # Copy relevant state
+            temp_client.context = context or 'image_translation'
+            temp_client._cancelled = self._cancelled
+            temp_client._in_cleanup = self._in_cleanup
+            temp_client.current_session_context = self.current_session_context
+            temp_client.conversation_message_count = self.conversation_message_count
+            
+            # Copy image-specific settings if they exist
+            temp_client.default_temperature = getattr(self, 'default_temperature', 0.3)
+            temp_client.default_max_tokens = getattr(self, 'default_max_tokens', 8192)
+            temp_client.request_timeout = self.request_timeout
+            
+            print(f"[MAIN KEY IMAGE RETRY] Created temp client with model: {temp_client.model}")
+            print(f"[MAIN KEY IMAGE RETRY] Temp client type: {getattr(temp_client, 'client_type', 'NOT SET')}")
+            print(f"[MAIN KEY IMAGE RETRY] Multi-key mode: {temp_client._multi_key_mode}")
+            
+            # Get file names for response tracking
+            payload_name, response_name = self._get_file_names(messages, context=context)
+            
+            # Try to send the image request
+            print(f"[MAIN KEY IMAGE RETRY] Sending image request...")
+            
+            # Use the send_image method instead of _get_response for better compatibility
+            result = temp_client.send_image(
+                messages=messages,
+                image_data=image_data,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                max_completion_tokens=max_completion_tokens,
+                context=context
+            )
+            
+            # Check the result
+            if result and isinstance(result, tuple):
+                content, finish_reason = result
+                if content:
+                    print(f"[MAIN KEY IMAGE RETRY] Success! Got image response of length: {len(content)}")
+                    # Save the response using our instance's method
+                    self._save_response(content, response_name)
+                    return content, finish_reason
+                else:
+                    print(f"[MAIN KEY IMAGE RETRY] Empty content returned for image")
+                    return None
+            else:
+                print(f"[MAIN KEY IMAGE RETRY] Unexpected result type: {type(result)}")
+                return None
+            
+        except Exception as e:
+            print(f"[MAIN KEY IMAGE RETRY] Exception: {type(e).__name__}: {str(e)[:500]}")
+            
+            # Check if it's also a content filter error
+            error_str = str(e).lower()
+            content_filter_indicators = [
+                "content_filter", "content was blocked", "response was blocked",
+                "safety filter", "content policy", "harmful content",
+                "blocked by safety", "harm_category", "content_policy_violation",
+                "unsafe content", "violates our usage policies",
+                "prohibited_content", "blockedreason", "content blocked",
+                "inappropriate image", "inappropriate content"
+            ]
+            
+            if any(indicator in error_str for indicator in content_filter_indicators):
+                print(f"[MAIN KEY IMAGE RETRY] Main key also hit content filter for image")
+            
+            # Re-raise so the calling method can handle it
+            raise
+ 
     def reset_conversation_for_new_context(self, new_context):
         """Reset conversation state when context changes"""
         self.current_session_context = new_context
@@ -2059,7 +4086,7 @@ class UnifiedClient:
         if provider is None:
             provider = self.client_type
         
-        print(f"   🔍 Extracting text from {provider} response...")
+        #print(f"   🔍 Extracting text from {provider} response...")
         print(f"   🔍 Response type: {type(response)}")
         
         # Get Gemini-specific parameters if provided
@@ -3219,894 +5246,7 @@ class UnifiedClient:
                 })
         
         return converted
-        
-    def get_current_key_info(self) -> str:
-        """Get information about the currently active key"""
-        if self.use_multi_keys and self.current_key_index is not None:
-            key = self._api_key_pool.keys[self.current_key_index]
-            status = "Active" if key.is_available() else "Cooling Down"
-            return f"{self.key_identifier} - Status: {status}, Success: {key.success_count}, Errors: {key.error_count}"
-        else:
-            return "Single Key Mode"
  
-    def _should_rotate(self) -> bool:
-        """Check if we should rotate keys based on settings"""
-        if not self.use_multi_keys:
-            return False
-        
-        if not self._force_rotation:
-            # Only rotate on errors
-            return False
-        
-        # Check frequency
-        with self._counter_lock:
-            self._request_counter += 1
-            
-            # Check if it's time to rotate
-            if self._request_counter >= self._rotation_frequency:
-                self._request_counter = 0
-                return True
-            else:
-                return False
-
-    def _get_shortest_cooldown_time(self) -> int:
-        """Get the shortest cooldown time among all keys"""
-        if not self._multi_key_mode or not self.__class__._api_key_pool:
-            return 60  # Default cooldown
-            
-        min_cooldown = float('inf')
-        now = time.time()
-        
-        for i, key in enumerate(self.__class__._api_key_pool.keys):
-            if key.enabled:
-                key_id = f"Key#{i+1} ({key.model})"
-                
-                # Check rate limit cache
-                cache_cooldown = self.__class__._rate_limit_cache.get_remaining_cooldown(key_id)
-                if cache_cooldown > 0:
-                    min_cooldown = min(min_cooldown, cache_cooldown)
-                
-                # Also check key's own cooldown
-                if key.is_cooling_down and key.last_error_time:
-                    remaining = key.cooldown - (now - key.last_error_time)
-                    if remaining > 0:
-                        min_cooldown = min(min_cooldown, remaining)
-        
-        # Return the minimum wait time, capped at 60 seconds
-        return min(int(min_cooldown) if min_cooldown != float('inf') else 30, 60)
-        
-    def _get_thread_assigned_key(self) -> Optional[int]:
-        """Get the key index assigned to current thread"""
-        thread_id = threading.current_thread().ident
-        
-        with self._key_assignment_lock:
-            if thread_id in self._thread_key_assignments:
-                key_index, timestamp = self._thread_key_assignments[thread_id]
-                # Check if assignment is still valid (not expired)
-                if time.time() - timestamp < 300:  # 5 minute expiry
-                    return key_index
-                else:
-                    # Expired, remove it
-                    del self._thread_key_assignments[thread_id]
-        
-        return None
-
-    def _assign_key_to_thread(self, key_index: int):
-        """Assign a key to the current thread"""
-        thread_id = threading.current_thread().ident
-        
-        with self._key_assignment_lock:
-            self._thread_key_assignments[thread_id] = (key_index, time.time())
-            
-            # Cleanup old assignments
-            current_time = time.time()
-            expired_threads = [
-                tid for tid, (_, ts) in self._thread_key_assignments.items()
-                if current_time - ts > 300
-            ]
-            for tid in expired_threads:
-                del self._thread_key_assignments[tid]
-                
-    def send(self, messages, temperature=None, max_tokens=None, 
-             max_completion_tokens=None, context=None) -> Tuple[str, Optional[str]]:
-        """Thread-safe send with proper key management and deduplication for batch translation"""
-        thread_name = threading.current_thread().name
-        
-        # Generate request hash for duplicate detection
-        request_hash = self._get_request_hash(messages)
-        
-        # Extract chapter info for better logging
-        chapter_info = self._extract_chapter_info(messages)
-        context_str = context or 'unknown'
-        if chapter_info['chapter']:
-            context_str = f"Chapter {chapter_info['chapter']}"
-            if chapter_info['chunk']:
-                context_str += f" Chunk {chapter_info['chunk']}/{chapter_info['total_chunks']}"
-        
-        # === SAFER DEDUPLICATION START ===
-        
-        # Check cache first (quick check without waiting)
-        if context in ['translation', 'glossary', 'image_translation']:
-            with self._request_cache_lock:
-                if request_hash in self._request_cache:
-                    content, finish_reason, timestamp = self._request_cache[request_hash]
-                    if time.time() - timestamp < self._cache_expiry_seconds:
-                        logger.info(f"[{thread_name}] Cache HIT for {context_str}, returning cached response")
-                        return content, finish_reason
-                    else:
-                        del self._request_cache[request_hash]
-        
-        # Check for duplicates ONLY for same content from different threads
-        is_duplicate = False
-        if context in ['translation', 'glossary', 'image_translation']:
-            is_duplicate = self._check_duplicate_request(request_hash, context)
-            
-            if is_duplicate:
-                # Wait a bit to let the other thread finish
-                wait_time = 3.0  # Slightly longer wait
-                logger.warning(f"[{thread_name}] Duplicate detected for {context_str}, waiting {wait_time}s...")
-                
-                # Check cache periodically while waiting
-                wait_intervals = 0.5
-                total_waited = 0
-                
-                while total_waited < wait_time:
-                    time.sleep(wait_intervals)
-                    total_waited += wait_intervals
-                    
-                    # Check cache again
-                    with self._request_cache_lock:
-                        if request_hash in self._request_cache:
-                            content, finish_reason, timestamp = self._request_cache[request_hash]
-                            if time.time() - timestamp < self._cache_expiry_seconds:
-                                logger.info(f"[{thread_name}] Found cached response while waiting for {context_str}")
-                                return content, finish_reason
-                
-                # After waiting, check if it's still being processed
-                with self._tracker_lock:
-                    if request_hash in self._chapter_request_tracker:
-                        existing = self._chapter_request_tracker[request_hash]
-                        time_diff = time.time() - existing['timestamp']
-                        if time_diff > 3:
-                            # The other thread likely finished, we can proceed
-                            logger.info(f"[{thread_name}] Other thread finished, proceeding with {context_str}")
-                            # Update our entry
-                            self._chapter_request_tracker[request_hash] = {
-                                'timestamp': time.time(),
-                                'context': context,
-                                'thread': thread_name,
-                                'chapter_info': chapter_info
-                            }
-                    else:
-                        # Not being processed anymore, add our entry
-                        self._chapter_request_tracker[request_hash] = {
-                            'timestamp': time.time(),
-                            'context': context,
-                            'thread': thread_name,
-                            'chapter_info': chapter_info
-                        }
-        
-        # === SAFER DEDUPLICATION END ===
-        
-        # Call debug if enabled via environment variable
-        if os.getenv("DEBUG_PARALLEL_REQUESTS", "0") == "1":
-            self._debug_active_requests()
-        
-        # Ensure thread has a client
-        self._ensure_thread_client()
-        
-        # Log the processing
-        logger.info(f"[{thread_name}] Processing {context_str} with {self.key_identifier}")
-        
-        max_retries = 7
-        retry_count = 0
-        last_error = None
-        retry_reason = None  # Track retry reason
-        successful_response = None  # Track successful response for caching
-        
-        # Track current attempt for payload
-        self._current_retry_attempt = 0
-        self._max_retries = max_retries
-        
-        # Track which keys we've already tried to avoid infinite loops
-        attempted_keys = set()
-        
-        # Flag to track if we should try main key for prohibited content
-        should_try_main_key = False
-        
-        # Define content filter indicators at method level
-        content_filter_indicators = [
-            "content_filter", "content was blocked", "response was blocked",
-            "safety filter", "content policy", "harmful content",
-            "blocked by safety", "harm_category", "content_policy_violation",
-            "unsafe content", "violates our usage policies",
-            "prohibited_content", "blockedreason", "content blocked"
-        ]
-        
-        try:
-            while retry_count < max_retries:
-                try:
-                    # Update current attempt
-                    self._current_retry_attempt = retry_count
-                    
-                    # Track current key
-                    attempted_keys.add(self.key_identifier)
-                    
-                    # Call the actual implementation with retry reason
-                    result = self._send_internal(messages, temperature, max_tokens, 
-                                               max_completion_tokens, context, retry_reason=retry_reason)
-                    
-                    # Mark success
-                    if self._multi_key_mode:
-                        tls = self._get_thread_local_client()
-                        if tls.key_index is not None:
-                            self._api_key_pool.mark_key_success(tls.key_index)
-                    
-                    logger.info(f"[{thread_name}] ✓ Request completed with {self.key_identifier}")
-                    successful_response = result
-                    break  # Success, exit retry loop
-                    
-                except Exception as e:
-                    last_error = e
-                    error_str = str(e)
-                    logger.error(f"[{thread_name}] ✗ {self.key_identifier} error: {error_str[:100]}")
-                    
-                    # Check for prohibited content FIRST (before rate limit check)
-                    if any(indicator in error_str.lower() for indicator in content_filter_indicators):
-                        retry_reason = "prohibited_content"
-                        print(f"[Thread-{thread_name}] Prohibited content detected on {self.key_identifier}")
-                        
-                        # If we're in multi-key mode and haven't tried main key yet
-                        if (self._multi_key_mode and 
-                            hasattr(self, 'original_api_key') and 
-                            hasattr(self, 'original_model') and
-                            self.original_api_key and 
-                            self.original_model and
-                            not should_try_main_key):
-                            
-                            print(f"[Thread-{thread_name}] Will retry with main key for prohibited content")
-                            should_try_main_key = True
-                            
-                            # Don't count this as a retry, just continue to trigger main key retry
-                            retry_count += 1
-                            continue
-                        else:
-                            # Either not in multi-key mode, or already tried main key
-                            print(f"[Thread-{thread_name}] Prohibited content - cannot retry")
-                            raise
-                    
-                    # Check for rate limit
-                    elif "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
-                        retry_reason = "rate_limit"
-                        if self._multi_key_mode:
-                            print(f"[Thread-{thread_name}] Rate limit hit on {self.key_identifier}")
-                            
-                            # Handle rate limit for this thread
-                            self._handle_rate_limit_for_thread()
-                            
-                            # Check if we have any available keys
-                            available_count = self._count_available_keys()
-                            if available_count == 0:
-                                logger.error(f"[{thread_name}] All API keys are cooling down")
-                                
-                                # If we still have retries left, wait for the shortest cooldown
-                                if retry_count < max_retries - 1:
-                                    cooldown_time = self._get_shortest_cooldown_time()
-                                    print(f"⏳ [Thread-{thread_name}] All keys cooling down, waiting {cooldown_time}s...")
-                                    
-                                    # Wait with cancellation check
-                                    for i in range(cooldown_time):
-                                        if self._cancelled:
-                                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                                        time.sleep(1)
-                                        if i % 10 == 0 and i > 0:
-                                            print(f"⏳ [Thread-{thread_name}] Still waiting... {cooldown_time - i}s remaining")
-                                    
-                                    # Force re-initialization after cooldown
-                                    tls = self._get_thread_local_client()
-                                    tls.initialized = False
-                                    self._ensure_thread_client()
-                                    
-                                    retry_count += 1
-                                    continue
-                                else:
-                                    # No more retries, raise the error
-                                    raise UnifiedClientError("All API keys are cooling down", error_type="rate_limit")
-                            
-                            # Check if we've tried too many keys
-                            if len(attempted_keys) >= len(self._api_key_pool.keys):
-                                logger.error(f"[{thread_name}] Attempted all {len(self._api_key_pool.keys)} keys")
-                                raise UnifiedClientError("All API keys rate limited", error_type="rate_limit")
-                            
-                            retry_count += 1
-                            logger.info(f"[{thread_name}] Retrying with new key, attempt {retry_count}/{max_retries}")
-                            continue
-                        else:
-                            # Single key mode - wait and retry
-                            if retry_count < max_retries - 1:
-                                wait_time = min(30 * (retry_count + 1), 120)
-                                logger.info(f"[{thread_name}] Rate limit, waiting {wait_time}s")
-                                
-                                for i in range(wait_time):
-                                    if self._cancelled:
-                                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                                    time.sleep(1)
-                                    
-                                retry_count += 1
-                                continue
-                            else:
-                                raise UnifiedClientError("Rate limit exceeded", error_type="rate_limit")
-                    
-                    # Check for cancellation
-                    elif isinstance(e, UnifiedClientError) and e.error_type in ["cancelled", "timeout"]:
-                        retry_reason = f"cancelled_{e.error_type}"
-                        raise
-                    
-                    # Other errors
-                    elif retry_count < max_retries - 1:
-                        # Determine retry reason based on error type
-                        if "timeout" in error_str.lower():
-                            retry_reason = "timeout_error"
-                        elif "connection" in error_str.lower():
-                            retry_reason = "connection_error"
-                        elif "500" in error_str or "502" in error_str or "503" in error_str:
-                            retry_reason = f"server_error_{error_str[:3]}"
-                        else:
-                            # Generic error with exception type
-                            retry_reason = f"error_{type(e).__name__}"[:30]  # Limit length for filename
-                        
-                        if self._multi_key_mode:
-                            tls = self._get_thread_local_client()
-                            if tls.key_index is not None:
-                                self._api_key_pool.mark_key_error(tls.key_index)
-                            
-                            if not self._force_rotation:
-                                # Error-based rotation - try a different key
-                                logger.info(f"[{thread_name}] Error occurred ({retry_reason}), rotating to new key...")
-                                
-                                # Force reassignment
-                                tls.initialized = False
-                                tls.request_count = 0
-                                self._ensure_thread_client()
-                                
-                                retry_count += 1
-                                logger.info(f"[{thread_name}] Rotated to {self.key_identifier} after error")
-                                continue
-                        
-                        # Retry with same key (or if rotation disabled)
-                        logger.info(f"[{thread_name}] Retrying after {retry_reason} (attempt {retry_count + 1}/{max_retries})")
-                        retry_count += 1
-                        time.sleep(2)
-                        continue
-                    
-                    # Can't retry - final error
-                    else:
-                        retry_reason = f"final_error_{type(e).__name__}"
-                        logger.error(f"[{thread_name}] Cannot retry request: {retry_reason}")
-                        raise
-            
-            # === SIMPLE CACHE UPDATE ===
-            if successful_response and context in ['translation', 'glossary', 'image_translation']:
-                content, finish_reason = successful_response
-                with self._request_cache_lock:
-                    self._request_cache[request_hash] = (content, finish_reason, time.time())
-                    
-                    # Cleanup old cache entries if too many
-                    if len(self._request_cache) > 1000:
-                        sorted_items = sorted(self._request_cache.items(), key=lambda x: x[1][2])
-                        for key, _ in sorted_items[:100]:
-                            del self._request_cache[key]
-                
-                logger.info(f"[{thread_name}] Cached successful response for {context_str}")
-            
-            # Remove from tracker
-            with self._tracker_lock:
-                self._chapter_request_tracker.pop(request_hash, None)
-            
-            if successful_response:
-                return successful_response
-            
-            # Exhausted retries
-            if last_error:
-                logger.error(f"[{thread_name}] Exhausted {max_retries} retries, last reason: {retry_reason}")
-                raise last_error
-            else:
-                raise Exception(f"Failed after {max_retries} attempts")
-                
-        except Exception as e:
-            # Clean up tracker on error
-            with self._tracker_lock:
-                self._chapter_request_tracker.pop(request_hash, None)
-            raise
-
-    def _send_internal(self, messages, temperature=None, max_tokens=None, 
-                       max_completion_tokens=None, context=None, retry_reason=None) -> Tuple[str, Optional[str]]:
-        """
-        Internal send implementation with integrated 500 error retry logic and prohibited content handling
-        """
-        start_time = time.time()
-        
-        # Generate request hash early
-        request_hash = self._get_request_hash(messages)
-        thread_name = threading.current_thread().name
-        
-        # Log with hash for tracking
-        logger.debug(f"[{thread_name}] _send_internal starting for {context} (hash: {request_hash[:8]}...) retry_reason: {retry_reason}")
-        
-        # Reset cancelled flag
-        self._cancelled = False
-        
-        # Reset counters when context changes
-        if context != self.current_session_context:
-            self.reset_conversation_for_new_context(context)
-        
-        self.context = context or 'translation'
-        self.conversation_message_count += 1
-        
-        # Internal retry logic for 500 errors - INCREASED TO 7
-        internal_retries = 7
-        base_delay = 5  # Base delay for exponential backoff
-        
-        # Track if we've tried main key for prohibited content
-        main_key_attempted = False
-        
-        # Define content filter indicators locally for consistency
-        content_filter_indicators = [
-            "content_filter", "content was blocked", "response was blocked",
-            "safety filter", "content policy", "harmful content",
-            "blocked by safety", "harm_category", "content_policy_violation",
-            "unsafe content", "violates our usage policies",
-            "prohibited_content", "blockedreason", "content blocked"
-        ]
-        
-        for attempt in range(internal_retries):
-            try:
-                # Validate request
-                valid, error_msg = self._validate_request(messages, max_tokens)
-                if not valid:
-                    raise UnifiedClientError(f"Invalid request: {error_msg}", error_type="validation")
-                
-                os.makedirs("Payloads", exist_ok=True)
-                
-                # Apply reinforcement
-                messages = self._apply_pure_reinforcement(messages)
-                
-                # Get file names - IMPORTANT for duplicate detection
-                payload_name, response_name = self._get_file_names(messages, context=self.context)
-                
-                # Save payload with retry reason
-                # On internal retries (500 errors), add that info too
-                if attempt > 0:
-                    internal_retry_reason = f"500_error_attempt_{attempt}"
-                    if retry_reason:
-                        combined_reason = f"{retry_reason}_{internal_retry_reason}"
-                    else:
-                        combined_reason = internal_retry_reason
-                    self._save_payload(messages, payload_name, retry_reason=combined_reason)
-                else:
-                    self._save_payload(messages, payload_name, retry_reason=retry_reason)
-                
-                # FIX: Define payload_messages BEFORE using it
-                # Create a sanitized version for payload (without actual image data)
-                payload_messages = [
-                    {**msg, 'content': 'IMAGE_DATA_OMITTED' if isinstance(msg.get('content'), list) else msg.get('content')}
-                    for msg in messages
-                ]
-                
-                # Now save the payload (payload_messages is now defined)
-                self._save_payload(payload_messages, payload_name)
-                
-                # Check for timeout toggle from GUI
-                retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
-                if retry_timeout_enabled:
-                    timeout_seconds = int(os.getenv("CHUNK_TIMEOUT", "180"))
-                    logger.info(f"Timeout monitoring enabled: {timeout_seconds}s limit")
-                
-                # Get response
-                response = self._get_response(messages, temperature, max_tokens, max_completion_tokens, response_name)
-                
-                # Check for cancellation (from timeout or stop button)
-                if self._cancelled:
-                    logger.info("Operation cancelled (timeout or user stop)")
-                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                
-                # ====== UNIVERSAL EXTRACTION INTEGRATION ======
-                # Use universal extraction instead of assuming response.content exists
-                extracted_content = ""
-                finish_reason = 'stop'
-
-                if response:
-                    # Prepare provider-specific parameters
-                    extraction_kwargs = {}
-                    
-                    # Add Gemini-specific parameters if applicable
-                    if self.client_type == 'gemini':
-                        # Check if this model supports thinking
-                        extraction_kwargs['supports_thinking'] = self._supports_thinking()
-                        # Get thinking budget from environment
-                        extraction_kwargs['thinking_budget'] = int(os.getenv("THINKING_BUDGET", "-1"))
-                    
-                    # Try universal extraction with provider-specific parameters
-                    extracted_content, finish_reason = self._extract_response_text(
-                        response, 
-                        provider=self.client_type,
-                        **extraction_kwargs
-                    )
-                    
-                    # If extraction failed but we have a response object
-                    if not extracted_content and response:
-                        print(f"⚠️ Failed to extract text from {self.client_type} response")
-                        print(f"   Response type: {type(response)}")
-                        
-                        # Provider-specific guidance
-                        if self.client_type == 'gemini':
-                            print(f"   Consider checking Gemini response structure")
-                            print(f"   Response attributes: {dir(response)[:5]}...")  # Show first 5 attributes
-                        else:
-                            print(f"   Consider checking response extraction for this provider")
-                        
-                        # Log the response structure for debugging
-                        self._save_failed_request(messages, "Extraction failed", context, response)
-                        
-                        # Check if response has any common attributes we missed
-                        if hasattr(response, 'content') and response.content:
-                            extracted_content = str(response.content)
-                            print(f"   Fallback: Using response.content directly")
-                        elif hasattr(response, 'text') and response.text:
-                            extracted_content = str(response.text)
-                            print(f"   Fallback: Using response.text directly")
-                    
-                    # Update response object with extracted content
-                    if extracted_content and hasattr(response, 'content'):
-                        response.content = extracted_content
-                    elif extracted_content:
-                        # Create a new response object if needed
-                        response = UnifiedResponse(
-                            content=extracted_content,
-                            finish_reason=finish_reason,
-                            raw_response=response
-                        )
-                
-                # CRITICAL: Save response for duplicate detection
-                # This must happen even for truncated/empty responses
-                if extracted_content:
-                    self._save_response(extracted_content, response_name)
-                
-                # Handle empty responses
-                if not extracted_content or extracted_content.strip() in ["", "[]"]:
-                    print(f"Empty or error response: {finish_reason}")
-                    self._save_failed_request(messages, "Empty response", context, response)
-                    
-                    # ALWAYS log these failures too
-                    self._log_truncation_failure(
-                        messages=messages,
-                        response_content=extracted_content or "",
-                        finish_reason=finish_reason or 'error',
-                        context=context,
-                        error_details=getattr(response, 'error_details', None) if response else None
-                    )
-                    self._track_stats(context, False, "empty_response", time.time() - start_time)
-                    
-                    # Use fallback
-                    fallback_content = self._handle_empty_result(messages, context, 
-                        getattr(response, 'error_details', "empty") if response else "empty")
-                    return fallback_content, 'error'
-                
-                # Track success
-                self._track_stats(context, True, None, time.time() - start_time)
-                
-                # Mark key as successful in multi-key mode
-                self._mark_key_success()
-                
-                # Log important info for retry mechanisms
-                if finish_reason in ['length', 'max_tokens']:
-                    print(f"Response was truncated: {finish_reason}")
-                    print(f"⚠️ Response truncated (finish_reason: {finish_reason})")
-                    
-                    # ALWAYS log truncation failures
-                    self._log_truncation_failure(
-                        messages=messages,
-                        response_content=extracted_content,
-                        finish_reason=finish_reason,
-                        context=context,
-                        error_details=getattr(response, 'error_details', None) if response else None
-                    )
-                    # The calling code will check finish_reason=='length' for retry
-                
-                # Apply API delay after successful call (even if truncated)
-                # SKIP DELAY DURING CLEANUP
-                if not self._in_cleanup:
-                    api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
-                    if api_delay > 0:
-                        print(f"⏳ Waiting {api_delay}s before next API call...")
-                        time.sleep(api_delay)
-                else:
-                    print("⚡ Skipping API delay (cleanup mode)")
-                
-                # Return the response with accurate finish_reason
-                # This is CRITICAL for retry mechanisms to work
-                return extracted_content, finish_reason
-                
-            except UnifiedClientError as e:
-                # Handle cancellation specially for timeout support
-                if e.error_type == "cancelled" or "cancelled" in str(e):
-                    self._in_cleanup = False  # Ensure cleanup flag is set
-                    logger.info("Propagating cancellation to caller")
-                    # Re-raise so send_with_interrupt can handle it
-                    raise
-                
-                print(f"UnifiedClient error: {e}")
-                
-                # Check if it's a rate limit error and re-raise for retry logic
-                error_str = str(e).lower()
-                if e.error_type == "rate_limit" or "429" in error_str or "rate limit" in error_str or "quota" in error_str:
-                    raise  # Re-raise for multi-key retry logic in outer send() method
-                
-                # Check for prohibited content - check BOTH error_type AND error string
-                if e.error_type == "prohibited_content" or any(indicator in error_str for indicator in content_filter_indicators):
-                    print(f"❌ Prohibited content detected: {error_str[:200]}")
-                    
-                    # Only try main key if conditions are met
-                    if (self._multi_key_mode and 
-                        not main_key_attempted and 
-                        hasattr(self, 'original_api_key') and 
-                        hasattr(self, 'original_model') and
-                        self.original_api_key and 
-                        self.original_model):
-                        
-                        print(f"🔄 Attempting main key fallback for prohibited content")
-                        print(f"   Current key: {self.key_identifier}")
-                        print(f"   Main key model: {self.original_model}")
-                        
-                        main_key_attempted = True
-                        
-                        try:
-                            # Create temporary client with main key
-                            main_response = self._retry_with_main_key(
-                                messages, temperature, max_tokens, max_completion_tokens, context
-                            )
-                            
-                            if main_response:
-                                content, finish_reason = main_response
-                                print(f"✅ Main key succeeded! Returning response")
-                                return content, finish_reason
-                            else:
-                                print(f"❌ Main key returned None")
-                                
-                        except Exception as main_error:
-                            print(f"❌ Main key error: {str(main_error)[:200]}")
-                            # Check if main key also hit content filter
-                            main_error_str = str(main_error).lower()
-                            if any(indicator in main_error_str for indicator in content_filter_indicators):
-                                print(f"❌ Main key also hit content filter")
-                            # Continue to normal error handling
-                    
-                    # Normal prohibited content handling
-                    print(f"❌ Content prohibited - not retrying further")
-                    self._save_failed_request(messages, e, context)
-                    self._track_stats(context, False, type(e).__name__, time.time() - start_time)
-                    fallback_content = self._handle_empty_result(messages, context, str(e))
-                    return fallback_content, 'error'
-                
-                # Check for 500 errors - retry these with exponential backoff
-                http_status = getattr(e, 'http_status', None)
-                if http_status == 500 or "500" in error_str or "api_error" in error_str:
-                    if attempt < internal_retries - 1:
-                        # Exponential backoff with jitter
-                        delay = (base_delay * (2 ** attempt)) + random.uniform(0, 1)
-                        # Cap the maximum delay to prevent extremely long waits
-                        delay = min(delay, 60)  # Max 60 seconds
-                        
-                        print(f"🔄 Server error (500) - auto-retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries})")
-                        
-                        # Wait with cancellation check
-                        wait_start = time.time()
-                        while time.time() - wait_start < delay:
-                            if self._cancelled:
-                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                            time.sleep(0.5)  # Check every 0.5 seconds
-                        continue
-                    else:
-                        print(f"❌ Server error (500) - exhausted {internal_retries} retries")
-                
-                # Save failed request and return fallback
-                self._save_failed_request(messages, e, context)
-                self._track_stats(context, False, type(e).__name__, time.time() - start_time)
-                fallback_content = self._handle_empty_result(messages, context, str(e))
-                return fallback_content, 'error'
-                
-            except Exception as e:
-                print(f"Unexpected error: {e}")
-                error_str = str(e).lower()
-                
-                # For unexpected errors, check if it's a timeout
-                if "timed out" in error_str:
-                    # Re-raise timeout errors so the retry logic can handle them
-                    raise UnifiedClientError(f"Request timed out: {e}", error_type="timeout")
-                
-                # Check if it's a rate limit error
-                if "429" in error_str or "rate limit" in error_str or "quota" in error_str:
-                    raise  # Re-raise for multi-key retry logic
-                
-                # Check for prohibited content in unexpected errors
-                if any(indicator in error_str for indicator in content_filter_indicators):
-                    print(f"❌ Content prohibited in unexpected error: {error_str[:200]}")
-                    
-                    # Debug current state
-                    self._debug_multi_key_state()
-                    
-                    # If we're in multi-key mode and haven't tried the main key yet
-                    if (self._multi_key_mode and 
-                        not main_key_attempted and 
-                        hasattr(self, 'original_api_key') and 
-                        hasattr(self, 'original_model') and
-                        self.original_api_key and 
-                        self.original_model):
-                        
-                        print(f"🔄 Attempting main key fallback for prohibited content (from unexpected error)")
-                        print(f"   Current key: {self.key_identifier}")
-                        print(f"   Main key model: {self.original_model}")
-                        
-                        main_key_attempted = True
-                        
-                        try:
-                            # Create temporary client with main key
-                            main_response = self._retry_with_main_key(
-                                messages, temperature, max_tokens, max_completion_tokens, context
-                            )
-                            
-                            if main_response:
-                                content, finish_reason = main_response
-                                print(f"✅ Main key succeeded! Returning response")
-                                return content, finish_reason
-                            else:
-                                print(f"❌ Main key returned None")
-                                
-                        except Exception as main_error:
-                            print(f"❌ Main key error: {str(main_error)[:200]}")
-                            # Check if main key also hit content filter
-                            main_error_str = str(main_error).lower()
-                            if any(indicator in main_error_str for indicator in content_filter_indicators):
-                                print(f"❌ Main key also hit content filter")
-                    
-                    # Fall through to normal error handling
-                    print(f"❌ Content prohibited - not retrying")
-                    self._save_failed_request(messages, e, context)
-                    self._track_stats(context, False, "unexpected_error", time.time() - start_time)
-                    fallback_content = self._handle_empty_result(messages, context, str(e))
-                    return fallback_content, 'error'
-                
-                # Check for 500 errors in unexpected exceptions
-                if "500" in error_str or "internal server error" in error_str:
-                    if attempt < internal_retries - 1:
-                        # Exponential backoff with jitter
-                        delay = (base_delay * (2 ** attempt)) + random.uniform(0, 1)
-                        delay = min(delay, 60)  # Max 60 seconds
-                        
-                        print(f"🔄 Server error (500) - auto-retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries})")
-                        
-                        wait_start = time.time()
-                        while time.time() - wait_start < delay:
-                            if self._cancelled:
-                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                            time.sleep(0.5)
-                        continue
-                
-                # Check for other transient errors with exponential backoff
-                transient_errors = ["502", "503", "504", "connection reset", "connection aborted"]
-                if any(err in error_str for err in transient_errors):
-                    if attempt < internal_retries - 1:
-                        # Use a slightly less aggressive backoff for transient errors
-                        delay = (base_delay/2 * (2 ** attempt)) + random.uniform(0, 1)
-                        delay = min(delay, 30)  # Max 30 seconds for transient errors
-                        
-                        print(f"🔄 Transient error - retrying in {delay:.1f}s")
-                        
-                        wait_start = time.time()
-                        while time.time() - wait_start < delay:
-                            if self._cancelled:
-                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                            time.sleep(0.5)
-                        continue
-                
-                # Save failed request and return fallback for other errors
-                self._save_failed_request(messages, e, context)
-                self._track_stats(context, False, "unexpected_error", time.time() - start_time)
-                fallback_content = self._handle_empty_result(messages, context, str(e))
-                return fallback_content, 'error'
-
-                    
-    def _retry_with_main_key(self, messages, temperature=None, max_tokens=None, 
-                            max_completion_tokens=None, context=None) -> Optional[Tuple[str, Optional[str]]]:
-        """
-        Create a temporary client with the main key and retry the request.
-        This is used for prohibited content errors in multi-key mode.
-        """
-        print(f"[MAIN KEY RETRY] Starting retry with main key")
-        print(f"[MAIN KEY RETRY] Original key: {self.original_api_key[:8]}...{self.original_api_key[-4:]}")
-        print(f"[MAIN KEY RETRY] Original model: {self.original_model}")
-        
-        try:
-            # Create a new temporary UnifiedClient instance with the main key
-            temp_client = UnifiedClient(
-                api_key=self.original_api_key,
-                model=self.original_model,
-                output_dir=self.output_dir
-            )
-            
-            # FORCE single-key mode after initialization
-            # This is thread-safe because we're modifying the instance, not the environment
-            temp_client._multi_key_mode = False
-            temp_client.use_multi_keys = False
-            temp_client.key_identifier = "Main Key (Fallback)"
-            
-            # The client should already be set up from __init__, but verify
-            if not hasattr(temp_client, 'client_type') or temp_client.client_type is None:
-                # Force setup if needed
-                temp_client.api_key = self.original_api_key
-                temp_client.model = self.original_model
-                temp_client._setup_client()
-            
-            # Copy relevant state
-            temp_client.context = context
-            temp_client._cancelled = self._cancelled
-            temp_client._in_cleanup = self._in_cleanup
-            temp_client.current_session_context = self.current_session_context
-            temp_client.conversation_message_count = self.conversation_message_count
-            
-            print(f"[MAIN KEY RETRY] Created temp client with model: {temp_client.model}")
-            print(f"[MAIN KEY RETRY] Temp client type: {getattr(temp_client, 'client_type', 'NOT SET')}")
-            print(f"[MAIN KEY RETRY] Multi-key mode: {temp_client._multi_key_mode}")
-            
-            # Get file names for response tracking
-            payload_name, response_name = self._get_file_names(messages, context=context)
-            
-            # Try to send the request
-            print(f"[MAIN KEY RETRY] Sending request...")
-            
-            # Use the send method instead of _get_response for better compatibility
-            result = temp_client.send(
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                max_completion_tokens=max_completion_tokens,
-                context=context
-            )
-            
-            # Check the result
-            if result and isinstance(result, tuple):
-                content, finish_reason = result
-                if content:
-                    print(f"[MAIN KEY RETRY] Success! Got content of length: {len(content)}")
-                    # Save the response using our instance's method
-                    self._save_response(content, response_name)
-                    return content, finish_reason
-                else:
-                    print(f"[MAIN KEY RETRY] Empty content returned")
-                    return None
-            else:
-                print(f"[MAIN KEY RETRY] Unexpected result type: {type(result)}")
-                return None
-            
-        except Exception as e:
-            print(f"[MAIN KEY RETRY] Exception: {type(e).__name__}: {str(e)[:500]}")
-            
-            # Check if it's also a content filter error
-            error_str = str(e).lower()
-            content_filter_indicators = [
-                "content_filter", "content was blocked", "response was blocked",
-                "safety filter", "content policy", "harmful content",
-                "blocked by safety", "harm_category", "content_policy_violation",
-                "unsafe content", "violates our usage policies",
-                "prohibited_content", "blockedreason", "content blocked"
-            ]
-            
-            if any(indicator in error_str for indicator in content_filter_indicators):
-                print(f"[MAIN KEY RETRY] Main key also hit content filter")
-            
-            # Re-raise so the calling method can handle it
-            raise
-    
     def _get_response(self, messages, temperature, max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
         """
         Route to appropriate AI provider and get response
@@ -6494,919 +7634,6 @@ class UnifiedClient:
             response_name=response_name,
             provider="salesforce"
         )
-    
-    # Image handling methods
-    def send_image(self, messages: List[Dict[str, Any]], image_data: Any,
-                  temperature: Optional[float] = None, 
-                  max_tokens: Optional[int] = None,
-                  max_completion_tokens: Optional[int] = None,
-                  context: str = 'image_translation') -> Tuple[str, str]:
-        """Thread-safe image send with proper key management and deduplication for batch translation"""
-        thread_name = threading.current_thread().name
-
-        # Generate request hash for duplicate detection (include image hash for better uniqueness)
-        image_size = len(image_data) if isinstance(image_data, (bytes, str)) else 0
-        # Create a more unique hash by including actual image data hash
-        if image_data:
-            image_hash = hashlib.md5(str(image_data).encode()).hexdigest()[:12]
-        else:
-            image_hash = "empty"
-        request_hash = self._get_request_hash(messages) + f"_img_{image_size}_{image_hash}"
-        
-        # Extract any chapter/context info from messages
-        chapter_info = self._extract_chapter_info(messages)
-        context_str = context or 'image_translation'
-        
-        # Try to get image filename if available
-        if chapter_info['chapter']:
-            context_str = f"Image Chapter {chapter_info['chapter']}"
-        else:
-            # Try to extract filename from messages
-            messages_str = str(messages)
-            if 'image' in messages_str.lower():
-                import re
-                filename_match = re.search(r'(\w+\.(png|jpg|jpeg|gif|bmp|webp))', messages_str, re.IGNORECASE)
-                if filename_match:
-                    context_str = f"Image: {filename_match.group(1)}"
-        
-        # === SAFER DEDUPLICATION START ===
-        
-        # Check cache first (quick check without waiting)
-        if context in ['image_translation', 'glossary']:
-            with self._request_cache_lock:
-                if request_hash in self._request_cache:
-                    content, finish_reason, timestamp = self._request_cache[request_hash]
-                    if time.time() - timestamp < self._cache_expiry_seconds:
-                        logger.info(f"[{thread_name}] Cache HIT for {context_str}, returning cached image response")
-                        return content, finish_reason
-                    else:
-                        del self._request_cache[request_hash]
-        
-        # Check for duplicates ONLY for same image from different threads
-        is_duplicate = False
-        if context in ['image_translation', 'glossary']:
-            is_duplicate = self._check_duplicate_request(request_hash, context)
-            
-            if is_duplicate:
-                # Wait a bit to let the other thread finish
-                wait_time = 3.0  # Slightly longer wait
-                logger.warning(f"[{thread_name}] Duplicate image detected for {context_str}, waiting {wait_time}s...")
-                
-                # Check cache periodically while waiting
-                wait_intervals = 0.5
-                total_waited = 0
-                
-                while total_waited < wait_time:
-                    time.sleep(wait_intervals)
-                    total_waited += wait_intervals
-                    
-                    # Check cache again
-                    with self._request_cache_lock:
-                        if request_hash in self._request_cache:
-                            content, finish_reason, timestamp = self._request_cache[request_hash]
-                            if time.time() - timestamp < self._cache_expiry_seconds:
-                                logger.info(f"[{thread_name}] Found cached image response while waiting")
-                                return content, finish_reason
-                
-                # After waiting, check if it's still being processed
-                with self._tracker_lock:
-                    if request_hash in self._chapter_request_tracker:
-                        existing = self._chapter_request_tracker[request_hash]
-                        time_diff = time.time() - existing['timestamp']
-                        if time_diff > 3:
-                            # The other thread likely finished, we can proceed
-                            logger.info(f"[{thread_name}] Other thread finished image, proceeding with {context_str}")
-                            # Update our entry
-                            self._chapter_request_tracker[request_hash] = {
-                                'timestamp': time.time(),
-                                'context': context,
-                                'thread': thread_name,
-                                'chapter_info': chapter_info
-                            }
-                    else:
-                        # Not being processed anymore, add our entry
-                        self._chapter_request_tracker[request_hash] = {
-                            'timestamp': time.time(),
-                            'context': context,
-                            'thread': thread_name,
-                            'chapter_info': chapter_info
-                        }
-        
-        # === SAFER DEDUPLICATION END ===
-        
-        # Call debug if enabled via environment variable
-        if os.getenv("DEBUG_PARALLEL_REQUESTS", "0") == "1":
-            self._debug_active_requests()
-        
-        # Ensure thread has a client
-        self._ensure_thread_client()
-        
-        logger.info(f"[{thread_name}] Processing {context_str} with {self.key_identifier}")
-
-        max_retries = 7
-        retry_count = 0
-        last_error = None
-        retry_reason = None  # Track retry reason
-        successful_response = None  # Track successful response for caching
-        
-        # Track current attempt for payload
-        self._current_retry_attempt = 0
-        self._max_retries = max_retries
-        
-        # Track which keys we've already tried to avoid infinite loops
-        attempted_keys = set()
-        
-        # Flag to track if we should try main key for prohibited content
-        should_try_main_key = False
-        
-        # Define content filter indicators at method level
-        content_filter_indicators = [
-            "content_filter", "content was blocked", "response was blocked",
-            "safety filter", "content policy", "harmful content",
-            "blocked by safety", "harm_category", "content_policy_violation",
-            "unsafe content", "violates our usage policies",
-            "prohibited_content", "blockedreason", "content blocked",
-            "inappropriate image", "inappropriate content"
-        ]
-        
-        try:
-            while retry_count < max_retries:
-                try:
-                    # Update current attempt
-                    self._current_retry_attempt = retry_count
-                    
-                    # Track current key
-                    attempted_keys.add(self.key_identifier)
-                    
-                    # Call the actual implementation with retry reason
-                    result = self._send_image_internal(messages, image_data, temperature,
-                                                     max_tokens, max_completion_tokens, context,
-                                                     retry_reason=retry_reason)
-                    
-                    # Mark success
-                    if self._multi_key_mode:
-                        tls = self._get_thread_local_client()
-                        if tls.key_index is not None:
-                            self._api_key_pool.mark_key_success(tls.key_index)
-                    
-                    logger.info(f"[{thread_name}] ✓ Image request completed with {self.key_identifier}")
-                    successful_response = result
-                    break  # Success, exit retry loop
-                    
-                except Exception as e:
-                    last_error = e
-                    error_str = str(e)
-                    logger.error(f"[{thread_name}] ✗ {self.key_identifier} image error: {error_str[:100]}")
-                    
-                    # Check for prohibited content FIRST (before rate limit check)
-                    if any(indicator in error_str.lower() for indicator in content_filter_indicators):
-                        retry_reason = "prohibited_image_content"
-                        print(f"[Thread-{thread_name}] Prohibited image content detected on {self.key_identifier}")
-                        
-                        # If we're in multi-key mode and haven't tried main key yet
-                        if (self._multi_key_mode and 
-                            hasattr(self, 'original_api_key') and 
-                            hasattr(self, 'original_model') and
-                            self.original_api_key and 
-                            self.original_model and
-                            not should_try_main_key):
-                            
-                            print(f"[Thread-{thread_name}] Will retry with main key for prohibited image content")
-                            should_try_main_key = True
-                            
-                            # Don't count this as a retry, just continue to trigger main key retry
-                            retry_count += 1
-                            continue
-                        else:
-                            # Either not in multi-key mode, or already tried main key
-                            print(f"[Thread-{thread_name}] Prohibited image content - cannot retry")
-                            raise
-                    
-                    # Check for rate limit
-                    elif "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
-                        retry_reason = "rate_limit_image"
-                        if self._multi_key_mode:
-                            print(f"[Thread-{thread_name}] Image rate limit hit on {self.key_identifier}")
-                            
-                            # Handle rate limit for this thread
-                            self._handle_rate_limit_for_thread()
-                            
-                            # Check if we have any available keys
-                            available_count = self._count_available_keys()
-                            if available_count == 0:
-                                logger.error(f"[{thread_name}] All API keys are cooling down for images")
-                                
-                                # If we still have retries left, wait for the shortest cooldown
-                                if retry_count < max_retries - 1:
-                                    cooldown_time = self._get_shortest_cooldown_time()
-                                    print(f"⏳ [Thread-{thread_name}] All keys cooling down for image, waiting {cooldown_time}s...")
-                                    
-                                    # Wait with cancellation check
-                                    for i in range(cooldown_time):
-                                        if self._cancelled:
-                                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                                        time.sleep(1)
-                                        if i % 10 == 0 and i > 0:
-                                            print(f"⏳ [Thread-{thread_name}] Still waiting... {cooldown_time - i}s remaining")
-                                    
-                                    # Force re-initialization after cooldown
-                                    tls = self._get_thread_local_client()
-                                    tls.initialized = False
-                                    self._ensure_thread_client()
-                                    
-                                    retry_count += 1
-                                    continue
-                                else:
-                                    # No more retries, raise the error
-                                    raise UnifiedClientError("All API keys are cooling down", error_type="rate_limit")
-                            
-                            # Check if we've tried too many keys
-                            if len(attempted_keys) >= len(self._api_key_pool.keys):
-                                logger.error(f"[{thread_name}] Attempted all {len(self._api_key_pool.keys)} keys for image")
-                                raise UnifiedClientError("All API keys rate limited for image requests", error_type="rate_limit")
-                            
-                            retry_count += 1
-                            logger.info(f"[{thread_name}] Retrying image with new key, attempt {retry_count}/{max_retries}")
-                            continue
-                        else:
-                            # Single key mode - wait and retry
-                            if retry_count < max_retries - 1:
-                                wait_time = min(30 * (retry_count + 1), 120)
-                                logger.info(f"[{thread_name}] Image rate limit, waiting {wait_time}s")
-                                
-                                for i in range(wait_time):
-                                    if self._cancelled:
-                                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                                    time.sleep(1)
-                                    
-                                retry_count += 1
-                                continue
-                            else:
-                                raise UnifiedClientError("Image rate limit exceeded", error_type="rate_limit")
-                    
-                    # Check for cancellation
-                    elif isinstance(e, UnifiedClientError) and e.error_type in ["cancelled", "timeout"]:
-                        retry_reason = f"cancelled_{e.error_type}"
-                        raise
-                    
-                    # Other errors
-                    elif retry_count < max_retries - 1:
-                        # Determine retry reason based on error type
-                        if "timeout" in error_str.lower():
-                            retry_reason = "timeout_error"
-                        elif "connection" in error_str.lower():
-                            retry_reason = "connection_error"
-                        elif "500" in error_str or "502" in error_str or "503" in error_str:
-                            retry_reason = f"server_error_{error_str[:3]}"
-                        else:
-                            # Generic error with exception type
-                            retry_reason = f"error_{type(e).__name__}"[:30]  # Limit length for filename
-                        
-                        if self._multi_key_mode:
-                            tls = self._get_thread_local_client()
-                            if tls.key_index is not None:
-                                self._api_key_pool.mark_key_error(tls.key_index)
-                            
-                            if not self._force_rotation:
-                                # Error-based rotation - try a different key
-                                logger.info(f"[{thread_name}] Image error occurred ({retry_reason}), rotating to new key...")
-                                
-                                # Force reassignment
-                                tls.initialized = False
-                                tls.request_count = 0
-                                self._ensure_thread_client()
-                                
-                                retry_count += 1
-                                logger.info(f"[{thread_name}] Rotated to {self.key_identifier} after image error")
-                                continue
-                        
-                        # Retry with same key (or if rotation disabled)
-                        logger.info(f"[{thread_name}] Retrying image after {retry_reason} (attempt {retry_count + 1}/{max_retries})")
-                        retry_count += 1
-                        time.sleep(2)
-                        continue
-                    
-                    # Can't retry - final error
-                    else:
-                        retry_reason = f"final_error_{type(e).__name__}"
-                        logger.error(f"[{thread_name}] Cannot retry image request: {retry_reason}")
-                        raise
-            
-            # === SIMPLE CACHE UPDATE ===
-            if successful_response and context in ['image_translation', 'glossary']:
-                content, finish_reason = successful_response
-                with self._request_cache_lock:
-                    self._request_cache[request_hash] = (content, finish_reason, time.time())
-                    
-                    # Cleanup old cache entries if too many
-                    if len(self._request_cache) > 1000:
-                        sorted_items = sorted(self._request_cache.items(), key=lambda x: x[1][2])
-                        for key, _ in sorted_items[:100]:
-                            del self._request_cache[key]
-                
-                logger.info(f"[{thread_name}] Cached successful image response for {context_str}")
-            
-            # Remove from tracker
-            with self._tracker_lock:
-                self._chapter_request_tracker.pop(request_hash, None)
-            
-            if successful_response:
-                return successful_response
-            
-            # Exhausted retries
-            if last_error:
-                logger.error(f"[{thread_name}] Exhausted {max_retries} image retries, last reason: {retry_reason}")
-                raise last_error
-            else:
-                raise Exception(f"Image request failed after {max_retries} attempts")
-                
-        except Exception as e:
-            # Clean up tracker on error
-            with self._tracker_lock:
-                self._chapter_request_tracker.pop(request_hash, None)
-            raise
-
-
-    def _send_image_internal(self, messages: List[Dict[str, Any]], image_data: Any,
-                            temperature: Optional[float] = None, 
-                            max_tokens: Optional[int] = None,
-                            max_completion_tokens: Optional[int] = None,
-                            context: str = 'image_translation',
-                            retry_reason: Optional[str] = None) -> Tuple[str, str]:
-        """
-        Internal implementation of send_image with integrated 500 error retry logic and universal extraction
-        """
-        start_time = time.time()
-        
-        # Generate request hash early (with image size)
-        image_size = len(image_data) if isinstance(image_data, (bytes, str)) else 0
-        request_hash = self._get_request_hash(messages) + f"_img{image_size}"
-        thread_name = threading.current_thread().name
-        
-        # Log with hash for tracking
-        logger.debug(f"[{thread_name}] _send_image_internal starting for {context} (hash: {request_hash[:8]}...) retry_reason: {retry_reason}")
-        
-        # Reset cancelled flag
-        self._cancelled = False
-        
-        # Reset counters when context changes
-        if context != self.current_session_context:
-            self.reset_conversation_for_new_context(context)
-        
-        self.context = context or 'image_translation'
-        self.conversation_message_count += 1
-        
-        # Internal retry logic for 500 errors - INCREASED TO 7
-        internal_retries = 7
-        base_delay = 5  # Base delay for exponential backoff
-        
-        # Track if we've tried main key for prohibited content
-        main_key_attempted = False
-        
-        # Define content filter indicators locally for consistency
-        content_filter_indicators = [
-            "content_filter", "content was blocked", "response was blocked",
-            "safety filter", "content policy", "harmful content",
-            "blocked by safety", "harm_category", "content_policy_violation",
-            "unsafe content", "violates our usage policies",
-            "prohibited_content", "blockedreason", "content blocked",
-            "inappropriate image", "inappropriate content"
-        ]
-        
-        # Use GUI values if not explicitly overridden
-        if temperature is None:
-            temperature = getattr(self, 'default_temperature', 0.3)
-            logger.debug(f"Using default temperature: {temperature}")
-    
-        
-        # Determine if this is an o-series model
-        is_o_series = self._is_o_series_model()
-        
-        # Handle token limits based on model type
-        if is_o_series:
-            # o-series models use max_completion_tokens
-            if max_completion_tokens is None:
-                max_completion_tokens = max_tokens if max_tokens is not None else getattr(self, 'default_max_tokens', 8192)
-            max_tokens = None  # Clear max_tokens for o-series
-            logger.info(f"Using o-series model {self.model} with max_completion_tokens: {max_completion_tokens}")
-        else:
-            # Regular models use max_tokens
-            if max_tokens is None:
-                max_tokens = max_completion_tokens if max_completion_tokens is not None else getattr(self, 'default_max_tokens', 8192)
-            max_completion_tokens = None  # Clear max_completion_tokens for regular models
-            logger.debug(f"Using regular model {self.model} with max_tokens: {max_tokens}")
-        
-        # Convert to base64 if needed
-        if isinstance(image_data, bytes):
-            image_base64 = base64.b64encode(image_data).decode('utf-8')
-            logger.debug(f"Converted {len(image_data)} bytes to base64")
-        else:
-            image_base64 = image_data
-                
-        for attempt in range(internal_retries):
-            try:
-                # Validate request (basic validation for images)
-                if not messages:
-                    raise UnifiedClientError("No messages provided for image request", error_type="validation")
-                
-                os.makedirs("Payloads", exist_ok=True)
-                
-                # Apply reinforcement
-                messages = self._apply_pure_reinforcement(messages)
-                
-                # Get file names - IMPORTANT for duplicate detection
-                payload_name, response_name = self._get_file_names(messages, context=self.context)
-                
-                # Create a sanitized version for payload (without actual image data)
-                payload_messages = [
-                    {**msg, 'content': 'IMAGE_DATA_OMITTED' if isinstance(msg.get('content'), list) else msg.get('content')}
-                    for msg in messages
-                ]
-                
-                # Save payload with retry reason
-                # On internal retries (500 errors), add that info too
-                if attempt > 0:
-                    internal_retry_reason = f"500_error_image_attempt_{attempt}"
-                    if retry_reason:
-                        combined_reason = f"{retry_reason}_{internal_retry_reason}"
-                    else:
-                        combined_reason = internal_retry_reason
-                    self._save_payload(payload_messages, payload_name, retry_reason=combined_reason)
-                else:
-                    self._save_payload(payload_messages, payload_name, retry_reason=retry_reason)
-                
-                # FIX: Define payload_messages BEFORE using it
-                # Create a sanitized version for payload (without actual image data)
-                payload_messages = [
-                    {**msg, 'content': 'IMAGE_DATA_OMITTED' if isinstance(msg.get('content'), list) else msg.get('content')}
-                    for msg in messages
-                ]
-                
-                # Now save the payload (payload_messages is now defined)
-                self._save_payload(payload_messages, payload_name)
-        
-                # Check for timeout toggle from GUI
-                retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
-                if retry_timeout_enabled:
-                    timeout_seconds = int(os.getenv("CHUNK_TIMEOUT", "180"))
-                    logger.info(f"Image timeout monitoring enabled: {timeout_seconds}s limit")
-                
-                # Log the request details
-                logger.info(f"Sending image request to {self.client_type} ({self.model})")
-                logger.debug(f"Temperature: {temperature}, Max tokens: {max_tokens or max_completion_tokens}")
-                
-                # Route to appropriate handler based on client type
-                if self.client_type == 'gemini':
-                    response = self._send_gemini_image(messages, image_base64, temperature, 
-                                                     max_tokens or max_completion_tokens, response_name)
-                elif self.client_type == 'openai':
-                    response = self._send_openai_image(messages, image_base64, temperature, 
-                                                 max_tokens, max_completion_tokens, response_name)
-                elif self.client_type == 'anthropic':
-                    response = self._send_anthropic_image(messages, image_base64, temperature, 
-                                                        max_tokens or max_completion_tokens, response_name)
-                elif self.client_type == 'electronhub':
-                    response = self._send_electronhub_image(messages, image_base64, temperature, 
-                                                          max_tokens or max_completion_tokens, response_name)
-                elif self.client_type == 'poe':
-                    response = self._send_poe_image(messages, image_base64, temperature,
-                                                  max_tokens or max_completion_tokens, response_name)
-                elif self.client_type == 'openrouter':
-                    response = self._send_openrouter_image(messages, image_base64, temperature,
-                                                         max_tokens or max_completion_tokens, response_name)
-                elif self.client_type == 'cohere':
-                    response = self._send_cohere_image(messages, image_base64, temperature,
-                                                     max_tokens or max_completion_tokens, response_name)
-                elif self.client_type == 'vertex_model_garden':
-                    response = self._send_vertex_model_garden_image(messages, image_base64, temperature, 
-                                                                   max_tokens or max_completion_tokens, response_name)
-                else:
-                    # Try OpenAI-compatible endpoint as fallback
-                    print(f"⚠️ No specific image handler for {self.client_type}, trying OpenAI-compatible endpoint")
-                    response = self._send_openai_image(messages, image_base64, temperature,
-                                                     max_tokens, max_completion_tokens, response_name)
-                
-                # Check for cancellation (from timeout or stop button)
-                if self._cancelled:
-                    logger.info("Image operation cancelled (timeout or user stop)")
-                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                
-                # ====== UNIVERSAL EXTRACTION INTEGRATION ======
-                # Use universal extraction instead of assuming response.content exists
-                extracted_content = ""
-                finish_reason = 'stop'
-                
-                if response:
-                    # Prepare provider-specific parameters
-                    extraction_kwargs = {}
-                    
-                    # Add Gemini-specific parameters if applicable
-                    if self.client_type == 'gemini':
-                        # Check if this model supports thinking
-                        extraction_kwargs['supports_thinking'] = self._supports_thinking()
-                        # Get thinking budget from environment
-                        extraction_kwargs['thinking_budget'] = int(os.getenv("THINKING_BUDGET", "-1"))
-                    
-                    # Try universal extraction with provider-specific parameters
-                    extracted_content, finish_reason = self._extract_response_text(
-                        response, 
-                        provider=self.client_type,
-                        **extraction_kwargs
-                    )
-                    
-                    # If extraction failed but we have a response object
-                    if not extracted_content and response:
-                        print(f"⚠️ Failed to extract text from {self.client_type} image response")
-                        print(f"   Response type: {type(response)}")
-                        print(f"   Consider checking image response extraction for this provider")
-                        
-                        # Log the response structure for debugging
-                        self._save_failed_request(messages, "Image extraction failed", context, response)
-                        
-                        # Check if response has any common attributes we missed
-                        if hasattr(response, 'content') and response.content:
-                            extracted_content = str(response.content)
-                            print(f"   Fallback: Using response.content directly")
-                        elif hasattr(response, 'text') and response.text:
-                            extracted_content = str(response.text)
-                            print(f"   Fallback: Using response.text directly")
-                    
-                    # Update response object with extracted content
-                    if extracted_content and hasattr(response, 'content'):
-                        response.content = extracted_content
-                    elif extracted_content:
-                        # Create a new response object if needed
-                        response = UnifiedResponse(
-                            content=extracted_content,
-                            finish_reason=finish_reason,
-                            raw_response=response
-                        )
-                
-                # CRITICAL: Save response for duplicate detection
-                # This must happen even for truncated/empty responses
-                if extracted_content:
-                    self._save_response(extracted_content, response_name)
-                    logger.debug(f"Saved image response to: {response_name}")
-                
-                # Handle empty responses
-                if not extracted_content or extracted_content.strip() in ["", "[]", "[IMAGE TRANSLATION FAILED]"]:
-                    print(f"Empty or error image response: {finish_reason}")
-                    self._save_failed_request(messages, "Empty image response", context, response)
-                    
-                    # ALWAYS log these failures too
-                    self._log_truncation_failure(
-                        messages=messages,
-                        response_content=extracted_content or "",
-                        finish_reason=finish_reason or 'error',
-                        context=context,
-                        error_details=getattr(response, 'error_details', None) if response else None
-                    )
-                    self._track_stats(context, False, "empty_image_response", time.time() - start_time)
-                    
-                    # Use fallback
-                    fallback_content = self._handle_empty_result(messages, context, 
-                        getattr(response, 'error_details', "empty_image") if response else "empty_image")
-                    return fallback_content, 'error'
-                
-                # Track success
-                self._track_stats(context, True, None, time.time() - start_time)
-                
-                # Mark key as successful in multi-key mode
-                self._mark_key_success()
-                
-                # Log important info for retry mechanisms
-                if finish_reason in ['length', 'max_tokens']:
-                    print(f"Image response was truncated: {finish_reason}")
-                    print(f"⚠️ Image response truncated (finish_reason: {finish_reason})")
-                    
-                    # ALWAYS log truncation failures
-                    self._log_truncation_failure(
-                        messages=messages,
-                        response_content=extracted_content,
-                        finish_reason=finish_reason,
-                        context=context,
-                        error_details=getattr(response, 'error_details', None) if response else None
-                    )
-                    # The calling code will check finish_reason=='length' for retry
-                
-                # Apply API delay after successful call (even if truncated)
-                # SKIP DELAY DURING CLEANUP
-                if not self._in_cleanup:
-                    api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
-                    if api_delay > 0:
-                        print(f"⏳ Waiting {api_delay}s before next API call...")
-                        time.sleep(api_delay)
-                else:
-                    print("⚡ Skipping API delay (cleanup mode)")
-                
-                # Return the response with accurate finish_reason
-                # This is CRITICAL for retry mechanisms to work
-                return extracted_content, finish_reason
-                
-            except UnifiedClientError as e:
-                # Handle cancellation specially for timeout support
-                if e.error_type == "cancelled" or "cancelled" in str(e):
-                    self._in_cleanup = False  # Ensure cleanup flag is set
-                    logger.info("Propagating image cancellation to caller")
-                    # Re-raise so send_with_interrupt can handle it
-                    raise
-                
-                print(f"UnifiedClient image error: {e}")
-                
-                # Check if it's a rate limit error and re-raise for retry logic
-                error_str = str(e).lower()
-                if e.error_type == "rate_limit" or "429" in error_str or "rate limit" in error_str or "quota" in error_str:
-                    raise  # Re-raise for multi-key retry logic in outer send_image() method
-                
-                # Check for prohibited content - check BOTH error_type AND error string
-                if e.error_type == "prohibited_content" or any(indicator in error_str for indicator in content_filter_indicators):
-                    print(f"❌ Prohibited image content detected: {error_str[:200]}")
-                    
-                    # Only try main key if conditions are met
-                    if (self._multi_key_mode and 
-                        not main_key_attempted and 
-                        hasattr(self, 'original_api_key') and 
-                        hasattr(self, 'original_model') and
-                        self.original_api_key and 
-                        self.original_model):
-                        
-                        print(f"🔄 Attempting main key fallback for prohibited image content")
-                        print(f"   Current key: {self.key_identifier}")
-                        print(f"   Main key model: {self.original_model}")
-                        
-                        main_key_attempted = True
-                        
-                        try:
-                            # Create temporary client with main key for image
-                            main_response = self._retry_image_with_main_key(
-                                messages, image_data, temperature, max_tokens, max_completion_tokens, context
-                            )
-                            
-                            if main_response:
-                                content, finish_reason = main_response
-                                print(f"✅ Main key succeeded for image! Returning response")
-                                return content, finish_reason
-                            else:
-                                print(f"❌ Main key returned None for image")
-                                
-                        except Exception as main_error:
-                            print(f"❌ Main key image error: {str(main_error)[:200]}")
-                            # Check if main key also hit content filter
-                            main_error_str = str(main_error).lower()
-                            if any(indicator in main_error_str for indicator in content_filter_indicators):
-                                print(f"❌ Main key also hit content filter for image")
-                            # Continue to normal error handling
-                    
-                    # Normal prohibited content handling
-                    print(f"❌ Image content prohibited - not retrying further")
-                    self._save_failed_request(messages, e, context)
-                    self._track_stats(context, False, type(e).__name__, time.time() - start_time)
-                    fallback_content = self._handle_empty_result(messages, context, str(e))
-                    return fallback_content, 'error'
-                
-                # Check for 500 errors - retry these with exponential backoff
-                http_status = getattr(e, 'http_status', None)
-                if http_status == 500 or "500" in error_str or "api_error" in error_str:
-                    if attempt < internal_retries - 1:
-                        # Exponential backoff with jitter
-                        delay = (base_delay * (2 ** attempt)) + random.uniform(0, 1)
-                        # Cap the maximum delay to prevent extremely long waits
-                        delay = min(delay, 60)  # Max 60 seconds
-                        
-                        print(f"🔄 Image server error (500) - auto-retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries})")
-                        
-                        # Wait with cancellation check
-                        wait_start = time.time()
-                        while time.time() - wait_start < delay:
-                            if self._cancelled:
-                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                            time.sleep(0.5)  # Check every 0.5 seconds
-                        continue
-                    else:
-                        print(f"❌ Image server error (500) - exhausted {internal_retries} retries")
-                
-                # Save failed request and return fallback
-                self._save_failed_request(messages, e, context)
-                self._track_stats(context, False, type(e).__name__, time.time() - start_time)
-                fallback_content = self._handle_empty_result(messages, context, str(e))
-                return fallback_content, 'error'
-                
-            except Exception as e:
-                print(f"Unexpected image error: {e}")
-                error_str = str(e).lower()
-                
-                # For unexpected errors, check if it's a timeout
-                if "timed out" in error_str:
-                    # Re-raise timeout errors so the retry logic can handle them
-                    raise UnifiedClientError(f"Image request timed out: {e}", error_type="timeout")
-                
-                # Check if it's a rate limit error
-                if "429" in error_str or "rate limit" in error_str or "quota" in error_str:
-                    raise  # Re-raise for multi-key retry logic
-                
-                # Check for prohibited content in unexpected errors
-                if any(indicator in error_str for indicator in content_filter_indicators):
-                    print(f"❌ Image content prohibited in unexpected error: {error_str[:200]}")
-                    
-                    # Debug current state
-                    self._debug_multi_key_state()
-                    
-                    # If we're in multi-key mode and haven't tried the main key yet
-                    if (self._multi_key_mode and 
-                        not main_key_attempted and 
-                        hasattr(self, 'original_api_key') and 
-                        hasattr(self, 'original_model') and
-                        self.original_api_key and 
-                        self.original_model):
-                        
-                        print(f"🔄 Attempting main key fallback for prohibited image (from unexpected error)")
-                        print(f"   Current key: {self.key_identifier}")
-                        print(f"   Main key model: {self.original_model}")
-                        
-                        main_key_attempted = True
-                        
-                        try:
-                            # Create temporary client with main key for image
-                            main_response = self._retry_image_with_main_key(
-                                messages, image_data, temperature, max_tokens, max_completion_tokens, context
-                            )
-                            
-                            if main_response:
-                                content, finish_reason = main_response
-                                print(f"✅ Main key succeeded for image! Returning response")
-                                return content, finish_reason
-                            else:
-                                print(f"❌ Main key returned None for image")
-                                
-                        except Exception as main_error:
-                            print(f"❌ Main key image error: {str(main_error)[:200]}")
-                            # Check if main key also hit content filter
-                            main_error_str = str(main_error).lower()
-                            if any(indicator in main_error_str for indicator in content_filter_indicators):
-                                print(f"❌ Main key also hit content filter for image")
-                    
-                    # Fall through to normal error handling
-                    print(f"❌ Image content prohibited - not retrying")
-                    self._save_failed_request(messages, e, context)
-                    self._track_stats(context, False, "unexpected_error", time.time() - start_time)
-                    fallback_content = self._handle_empty_result(messages, context, str(e))
-                    return fallback_content, 'error'
-                
-                # Check for 500 errors in unexpected exceptions
-                if "500" in error_str or "internal server error" in error_str:
-                    if attempt < internal_retries - 1:
-                        # Exponential backoff with jitter
-                        delay = (base_delay * (2 ** attempt)) + random.uniform(0, 1)
-                        delay = min(delay, 60)  # Max 60 seconds
-                        
-                        print(f"🔄 Image server error (500) - auto-retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries})")
-                        
-                        wait_start = time.time()
-                        while time.time() - wait_start < delay:
-                            if self._cancelled:
-                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                            time.sleep(0.5)
-                        continue
-                
-                # Check for other transient errors with exponential backoff
-                transient_errors = ["502", "503", "504", "connection reset", "connection aborted"]
-                if any(err in error_str for err in transient_errors):
-                    if attempt < internal_retries - 1:
-                        # Use a slightly less aggressive backoff for transient errors
-                        delay = (base_delay/2 * (2 ** attempt)) + random.uniform(0, 1)
-                        delay = min(delay, 30)  # Max 30 seconds for transient errors
-                        
-                        print(f"🔄 Image transient error - retrying in {delay:.1f}s")
-                        
-                        wait_start = time.time()
-                        while time.time() - wait_start < delay:
-                            if self._cancelled:
-                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                            time.sleep(0.5)
-                        continue
-                
-                # Save failed request and return fallback for other errors
-                self._save_failed_request(messages, e, context)
-                self._track_stats(context, False, "unexpected_error", time.time() - start_time)
-                fallback_content = self._handle_empty_result(messages, context, str(e))
-                return fallback_content, 'error'
-
-    def _retry_image_with_main_key(self, messages, image_data, temperature=None, max_tokens=None, 
-                                   max_completion_tokens=None, context=None) -> Optional[Tuple[str, Optional[str]]]:
-        """
-        Create a temporary client with the main key and retry the image request.
-        This is used for prohibited content errors in multi-key mode.
-        """
-        print(f"[MAIN KEY IMAGE RETRY] Starting image retry with main key")
-        print(f"[MAIN KEY IMAGE RETRY] Original key: {self.original_api_key[:8]}...{self.original_api_key[-4:]}")
-        print(f"[MAIN KEY IMAGE RETRY] Original model: {self.original_model}")
-        
-        try:
-            # Create a new temporary UnifiedClient instance with the main key
-            temp_client = UnifiedClient(
-                api_key=self.original_api_key,
-                model=self.original_model,
-                output_dir=self.output_dir
-            )
-            
-            # FORCE single-key mode after initialization
-            # This is thread-safe because we're modifying the instance, not the environment
-            temp_client._multi_key_mode = False
-            temp_client.use_multi_keys = False
-            temp_client.key_identifier = "Main Key (Image Fallback)"
-            
-            # The client should already be set up from __init__, but verify
-            if not hasattr(temp_client, 'client_type') or temp_client.client_type is None:
-                # Force setup if needed
-                temp_client.api_key = self.original_api_key
-                temp_client.model = self.original_model
-                temp_client._setup_client()
-            
-            # Copy relevant state
-            temp_client.context = context or 'image_translation'
-            temp_client._cancelled = self._cancelled
-            temp_client._in_cleanup = self._in_cleanup
-            temp_client.current_session_context = self.current_session_context
-            temp_client.conversation_message_count = self.conversation_message_count
-            
-            # Copy image-specific settings if they exist
-            temp_client.default_temperature = getattr(self, 'default_temperature', 0.3)
-            temp_client.default_max_tokens = getattr(self, 'default_max_tokens', 8192)
-            temp_client.request_timeout = self.request_timeout
-            
-            print(f"[MAIN KEY IMAGE RETRY] Created temp client with model: {temp_client.model}")
-            print(f"[MAIN KEY IMAGE RETRY] Temp client type: {getattr(temp_client, 'client_type', 'NOT SET')}")
-            print(f"[MAIN KEY IMAGE RETRY] Multi-key mode: {temp_client._multi_key_mode}")
-            
-            # Get file names for response tracking
-            payload_name, response_name = self._get_file_names(messages, context=context)
-            
-            # Try to send the image request
-            print(f"[MAIN KEY IMAGE RETRY] Sending image request...")
-            
-            # Use the send_image method instead of _get_response for better compatibility
-            result = temp_client.send_image(
-                messages=messages,
-                image_data=image_data,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                max_completion_tokens=max_completion_tokens,
-                context=context
-            )
-            
-            # Check the result
-            if result and isinstance(result, tuple):
-                content, finish_reason = result
-                if content:
-                    print(f"[MAIN KEY IMAGE RETRY] Success! Got image response of length: {len(content)}")
-                    # Save the response using our instance's method
-                    self._save_response(content, response_name)
-                    return content, finish_reason
-                else:
-                    print(f"[MAIN KEY IMAGE RETRY] Empty content returned for image")
-                    return None
-            else:
-                print(f"[MAIN KEY IMAGE RETRY] Unexpected result type: {type(result)}")
-                return None
-            
-        except Exception as e:
-            print(f"[MAIN KEY IMAGE RETRY] Exception: {type(e).__name__}: {str(e)[:500]}")
-            
-            # Check if it's also a content filter error
-            error_str = str(e).lower()
-            content_filter_indicators = [
-                "content_filter", "content was blocked", "response was blocked",
-                "safety filter", "content policy", "harmful content",
-                "blocked by safety", "harm_category", "content_policy_violation",
-                "unsafe content", "violates our usage policies",
-                "prohibited_content", "blockedreason", "content blocked",
-                "inappropriate image", "inappropriate content"
-            ]
-            
-            if any(indicator in error_str for indicator in content_filter_indicators):
-                print(f"[MAIN KEY IMAGE RETRY] Main key also hit content filter for image")
-            
-            # Re-raise so the calling method can handle it
-            raise
-
-
-    def _debug_active_requests(self):
-        """Debug method to see what requests are currently being tracked"""
-        with self._tracker_lock:
-            current_time = time.time()
-            print(f"\n=== Active Request Tracking ===")
-            print(f"Total tracked: {len(self._chapter_request_tracker)}")
-            
-            for hash_key, info in self._chapter_request_tracker.items():
-                age = current_time - info['timestamp']
-                thread = info['thread']
-                context = info['context']
-                chapter_info = info.get('chapter_info', {})
-                chapter = chapter_info.get('chapter', 'N/A')
-                
-                print(f"  Hash: {hash_key[:8]}... | Thread: {thread} | "
-                      f"Chapter: {chapter} | Age: {age:.1f}s | Context: {context}")
-            print(f"================================\n")
         
     def _send_vertex_model_garden_image(self, messages, image_base64, temperature, max_tokens, response_name):
         """Send image request to Vertex AI Model Garden"""
