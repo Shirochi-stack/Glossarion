@@ -443,7 +443,7 @@ class EnhancedTextExtractor:
                 clean_text = self.h2t.handle(content_to_convert)
             except (AssertionError, UnboundLocalError) as e:
                 error_msg = str(e)
-                if "cannot access local variable" in error_msg or "we should not get here!" in error_msg or "unexpected call to parse_endtag" in error_msg:
+                if "cannot access local variable" in error_msg or "we should not get here!" in error_msg or "unexpected call to parse_endtag" in error_msg or "unexpected call to parse_starttag" in error_msg:
                     print(f"⚠️ html2text encountered malformed HTML: {error_msg}")
                     print(f"⚠️ Applying minimal fixes...")
                     # Apply minimal fixes
