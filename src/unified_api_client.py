@@ -126,6 +126,8 @@ import hashlib
 import html
 from multi_api_key_manager import APIKeyPool, APIKeyEntry, RateLimitCache
 import threading
+import uuid
+from threading import RLock
 from collections import defaultdict
 logger = logging.getLogger(__name__)
 
@@ -236,6 +238,10 @@ class UnifiedClient:
     4. Cleaner error handling and retry logic
     5. INSTANCE-BASED multi-key mode (not class-based)
     """
+    # Thread safety for file operations
+    _file_write_lock = RLock()
+    _chapter_request_tracker = {}  # Track chapter requests to prevent duplication
+    _tracker_lock = RLock()
     
     # Class-level shared resources - properly initialized
     _rate_limit_cache = None
@@ -916,99 +922,109 @@ class UnifiedClient:
     
 
     def __init__(self, api_key: str, model: str, output_dir: str = None):
-        self._current_output_file = None
-        self.original_api_key = api_key  # Store original
-        self.original_model = model      # Store original
-        self.api_key = api_key
-        self.model = model
+        """Initialize the unified client with enhanced thread safety"""
+        # Store original values
+        self.original_api_key = api_key
+        self.original_model = model
+        
+        # Add unique session ID for this client instance
+        self.session_id = str(uuid.uuid4())[:8]
+        
+        # INSTANCE-LEVEL multi-key configuration
+        self._multi_key_mode = False  # INSTANCE variable, not class!
+        self._force_rotation = True
+        self._rotation_frequency = 1
+        
+        # Instance variables
+        self.output_dir = output_dir
+        self._cancelled = False
+        self._in_cleanup = False
         self.conversation_message_count = 0
-        self.pattern_counts = {}
-        self.last_pattern = None
         self.context = None
         self.current_session_context = None
-        self._cancelled = False
-        self.output_dir = output_dir
-        self._actual_output_filename = None
-        self._in_cleanup = False
+        
+        # Request tracking with thread safety
+        self._request_count = 0
+        self._thread_request_count = 0
+        self._request_history = {}  # Store recent request hashes
+        
+        # Stats tracking
+        self.stats = {
+            'total_requests': 0,
+            'successful_requests': 0,
+            'failed_requests': 0,
+            'errors': defaultdict(int),
+            'response_times': []
+        }
+        
+        # File tracking for duplicate prevention
+        self._active_files = set()  # Track files being written
+        self._file_lock = RLock()
+        
+        # Timeout configuration
+        retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
+        if retry_timeout_enabled:
+            self.request_timeout = int(os.getenv("CHUNK_TIMEOUT", "900"))
+        else:
+            self.request_timeout = 36000  # 10 hours
+        
+        # Initialize client references
+        self.api_key = api_key
+        self.model = model
+        self.key_identifier = "Single Key"
+        self.current_key_index = None
         self.openai_client = None
         self.gemini_client = None
         self.mistral_client = None
         self.cohere_client = None
-        
-        # CRITICAL: Initialize ALL instance-level multi-key variables HERE
-        # These MUST exist for all instances to prevent AttributeError
-        self._multi_key_mode = False  # Instance variable, not class!
-        self._force_rotation = True   # Default to True
-        self._rotation_frequency = 1  # Default to 1
-        self.use_multi_keys = False  # For backward compatibility
-        self.current_key_index = None
-        self.key_identifier = "Single Key"
-        self.request_count = 0  # Instance request counter
-        
-        print(f"[DEBUG] Initializing UnifiedClient with model: {model}")
-        
-        # Get timeout configuration from GUI (moved up)
-        retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
-        if retry_timeout_enabled:
-            self.request_timeout = int(os.getenv("CHUNK_TIMEOUT", "900"))
-            logger.info(f"Using GUI-configured timeout: {self.request_timeout}s")
-        else:
-            self.request_timeout = 36000  # 10 hour default
-            logger.info(f"Using default timeout: {self.request_timeout}s")
-        
-        # Stats tracking (moved up)
-        self.stats = {
-            'total_requests': 0,
-            'empty_results': 0,
-            'errors': {},
-            'response_times': [],
-            'successful_requests': 0,
-            'failed_requests': 0
-        }
-        
-        # Store Google Cloud credentials path if available
-        self.google_creds_path = None
+        self._actual_output_filename = None
+        self._current_output_file = None
+        self._last_response_filename = None
         
         # Check if multi-key mode should be enabled FOR THIS INSTANCE
         use_multi_keys_env = os.getenv('USE_MULTI_API_KEYS', '0') == '1'
         print(f"[DEBUG] USE_MULTI_API_KEYS env var: {os.getenv('USE_MULTI_API_KEYS')}")
-        print(f"[DEBUG] MULTI_API_KEYS env var exists: {os.getenv('MULTI_API_KEYS') is not None}")
-        print(f"[DEBUG] use_multi_keys_env: {use_multi_keys_env}")
-        print(f"[DEBUG] Instance _multi_key_mode: {self._multi_key_mode}")
+        print(f"[DEBUG] Creating new instance - multi-key mode from env: {use_multi_keys_env}")
         
         if use_multi_keys_env:
             # Initialize from environment
             multi_keys_json = os.getenv('MULTI_API_KEYS', '[]')
-            print(f"[DEBUG] multi_keys_json: {multi_keys_json[:100]}...")
+            print(f"[DEBUG] Loading multi-keys config...")
             force_rotation = os.getenv('FORCE_KEY_ROTATION', '1') == '1'
             rotation_frequency = int(os.getenv('ROTATION_FREQUENCY', '1'))
             
             try:
                 multi_keys = json.loads(multi_keys_json)
                 if multi_keys:
-                    # Setup the shared pool (class-level)
+                    # Setup the shared pool
                     self.setup_multi_key_pool(multi_keys, force_rotation, rotation_frequency)
                     
                     # Enable multi-key mode FOR THIS INSTANCE
                     self._multi_key_mode = True
                     self._force_rotation = force_rotation
                     self._rotation_frequency = rotation_frequency
-                    self.use_multi_keys = True  # Backward compatibility
                     
-                    print(f"[DEBUG] ✅ Multi-key mode enabled for this instance with {len(multi_keys)} keys")
-                    # Don't select a key yet - wait until first request
-                    # But DON'T return early - we need to finish initialization
+                    print(f"[DEBUG] ✅ This instance has multi-key mode ENABLED")
                 else:
                     print(f"[DEBUG] ❌ No keys found in config, staying in single-key mode")
-                    # Instance variables already set to defaults
+                    self._multi_key_mode = False
             except Exception as e:
-                print(f"[ERROR] Failed to load multi-key config: {e}")
                 logger.error(f"Failed to load multi-key config: {e}")
-                # Instance variables already set to defaults
+                self._multi_key_mode = False
+                print(f"[DEBUG] ❌ Error loading config, falling back to single-key mode")
         else:
             #print(f"[DEBUG] ❌ Multi-key mode is DISABLED for this instance (env var = 0)")
-            # Instance variables already set to defaults
-            pass
+            self._multi_key_mode = False
+        
+        # Initial setup based on THIS INSTANCE's mode
+        if not self._multi_key_mode:
+            self.api_key = api_key
+            self.model = model
+            self.key_identifier = "Single Key"
+            self._setup_client()
+        
+        # Store Google Cloud credentials path if available
+        self.google_creds_path = None
         
         # Check for Vertex AI Model Garden models (contain @ symbol)
         if '@' in self.model or self.model.startswith('vertex/'):
@@ -1375,6 +1391,138 @@ class UnifiedClient:
             return f"{self.key_identifier} - Status: {status}, Success: {key.success_count}, Errors: {key.error_count}"
         else:
             return "Single Key Mode"
+
+    def _generate_unique_thread_dir(self, context: str) -> str:
+        """Generate a truly unique thread directory with session ID and timestamp"""
+        thread_name = threading.current_thread().name
+        thread_id = threading.current_thread().ident
+        
+        # Include timestamp and session ID for uniqueness
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:20]
+        unique_id = f"{thread_name}_{thread_id}_{self.session_id}_{timestamp}"
+        
+        thread_dir = os.path.join("Payloads", context, unique_id)
+        os.makedirs(thread_dir, exist_ok=True)
+        return thread_dir
+
+    def _get_request_hash(self, messages: list) -> str:
+        """
+        Generate a hash of the request content.
+        This should be unique per chapter/chunk to catch true duplicates.
+        """
+        content_parts = []
+        
+        for msg in messages:
+            role = msg.get('role', '')
+            content = msg.get('content', '')
+            
+            # Handle different content types
+            if isinstance(content, list):
+                # For image messages, include a marker
+                content_str = "IMAGE_MESSAGE"
+            else:
+                # For text, use the actual content but limit length
+                # This ensures different chapters get different hashes
+                content_str = str(content)[:2000]  # Use first 2000 chars
+            
+            content_parts.append(f"{role}:{content_str}")
+        
+        content_str = "|".join(content_parts)
+        return hashlib.md5(content_str.encode()).hexdigest()
+
+    def _check_duplicate_request(self, request_hash: str, context: str) -> bool:
+        """
+        Check if this EXACT request is being processed by ANOTHER thread.
+        This is designed to catch true duplicates while allowing parallel processing.
+        """
+        
+        # Only check for duplicates in translation/glossary contexts
+        if context not in ['translation', 'glossary', 'image_translation']:
+            return False
+        
+        with self._tracker_lock:
+            current_time = time.time()
+            thread_name = threading.current_thread().name
+            
+            # Clean old entries (older than 10 seconds - reduced window)
+            self._chapter_request_tracker = {
+                k: v for k, v in self._chapter_request_tracker.items()
+                if current_time - v['timestamp'] < 10
+            }
+            
+            # Check if this EXACT request exists from ANOTHER thread
+            if request_hash in self._chapter_request_tracker:
+                existing = self._chapter_request_tracker[request_hash]
+                existing_thread = existing.get('thread', 'unknown')
+                time_diff = current_time - existing['timestamp']
+                
+                # Only flag as duplicate if:
+                # 1. It's from a DIFFERENT thread
+                # 2. The request is still "active" (within 2 seconds)
+                # 3. It's the EXACT same content (same hash)
+                if existing_thread != thread_name and time_diff < 2:
+                    # Extract chapter info for better logging
+                    chapter_info = existing.get('chapter_info', {})
+                    chapter_str = f"Chapter {chapter_info.get('chapter', '?')}" if chapter_info.get('chapter') else "content"
+                    
+                    print(f"⚠️ [{thread_name}] DUPLICATE: Same {chapter_str} being processed by {existing_thread}")
+                    print(f"   Hash: {request_hash[:8]}... | Time diff: {time_diff:.1f}s")
+                    return True
+            
+            # Track this request with more metadata
+            self._chapter_request_tracker[request_hash] = {
+                'timestamp': current_time,
+                'context': context,
+                'thread': thread_name,
+                'chapter_info': self._extract_chapter_info([])  # Store chapter info if available
+            }
+            return False
+
+    def _get_safe_filename(self, base_filename: str, content_hash: str = None) -> str:
+        """Generate a safe, unique filename"""
+        # Add content hash if provided
+        if content_hash:
+            name, ext = os.path.splitext(base_filename)
+            return f"{name}_{content_hash[:8]}{ext}"
+        return base_filename
+
+    def _is_file_being_written(self, filepath: str) -> bool:
+        """Check if a file is currently being written by another thread"""
+        with self._file_lock:
+            return filepath in self._active_files
+
+    def _mark_file_active(self, filepath: str):
+        """Mark a file as being written"""
+        with self._file_lock:
+            self._active_files.add(filepath)
+
+    def _mark_file_complete(self, filepath: str):
+        """Mark a file write as complete"""
+        with self._file_lock:
+            self._active_files.discard(filepath)
+
+    def _extract_chapter_info(self, messages) -> dict:
+        """Extract chapter and chunk information from messages"""
+        info = {
+            'chapter': None,
+            'chunk': None,
+            'total_chunks': None
+        }
+        
+        messages_str = str(messages)
+        
+        # Extract chapter number
+        chapter_match = re.search(r'Chapter (\d+)', messages_str)
+        if chapter_match:
+            info['chapter'] = chapter_match.group(1)
+        
+        # Extract chunk information
+        chunk_match = re.search(r'Chunk (\d+)/(\d+)', messages_str)
+        if chunk_match:
+            info['chunk'] = chunk_match.group(1)
+            info['total_chunks'] = chunk_match.group(2)
+        
+        return info
             
     def _setup_client(self):
         """Setup the appropriate client based on model type"""
@@ -1714,18 +1862,449 @@ class UnifiedClient:
         """Handle empty results with context-aware fallbacks"""
         print(f"Handling empty result for context: {context}, error: {error_info}")
         
+        # Log detailed error information for debugging
+        if isinstance(error_info, dict):
+            error_type = error_info.get('error', 'unknown')
+            error_details = error_info.get('details', '')
+        else:
+            error_type = str(error_info)
+            error_details = ''
+        
+        # Check if this is an extraction failure vs actual empty response
+        is_extraction_failure = 'extract' in error_type.lower() or 'parse' in error_type.lower()
+        
         if context == 'glossary':
+            # For glossary, we might have partial data in error_info
+            if is_extraction_failure and isinstance(error_info, dict):
+                # Check if raw response is available
+                raw_response = error_info.get('raw_response', '')
+                if raw_response and 'character' in str(raw_response):
+                    # Log that data exists but couldn't be extracted
+                    print("⚠️ Glossary data exists in response but extraction failed!")
+                    print("   Consider checking response extraction for this provider")
+            
             # Return empty but valid JSON
             return "[]"
+            
         elif context == 'translation':
             # Extract the original text and return it with a marker
             original_text = self._extract_user_content(messages)
-            return f"[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]\n{original_text}"
+            
+            # Add more specific error info if available
+            if is_extraction_failure:
+                return f"[EXTRACTION FAILED - ORIGINAL TEXT PRESERVED]\n{original_text}"
+            elif 'rate' in error_type.lower():
+                return f"[RATE LIMITED - ORIGINAL TEXT PRESERVED]\n{original_text}"
+            elif 'safety' in error_type.lower() or 'prohibited' in error_type.lower():
+                return f"[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]\n{original_text}"
+            else:
+                return f"[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]\n{original_text}"
+                
         elif context == 'image_translation':
-            return "[IMAGE TRANSLATION FAILED]"
+            # Provide more specific error messages for image translation
+            if 'size' in error_type.lower():
+                return "[IMAGE TOO LARGE - TRANSLATION FAILED]"
+            elif 'format' in error_type.lower():
+                return "[UNSUPPORTED IMAGE FORMAT - TRANSLATION FAILED]"
+            elif is_extraction_failure:
+                return "[RESPONSE EXTRACTION FAILED]"
+            else:
+                return "[IMAGE TRANSLATION FAILED]"
+                
+        elif context == 'manga':
+            # Add manga-specific handling
+            return "[MANGA TRANSLATION FAILED]"
+            
+        elif context == 'metadata':
+            # For metadata extraction
+            return "{}"
+            
         else:
-            # Generic fallback
-            return "[AI RESPONSE UNAVAILABLE]"
+            # Generic fallback with error type
+            if is_extraction_failure:
+                return "[RESPONSE EXTRACTION FAILED]"
+            elif 'rate' in error_type.lower():
+                return "[RATE LIMITED - PLEASE RETRY]"
+            else:
+                return "[AI RESPONSE UNAVAILABLE]"
+
+    def _extract_response_text(self, response, provider=None, **kwargs):
+        """
+        Universal response text extraction that works across all providers.
+        Includes enhanced Gemini-specific handling when needed.
+        
+        Args:
+            response: The API response object
+            provider: The provider name (e.g., 'gemini', 'openai')
+            **kwargs: Additional provider-specific parameters:
+                - supports_thinking (bool): For Gemini thinking models
+                - thinking_budget (int): For Gemini thinking token budget
+        """
+        result = ""
+        finish_reason = 'stop'
+        
+        # Determine provider if not specified
+        if provider is None:
+            provider = self.client_type
+        
+        print(f"   🔍 Extracting text from {provider} response...")
+        print(f"   🔍 Response type: {type(response)}")
+        
+        # Get Gemini-specific parameters if provided
+        supports_thinking = kwargs.get('supports_thinking', False)
+        thinking_budget = kwargs.get('thinking_budget', -1)
+        
+        # ========== GEMINI-SPECIFIC: Early prohibited content check ==========
+        if provider == 'gemini' and hasattr(response, 'candidates') and response.candidates:
+            for i, candidate in enumerate(response.candidates):
+                if hasattr(candidate, 'finish_reason'):
+                    finish_reason_str = str(candidate.finish_reason)
+                    if 'PROHIBITED_CONTENT' in finish_reason_str:
+                        print(f"   🚫 [Gemini] Candidate {i+1} has prohibited content: {finish_reason_str}")
+                        # Return immediately with prohibited_content status
+                        return "", "prohibited_content"
+        
+        # Handle UnifiedResponse objects
+        if isinstance(response, UnifiedResponse):
+            if response.content:
+                print(f"   ✅ Got text from UnifiedResponse.content: {len(response.content)} chars")
+                return response.content, response.finish_reason or 'stop'
+        
+        # Method 1: Direct text attributes (common patterns)
+        text_attributes = ['text', 'content', 'message', 'output', 'response', 'answer', 'reply']
+        
+        # For Gemini, prioritize 'text' attribute
+        if provider == 'gemini':
+            text_attributes = ['text'] + [attr for attr in text_attributes if attr != 'text']
+        
+        for attr in text_attributes:
+            if hasattr(response, attr):
+                try:
+                    value = getattr(response, attr)
+                    if value and isinstance(value, str):
+                        result = value
+                        print(f"   ✅ Got text from response.{attr}: {len(result)} chars")
+                        return result, finish_reason
+                except Exception as e:
+                    # More detailed logging for Gemini
+                    if provider == 'gemini' and attr == 'text':
+                        print(f"   ⚠️ [Gemini] Failed to get response.text directly: {e}")
+                    pass
+        
+        # Method 2: Common nested patterns
+        nested_patterns = [
+            # OpenAI/Mistral pattern
+            lambda r: r.choices[0].message.content if hasattr(r, 'choices') and r.choices else None,
+            # Anthropic SDK pattern
+            lambda r: r.content[0].text if hasattr(r, 'content') and r.content and hasattr(r.content[0], 'text') else None,
+            # Cohere pattern
+            lambda r: r.text if hasattr(r, 'text') else None,
+            # JSON response pattern
+            lambda r: r.get('choices', [{}])[0].get('message', {}).get('content') if isinstance(r, dict) else None,
+            lambda r: r.get('content') if isinstance(r, dict) else None,
+            lambda r: r.get('text') if isinstance(r, dict) else None,
+            lambda r: r.get('output') if isinstance(r, dict) else None,
+        ]
+        
+        for i, pattern in enumerate(nested_patterns):
+            try:
+                extracted = pattern(response)
+                if extracted and isinstance(extracted, str):
+                    result = extracted
+                    print(f"   ✅ Extracted via nested pattern {i+1}: {len(result)} chars")
+                    return result, finish_reason
+            except:
+                pass
+        
+        # Method 3: Check for finish_reason in common locations
+        finish_reason_locations = [
+            lambda r: r.choices[0].finish_reason if hasattr(r, 'choices') and r.choices else None,
+            lambda r: r.finish_reason if hasattr(r, 'finish_reason') else None,
+            lambda r: r.get('choices', [{}])[0].get('finish_reason') if isinstance(r, dict) else None,
+        ]
+        
+        for location in finish_reason_locations:
+            try:
+                found_reason = location(response)
+                if found_reason:
+                    finish_reason = str(found_reason)
+                    # Normalize finish reasons
+                    if 'MAX_TOKENS' in finish_reason.upper() or finish_reason == 'max_tokens':
+                        finish_reason = 'length'
+                    elif 'SAFETY' in finish_reason.upper():
+                        finish_reason = 'safety'
+                    elif 'PROHIBITED_CONTENT' in finish_reason.upper():
+                        finish_reason = 'prohibited_content'
+                    elif 'STOP' in finish_reason.upper():
+                        finish_reason = 'stop'
+                    break
+            except:
+                pass
+        
+        # Method 4: Enhanced Gemini/candidates-style extraction
+        if hasattr(response, 'candidates') and response.candidates:
+            num_candidates = len(response.candidates)
+            if provider == 'gemini':
+                print(f"   🔍 [Gemini] Attempting extraction from {num_candidates} candidates...")
+            else:
+                print(f"   🔍 Attempting candidates-style extraction from {num_candidates} candidates...")
+            
+            for i, candidate in enumerate(response.candidates):
+                if provider == 'gemini':
+                    print(f"   🔍 [Gemini] Checking candidate {i+1}")
+                
+                # Check finish reason with detailed logging for Gemini
+                if hasattr(candidate, 'finish_reason'):
+                    finish_reason_str = str(candidate.finish_reason)
+                    if provider == 'gemini':
+                        print(f"   🔍 [Gemini] Finish reason: {finish_reason_str}")
+                    
+                    if 'MAX_TOKENS' in finish_reason_str:
+                        finish_reason = 'length'
+                    elif 'SAFETY' in finish_reason_str:
+                        finish_reason = 'safety'
+                    elif 'PROHIBITED_CONTENT' in finish_reason_str:
+                        finish_reason = 'prohibited_content'
+                
+                # Try direct text on candidate (some models provide this)
+                if hasattr(candidate, 'text'):
+                    try:
+                        if candidate.text:
+                            result = candidate.text
+                            print(f"   ✅ Got text from candidate.text: {len(result)} chars")
+                            return result, finish_reason
+                    except:
+                        pass
+                
+                # Try to extract from content.parts
+                if hasattr(candidate, 'content'):
+                    # Try direct text on content
+                    if hasattr(candidate.content, 'text'):
+                        try:
+                            if candidate.content.text:
+                                result = candidate.content.text
+                                print(f"   ✅ Got text from candidate.content.text: {len(result)} chars")
+                                return result, finish_reason
+                        except:
+                            pass
+                    
+                    # Try parts with enhanced extraction
+                    if hasattr(candidate.content, 'parts'):
+                        parts = candidate.content.parts or []
+                        if provider == 'gemini':
+                            print(f"   🔍 [Gemini] Candidate has {len(parts)} parts")
+                        
+                        text_parts = []
+                        
+                        for j, part in enumerate(parts):
+                            # Skip thinking parts for Gemini
+                            if provider == 'gemini' and hasattr(part, 'thinking') and part.thinking:
+                                print(f"   🔍 [Gemini] Part {j+1} is a thinking part, skipping")
+                                continue
+                            
+                            part_text = self._extract_part_text(part, provider=provider, part_index=j+1)
+                            if part_text:
+                                text_parts.append(part_text)
+                                if provider == 'gemini':
+                                    print(f"   ✅ [Gemini] Successfully extracted {len(part_text)} chars from part {j+1}")
+                            else:
+                                if provider == 'gemini':
+                                    print(f"   ⚠️ [Gemini] Could not extract text from part {j+1}")
+                        
+                        if text_parts:
+                            result = ''.join(text_parts)
+                            total_parts = len(text_parts)
+                            if provider == 'gemini':
+                                print(f"   ✅ [Gemini] Extracted total text from {total_parts} parts: {len(result)} chars")
+                            else:
+                                print(f"   ✅ Extracted from {total_parts} parts: {len(result)} chars total")
+                            return result, finish_reason
+        
+        # Method 5: Gemini thinking-specific response structure
+        if provider == 'gemini' and supports_thinking and thinking_budget != 0:
+            print("   🔍 [Gemini] Checking for thinking-specific response structure...")
+            
+            # Some models might have a separate 'output' or 'response' field when thinking is enabled
+            if hasattr(response, 'output') and response.output:
+                result = str(response.output)
+                print(f"   ✅ [Gemini] Got text from response.output (thinking): {len(result)} chars")
+                return result, finish_reason
+            
+            if hasattr(response, 'response') and response.response:
+                result = str(response.response)
+                print(f"   ✅ [Gemini] Got text from response.response (thinking): {len(result)} chars")
+                return result, finish_reason
+        
+        # Method 6: String representation extraction (last resort)
+        if not result:
+            if provider == 'gemini':
+                print("   🔍 [Gemini] Attempting string extraction as last resort...")
+            else:
+                print("   🔍 Attempting string extraction as last resort...")
+            
+            result = self._extract_from_string(response, provider=provider)
+            if result:
+                print(f"   🔧 Extracted from string representation: {len(result)} chars")
+                return result, finish_reason
+        
+        # Method 7: Handle dictionary/JSON responses
+        if isinstance(response, dict):
+            # Look for common keys
+            for key in ['content', 'text', 'output', 'message', 'response', 'answer', 'result']:
+                if key in response:
+                    value = response[key]
+                    if isinstance(value, str):
+                        result = value
+                        print(f"   ✅ Got text from dict['{key}']: {len(result)} chars")
+                        return result, finish_reason
+                    elif isinstance(value, list) and value:
+                        # Handle list of content items (Anthropic HTTP style)
+                        if isinstance(value[0], dict) and 'text' in value[0]:
+                            result = value[0]['text']
+                            print(f"   ✅ Got text from dict['{key}'][0]['text']: {len(result)} chars")
+                            return result, finish_reason
+        
+        # Method 8: Last resort attribute inspection (enhanced for Gemini)
+        if not result and provider == 'gemini':
+            print("   🔍 [Gemini] Last resort: inspecting all response attributes...")
+            attrs = dir(response)
+            text_attrs = [attr for attr in attrs if 'text' in attr.lower() or 'content' in attr.lower() or 'output' in attr.lower()]
+            print(f"   🔍 [Gemini] Potential text attributes: {text_attrs}")
+            
+            for attr in text_attrs:
+                if not attr.startswith('_'):  # Skip private attributes
+                    try:
+                        value = getattr(response, attr)
+                        if value and isinstance(value, str) and len(value) > 10:  # Likely actual content
+                            result = value
+                            print(f"   ✅ [Gemini] Got text from response.{attr}: {len(result)} chars")
+                            return result, finish_reason
+                    except:
+                        pass
+        
+        if provider == 'gemini':
+            print(f"   ❌ [Gemini] Failed to extract text from response")
+        else:
+            print(f"   ❌ Failed to extract text from {provider} response")
+        
+        return "", 'error'
+
+
+    def _extract_part_text(self, part, provider=None, part_index=None):
+        """
+        Extract text from a part object (handles various formats).
+        Enhanced with provider-specific handling.
+        """
+        # Direct text attribute
+        if hasattr(part, 'text'):
+            try:
+                text = part.text
+                if text:
+                    if provider == 'gemini' and part_index:
+                        print(f"   ✅ [Gemini] Part {part_index} has text via direct access: {len(text)} chars")
+                    return text
+            except Exception as e:
+                if provider == 'gemini' and part_index:
+                    print(f"   ⚠️ [Gemini] Failed direct access on part {part_index}: {e}")
+        
+        # Use getattr with fallback
+        try:
+            text = getattr(part, 'text', None)
+            if text:
+                if provider == 'gemini' and part_index:
+                    print(f"   ✅ [Gemini] Part {part_index} has text via getattr: {len(text)} chars")
+                return text
+        except Exception as e:
+            if provider == 'gemini' and part_index:
+                print(f"   ⚠️ [Gemini] Failed getattr on part {part_index}: {e}")
+        
+        # String representation extraction
+        part_str = str(part)
+        
+        if provider == 'gemini' and part_index:
+            print(f"   🔍 [Gemini] Part {part_index} string representation length: {len(part_str)}")
+        
+        if 'text=' in part_str or 'text":' in part_str:
+            import re
+            patterns = [
+                r'text="""(.*?)"""',  # Triple quotes (common in Gemini)
+                r'text="([^"]*(?:\\.[^"]*)*)"',  # Double quotes with escaping
+                r"text='([^']*(?:\\.[^']*)*)'",  # Single quotes
+                r'text=([^,\)]+)',  # Unquoted text (last resort)
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, part_str, re.DOTALL)
+                if match:
+                    text = match.group(1)
+                    # Unescape common escape sequences
+                    text = text.replace('\\n', '\n')
+                    text = text.replace('\\t', '\t')
+                    text = text.replace('\\r', '\r')
+                    text = text.replace('\\"', '"')
+                    text = text.replace("\\'", "'")
+                    text = text.replace('\\\\', '\\')
+                    
+                    if provider == 'gemini' and part_index:
+                        print(f"   🔧 [Gemini] Part {part_index} extracted via regex pattern: {len(text)} chars")
+                    
+                    return text
+        
+        # Part is itself a string
+        if isinstance(part, str):
+            if provider == 'gemini' and part_index:
+                print(f"   ✅ [Gemini] Part {part_index} is a string: {len(part)} chars")
+            return part
+        
+        if provider == 'gemini' and part_index:
+            print(f"   ⚠️ [Gemini] Failed string extraction on part {part_index}")
+        
+        return None
+
+
+    def _extract_from_string(self, response, provider=None):
+        """
+        Extract text from string representation of response.
+        Enhanced with provider-specific patterns.
+        """
+        try:
+            response_str = str(response)
+            import re
+            
+            # Common patterns in string representations
+            patterns = [
+                r'text="""(.*?)"""',  # Triple quotes (Gemini often uses this)
+                r'text="([^"]*(?:\\.[^"]*)*)"',  # Double quotes
+                r"text='([^']*(?:\\.[^']*)*)'",  # Single quotes  
+                r'content="([^"]*(?:\\.[^"]*)*)"',  # Content field
+                r'content="""(.*?)"""',  # Triple quoted content
+                r'"text":\s*"([^"]*(?:\\.[^"]*)*)"',  # JSON style
+                r'"content":\s*"([^"]*(?:\\.[^"]*)*)"',  # JSON content
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, response_str, re.DOTALL)
+                if match:
+                    text = match.group(1)
+                    # Unescape common escape sequences
+                    text = text.replace('\\n', '\n')
+                    text = text.replace('\\t', '\t')
+                    text = text.replace('\\r', '\r')
+                    text = text.replace('\\"', '"')
+                    text = text.replace("\\'", "'")
+                    text = text.replace('\\\\', '\\')
+                    
+                    if provider == 'gemini':
+                        print(f"   🔧 [Gemini] Extracted from string using pattern: {pattern[:30]}...")
+                    
+                    return text
+        except Exception as e:
+            if provider == 'gemini':
+                print(f"   ⚠️ [Gemini] Error during string extraction: {e}")
+            else:
+                print(f"   ⚠️ Error during string extraction: {e}")
+        
+        return None
     
     def _extract_user_content(self, messages):
         """Extract user content from messages"""
@@ -1774,101 +2353,131 @@ class UnifiedClient:
         self._last_response_filename = response_name
         return payload_name, response_name
     
-    def _save_payload(self, messages, filename):
+    def _save_payload(self, messages, filename, retry_reason=None):
+        """Save request payload for debugging with retry reason tracking"""
         
-         # Thread isolation
-        thread_name = threading.current_thread().name
-        if 'Translation' in thread_name:
-            context = 'translation'
-        elif 'Glossary' in thread_name:
-            context = 'glossary'
+        # Get stable thread directory
+        thread_dir = self._get_thread_directory()
+        
+        # Generate request hash for the filename (to make it unique)
+        request_hash = self._get_request_hash(messages)
+        
+        # Add hash and retry info to filename
+        base_name, ext = os.path.splitext(filename)
+        timestamp = datetime.now().strftime("%H%M%S")
+        
+        # Include retry reason in filename if provided
+        if retry_reason:
+            # Sanitize retry reason for filename
+            safe_reason = retry_reason.replace(" ", "_").replace("/", "_")[:20]
+            unique_filename = f"{base_name}_{timestamp}_{safe_reason}_{request_hash[:6]}{ext}"
         else:
-            context = 'general'
+            unique_filename = f"{base_name}_{timestamp}_{request_hash[:6]}{ext}"
         
-        thread_dir = os.path.join("Payloads", context, f"{thread_name}_{threading.current_thread().ident}")
-        os.makedirs(thread_dir, exist_ok=True)
-        """Save request payload for debugging"""
-        filepath = os.path.join(thread_dir, filename)
+        filepath = os.path.join(thread_dir, unique_filename)
+        
         try:
-            # Include debug info about system prompt
-            debug_info = {
-                'system_prompt_present': any(msg.get('role') == 'system' for msg in messages),
-                'system_prompt_length': 0
-            }
-            
-            for msg in messages:
-                if msg.get('role') == 'system':
-                    debug_info['system_prompt_length'] = len(msg.get('content', ''))
-                    break
-            
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump({
-                    'model': self.model,
-                    'client_type': self.client_type,
-                    'messages': messages,
-                    'timestamp': datetime.now().isoformat(),
-                    'debug': debug_info
-                }, f, indent=2, ensure_ascii=False)
+            # Thread-safe file writing
+            with self._file_write_lock:
+                thread_name = threading.current_thread().name
+                thread_id = threading.current_thread().ident
                 
-            if self.client_type == 'electronhub' and debug_info['system_prompt_present']:
-                logger.info(f"ElectronHub payload saved with system prompt ({debug_info['system_prompt_length']} chars)")
+                # Extract chapter info for better tracking
+                chapter_info = self._extract_chapter_info(messages)
+                
+                # Include debug info with retry reason
+                debug_info = {
+                    'system_prompt_present': any(msg.get('role') == 'system' for msg in messages),
+                    'system_prompt_length': 0,
+                    'request_hash': request_hash,
+                    'thread_name': thread_name,
+                    'thread_id': thread_id,
+                    'session_id': self.session_id,
+                    'chapter_info': chapter_info,
+                    'timestamp': datetime.now().isoformat(),
+                    'key_identifier': self.key_identifier,
+                    'retry_reason': retry_reason,  # Track why this payload was saved
+                    'is_retry': retry_reason is not None
+                }
+                
+                for msg in messages:
+                    if msg.get('role') == 'system':
+                        debug_info['system_prompt_length'] = len(msg.get('content', ''))
+                        break
+                
+                # Write the payload
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    json.dump({
+                        'model': self.model,
+                        'client_type': self.client_type,
+                        'messages': messages,
+                        'timestamp': datetime.now().isoformat(),
+                        'debug': debug_info,
+                        'key_identifier': self.key_identifier,
+                        'retry_info': {
+                            'reason': retry_reason,
+                            'attempt': getattr(self, '_current_retry_attempt', 0),
+                            'max_retries': getattr(self, '_max_retries', 7)
+                        } if retry_reason else None
+                    }, f, indent=2, ensure_ascii=False)
+                
+                logger.debug(f"[{thread_name}] Saved payload to: {filepath} (reason: {retry_reason or 'initial'})")
+                
         except Exception as e:
-            print(f"Failed to save payload: {e}")
-    
+            logger.error(f"Failed to save payload: {e}")
+
 
     def _save_response(self, content: str, filename: str):
-        """Save API response to file with proper path handling
-        
-        IMPORTANT: Only save JSON payloads, not HTML responses
-        HTML responses are saved in the book output folder, not Payloads
-        """
+        """Save API response with proper thread organization"""
         if not content or not os.getenv("SAVE_PAYLOAD", "1") == "1":
             return
         
         # ONLY save JSON files to Payloads folder
-        # Skip HTML files - they belong in the book output folder
         if not filename.endswith('.json'):
             logger.debug(f"Skipping HTML response save to Payloads: {filename}")
             return
         
-        # ADD: Thread isolation
-        thread_name = threading.current_thread().name
-        if 'Translation' in thread_name:
-            context = 'translation'
-        elif 'Glossary' in thread_name:
-            context = 'glossary'
-        else:
-            context = 'general'
+        # Get stable thread directory
+        thread_dir = self._get_thread_directory()
         
-        thread_dir = os.path.join("Payloads", context, f"{thread_name}_{threading.current_thread().ident}")
-        os.makedirs(thread_dir, exist_ok=True)
-            
         try:
-            # REST OF YOUR CODE STAYS EXACTLY THE SAME
-            # Use forward slashes for consistency
+            # Generate content hash for uniqueness
+            content_hash = hashlib.md5(content.encode()).hexdigest()[:6]
+            
+            # Clean up filename
             safe_filename = filename.replace("\\", "/")
             if "/" in safe_filename:
                 safe_filename = safe_filename.split("/")[-1]
             
-            # CHANGE: Use thread directory instead of "Payloads"
-            filepath = os.path.join(thread_dir, safe_filename)  # CHANGED from: os.path.join("Payloads", safe_filename)
+            # Make filename unique with timestamp and hash
+            base_name, ext = os.path.splitext(safe_filename)
+            timestamp = datetime.now().strftime("%H%M%S")
+            unique_filename = f"{base_name}_{timestamp}_{content_hash}{ext}"
+            filepath = os.path.join(thread_dir, unique_filename)
             
-            # For JSON responses, ensure proper formatting
-            try:
-                # Try to parse and pretty-print JSON
-                json_content = json.loads(content)
-                with open(filepath, 'w', encoding='utf-8') as f:
-                    json.dump(json_content, f, indent=2, ensure_ascii=False)
-            except json.JSONDecodeError:
-                # If not valid JSON, save as-is
-                with open(filepath, 'w', encoding='utf-8') as f:
-                    f.write(content)
-            
-            logger.debug(f"Saved JSON payload to: {filepath}")
-            
+            # Thread-safe file writing
+            with self._file_write_lock:
+                # For JSON responses, ensure proper formatting
+                if filename.endswith('.json'):
+                    try:
+                        json_content = json.loads(content) if isinstance(content, str) else content
+                        with open(filepath, 'w', encoding='utf-8') as f:
+                            json.dump(json_content, f, indent=2, ensure_ascii=False)
+                    except json.JSONDecodeError:
+                        # If not valid JSON, save as text
+                        with open(filepath, 'w', encoding='utf-8') as f:
+                            f.write(content)
+                else:
+                    # Save as text
+                    with open(filepath, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                
+                logger.debug(f"Saved response to: {filepath}")
+                
         except Exception as e:
-            print(f"Failed to save response to {filename}: {e}")
-            # Don't raise - this is not critical functionality
+            logger.error(f"Failed to save response: {e}")
+
+
 
     def set_output_filename(self, filename: str):
         """Set the actual output filename for truncation logging
@@ -2488,20 +3097,94 @@ class UnifiedClient:
                 return True
             else:
                 return False
+
+    def _get_shortest_cooldown_time(self) -> int:
+        """Get the shortest cooldown time among all keys"""
+        if not self._multi_key_mode or not self.__class__._api_key_pool:
+            return 60  # Default cooldown
+            
+        min_cooldown = float('inf')
+        now = time.time()
+        
+        for i, key in enumerate(self.__class__._api_key_pool.keys):
+            if key.enabled:
+                key_id = f"Key#{i+1} ({key.model})"
+                
+                # Check rate limit cache
+                cache_cooldown = self.__class__._rate_limit_cache.get_remaining_cooldown(key_id)
+                if cache_cooldown > 0:
+                    min_cooldown = min(min_cooldown, cache_cooldown)
+                
+                # Also check key's own cooldown
+                if key.is_cooling_down and key.last_error_time:
+                    remaining = key.cooldown - (now - key.last_error_time)
+                    if remaining > 0:
+                        min_cooldown = min(min_cooldown, remaining)
+        
+        # Return the minimum wait time, capped at 60 seconds
+        return min(int(min_cooldown) if min_cooldown != float('inf') else 30, 60)
                 
     def send(self, messages, temperature=None, max_tokens=None, 
              max_completion_tokens=None, context=None) -> Tuple[str, Optional[str]]:
         """Thread-safe send with proper key management for batch translation"""
         thread_name = threading.current_thread().name
         
+        # Generate request hash for duplicate detection
+        request_hash = self._get_request_hash(messages)
+        
+        # Extract chapter info for better logging
+        chapter_info = self._extract_chapter_info(messages)
+        context_str = context or 'unknown'
+        if chapter_info['chapter']:
+            context_str = f"Chapter {chapter_info['chapter']}"
+            if chapter_info['chunk']:
+                context_str += f" Chunk {chapter_info['chunk']}/{chapter_info['total_chunks']}"
+        
+        # Check for duplicates ONLY for same content from different threads
+        is_duplicate = False
+        if context in ['translation', 'glossary', 'image_translation']:
+            is_duplicate = self._check_duplicate_request(request_hash, context)
+            
+            if is_duplicate:
+                # Wait a bit to let the other thread finish
+                wait_time = 2.5
+                logger.warning(f"[{thread_name}] Duplicate detected for {context_str}, waiting {wait_time}s...")
+                time.sleep(wait_time)
+                
+                # After waiting, check if it's still being processed
+                with self._tracker_lock:
+                    if request_hash in self._chapter_request_tracker:
+                        existing = self._chapter_request_tracker[request_hash]
+                        time_diff = time.time() - existing['timestamp']
+                        if time_diff > 2:
+                            # The other thread likely finished, we can proceed
+                            logger.info(f"[{thread_name}] Other thread finished, proceeding with {context_str}")
+                            # Update our entry
+                            self._chapter_request_tracker[request_hash] = {
+                                'timestamp': time.time(),
+                                'context': context,
+                                'thread': thread_name,
+                                'chapter_info': chapter_info
+                            }
+        
+        # Call debug if enabled via environment variable
+        if os.getenv("DEBUG_PARALLEL_REQUESTS", "0") == "1":
+            self._debug_active_requests()
+        
         # Ensure thread has a client
         self._ensure_thread_client()
         
-        logger.info(f"[{thread_name}] Using {self.key_identifier} for {context or 'unknown'}")
+        # Log the processing
+        logger.info(f"[{thread_name}] Processing {context_str} with {self.key_identifier}")
         
         max_retries = 7
         retry_count = 0
         last_error = None
+        retry_reason = None  # Track retry reason
+        
+        # Track current attempt for payload
+        self._current_retry_attempt = 0
+        self._max_retries = max_retries
         
         # Track which keys we've already tried to avoid infinite loops
         attempted_keys = set()
@@ -2520,12 +3203,15 @@ class UnifiedClient:
         
         while retry_count < max_retries:
             try:
+                # Update current attempt
+                self._current_retry_attempt = retry_count
+                
                 # Track current key
                 attempted_keys.add(self.key_identifier)
                 
-                # Call the actual implementation
+                # Call the actual implementation with retry reason
                 result = self._send_internal(messages, temperature, max_tokens, 
-                                           max_completion_tokens, context)
+                                           max_completion_tokens, context, retry_reason=retry_reason)
                 
                 # Mark success
                 if self._multi_key_mode:
@@ -2543,6 +3229,7 @@ class UnifiedClient:
                 
                 # Check for prohibited content FIRST (before rate limit check)
                 if any(indicator in error_str.lower() for indicator in content_filter_indicators):
+                    retry_reason = "prohibited_content"
                     print(f"[Thread-{thread_name}] Prohibited content detected on {self.key_identifier}")
                     
                     # If we're in multi-key mode and haven't tried main key yet
@@ -2557,7 +3244,6 @@ class UnifiedClient:
                         should_try_main_key = True
                         
                         # Don't count this as a retry, just continue to trigger main key retry
-                        # The _send_internal method will handle the actual main key retry
                         retry_count += 1
                         continue
                     else:
@@ -2567,6 +3253,7 @@ class UnifiedClient:
                 
                 # Check for rate limit
                 elif "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
+                    retry_reason = "rate_limit"
                     if self._multi_key_mode:
                         print(f"[Thread-{thread_name}] Rate limit hit on {self.key_identifier}")
                         
@@ -2628,10 +3315,22 @@ class UnifiedClient:
                 
                 # Check for cancellation
                 elif isinstance(e, UnifiedClientError) and e.error_type in ["cancelled", "timeout"]:
+                    retry_reason = f"cancelled_{e.error_type}"
                     raise
                 
                 # Other errors
                 elif retry_count < max_retries - 1:
+                    # Determine retry reason based on error type
+                    if "timeout" in error_str.lower():
+                        retry_reason = "timeout_error"
+                    elif "connection" in error_str.lower():
+                        retry_reason = "connection_error"
+                    elif "500" in error_str or "502" in error_str or "503" in error_str:
+                        retry_reason = f"server_error_{error_str[:3]}"
+                    else:
+                        # Generic error with exception type
+                        retry_reason = f"error_{type(e).__name__}"[:30]  # Limit length for filename
+                    
                     if self._multi_key_mode:
                         tls = self._get_thread_local_client()
                         if tls.key_index is not None:
@@ -2639,7 +3338,7 @@ class UnifiedClient:
                         
                         if not self._force_rotation:
                             # Error-based rotation - try a different key
-                            logger.info(f"[{thread_name}] Error occurred, rotating to new key...")
+                            logger.info(f"[{thread_name}] Error occurred ({retry_reason}), rotating to new key...")
                             
                             # Force reassignment
                             tls.initialized = False
@@ -2651,51 +3350,37 @@ class UnifiedClient:
                             continue
                     
                     # Retry with same key (or if rotation disabled)
+                    logger.info(f"[{thread_name}] Retrying after {retry_reason} (attempt {retry_count + 1}/{max_retries})")
                     retry_count += 1
                     time.sleep(2)
                     continue
                 
-                # Can't retry
-                raise
+                # Can't retry - final error
+                else:
+                    retry_reason = f"final_error_{type(e).__name__}"
+                    logger.error(f"[{thread_name}] Cannot retry request: {retry_reason}")
+                    raise
         
         # Exhausted retries
         if last_error:
+            logger.error(f"[{thread_name}] Exhausted {max_retries} retries, last reason: {retry_reason}")
             raise last_error
         else:
             raise Exception(f"Failed after {max_retries} attempts")
 
-
-    def _get_shortest_cooldown_time(self) -> int:
-        """Get the shortest cooldown time among all keys"""
-        if not self._multi_key_mode or not self.__class__._api_key_pool:
-            return 60  # Default cooldown
-            
-        min_cooldown = float('inf')
-        now = time.time()
-        
-        for i, key in enumerate(self.__class__._api_key_pool.keys):
-            if key.enabled:
-                key_id = f"Key#{i+1} ({key.model})"
-                
-                # Check rate limit cache
-                cache_cooldown = self.__class__._rate_limit_cache.get_remaining_cooldown(key_id)
-                if cache_cooldown > 0:
-                    min_cooldown = min(min_cooldown, cache_cooldown)
-                
-                # Also check key's own cooldown
-                if key.is_cooling_down and key.last_error_time:
-                    remaining = key.cooldown - (now - key.last_error_time)
-                    if remaining > 0:
-                        min_cooldown = min(min_cooldown, remaining)
-        
-        # Return the minimum wait time, capped at 60 seconds
-        return min(int(min_cooldown) if min_cooldown != float('inf') else 30, 60)
-    
-    def _send_internal(self, messages, temperature=None, max_tokens=None, max_completion_tokens=None, context=None) -> Tuple[str, Optional[str]]:
+    def _send_internal(self, messages, temperature=None, max_tokens=None, 
+                       max_completion_tokens=None, context=None, retry_reason=None) -> Tuple[str, Optional[str]]:
         """
         Internal send implementation with integrated 500 error retry logic and prohibited content handling
         """
         start_time = time.time()
+        
+        # Generate request hash early
+        request_hash = self._get_request_hash(messages)
+        thread_name = threading.current_thread().name
+        
+        # Log with hash for tracking
+        logger.debug(f"[{thread_name}] _send_internal starting for {context} (hash: {request_hash[:8]}...) retry_reason: {retry_reason}")
         
         # Reset cancelled flag
         self._cancelled = False
@@ -2714,6 +3399,15 @@ class UnifiedClient:
         # Track if we've tried main key for prohibited content
         main_key_attempted = False
         
+        # Define content filter indicators locally for consistency
+        content_filter_indicators = [
+            "content_filter", "content was blocked", "response was blocked",
+            "safety filter", "content policy", "harmful content",
+            "blocked by safety", "harm_category", "content_policy_violation",
+            "unsafe content", "violates our usage policies",
+            "prohibited_content", "blockedreason", "content blocked"
+        ]
+        
         for attempt in range(internal_retries):
             try:
                 # Validate request
@@ -2729,8 +3423,27 @@ class UnifiedClient:
                 # Get file names - IMPORTANT for duplicate detection
                 payload_name, response_name = self._get_file_names(messages, context=self.context)
                 
-                # Save payload for debugging
-                self._save_payload(messages, payload_name)
+                # Save payload with retry reason
+                # On internal retries (500 errors), add that info too
+                if attempt > 0:
+                    internal_retry_reason = f"500_error_attempt_{attempt}"
+                    if retry_reason:
+                        combined_reason = f"{retry_reason}_{internal_retry_reason}"
+                    else:
+                        combined_reason = internal_retry_reason
+                    self._save_payload(messages, payload_name, retry_reason=combined_reason)
+                else:
+                    self._save_payload(messages, payload_name, retry_reason=retry_reason)
+                
+                # FIX: Define payload_messages BEFORE using it
+                # Create a sanitized version for payload (without actual image data)
+                payload_messages = [
+                    {**msg, 'content': 'IMAGE_DATA_OMITTED' if isinstance(msg.get('content'), list) else msg.get('content')}
+                    for msg in messages
+                ]
+                
+                # Now save the payload (payload_messages is now defined)
+                self._save_payload(payload_messages, payload_name)
                 
                 # Check for timeout toggle from GUI
                 retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
@@ -2746,27 +3459,86 @@ class UnifiedClient:
                     logger.info("Operation cancelled (timeout or user stop)")
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 
+                # ====== UNIVERSAL EXTRACTION INTEGRATION ======
+                # Use universal extraction instead of assuming response.content exists
+                extracted_content = ""
+                finish_reason = 'stop'
+
+                if response:
+                    # Prepare provider-specific parameters
+                    extraction_kwargs = {}
+                    
+                    # Add Gemini-specific parameters if applicable
+                    if self.client_type == 'gemini':
+                        # Check if this model supports thinking
+                        extraction_kwargs['supports_thinking'] = self._supports_thinking()
+                        # Get thinking budget from environment
+                        extraction_kwargs['thinking_budget'] = int(os.getenv("THINKING_BUDGET", "-1"))
+                    
+                    # Try universal extraction with provider-specific parameters
+                    extracted_content, finish_reason = self._extract_response_text(
+                        response, 
+                        provider=self.client_type,
+                        **extraction_kwargs
+                    )
+                    
+                    # If extraction failed but we have a response object
+                    if not extracted_content and response:
+                        print(f"⚠️ Failed to extract text from {self.client_type} response")
+                        print(f"   Response type: {type(response)}")
+                        
+                        # Provider-specific guidance
+                        if self.client_type == 'gemini':
+                            print(f"   Consider checking Gemini response structure")
+                            print(f"   Response attributes: {dir(response)[:5]}...")  # Show first 5 attributes
+                        else:
+                            print(f"   Consider checking response extraction for this provider")
+                        
+                        # Log the response structure for debugging
+                        self._save_failed_request(messages, "Extraction failed", context, response)
+                        
+                        # Check if response has any common attributes we missed
+                        if hasattr(response, 'content') and response.content:
+                            extracted_content = str(response.content)
+                            print(f"   Fallback: Using response.content directly")
+                        elif hasattr(response, 'text') and response.text:
+                            extracted_content = str(response.text)
+                            print(f"   Fallback: Using response.text directly")
+                    
+                    # Update response object with extracted content
+                    if extracted_content and hasattr(response, 'content'):
+                        response.content = extracted_content
+                    elif extracted_content:
+                        # Create a new response object if needed
+                        response = UnifiedResponse(
+                            content=extracted_content,
+                            finish_reason=finish_reason,
+                            raw_response=response
+                        )
+                
                 # CRITICAL: Save response for duplicate detection
                 # This must happen even for truncated/empty responses
-                if response.content:
-                    self._save_response(response.content, response_name)
+                if extracted_content:
+                    self._save_response(extracted_content, response_name)
                 
                 # Handle empty responses
-                if response.is_error or not response.content or response.content.strip() in ["", "[]"]:
-                    print(f"Empty or error response: {response.finish_reason}")
-                    self._save_failed_request(messages, "Empty response", context, response.raw_response)
+                if not extracted_content or extracted_content.strip() in ["", "[]"]:
+                    print(f"Empty or error response: {finish_reason}")
+                    self._save_failed_request(messages, "Empty response", context, response)
+                    
                     # ALWAYS log these failures too
                     self._log_truncation_failure(
                         messages=messages,
-                        response_content=response.content or "",
-                        finish_reason=response.finish_reason or 'error',
+                        response_content=extracted_content or "",
+                        finish_reason=finish_reason or 'error',
                         context=context,
-                        error_details=response.error_details
+                        error_details=getattr(response, 'error_details', None) if response else None
                     )
                     self._track_stats(context, False, "empty_response", time.time() - start_time)
                     
                     # Use fallback
-                    fallback_content = self._handle_empty_result(messages, context, response.error_details or "empty")
+                    fallback_content = self._handle_empty_result(messages, context, 
+                        getattr(response, 'error_details', "empty") if response else "empty")
                     return fallback_content, 'error'
                 
                 # Track success
@@ -2776,17 +3548,17 @@ class UnifiedClient:
                 self._mark_key_success()
                 
                 # Log important info for retry mechanisms
-                if response.is_truncated:
-                    print(f"Response was truncated: {response.finish_reason}")
-                    print(f"⚠️ Response truncated (finish_reason: {response.finish_reason})")
+                if finish_reason in ['length', 'max_tokens']:
+                    print(f"Response was truncated: {finish_reason}")
+                    print(f"⚠️ Response truncated (finish_reason: {finish_reason})")
                     
                     # ALWAYS log truncation failures
                     self._log_truncation_failure(
                         messages=messages,
-                        response_content=response.content,
-                        finish_reason=response.finish_reason,
+                        response_content=extracted_content,
+                        finish_reason=finish_reason,
                         context=context,
-                        error_details=response.error_details
+                        error_details=getattr(response, 'error_details', None) if response else None
                     )
                     # The calling code will check finish_reason=='length' for retry
                 
@@ -2802,7 +3574,7 @@ class UnifiedClient:
                 
                 # Return the response with accurate finish_reason
                 # This is CRITICAL for retry mechanisms to work
-                return response.content, response.finish_reason
+                return extracted_content, finish_reason
                 
             except UnifiedClientError as e:
                 # Handle cancellation specially for timeout support
@@ -2820,19 +3592,10 @@ class UnifiedClient:
                     raise  # Re-raise for multi-key retry logic in outer send() method
                 
                 # Check for prohibited content - check BOTH error_type AND error string
-                if e.error_type == "prohibited_content" or any(indicator in error_str for indicator in [
-                    "content_filter", "content was blocked", "response was blocked",
-                    "safety filter", "content policy", "harmful content",
-                    "blocked by safety", "harm_category", "content_policy_violation",
-                    "unsafe content", "violates our usage policies",
-                    "prohibited_content", "blockedreason", "content blocked"
-                ]):
+                if e.error_type == "prohibited_content" or any(indicator in error_str for indicator in content_filter_indicators):
                     print(f"❌ Prohibited content detected: {error_str[:200]}")
                     
-                    # Only try main key if:
-                    # 1. We're in multi-key mode
-                    # 2. We haven't tried main key yet
-                    # 3. We have original_api_key and original_model
+                    # Only try main key if conditions are met
                     if (self._multi_key_mode and 
                         not main_key_attempted and 
                         hasattr(self, 'original_api_key') and 
@@ -2915,14 +3678,6 @@ class UnifiedClient:
                     raise  # Re-raise for multi-key retry logic
                 
                 # Check for prohibited content in unexpected errors
-                content_filter_indicators = [
-                    "content_filter", "content was blocked", "response was blocked",
-                    "safety filter", "content policy", "harmful content",
-                    "blocked by safety", "harm_category", "content_policy_violation",
-                    "unsafe content", "violates our usage policies",
-                    "prohibited_content", "blockedreason", "content blocked"
-                ]
-                
                 if any(indicator in error_str for indicator in content_filter_indicators):
                     print(f"❌ Content prohibited in unexpected error: {error_str[:200]}")
                     
@@ -3903,131 +4658,6 @@ class UnifiedClient:
         
         return False
 
-    def _extract_gemini_response_text(self, response, supports_thinking=False, thinking_budget=-1):
-        """
-        Enhanced extraction method that handles various response structures,
-        including when thinking is enabled.
-        """
-        result = ""
-        finish_reason = 'stop'
-        
-        # FIRST: Check for prohibited content in finish reasons
-        if hasattr(response, 'candidates') and response.candidates:
-            for i, candidate in enumerate(response.candidates):
-                if hasattr(candidate, 'finish_reason'):
-                    finish_reason_str = str(candidate.finish_reason)
-                    if 'PROHIBITED_CONTENT' in finish_reason_str:
-                        print(f"   🚫 Candidate {i+1} has prohibited content: {finish_reason_str}")
-                        # Return immediately with prohibited_content status
-                        return "", "prohibited_content"
-        
-        # Method 1: Try direct text access first
-        try:
-            if hasattr(response, 'text') and response.text:
-                result = response.text
-                print(f"   ✅ Got text directly: {len(result)} chars")
-                return result, finish_reason
-        except Exception as e:
-            print(f"   ⚠️ Failed to get text directly: {e}")
-        
-        # Method 2: Try candidates with enhanced extraction
-        if hasattr(response, 'candidates') and response.candidates:
-            print(f"   🔍 Number of candidates: {len(response.candidates)}")
-            
-            for i, candidate in enumerate(response.candidates):
-                print(f"   🔍 Checking candidate {i+1}")
-                
-                # Check finish reason
-                if hasattr(candidate, 'finish_reason'):
-                    finish_reason_str = str(candidate.finish_reason)
-                    print(f"   🔍 Finish reason: {finish_reason_str}")
-                    if 'MAX_TOKENS' in finish_reason_str:
-                        finish_reason = 'length'
-                    elif 'SAFETY' in finish_reason_str:
-                        finish_reason = 'safety'
-                    elif 'PROHIBITED_CONTENT' in finish_reason_str:
-                        finish_reason = 'prohibited_content'
-                
-                # Method 2a: Try candidate.text directly (some models provide this)
-                if hasattr(candidate, 'text'):
-                    try:
-                        if candidate.text:
-                            result = candidate.text
-                            print(f"   ✅ Got text from candidate.text: {len(result)} chars")
-                            return result, finish_reason
-                    except:
-                        pass
-                
-                # Method 2b: Extract from content.parts
-                if hasattr(candidate, 'content'):
-                    # Try direct text on content
-                    if hasattr(candidate.content, 'text'):
-                        try:
-                            if candidate.content.text:
-                                result = candidate.content.text
-                                print(f"   ✅ Got text from candidate.content.text: {len(result)} chars")
-                                return result, finish_reason
-                        except:
-                            pass
-                    
-                    # Try parts
-                    if hasattr(candidate.content, 'parts') and candidate.content.parts:
-                        parts = candidate.content.parts
-                        print(f"   🔍 Candidate has {len(parts)} parts")
-                        
-                        text_parts = []
-                        for j, part in enumerate(parts):
-                            # Skip thinking parts if they're marked differently
-                            if hasattr(part, 'thinking') and part.thinking:
-                                print(f"   🔍 Part {j+1} is a thinking part, skipping")
-                                continue
-                            
-                            # Extract text from part
-                            if hasattr(part, 'text') and part.text:
-                                print(f"   🔍 Part {j+1} has text: {len(part.text)} chars")
-                                text_parts.append(part.text)
-                        
-                        if text_parts:
-                            result = ''.join(text_parts)
-                            print(f"   ✅ Extracted text from parts: {len(result)} chars")
-                            return result, finish_reason
-        
-        # Method 3: Check for thinking-specific response structure
-        if supports_thinking and thinking_budget != 0:
-            print("   🔍 Checking for thinking-specific response structure...")
-            
-            # Some models might have a separate 'output' or 'response' field when thinking is enabled
-            if hasattr(response, 'output') and response.output:
-                result = str(response.output)
-                print(f"   ✅ Got text from response.output: {len(result)} chars")
-                return result, finish_reason
-            
-            if hasattr(response, 'response') and response.response:
-                result = str(response.response)
-                print(f"   ✅ Got text from response.response: {len(result)} chars")
-                return result, finish_reason
-        
-        # Method 4: Last resort - inspect all attributes
-        if not result:
-            print("   🔍 Last resort: inspecting all response attributes...")
-            attrs = dir(response)
-            text_attrs = [attr for attr in attrs if 'text' in attr.lower() or 'content' in attr.lower() or 'output' in attr.lower()]
-            print(f"   🔍 Potential text attributes: {text_attrs}")
-            
-            for attr in text_attrs:
-                if not attr.startswith('_'):  # Skip private attributes
-                    try:
-                        value = getattr(response, attr)
-                        if value and isinstance(value, str) and len(value) > 10:  # Likely actual content
-                            result = value
-                            print(f"   ✅ Got text from response.{attr}: {len(result)} chars")
-                            return result, finish_reason
-                    except:
-                        pass
-        
-        print(f"   ❌ Failed to extract any text from response")
-        return result, finish_reason
-
     def _get_thread_directory(self):
         """Get thread-specific directory for payload storage"""
         thread_name = threading.current_thread().name
@@ -4043,24 +4673,42 @@ class UnifiedClient:
         return thread_dir
 
     def _save_gemini_safety_config(self, config_data: dict, response_name: str):
-        """Save Gemini safety configuration with thread isolation"""
+        """Save Gemini safety configuration with proper thread organization"""
         if not os.getenv("SAVE_PAYLOAD", "1") == "1":
             return
-            
-        thread_dir = self._get_thread_directory()
-        config_filename = f"gemini_safety_{response_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        
+        # Determine context from thread name
+        thread_name = threading.current_thread().name
+        thread_id = threading.current_thread().ident
+        
+        if 'Translation' in thread_name:
+            context = 'translation'
+        elif 'Glossary' in thread_name:
+            context = 'glossary'
+        else:
+            context = 'general'
+        
+        # Use STABLE thread directory (same as other save methods)
+        thread_dir = os.path.join("Payloads", context, f"{thread_name}_{thread_id}")
+        os.makedirs(thread_dir, exist_ok=True)
+        
+        # Create unique filename with timestamp
+        timestamp = datetime.now().strftime("%H%M%S")
+        config_filename = f"gemini_safety_{timestamp}_{response_name}.json"
         config_path = os.path.join(thread_dir, config_filename)
         
         try:
-            with open(config_path, 'w', encoding='utf-8') as f:
-                json.dump(config_data, f, indent=2, ensure_ascii=False)
-            logger.debug(f"Saved Gemini safety config to: {config_path}")
+            with self._file_write_lock:
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    json.dump(config_data, f, indent=2, ensure_ascii=False)
+                logger.debug(f"Saved Gemini safety config to: {config_path}")
         except Exception as e:
-            print(f"Failed to save Gemini safety config: {e}")
+            logger.error(f"Failed to save Gemini safety config: {e}")
 
     def _send_gemini(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to Gemini API with support for both text and multi-image messages"""
         response = None
+        
         # Check if we should use OpenAI-compatible endpoint
         use_openai_endpoint = os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"
         gemini_endpoint = os.getenv("GEMINI_OPENAI_ENDPOINT", "")
@@ -4075,7 +4723,6 @@ class UnifiedClient:
             
             print(f"🔄 Using OpenAI-compatible endpoint for Gemini: {gemini_endpoint}")
             
-            # SAVE SAFETY CONFIGURATION FOR GEMINI OPENAI ENDPOINT
             # Check if safety settings are disabled
             disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
             
@@ -4183,9 +4830,7 @@ class UnifiedClient:
         BOOST_FACTOR = 1
         attempts = 4
         attempt = 0
-        result = None
         current_tokens = max_tokens * BOOST_FACTOR
-        finish_reason = None
         error_details = {}
         
         # SAVE SAFETY CONFIGURATION FOR VERIFICATION
@@ -4214,7 +4859,7 @@ class UnifiedClient:
         else:
             thinking_status = " (thinking not supported)"
             
-        print(f"🔒 Gemini Safety Status: {safety_status}")
+        print(f"🔒 Gemini Safety Status: {safety_status}{thinking_status}")
         
         # Save configuration to file
         config_data = {
@@ -4231,7 +4876,8 @@ class UnifiedClient:
 
         # Save configuration to file with thread isolation
         self._save_gemini_safety_config(config_data, response_name)
-               
+        
+        # Main attempt loop
         while attempt < attempts:
             try:
                 if self._cancelled:
@@ -4280,13 +4926,14 @@ class UnifiedClient:
                     else:
                         print(f"   🧠 Thinking Budget: {thinking_budget} tokens")
 
+                # Make the API call
                 response = self.gemini_client.models.generate_content(
                     model=self.model,
                     contents=formatted_prompt,
                     config=generation_config
                 )
                 
-                # Check for blocked content
+                # Check for blocked content in prompt_feedback
                 if hasattr(response, 'prompt_feedback'):
                     feedback = response.prompt_feedback
                     if hasattr(feedback, 'block_reason') and feedback.block_reason:
@@ -4297,67 +4944,71 @@ class UnifiedClient:
                             print(f"Content blocked: {feedback.block_reason}")
                         
                         # Raise as UnifiedClientError with prohibited_content type
-                        # This will be caught by the retry logic
                         raise UnifiedClientError(
                             f"Content blocked: {feedback.block_reason}",
                             error_type="prohibited_content",
                             details={"block_reason": str(feedback.block_reason)}
                         )
                 
-                # IMPORTANT: Skip the early text extraction that causes the error
-                # Go directly to the enhanced extraction method
+                # Check if response has candidates with prohibited content finish reason
+                # This is important for early detection before extraction
+                prohibited_detected = False
+                finish_reason = 'stop'  # Default
                 
-                # Check usage metadata for thinking tokens BEFORE extraction
-                if hasattr(response, 'usage_metadata'):
-                    usage = response.usage_metadata
+                if hasattr(response, 'candidates') and response.candidates:
+                    for candidate in response.candidates:
+                        if hasattr(candidate, 'finish_reason'):
+                            finish_reason_str = str(candidate.finish_reason)
+                            if 'PROHIBITED_CONTENT' in finish_reason_str:
+                                prohibited_detected = True
+                                finish_reason = 'prohibited_content'
+                                print(f"   🚫 Candidate has prohibited content finish reason: {finish_reason_str}")
+                                break
+                            elif 'MAX_TOKENS' in finish_reason_str:
+                                finish_reason = 'length'
+                            elif 'SAFETY' in finish_reason_str:
+                                finish_reason = 'safety'
+                
+                # If prohibited content detected, raise error for retry logic
+                if prohibited_detected:
+                    # Get thinking tokens if available for debugging
+                    thinking_tokens_wasted = 0
+                    if hasattr(response, 'usage_metadata') and hasattr(response.usage_metadata, 'thoughts_token_count'):
+                        thinking_tokens_wasted = response.usage_metadata.thoughts_token_count or 0
+                        if thinking_tokens_wasted > 0:
+                            print(f"   ⚠️ Wasted {thinking_tokens_wasted} thinking tokens on prohibited content")
                     
-                    # Check if thinking tokens were actually used (only if model supports thinking)
-                    if supports_thinking and hasattr(usage, 'thoughts_token_count'):
-                        if usage.thoughts_token_count and usage.thoughts_token_count > 0:
-                            print(f"   Thinking tokens used: {usage.thoughts_token_count}")
-                        else:
-                            print(f"   ✅ Thinking successfully disabled (0 thinking tokens)")
-                
-                # Use the enhanced extraction method directly without trying response.text first
-                result, finish_reason = self._extract_gemini_response_text(
-                    response, 
-                    supports_thinking=supports_thinking,
-                    thinking_budget=thinking_budget
-                )
-                
-                # Check if finish_reason indicates prohibited content
-                if finish_reason == 'prohibited_content':
-                    print(f"   🚫 Extraction detected prohibited content")
-                    # Raise as UnifiedClientError for retry logic
                     raise UnifiedClientError(
                         "Content blocked: FinishReason.PROHIBITED_CONTENT",
                         error_type="prohibited_content",
-                        details={"finish_reason": "PROHIBITED_CONTENT", "thinking_tokens_wasted": getattr(response.usage_metadata, 'thoughts_token_count', 0) if hasattr(response, 'usage_metadata') else 0}
+                        details={
+                            "finish_reason": "PROHIBITED_CONTENT",
+                            "thinking_tokens_wasted": thinking_tokens_wasted
+                        }
                     )
                 
-                # Only break if we successfully extracted content
-                if result and result.strip():
-                    break
-                else:
-                    # If extraction returned empty, check if it was due to prohibited content
-                    # by re-examining the response
-                    if hasattr(response, 'candidates') and response.candidates:
-                        for candidate in response.candidates:
-                            if hasattr(candidate, 'finish_reason'):
-                                finish_reason_str = str(candidate.finish_reason)
-                                if 'PROHIBITED_CONTENT' in finish_reason_str:
-                                    print(f"   🚫 Empty response due to prohibited content: {finish_reason_str}")
-                                    raise UnifiedClientError(
-                                        f"Content blocked: {finish_reason_str}",
-                                        error_type="prohibited_content",
-                                        details={"finish_reason": finish_reason_str, "empty_response": True}
-                                    )
-                    
-                    # If extraction returned empty for other reasons, treat as an error and potentially retry
-                    print(f"   ⚠️ Enhanced extraction returned empty result")
-                    error_details[f'attempt_{attempt+1}'] = "Empty response after extraction"
-                    
-
+                # Log thinking token usage if available
+                if hasattr(response, 'usage_metadata'):
+                    usage = response.usage_metadata
+                    if supports_thinking and hasattr(usage, 'thoughts_token_count'):
+                        if usage.thoughts_token_count and usage.thoughts_token_count > 0:
+                            print(f"   💭 Thinking tokens used: {usage.thoughts_token_count}")
+                        else:
+                            print(f"   ✅ Thinking successfully disabled (0 thinking tokens)")
+                
+                # IMPORTANT: Return the raw response wrapped in UnifiedResponse
+                # Let the universal extractor in _send_internal handle the extraction
+                return UnifiedResponse(
+                    content="",  # Leave empty - will be extracted by universal method
+                    finish_reason=finish_reason,
+                    raw_response=response,  # Pass the full Gemini response object
+                    error_details=error_details if error_details else None
+                )
+                
+            except UnifiedClientError as e:
+                # Re-raise UnifiedClientErrors (including prohibited content)
+                raise
+                
             except Exception as e:
                 print(f"Gemini attempt {attempt+1} failed: {e}")
                 error_details[f'attempt_{attempt+1}'] = str(e)
@@ -4394,41 +5045,41 @@ class UnifiedClient:
                     print(f"⏳ Rate limited. Google suggests waiting {retry_delay}s before retry")
                     
                     # Create a UnifiedClientError with proper error_type for rate limit
-                    # This ensures the upper level recognizes it as a rate limit
                     raise UnifiedClientError(
                         f"Rate limit exceeded (429). Retry after {retry_delay}s", 
                         error_type="rate_limit",
                         http_status=429
                     )
                 
-                # For other errors that aren't safety/content blocks, we might want to retry
-                if "Content blocked" not in str(e) and attempt < attempts - 1:
+                # For other errors, we might want to retry
+                if attempt < attempts - 1:
                     attempt += 1
                     wait_time = min(2 ** attempt, 10)  # Exponential backoff with max 10s
-                    print(f"⏳ Retrying in {wait_time}s...")
+                    print(f"⏳ Retrying Gemini in {wait_time}s...")
                     time.sleep(wait_time)
                     continue
                 else:
-                    # For content blocks or final attempt, re-raise
+                    # Final attempt failed, re-raise
                     raise
         
-        if not result:
-            print("All Gemini retries failed")
-            self._log_truncation_failure(
-                messages=messages,
-                response_content="",
-                finish_reason='error',
-                context=self.context,
-                error_details={'error': 'all_retries_failed', 'provider': 'gemini', 'attempts': attempt}
-            )
-            result = "[]" if self.context == 'glossary' else ""
-            finish_reason = 'error'
+        # If we exhausted all attempts without success
+        print(f"❌ All {attempts} Gemini attempts failed")
         
+        # Log the failure
+        self._log_truncation_failure(
+            messages=messages,
+            response_content="",
+            finish_reason='error',
+            context=self.context,
+            error_details={'error': 'all_retries_failed', 'provider': 'gemini', 'attempts': attempts, 'details': error_details}
+        )
+        
+        # Return error response
         return UnifiedResponse(
-            content=result,
-            finish_reason=finish_reason,
-            raw_response=response,
-            error_details=error_details if error_details else None
+            content="",
+            finish_reason='error',
+            raw_response=None,
+            error_details={'error': 'all_retries_failed', 'attempts': attempts, 'details': error_details}
         )
     
     def _format_gemini_prompt_simple(self, messages) -> str:
@@ -5601,27 +6252,100 @@ class UnifiedClient:
                   context: str = 'image_translation') -> Tuple[str, str]:
         """Thread-safe image send with proper key management for batch translation"""
         thread_name = threading.current_thread().name
+
+        # Generate request hash for duplicate detection (include image size)
+        image_size = len(image_data) if isinstance(image_data, (bytes, str)) else 0
+        request_hash = self._get_request_hash(messages) + f"_img{image_size}"
+        
+        # Extract any chapter/context info from messages
+        chapter_info = self._extract_chapter_info(messages)
+        context_str = context or 'image_translation'
+        
+        # Try to get image filename if available
+        if chapter_info['chapter']:
+            context_str = f"Image Chapter {chapter_info['chapter']}"
+        else:
+            # Try to extract filename from messages
+            messages_str = str(messages)
+            if 'image' in messages_str.lower():
+                import re
+                filename_match = re.search(r'(\w+\.(png|jpg|jpeg|gif|bmp|webp))', messages_str, re.IGNORECASE)
+                if filename_match:
+                    context_str = f"Image: {filename_match.group(1)}"
+        
+        # Check for duplicates ONLY for same image from different threads
+        is_duplicate = False
+        if context in ['image_translation', 'glossary']:
+            is_duplicate = self._check_duplicate_request(request_hash, context)
+            
+            if is_duplicate:
+                # Wait a bit to let the other thread finish
+                wait_time = 2.5
+                logger.warning(f"[{thread_name}] Duplicate image detected for {context_str}, waiting {wait_time}s...")
+                time.sleep(wait_time)
+                
+                # After waiting, check if it's still being processed
+                with self._tracker_lock:
+                    if request_hash in self._chapter_request_tracker:
+                        existing = self._chapter_request_tracker[request_hash]
+                        time_diff = time.time() - existing['timestamp']
+                        if time_diff > 2:
+                            # The other thread likely finished, we can proceed
+                            logger.info(f"[{thread_name}] Other thread finished image, proceeding with {context_str}")
+                            # Update our entry
+                            self._chapter_request_tracker[request_hash] = {
+                                'timestamp': time.time(),
+                                'context': context,
+                                'thread': thread_name,
+                                'chapter_info': chapter_info
+                            }
+        
+        # Call debug if enabled via environment variable
+        if os.getenv("DEBUG_PARALLEL_REQUESTS", "0") == "1":  # Changed default to "0"
+            self._debug_active_requests()
         
         # Ensure thread has a client
         self._ensure_thread_client()
         
-        logger.info(f"[{thread_name}] Using {self.key_identifier} for image: {context}")
-        
-        max_retries = 3
+        logger.info(f"[{thread_name}] Processing {context_str} with {self.key_identifier}")
+
+        max_retries = 7
         retry_count = 0
         last_error = None
+        retry_reason = None  # Track retry reason
         
-        # Track which keys we've already tried
+        # Track current attempt for payload
+        self._current_retry_attempt = 0
+        self._max_retries = max_retries
+        
+        # Track which keys we've already tried to avoid infinite loops
         attempted_keys = set()
+        
+        # Flag to track if we should try main key for prohibited content
+        should_try_main_key = False
+        
+        # Define content filter indicators at method level
+        content_filter_indicators = [
+            "content_filter", "content was blocked", "response was blocked",
+            "safety filter", "content policy", "harmful content",
+            "blocked by safety", "harm_category", "content_policy_violation",
+            "unsafe content", "violates our usage policies",
+            "prohibited_content", "blockedreason", "content blocked",
+            "inappropriate image", "inappropriate content"
+        ]
         
         while retry_count < max_retries:
             try:
+                # Update current attempt
+                self._current_retry_attempt = retry_count
+                
                 # Track current key
                 attempted_keys.add(self.key_identifier)
                 
-                # Call the actual implementation
+                # Call the actual implementation with retry reason
                 result = self._send_image_internal(messages, image_data, temperature,
-                                                 max_tokens, max_completion_tokens, context)
+                                                 max_tokens, max_completion_tokens, context,
+                                                 retry_reason=retry_reason)
                 
                 # Mark success
                 if self._multi_key_mode:
@@ -5629,18 +6353,41 @@ class UnifiedClient:
                     if tls.key_index is not None:
                         self._api_key_pool.mark_key_success(tls.key_index)
                 
-                logger.info(f"[{thread_name}] ✓ Image request completed")
+                logger.info(f"[{thread_name}] ✓ Image request completed with {self.key_identifier}")
                 return result
                 
             except Exception as e:
                 last_error = e
                 error_str = str(e)
-                
-                # Log the error with key info
                 logger.error(f"[{thread_name}] ✗ {self.key_identifier} image error: {error_str[:100]}")
                 
-                # Check if it's a rate limit error
-                if "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
+                # Check for prohibited content FIRST (before rate limit check)
+                if any(indicator in error_str.lower() for indicator in content_filter_indicators):
+                    retry_reason = "prohibited_image_content"
+                    print(f"[Thread-{thread_name}] Prohibited image content detected on {self.key_identifier}")
+                    
+                    # If we're in multi-key mode and haven't tried main key yet
+                    if (self._multi_key_mode and 
+                        hasattr(self, 'original_api_key') and 
+                        hasattr(self, 'original_model') and
+                        self.original_api_key and 
+                        self.original_model and
+                        not should_try_main_key):
+                        
+                        print(f"[Thread-{thread_name}] Will retry with main key for prohibited image content")
+                        should_try_main_key = True
+                        
+                        # Don't count this as a retry, just continue to trigger main key retry
+                        retry_count += 1
+                        continue
+                    else:
+                        # Either not in multi-key mode, or already tried main key
+                        print(f"[Thread-{thread_name}] Prohibited image content - cannot retry")
+                        raise
+                
+                # Check for rate limit
+                elif "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
+                    retry_reason = "rate_limit_image"
                     if self._multi_key_mode:
                         print(f"[Thread-{thread_name}] Image rate limit hit on {self.key_identifier}")
                         
@@ -5655,7 +6402,7 @@ class UnifiedClient:
                             # If we still have retries left, wait for the shortest cooldown
                             if retry_count < max_retries - 1:
                                 cooldown_time = self._get_shortest_cooldown_time()
-                                print(f"⏳ [Thread-{thread_name}] All keys cooling down for image request, waiting {cooldown_time}s...")
+                                print(f"⏳ [Thread-{thread_name}] All keys cooling down for image, waiting {cooldown_time}s...")
                                 
                                 # Wait with cancellation check
                                 for i in range(cooldown_time):
@@ -5663,7 +6410,7 @@ class UnifiedClient:
                                         raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                                     time.sleep(1)
                                     if i % 10 == 0 and i > 0:
-                                        print(f"⏳ [Thread-{thread_name}] Still waiting for image API... {cooldown_time - i}s remaining")
+                                        print(f"⏳ [Thread-{thread_name}] Still waiting... {cooldown_time - i}s remaining")
                                 
                                 # Force re-initialization after cooldown
                                 tls = self._get_thread_local_client()
@@ -5685,10 +6432,10 @@ class UnifiedClient:
                         logger.info(f"[{thread_name}] Retrying image with new key, attempt {retry_count}/{max_retries}")
                         continue
                     else:
-                        # Single key mode
+                        # Single key mode - wait and retry
                         if retry_count < max_retries - 1:
                             wait_time = min(30 * (retry_count + 1), 120)
-                            logger.info(f"[{thread_name}] Single key image rate limit, waiting {wait_time}s")
+                            logger.info(f"[{thread_name}] Image rate limit, waiting {wait_time}s")
                             
                             for i in range(wait_time):
                                 if self._cancelled:
@@ -5698,40 +6445,59 @@ class UnifiedClient:
                             retry_count += 1
                             continue
                         else:
-                            raise UnifiedClientError(f"Image rate limit exceeded after {max_retries} attempts", error_type="rate_limit")
+                            raise UnifiedClientError("Image rate limit exceeded", error_type="rate_limit")
                 
-                # For cancellation or timeout, don't retry
+                # Check for cancellation
                 elif isinstance(e, UnifiedClientError) and e.error_type in ["cancelled", "timeout"]:
+                    retry_reason = f"cancelled_{e.error_type}"
                     raise
                 
-                # For other errors in multi-key mode
-                elif self._multi_key_mode and retry_count < max_retries - 1:
-                    tls = self._get_thread_local_client()
-                    if tls.key_index is not None:
-                        self._api_key_pool.mark_key_error(tls.key_index)
-                    
-                    if not self._force_rotation:
-                        # Error-based rotation mode
-                        logger.info(f"[{thread_name}] Image error, rotating to new key...")
-                        
-                        # Force reassignment
-                        tls.initialized = False
-                        tls.request_count = 0
-                        self._ensure_thread_client()
-                        
-                        retry_count += 1
-                        continue
+                # Other errors
+                elif retry_count < max_retries - 1:
+                    # Determine retry reason based on error type
+                    if "timeout" in error_str.lower():
+                        retry_reason = "timeout_error"
+                    elif "connection" in error_str.lower():
+                        retry_reason = "connection_error"
+                    elif "500" in error_str or "502" in error_str or "503" in error_str:
+                        retry_reason = f"server_error_{error_str[:3]}"
                     else:
-                        # Force rotation mode - retry same key
-                        retry_count += 1
-                        time.sleep(2)
-                        continue
+                        # Generic error with exception type
+                        retry_reason = f"error_{type(e).__name__}"[:30]  # Limit length for filename
+                    
+                    if self._multi_key_mode:
+                        tls = self._get_thread_local_client()
+                        if tls.key_index is not None:
+                            self._api_key_pool.mark_key_error(tls.key_index)
+                        
+                        if not self._force_rotation:
+                            # Error-based rotation - try a different key
+                            logger.info(f"[{thread_name}] Image error occurred ({retry_reason}), rotating to new key...")
+                            
+                            # Force reassignment
+                            tls.initialized = False
+                            tls.request_count = 0
+                            self._ensure_thread_client()
+                            
+                            retry_count += 1
+                            logger.info(f"[{thread_name}] Rotated to {self.key_identifier} after image error")
+                            continue
+                    
+                    # Retry with same key (or if rotation disabled)
+                    logger.info(f"[{thread_name}] Retrying image after {retry_reason} (attempt {retry_count + 1}/{max_retries})")
+                    retry_count += 1
+                    time.sleep(2)
+                    continue
                 
-                # Can't retry, raise the error
-                raise
+                # Can't retry - final error
+                else:
+                    retry_reason = f"final_error_{type(e).__name__}"
+                    logger.error(f"[{thread_name}] Cannot retry image request: {retry_reason}")
+                    raise
         
-        # Should not reach here
+        # Exhausted retries
         if last_error:
+            logger.error(f"[{thread_name}] Exhausted {max_retries} image retries, last reason: {retry_reason}")
             raise last_error
         else:
             raise Exception(f"Image request failed after {max_retries} attempts")
@@ -5741,18 +6507,53 @@ class UnifiedClient:
                             temperature: Optional[float] = None, 
                             max_tokens: Optional[int] = None,
                             max_completion_tokens: Optional[int] = None,
-                            context: str = 'image_translation') -> Tuple[str, str]:
+                            context: str = 'image_translation',
+                            retry_reason: Optional[str] = None) -> Tuple[str, str]:
         """
-        Internal implementation of send_image with integrated 500 error retry logic
+        Internal implementation of send_image with integrated 500 error retry logic and universal extraction
         """
+        start_time = time.time()
+        
+        # Generate request hash early (with image size)
+        image_size = len(image_data) if isinstance(image_data, (bytes, str)) else 0
+        request_hash = self._get_request_hash(messages) + f"_img{image_size}"
+        thread_name = threading.current_thread().name
+        
+        # Log with hash for tracking
+        logger.debug(f"[{thread_name}] _send_image_internal starting for {context} (hash: {request_hash[:8]}...) retry_reason: {retry_reason}")
+        
+        # Reset cancelled flag
         self._cancelled = False
+        
+        # Reset counters when context changes
+        if context != self.current_session_context:
+            self.reset_conversation_for_new_context(context)
+        
         self.context = context or 'image_translation'
         self.conversation_message_count += 1
+        
+        # Internal retry logic for 500 errors - INCREASED TO 7
+        internal_retries = 7
+        base_delay = 5  # Base delay for exponential backoff
+        
+        # Track if we've tried main key for prohibited content
+        main_key_attempted = False
+        
+        # Define content filter indicators locally for consistency
+        content_filter_indicators = [
+            "content_filter", "content was blocked", "response was blocked",
+            "safety filter", "content policy", "harmful content",
+            "blocked by safety", "harm_category", "content_policy_violation",
+            "unsafe content", "violates our usage policies",
+            "prohibited_content", "blockedreason", "content blocked",
+            "inappropriate image", "inappropriate content"
+        ]
         
         # Use GUI values if not explicitly overridden
         if temperature is None:
             temperature = getattr(self, 'default_temperature', 0.3)
             logger.debug(f"Using default temperature: {temperature}")
+    
         
         # Determine if this is an o-series model
         is_o_series = self._is_o_series_model()
@@ -5777,68 +6578,58 @@ class UnifiedClient:
             logger.debug(f"Converted {len(image_data)} bytes to base64")
         else:
             image_base64 = image_data
-        
-        # Internal retry logic for 500 errors
-        internal_retries = 3
+                
         for attempt in range(internal_retries):
             try:
+                # Validate request (basic validation for images)
+                if not messages:
+                    raise UnifiedClientError("No messages provided for image request", error_type="validation")
+                
                 os.makedirs("Payloads", exist_ok=True)
                 
+                # Apply reinforcement
                 messages = self._apply_pure_reinforcement(messages)
                 
-                # Use proper naming for duplicate detection
+                # Get file names - IMPORTANT for duplicate detection
                 payload_name, response_name = self._get_file_names(messages, context=self.context)
+                
+                # Create a sanitized version for payload (without actual image data)
+                payload_messages = [
+                    {**msg, 'content': 'IMAGE_DATA_OMITTED' if isinstance(msg.get('content'), list) else msg.get('content')}
+                    for msg in messages
+                ]
+                
+                # Save payload with retry reason
+                # On internal retries (500 errors), add that info too
+                if attempt > 0:
+                    internal_retry_reason = f"500_error_image_attempt_{attempt}"
+                    if retry_reason:
+                        combined_reason = f"{retry_reason}_{internal_retry_reason}"
+                    else:
+                        combined_reason = internal_retry_reason
+                    self._save_payload(payload_messages, payload_name, retry_reason=combined_reason)
+                else:
+                    self._save_payload(payload_messages, payload_name, retry_reason=retry_reason)
+                
+                # FIX: Define payload_messages BEFORE using it
+                # Create a sanitized version for payload (without actual image data)
+                payload_messages = [
+                    {**msg, 'content': 'IMAGE_DATA_OMITTED' if isinstance(msg.get('content'), list) else msg.get('content')}
+                    for msg in messages
+                ]
+                
+                # Now save the payload (payload_messages is now defined)
+                self._save_payload(payload_messages, payload_name)
+        
+                # Check for timeout toggle from GUI
+                retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
+                if retry_timeout_enabled:
+                    timeout_seconds = int(os.getenv("CHUNK_TIMEOUT", "180"))
+                    logger.info(f"Image timeout monitoring enabled: {timeout_seconds}s limit")
                 
                 # Log the request details
                 logger.info(f"Sending image request to {self.client_type} ({self.model})")
                 logger.debug(f"Temperature: {temperature}, Max tokens: {max_tokens or max_completion_tokens}")
-                
-                # Check provider vision support with latest models (2025)
-                vision_providers = {
-                    'openai': ['gpt-4-vision', 'gpt-4-turbo', 'gpt-4o', 'gpt-4o-mini', 'gpt-4.5', 'gpt-4.1', 
-                              'gpt-4.1-mini', 'o1-vision', 'o3', 'o3-mini', 'o3-pro', 'o4', 'o4-mini'],
-                    'anthropic': ['claude-3', 'claude-3.5', 'claude-3-opus', 'claude-3.5-sonnet', 'claude-3-haiku', 
-                                 'claude-3.5-haiku', 'claude-3.7-sonnet', 'claude-4-opus', 'claude-4-sonnet',
-                                 'claude-opus-4', 'claude-sonnet-4'],
-                    'gemini': ['gemini-pro-vision', 'gemini-1.5', 'gemini-2.0', 'gemini-2.5', 'gemini-flash', 
-                              'gemini-flash-lite', 'gemini-2.5-pro', 'gemini-2.5-flash'],
-                    'poe': ['claude-3-opus', 'claude-4-opus', 'claude-4-sonnet', 'gpt-4', 'gpt-4o', 'gpt-4.5', 
-                           'gemini-pro', 'claude-3.5-sonnet', 'gemini-2.5-pro'],
-                    'openrouter': ['any'],  # Supports routing to any vision model
-                    'groq': ['llava', 'vision'],  # Groq supports some vision models
-                    'fireworks': ['firellava', 'vision'],  # Fireworks vision models
-                    'together': ['llava', 'fuyu', 'cogvlm'],
-                    'replicate': ['blip', 'clip', 'llava', 'minigpt4'],
-                    'huggingface': ['vision-transformer', 'vit', 'clip', 'blip'],
-                    'deepseek': ['deepseek-vl', 'deepseek-r1-vl'],  # DeepSeek vision language models
-                    'qwen': ['qwen-vl', 'qwen2-vl', 'qwen2.5-vl'],  # Qwen vision models
-                    'yi': ['yi-vl'],  # Yi vision models
-                    'moonshot': ['moonshot-v1-vision'],
-                    'electronhub': ['any'],  # Can route to any vision model
-                    'perplexity': [],  # Perplexity doesn't support direct image input
-                    'cohere': ['aya-vision'],  # Cohere's multimodal Aya Vision
-                    'tii': ['falcon-2-11b'],  # Falcon 2 with vision support
-                    'xai': ['grok-3', 'grok-vision'],  # Grok models with vision
-                    'meta': ['llama-4-vision'],  # Meta's Llama 4 with vision
-                    'vertex_model_garden': ['gemini', 'imagen', 'claude'],  # Vertex AI Model Garden vision models
-                }
-                
-                # Check if provider supports vision
-                if self.client_type not in vision_providers:
-                    #print(f"⚠️ WARNING: Provider {self.client_type} not in vision_providers list, attempting anyway...")
-                    # raise UnifiedClientError(f"Provider {self.client_type} does not support image input")
-                    pass
-
-                # Check if specific model supports vision
-                supported_models = vision_providers.get(self.client_type, [])
-                if supported_models != ['any']:
-                    model_supported = any(model in self.model.lower() for model in supported_models)
-                    if not model_supported:
-                        #print(f"⚠️ WARNING: Model {self.model} not in supported vision models list, attempting anyway...")
-                        #print(f"   Client type: {self.client_type}")
-                        #print(f"   Expected models: {supported_models}")
-                        # raise UnifiedClientError(f"Model {self.model} does not support image input")
-                        pass
                 
                 # Route to appropriate handler based on client type
                 if self.client_type == 'gemini':
@@ -5866,51 +6657,115 @@ class UnifiedClient:
                     response = self._send_vertex_model_garden_image(messages, image_base64, temperature, 
                                                                    max_tokens or max_completion_tokens, response_name)
                 else:
-                    raise UnifiedClientError(f"Image input not supported for {self.client_type}")
+                    # Try OpenAI-compatible endpoint as fallback
+                    print(f"⚠️ No specific image handler for {self.client_type}, trying OpenAI-compatible endpoint")
+                    response = self._send_openai_image(messages, image_base64, temperature,
+                                                     max_tokens, max_completion_tokens, response_name)
                 
+                # Check for cancellation (from timeout or stop button)
                 if self._cancelled:
-                    raise UnifiedClientError("Operation cancelled by user")
+                    logger.info("Image operation cancelled (timeout or user stop)")
+                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 
-                # Save response for duplicate detection
-                if response.content:
-                    self._save_response(response.content, response_name)
-                    logger.debug(f"Saved response to: {response_name}")
+                # ====== UNIVERSAL EXTRACTION INTEGRATION ======
+                # Use universal extraction instead of assuming response.content exists
+                extracted_content = ""
+                finish_reason = 'stop'
                 
-                # Handle empty responses
-                if not response.content or response.content.strip() == "":
-                    print(f"Empty response from {self.client_type}")
+                if response:
+                    # Prepare provider-specific parameters
+                    extraction_kwargs = {}
                     
-                    # Log empty image responses
-                    self._log_truncation_failure(
-                        messages=messages,
-                        response_content="",
-                        finish_reason='error',
-                        context=context or 'image_translation',
-                        error_details={'error': 'empty_image_response'}
+                    # Add Gemini-specific parameters if applicable
+                    if self.client_type == 'gemini':
+                        # Check if this model supports thinking
+                        extraction_kwargs['supports_thinking'] = self._supports_thinking()
+                        # Get thinking budget from environment
+                        extraction_kwargs['thinking_budget'] = int(os.getenv("THINKING_BUDGET", "-1"))
+                    
+                    # Try universal extraction with provider-specific parameters
+                    extracted_content, finish_reason = self._extract_response_text(
+                        response, 
+                        provider=self.client_type,
+                        **extraction_kwargs
                     )
                     
-                    fallback = self._handle_empty_result(messages, context, "empty_image_response")
-                    return fallback, 'error'
-                
-                # Mark key as successful for image request
-                if self.use_multi_keys:
-                    self._mark_key_success()
-                
-                # Log truncation for retry mechanism
-                if response.is_truncated:
-                    print(f"Image response was truncated: {response.finish_reason}")
-                    print(f"⚠️ Image response truncated (finish_reason: {response.finish_reason})")
+                    # If extraction failed but we have a response object
+                    if not extracted_content and response:
+                        print(f"⚠️ Failed to extract text from {self.client_type} image response")
+                        print(f"   Response type: {type(response)}")
+                        print(f"   Consider checking image response extraction for this provider")
+                        
+                        # Log the response structure for debugging
+                        self._save_failed_request(messages, "Image extraction failed", context, response)
+                        
+                        # Check if response has any common attributes we missed
+                        if hasattr(response, 'content') and response.content:
+                            extracted_content = str(response.content)
+                            print(f"   Fallback: Using response.content directly")
+                        elif hasattr(response, 'text') and response.text:
+                            extracted_content = str(response.text)
+                            print(f"   Fallback: Using response.text directly")
                     
-                    # Log image truncation failures
+                    # Update response object with extracted content
+                    if extracted_content and hasattr(response, 'content'):
+                        response.content = extracted_content
+                    elif extracted_content:
+                        # Create a new response object if needed
+                        response = UnifiedResponse(
+                            content=extracted_content,
+                            finish_reason=finish_reason,
+                            raw_response=response
+                        )
+                
+                # CRITICAL: Save response for duplicate detection
+                # This must happen even for truncated/empty responses
+                if extracted_content:
+                    self._save_response(extracted_content, response_name)
+                    logger.debug(f"Saved image response to: {response_name}")
+                
+                # Handle empty responses
+                if not extracted_content or extracted_content.strip() in ["", "[]", "[IMAGE TRANSLATION FAILED]"]:
+                    print(f"Empty or error image response: {finish_reason}")
+                    self._save_failed_request(messages, "Empty image response", context, response)
+                    
+                    # ALWAYS log these failures too
                     self._log_truncation_failure(
                         messages=messages,
-                        response_content=response.content,
-                        finish_reason=response.finish_reason,
-                        context=context or 'image_translation',
-                        error_details=response.error_details
-                    )               
-
-                # Apply API delay after successful image call
+                        response_content=extracted_content or "",
+                        finish_reason=finish_reason or 'error',
+                        context=context,
+                        error_details=getattr(response, 'error_details', None) if response else None
+                    )
+                    self._track_stats(context, False, "empty_image_response", time.time() - start_time)
+                    
+                    # Use fallback
+                    fallback_content = self._handle_empty_result(messages, context, 
+                        getattr(response, 'error_details', "empty_image") if response else "empty_image")
+                    return fallback_content, 'error'
+                
+                # Track success
+                self._track_stats(context, True, None, time.time() - start_time)
+                
+                # Mark key as successful in multi-key mode
+                self._mark_key_success()
+                
+                # Log important info for retry mechanisms
+                if finish_reason in ['length', 'max_tokens']:
+                    print(f"Image response was truncated: {finish_reason}")
+                    print(f"⚠️ Image response truncated (finish_reason: {finish_reason})")
+                    
+                    # ALWAYS log truncation failures
+                    self._log_truncation_failure(
+                        messages=messages,
+                        response_content=extracted_content,
+                        finish_reason=finish_reason,
+                        context=context,
+                        error_details=getattr(response, 'error_details', None) if response else None
+                    )
+                    # The calling code will check finish_reason=='length' for retry
+                
+                # Apply API delay after successful call (even if truncated)
                 # SKIP DELAY DURING CLEANUP
                 if not self._in_cleanup:
                     api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
@@ -5919,107 +6774,316 @@ class UnifiedClient:
                         time.sleep(api_delay)
                 else:
                     print("⚡ Skipping API delay (cleanup mode)")
-
-                return response.content, response.finish_reason
-                    
+                
+                # Return the response with accurate finish_reason
+                # This is CRITICAL for retry mechanisms to work
+                return extracted_content, finish_reason
+                
             except UnifiedClientError as e:
-                # Re-raise our own errors
+                # Handle cancellation specially for timeout support
                 if e.error_type == "cancelled" or "cancelled" in str(e):
                     self._in_cleanup = False  # Ensure cleanup flag is set
-                    print(f"Image processing cancelled: {e}")
+                    logger.info("Propagating image cancellation to caller")
+                    # Re-raise so send_with_interrupt can handle it
                     raise
                 
-                print(f"Image processing error: {e}")
-                error_str = str(e).lower()
+                print(f"UnifiedClient image error: {e}")
                 
-                # Check if it's a rate limit that needs to be handled by outer retry logic
-                if "429" in error_str or "rate limit" in error_str or "quota" in error_str:
+                # Check if it's a rate limit error and re-raise for retry logic
+                error_str = str(e).lower()
+                if e.error_type == "rate_limit" or "429" in error_str or "rate limit" in error_str or "quota" in error_str:
                     raise  # Re-raise for multi-key retry logic in outer send_image() method
                 
-                # Check for prohibited content - never retry these
-                content_filter_indicators = [
-                    "content_filter", "content was blocked", "response was blocked",
-                    "safety filter", "content policy", "harmful content",
-                    "blocked by safety", "harm_category", "inappropriate image"
-                ]
-                
-                if any(indicator in error_str for indicator in content_filter_indicators):
-                    print(f"❌ Image content prohibited - not retrying: {error_str[:100]}")
+                # Check for prohibited content - check BOTH error_type AND error string
+                if e.error_type == "prohibited_content" or any(indicator in error_str for indicator in content_filter_indicators):
+                    print(f"❌ Prohibited image content detected: {error_str[:200]}")
+                    
+                    # Only try main key if conditions are met
+                    if (self._multi_key_mode and 
+                        not main_key_attempted and 
+                        hasattr(self, 'original_api_key') and 
+                        hasattr(self, 'original_model') and
+                        self.original_api_key and 
+                        self.original_model):
+                        
+                        print(f"🔄 Attempting main key fallback for prohibited image content")
+                        print(f"   Current key: {self.key_identifier}")
+                        print(f"   Main key model: {self.original_model}")
+                        
+                        main_key_attempted = True
+                        
+                        try:
+                            # Create temporary client with main key for image
+                            main_response = self._retry_image_with_main_key(
+                                messages, image_data, temperature, max_tokens, max_completion_tokens, context
+                            )
+                            
+                            if main_response:
+                                content, finish_reason = main_response
+                                print(f"✅ Main key succeeded for image! Returning response")
+                                return content, finish_reason
+                            else:
+                                print(f"❌ Main key returned None for image")
+                                
+                        except Exception as main_error:
+                            print(f"❌ Main key image error: {str(main_error)[:200]}")
+                            # Check if main key also hit content filter
+                            main_error_str = str(main_error).lower()
+                            if any(indicator in main_error_str for indicator in content_filter_indicators):
+                                print(f"❌ Main key also hit content filter for image")
+                            # Continue to normal error handling
+                    
+                    # Normal prohibited content handling
+                    print(f"❌ Image content prohibited - not retrying further")
                     self._save_failed_request(messages, e, context)
-                    raise  # Re-raise without retry
+                    self._track_stats(context, False, type(e).__name__, time.time() - start_time)
+                    fallback_content = self._handle_empty_result(messages, context, str(e))
+                    return fallback_content, 'error'
                 
-                # Check for 500 errors - retry these
+                # Check for 500 errors - retry these with exponential backoff
                 http_status = getattr(e, 'http_status', None)
                 if http_status == 500 or "500" in error_str or "api_error" in error_str:
                     if attempt < internal_retries - 1:
-                        wait_time = min(5 * (attempt + 1), 15)  # 5s, 10s, 15s backoff
-                        print(f"🔄 Image server error (500) - auto-retrying in {wait_time}s (attempt {attempt + 1}/{internal_retries})")
+                        # Exponential backoff with jitter
+                        delay = (base_delay * (2 ** attempt)) + random.uniform(0, 1)
+                        # Cap the maximum delay to prevent extremely long waits
+                        delay = min(delay, 60)  # Max 60 seconds
+                        
+                        print(f"🔄 Image server error (500) - auto-retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries})")
                         
                         # Wait with cancellation check
-                        for i in range(wait_time):
+                        wait_start = time.time()
+                        while time.time() - wait_start < delay:
                             if self._cancelled:
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                            time.sleep(1)
+                            time.sleep(0.5)  # Check every 0.5 seconds
                         continue
                     else:
                         print(f"❌ Image server error (500) - exhausted {internal_retries} retries")
                 
-                # Save failed request and raise
+                # Save failed request and return fallback
                 self._save_failed_request(messages, e, context)
-                raise
+                self._track_stats(context, False, type(e).__name__, time.time() - start_time)
+                fallback_content = self._handle_empty_result(messages, context, str(e))
+                return fallback_content, 'error'
                 
             except Exception as e:
-                # Wrap other errors
-                print(f"Unexpected image processing error: {e}")
+                print(f"Unexpected image error: {e}")
                 error_str = str(e).lower()
                 
-                # Check if it's a rate limit that wasn't caught
+                # For unexpected errors, check if it's a timeout
+                if "timed out" in error_str:
+                    # Re-raise timeout errors so the retry logic can handle them
+                    raise UnifiedClientError(f"Image request timed out: {e}", error_type="timeout")
+                
+                # Check if it's a rate limit error
                 if "429" in error_str or "rate limit" in error_str or "quota" in error_str:
                     raise  # Re-raise for multi-key retry logic
                 
-                # Check for timeout errors
-                if "timed out" in error_str:
-                    raise UnifiedClientError(f"Image request timed out: {e}", error_type="timeout")
-                
                 # Check for prohibited content in unexpected errors
-                content_filter_indicators = [
-                    "content_filter", "content was blocked", "response was blocked",
-                    "safety filter", "content policy", "harmful content",
-                    "blocked by safety", "harm_category", "inappropriate"
-                ]
-                
                 if any(indicator in error_str for indicator in content_filter_indicators):
+                    print(f"❌ Image content prohibited in unexpected error: {error_str[:200]}")
+                    
+                    # Debug current state
+                    self._debug_multi_key_state()
+                    
+                    # If we're in multi-key mode and haven't tried the main key yet
+                    if (self._multi_key_mode and 
+                        not main_key_attempted and 
+                        hasattr(self, 'original_api_key') and 
+                        hasattr(self, 'original_model') and
+                        self.original_api_key and 
+                        self.original_model):
+                        
+                        print(f"🔄 Attempting main key fallback for prohibited image (from unexpected error)")
+                        print(f"   Current key: {self.key_identifier}")
+                        print(f"   Main key model: {self.original_model}")
+                        
+                        main_key_attempted = True
+                        
+                        try:
+                            # Create temporary client with main key for image
+                            main_response = self._retry_image_with_main_key(
+                                messages, image_data, temperature, max_tokens, max_completion_tokens, context
+                            )
+                            
+                            if main_response:
+                                content, finish_reason = main_response
+                                print(f"✅ Main key succeeded for image! Returning response")
+                                return content, finish_reason
+                            else:
+                                print(f"❌ Main key returned None for image")
+                                
+                        except Exception as main_error:
+                            print(f"❌ Main key image error: {str(main_error)[:200]}")
+                            # Check if main key also hit content filter
+                            main_error_str = str(main_error).lower()
+                            if any(indicator in main_error_str for indicator in content_filter_indicators):
+                                print(f"❌ Main key also hit content filter for image")
+                    
+                    # Fall through to normal error handling
                     print(f"❌ Image content prohibited - not retrying")
                     self._save_failed_request(messages, e, context)
-                    fallback = self._handle_empty_result(messages, context, str(e))
-                    return fallback, 'error'
+                    self._track_stats(context, False, "unexpected_error", time.time() - start_time)
+                    fallback_content = self._handle_empty_result(messages, context, str(e))
+                    return fallback_content, 'error'
                 
                 # Check for 500 errors in unexpected exceptions
                 if "500" in error_str or "internal server error" in error_str:
                     if attempt < internal_retries - 1:
-                        wait_time = min(5 * (attempt + 1), 15)
-                        print(f"🔄 Image server error (500) - auto-retrying in {wait_time}s (attempt {attempt + 1}/{internal_retries})")
+                        # Exponential backoff with jitter
+                        delay = (base_delay * (2 ** attempt)) + random.uniform(0, 1)
+                        delay = min(delay, 60)  # Max 60 seconds
                         
-                        for i in range(wait_time):
+                        print(f"🔄 Image server error (500) - auto-retrying in {delay:.1f}s (attempt {attempt + 1}/{internal_retries})")
+                        
+                        wait_start = time.time()
+                        while time.time() - wait_start < delay:
                             if self._cancelled:
                                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                            time.sleep(1)
+                            time.sleep(0.5)
                         continue
                 
-                # Check for other transient errors
+                # Check for other transient errors with exponential backoff
                 transient_errors = ["502", "503", "504", "connection reset", "connection aborted"]
                 if any(err in error_str for err in transient_errors):
                     if attempt < internal_retries - 1:
-                        wait_time = min(3 * (attempt + 1), 10)
-                        print(f"🔄 Image transient error - retrying in {wait_time}s")
-                        time.sleep(wait_time)
+                        # Use a slightly less aggressive backoff for transient errors
+                        delay = (base_delay/2 * (2 ** attempt)) + random.uniform(0, 1)
+                        delay = min(delay, 30)  # Max 30 seconds for transient errors
+                        
+                        print(f"🔄 Image transient error - retrying in {delay:.1f}s")
+                        
+                        wait_start = time.time()
+                        while time.time() - wait_start < delay:
+                            if self._cancelled:
+                                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                            time.sleep(0.5)
                         continue
                 
-                # Save failed request and return fallback
+                # Save failed request and return fallback for other errors
                 self._save_failed_request(messages, e, context)
-                fallback = self._handle_empty_result(messages, context, str(e))
-                return fallback, 'error'
+                self._track_stats(context, False, "unexpected_error", time.time() - start_time)
+                fallback_content = self._handle_empty_result(messages, context, str(e))
+                return fallback_content, 'error'
 
+    def _retry_image_with_main_key(self, messages, image_data, temperature=None, max_tokens=None, 
+                                   max_completion_tokens=None, context=None) -> Optional[Tuple[str, Optional[str]]]:
+        """
+        Create a temporary client with the main key and retry the image request.
+        This is used for prohibited content errors in multi-key mode.
+        """
+        print(f"[MAIN KEY IMAGE RETRY] Starting image retry with main key")
+        print(f"[MAIN KEY IMAGE RETRY] Original key: {self.original_api_key[:8]}...{self.original_api_key[-4:]}")
+        print(f"[MAIN KEY IMAGE RETRY] Original model: {self.original_model}")
+        
+        try:
+            # Create a new temporary UnifiedClient instance with the main key
+            temp_client = UnifiedClient(
+                api_key=self.original_api_key,
+                model=self.original_model,
+                output_dir=self.output_dir
+            )
+            
+            # FORCE single-key mode after initialization
+            # This is thread-safe because we're modifying the instance, not the environment
+            temp_client._multi_key_mode = False
+            temp_client.use_multi_keys = False
+            temp_client.key_identifier = "Main Key (Image Fallback)"
+            
+            # The client should already be set up from __init__, but verify
+            if not hasattr(temp_client, 'client_type') or temp_client.client_type is None:
+                # Force setup if needed
+                temp_client.api_key = self.original_api_key
+                temp_client.model = self.original_model
+                temp_client._setup_client()
+            
+            # Copy relevant state
+            temp_client.context = context or 'image_translation'
+            temp_client._cancelled = self._cancelled
+            temp_client._in_cleanup = self._in_cleanup
+            temp_client.current_session_context = self.current_session_context
+            temp_client.conversation_message_count = self.conversation_message_count
+            
+            # Copy image-specific settings if they exist
+            temp_client.default_temperature = getattr(self, 'default_temperature', 0.3)
+            temp_client.default_max_tokens = getattr(self, 'default_max_tokens', 8192)
+            temp_client.request_timeout = self.request_timeout
+            
+            print(f"[MAIN KEY IMAGE RETRY] Created temp client with model: {temp_client.model}")
+            print(f"[MAIN KEY IMAGE RETRY] Temp client type: {getattr(temp_client, 'client_type', 'NOT SET')}")
+            print(f"[MAIN KEY IMAGE RETRY] Multi-key mode: {temp_client._multi_key_mode}")
+            
+            # Get file names for response tracking
+            payload_name, response_name = self._get_file_names(messages, context=context)
+            
+            # Try to send the image request
+            print(f"[MAIN KEY IMAGE RETRY] Sending image request...")
+            
+            # Use the send_image method instead of _get_response for better compatibility
+            result = temp_client.send_image(
+                messages=messages,
+                image_data=image_data,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                max_completion_tokens=max_completion_tokens,
+                context=context
+            )
+            
+            # Check the result
+            if result and isinstance(result, tuple):
+                content, finish_reason = result
+                if content:
+                    print(f"[MAIN KEY IMAGE RETRY] Success! Got image response of length: {len(content)}")
+                    # Save the response using our instance's method
+                    self._save_response(content, response_name)
+                    return content, finish_reason
+                else:
+                    print(f"[MAIN KEY IMAGE RETRY] Empty content returned for image")
+                    return None
+            else:
+                print(f"[MAIN KEY IMAGE RETRY] Unexpected result type: {type(result)}")
+                return None
+            
+        except Exception as e:
+            print(f"[MAIN KEY IMAGE RETRY] Exception: {type(e).__name__}: {str(e)[:500]}")
+            
+            # Check if it's also a content filter error
+            error_str = str(e).lower()
+            content_filter_indicators = [
+                "content_filter", "content was blocked", "response was blocked",
+                "safety filter", "content policy", "harmful content",
+                "blocked by safety", "harm_category", "content_policy_violation",
+                "unsafe content", "violates our usage policies",
+                "prohibited_content", "blockedreason", "content blocked",
+                "inappropriate image", "inappropriate content"
+            ]
+            
+            if any(indicator in error_str for indicator in content_filter_indicators):
+                print(f"[MAIN KEY IMAGE RETRY] Main key also hit content filter for image")
+            
+            # Re-raise so the calling method can handle it
+            raise
+
+
+    def _debug_active_requests(self):
+        """Debug method to see what requests are currently being tracked"""
+        with self._tracker_lock:
+            current_time = time.time()
+            print(f"\n=== Active Request Tracking ===")
+            print(f"Total tracked: {len(self._chapter_request_tracker)}")
+            
+            for hash_key, info in self._chapter_request_tracker.items():
+                age = current_time - info['timestamp']
+                thread = info['thread']
+                context = info['context']
+                chapter_info = info.get('chapter_info', {})
+                chapter = chapter_info.get('chapter', 'N/A')
+                
+                print(f"  Hash: {hash_key[:8]}... | Thread: {thread} | "
+                      f"Chapter: {chapter} | Age: {age:.1f}s | Context: {context}")
+            print(f"================================\n")
+        
     def _send_vertex_model_garden_image(self, messages, image_base64, temperature, max_tokens, response_name):
         """Send image request to Vertex AI Model Garden"""
         # For now, we can just call the regular send method since Vertex AI 
