@@ -356,9 +356,8 @@ class UnifiedClient:
     }
     
     @classmethod
-    def setup_multi_key_pool(cls, config: List[Dict], force_rotation: bool = True, 
-                             rotation_frequency: int = 1):
-        """Setup the shared multi-key pool with decryption validation"""
+    def setup_multi_key_pool(cls, keys_list, force_rotation=True, rotation_frequency=1):
+        """Setup the shared API key pool"""
         with cls._pool_lock:
             if cls._api_key_pool is None:
                 cls._api_key_pool = APIKeyPool()
@@ -371,7 +370,8 @@ class UnifiedClient:
             validated_keys = []
             encrypted_keys_fixed = 0
             
-            for i, key_data in enumerate(config):
+            # FIX 1: Use keys_list parameter instead of undefined 'config'
+            for i, key_data in enumerate(keys_list):
                 if not isinstance(key_data, dict):
                     continue
                     
@@ -403,6 +403,17 @@ class UnifiedClient:
             
             # Load the validated keys
             cls._api_key_pool.load_from_list(validated_keys)
+            
+            # FIX 2: Store settings at class level (these affect all instances)
+            # These are class variables since pool is shared
+            if not hasattr(cls, '_force_rotation'):
+                cls._force_rotation = force_rotation
+            if not hasattr(cls, '_rotation_frequency'):
+                cls._rotation_frequency = rotation_frequency
+            
+            # Or update if provided
+            cls._force_rotation = force_rotation
+            cls._rotation_frequency = rotation_frequency
             
             # Single debug message
             if encrypted_keys_fixed > 0:
