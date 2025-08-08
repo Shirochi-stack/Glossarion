@@ -600,7 +600,7 @@ class UnifiedClient:
                 # Get a key using thread-safe method
                 key_info = None
                 
-                # Use the pool's thread-safe method
+                # First try using the pool's method if available
                 if hasattr(self._api_key_pool, 'get_key_for_thread'):
                     try:
                         key_info = self._api_key_pool.get_key_for_thread(
@@ -620,14 +620,14 @@ class UnifiedClient:
                     key_info = self._get_next_available_key_for_thread()
                 
                 if key_info:
-                    key, key_index = key_info[:2]
+                    key, key_index = key_info[:2]  # Handle both tuple formats
                     
                     # Generate key identifier
                     key_id = f"Key#{key_index+1} ({key.model})"
                     if hasattr(key, 'identifier') and key.identifier:
                         key_id = key.identifier
                     
-                    # Update THREAD-LOCAL state (not instance state!)
+                    # Update thread-local state
                     tls.api_key = key.api_key
                     tls.model = key.model
                     tls.key_index = key_index
@@ -635,34 +635,33 @@ class UnifiedClient:
                     tls.initialized = True
                     tls.last_rotation = time.time()
                     
-                    # Copy to instance for compatibility (but this is not thread-safe!)
-                    # Only do this for logging/debugging purposes
+                    # Copy to instance for compatibility
                     self.api_key = tls.api_key
                     self.model = tls.model
                     self.key_identifier = tls.key_identifier
                     self.current_key_index = key_index
                     
                     # Log key assignment
-                    masked_key = tls.api_key[:4] + "..." + tls.api_key[-4:] if len(tls.api_key) > 12 else "***"
-                    print(f"[Thread-{thread_name}] 🔑 Using {tls.key_identifier} - {masked_key}")
+                    if len(self.api_key) > 12:
+                        masked_key = self.api_key[:4] + "..." + self.api_key[-4:]
+                    else:
+                        masked_key = self.api_key[:3] + "..." + self.api_key[-2:] if len(self.api_key) > 5 else "***"
                     
-                    # Setup THREAD-LOCAL client
-                    self._setup_thread_local_client()
+                    print(f"[Thread-{thread_name}] 🔑 Using {self.key_identifier} - {masked_key}")
+                    
+                    # Setup client with new key
+                    self._setup_client()
                     return
                 else:
                     # No keys available
                     raise UnifiedClientError("No available API keys for thread", error_type="no_keys")
             else:
-                # Not rotating, ensure instance variables match thread-local for compatibility
+                # Not rotating, ensure instance variables match thread-local
                 if tls.initialized:
                     self.api_key = tls.api_key
                     self.model = tls.model
                     self.key_identifier = tls.key_identifier
                     self.current_key_index = getattr(tls, 'key_index', None)
-                    
-                    # Ensure thread-local client exists
-                    if not hasattr(tls, 'openai_client') and self.client_type == 'openai':
-                        self._setup_thread_local_client()
         
         # Single key mode
         elif not tls.initialized:
@@ -677,7 +676,7 @@ class UnifiedClient:
             self.key_identifier = tls.key_identifier
             
             logger.debug(f"[Thread-{thread_name}] Single-key mode: Using {self.model}")
-            self._setup_client()  # Use regular setup for single-key mode
+            self._setup_client()
 
 
     def _get_thread_key(self) -> Optional[Tuple[str, int]]:
