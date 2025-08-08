@@ -44,6 +44,7 @@ chardet
 charset-normalizer
 olefile
 html2text
+markdown2
 
 # Image processing
 opencv-python
