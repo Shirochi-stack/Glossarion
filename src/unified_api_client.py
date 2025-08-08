@@ -2773,26 +2773,108 @@ class UnifiedClient:
                     logger.info(f"Response saved successfully for {context}")
                 else:
                     print(f"No content to save for {context}")
-                
+
                 # Handle empty responses
-                if not extracted_content or extracted_content.strip() in ["", "[]"]:
+                if not extracted_content or extracted_content.strip() in ["", "[]", "[IMAGE TRANSLATION FAILED]"]:
                     print(f"Empty or error response: {finish_reason}")
-                    self._save_failed_request(messages, "Empty response", context, response)
                     
-                    # ALWAYS log these failures too
+                    # Check if this is likely a safety filter issue (especially for Gemini)
+                    is_likely_safety_filter = False
+                    
+                    # Check various indicators that this is a safety filter
+                    if self.client_type == 'gemini' or 'gemini' in self.model.lower():
+                        # Gemini often returns empty with 'length' or 'stop' when it's actually a safety filter
+                        if finish_reason in ['length', 'stop'] and not extracted_content:
+                            print(f"❌ Likely Gemini safety filter (empty content with finish_reason={finish_reason})")
+                            is_likely_safety_filter = True
+                    
+                    # Check for safety-related content in response
+                    if response and hasattr(response, 'raw_response'):
+                        response_str = str(response.raw_response).lower()
+                        safety_indicators = ['safety', 'blocked', 'prohibited', 'harmful', 'inappropriate']
+                        if any(indicator in response_str for indicator in safety_indicators):
+                            print(f"❌ Safety indicators found in response")
+                            is_likely_safety_filter = True
+                    
+                    # Check for specific safety filter messages in extracted content
+                    if extracted_content:
+                        content_lower = extracted_content.lower()
+                        if any(phrase in content_lower for phrase in [
+                            'blocked', 'safety', 'cannot', 'unable', 'prohibited',
+                            'content filter', 'refused', 'inappropriate'
+                        ]):
+                            print(f"❌ Safety filter phrases detected in content")
+                            is_likely_safety_filter = True
+                    
+                    # If it's likely a safety filter and we haven't tried main key yet
+                    if is_likely_safety_filter and not main_key_attempted:
+                        # Only try main key if conditions are met
+                        if (self._multi_key_mode and 
+                            hasattr(self, 'original_api_key') and 
+                            hasattr(self, 'original_model') and
+                            self.original_api_key and 
+                            self.original_model):
+                            
+                            print(f"🔄 Empty response likely due to safety filter - attempting main key fallback")
+                            print(f"   Current key: {self.key_identifier}")
+                            print(f"   Main key model: {self.original_model}")
+                            
+                            main_key_attempted = True
+                            
+                            try:
+                                # Create temporary client with main key
+                                main_response = self._retry_with_main_key(
+                                    messages, temperature, max_tokens, max_completion_tokens, context
+                                )
+                                
+                                if main_response:
+                                    content, finish_reason = main_response
+                                    if content and content.strip():  # Make sure we got actual content
+                                        print(f"✅ Main key succeeded! Got {len(content)} chars")
+                                        return content, finish_reason
+                                    else:
+                                        print(f"❌ Main key also returned empty content")
+                                else:
+                                    print(f"❌ Main key returned None")
+                                    
+                            except Exception as main_error:
+                                print(f"❌ Main key error: {str(main_error)[:200]}")
+                                # Check if main key also hit content filter
+                                main_error_str = str(main_error).lower()
+                                if any(indicator in main_error_str for indicator in content_filter_indicators):
+                                    print(f"❌ Main key also hit content filter")
+                        else:
+                            if not self._multi_key_mode:
+                                print(f"❌ Not in multi-key mode, cannot retry with main key")
+                            else:
+                                print(f"❌ Main key not available for retry")
+                    
+                    # If we couldn't retry or retry failed, continue with normal error handling
+                    self._save_failed_request(messages, "Empty response (possible safety filter)", context, response)
+                    
+                    # Log the failure
                     self._log_truncation_failure(
                         messages=messages,
                         response_content=extracted_content or "",
-                        finish_reason=finish_reason or 'error',
+                        finish_reason='content_filter' if is_likely_safety_filter else (finish_reason or 'error'),
                         context=context,
-                        error_details=getattr(response, 'error_details', None) if response else None
+                        error_details={
+                            'likely_safety_filter': is_likely_safety_filter,
+                            'original_finish_reason': finish_reason,
+                            'provider': self.client_type,
+                            'model': self.model
+                        } if is_likely_safety_filter else getattr(response, 'error_details', None)
                     )
+                    
                     self._track_stats(context, False, "empty_response", time.time() - start_time)
                     
                     # Use fallback
+                    fallback_reason = "safety_filter" if is_likely_safety_filter else "empty"
                     fallback_content = self._handle_empty_result(messages, context, 
-                        getattr(response, 'error_details', "empty") if response else "empty")
-                    return fallback_content, 'error'
+                        getattr(response, 'error_details', fallback_reason) if response else fallback_reason)
+                    
+                    # Return with appropriate finish_reason
+                    return fallback_content, 'content_filter' if is_likely_safety_filter else 'error'
                 
                 # Track success
                 self._track_stats(context, True, None, time.time() - start_time)
@@ -3719,23 +3801,105 @@ class UnifiedClient:
                 
                 # Handle empty responses
                 if not extracted_content or extracted_content.strip() in ["", "[]", "[IMAGE TRANSLATION FAILED]"]:
-                    print(f"Empty or error image response: {finish_reason}")
-                    self._save_failed_request(messages, "Empty image response", context, response)
+                    print(f"Empty or error response: {finish_reason}")
                     
-                    # ALWAYS log these failures too
+                    # Check if this is likely a safety filter issue (especially for Gemini)
+                    is_likely_safety_filter = False
+                    
+                    # Check various indicators that this is a safety filter
+                    if self.client_type == 'gemini' or 'gemini' in self.model.lower():
+                        # Gemini often returns empty with 'length' or 'stop' when it's actually a safety filter
+                        if finish_reason in ['length', 'stop'] and not extracted_content:
+                            print(f"❌ Likely Gemini safety filter (empty content with finish_reason={finish_reason})")
+                            is_likely_safety_filter = True
+                    
+                    # Check for safety-related content in response
+                    if response and hasattr(response, 'raw_response'):
+                        response_str = str(response.raw_response).lower()
+                        safety_indicators = ['safety', 'blocked', 'prohibited', 'harmful', 'inappropriate']
+                        if any(indicator in response_str for indicator in safety_indicators):
+                            print(f"❌ Safety indicators found in response")
+                            is_likely_safety_filter = True
+                    
+                    # Check for specific safety filter messages in extracted content
+                    if extracted_content:
+                        content_lower = extracted_content.lower()
+                        if any(phrase in content_lower for phrase in [
+                            'blocked', 'safety', 'cannot', 'unable', 'prohibited',
+                            'content filter', 'refused', 'inappropriate'
+                        ]):
+                            print(f"❌ Safety filter phrases detected in content")
+                            is_likely_safety_filter = True
+                    
+                    # If it's likely a safety filter and we haven't tried main key yet
+                    if is_likely_safety_filter and not main_key_attempted:
+                        # Only try main key if conditions are met
+                        if (self._multi_key_mode and 
+                            hasattr(self, 'original_api_key') and 
+                            hasattr(self, 'original_model') and
+                            self.original_api_key and 
+                            self.original_model):
+                            
+                            print(f"🔄 Empty response likely due to safety filter - attempting main key fallback")
+                            print(f"   Current key: {self.key_identifier}")
+                            print(f"   Main key model: {self.original_model}")
+                            
+                            main_key_attempted = True
+                            
+                            try:
+                                # Create temporary client with main key
+                                main_response = self._retry_with_main_key(
+                                    messages, temperature, max_tokens, max_completion_tokens, context
+                                )
+                                
+                                if main_response:
+                                    content, finish_reason = main_response
+                                    if content and content.strip():  # Make sure we got actual content
+                                        print(f"✅ Main key succeeded! Got {len(content)} chars")
+                                        return content, finish_reason
+                                    else:
+                                        print(f"❌ Main key also returned empty content")
+                                else:
+                                    print(f"❌ Main key returned None")
+                                    
+                            except Exception as main_error:
+                                print(f"❌ Main key error: {str(main_error)[:200]}")
+                                # Check if main key also hit content filter
+                                main_error_str = str(main_error).lower()
+                                if any(indicator in main_error_str for indicator in content_filter_indicators):
+                                    print(f"❌ Main key also hit content filter")
+                        else:
+                            if not self._multi_key_mode:
+                                print(f"❌ Not in multi-key mode, cannot retry with main key")
+                            else:
+                                print(f"❌ Main key not available for retry")
+                    
+                    # If we couldn't retry or retry failed, continue with normal error handling
+                    self._save_failed_request(messages, "Empty response (possible safety filter)", context, response)
+                    
+                    # Log the failure
                     self._log_truncation_failure(
                         messages=messages,
                         response_content=extracted_content or "",
-                        finish_reason=finish_reason or 'error',
+                        finish_reason='content_filter' if is_likely_safety_filter else (finish_reason or 'error'),
                         context=context,
-                        error_details=getattr(response, 'error_details', None) if response else None
+                        error_details={
+                            'likely_safety_filter': is_likely_safety_filter,
+                            'original_finish_reason': finish_reason,
+                            'provider': self.client_type,
+                            'model': self.model
+                        } if is_likely_safety_filter else getattr(response, 'error_details', None)
                     )
-                    self._track_stats(context, False, "empty_image_response", time.time() - start_time)
+                    
+                    self._track_stats(context, False, "empty_response", time.time() - start_time)
                     
                     # Use fallback
+                    fallback_reason = "safety_filter" if is_likely_safety_filter else "empty"
                     fallback_content = self._handle_empty_result(messages, context, 
-                        getattr(response, 'error_details', "empty_image") if response else "empty_image")
-                    return fallback_content, 'error'
+                        getattr(response, 'error_details', fallback_reason) if response else fallback_reason)
+                    
+                    # Return with appropriate finish_reason
+                    return fallback_content, 'content_filter' if is_likely_safety_filter else 'error'
                 
                 # Track success
                 self._track_stats(context, True, None, time.time() - start_time)
