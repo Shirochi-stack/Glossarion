@@ -934,7 +934,7 @@ class EPUBCompiler:
         self.css_dir = os.path.join(self.output_dir, "css")
         self.fonts_dir = os.path.join(self.output_dir, "fonts")
         self.metadata_path = os.path.join(self.output_dir, "metadata.json")
-        self.attach_css_to_chapters = os.getenv('ATTACH_CSS_TO_CHAPTERS', '0') == '1'
+        self.attach_css_to_chapters = os.getenv('ATTACH_CSS_TO_CHAPTERS', '0') == '1'  # Default to '0' (disabled)
 
         
         # Set global log callback
