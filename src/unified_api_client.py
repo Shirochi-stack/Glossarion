@@ -628,7 +628,7 @@ class UnifiedClient:
                     if hasattr(key, 'identifier') and key.identifier:
                         key_id = key.identifier
                     
-                    # Update thread-local state
+                    # Update thread-local state (no lock needed, thread-local is safe)
                     tls.api_key = key.api_key
                     tls.model = key.model
                     tls.key_index = key_index
@@ -636,11 +636,20 @@ class UnifiedClient:
                     tls.initialized = True
                     tls.last_rotation = time.time()
                     
-                    # Copy to instance for compatibility
-                    self.api_key = tls.api_key
-                    self.model = tls.model
-                    self.key_identifier = tls.key_identifier
-                    self.current_key_index = key_index
+                    # MICROSECOND LOCK: Only when copying to instance variables
+                    if hasattr(self, '_instance_model_lock'):
+                        with self._instance_model_lock:
+                            # Copy to instance for compatibility
+                            self.api_key = tls.api_key
+                            self.model = tls.model
+                            self.key_identifier = tls.key_identifier
+                            self.current_key_index = key_index
+                    else:
+                        # No lock available, fall back
+                        self.api_key = tls.api_key
+                        self.model = tls.model
+                        self.key_identifier = tls.key_identifier
+                        self.current_key_index = key_index
                     
                     # Log key assignment
                     if len(self.api_key) > 12:
@@ -650,7 +659,7 @@ class UnifiedClient:
                     
                     print(f"[Thread-{thread_name}] 🔑 Using {self.key_identifier} - {masked_key}")
                     
-                    # Setup client with new key
+                    # Setup client with new key (might need lock if it modifies instance state)
                     self._setup_client()
                     return
                 else:
@@ -659,10 +668,18 @@ class UnifiedClient:
             else:
                 # Not rotating, ensure instance variables match thread-local
                 if tls.initialized:
-                    self.api_key = tls.api_key
-                    self.model = tls.model
-                    self.key_identifier = tls.key_identifier
-                    self.current_key_index = getattr(tls, 'key_index', None)
+                    # MICROSECOND LOCK: When syncing instance variables
+                    if hasattr(self, '_instance_model_lock'):
+                        with self._instance_model_lock:
+                            self.api_key = tls.api_key
+                            self.model = tls.model
+                            self.key_identifier = tls.key_identifier
+                            self.current_key_index = getattr(tls, 'key_index', None)
+                    else:
+                        self.api_key = tls.api_key
+                        self.model = tls.model
+                        self.key_identifier = tls.key_identifier
+                        self.current_key_index = getattr(tls, 'key_index', None)
         
         # Single key mode
         elif not tls.initialized:
@@ -672,13 +689,19 @@ class UnifiedClient:
             tls.initialized = True
             tls.request_count = 0
             
-            self.api_key = tls.api_key
-            self.model = tls.model
-            self.key_identifier = tls.key_identifier
+            # MICROSECOND LOCK: When setting instance variables
+            if hasattr(self, '_instance_model_lock'):
+                with self._instance_model_lock:
+                    self.api_key = tls.api_key
+                    self.model = tls.model
+                    self.key_identifier = tls.key_identifier
+            else:
+                self.api_key = tls.api_key
+                self.model = tls.model
+                self.key_identifier = tls.key_identifier
             
             logger.debug(f"[Thread-{thread_name}] Single-key mode: Using {self.model}")
             self._setup_client()
-
 
     def _get_thread_key(self) -> Optional[Tuple[str, int]]:
         """Get the API key assigned to current thread"""
