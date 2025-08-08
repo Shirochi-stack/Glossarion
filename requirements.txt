@@ -43,6 +43,7 @@ certifi
 chardet
 charset-normalizer
 olefile
+html2text
 
 # Image processing
 opencv-python
