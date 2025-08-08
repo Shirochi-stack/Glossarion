@@ -1134,6 +1134,8 @@ class TranslatorGUI:
         self.current_file_index = 0
         self.use_gemini_openai_endpoint_var = tk.BooleanVar(value=self.config.get('use_gemini_openai_endpoint', False))
         self.gemini_openai_endpoint_var = tk.StringVar(value=self.config.get('gemini_openai_endpoint', ''))
+        self.attach_css_to_chapters_var = tk.BooleanVar(value=False)  # Default to disabled
+
         
         # Initialize the variables with default values
         self.enable_parallel_extraction_var = tk.BooleanVar(value=self.config.get('enable_parallel_extraction', True))
@@ -6881,12 +6883,14 @@ Rules:
             'TRANSLATION_HISTORY_ROLLING': "1" if self.translation_history_rolling_var.get() else "0",
             'USE_GEMINI_OPENAI_ENDPOINT': '1' if self.use_gemini_openai_endpoint_var.get() else '0',
             'GEMINI_OPENAI_ENDPOINT': self.gemini_openai_endpoint_var.get() if self.gemini_openai_endpoint_var.get() else '',
+            "ATTACH_CSS_TO_CHAPTERS": "1" if self.attach_css_to_chapters_var.get() else "0",
+
             # Extraction settings
             "EXTRACTION_MODE": extraction_mode,
             "ENHANCED_FILTERING": enhanced_filtering,
             "ENHANCED_PRESERVE_STRUCTURE": "1" if getattr(self, 'enhanced_preserve_structure_var', tk.BooleanVar(value=True)).get() else "0",
             
-            # For new UI (if available)
+            # For new UI
             "TEXT_EXTRACTION_METHOD": extraction_method if hasattr(self, 'text_extraction_method_var') else ('enhanced' if extraction_mode == 'enhanced' else 'standard'),
             "FILE_FILTERING_LEVEL": filtering_level if hasattr(self, 'file_filtering_level_var') else extraction_mode,
             'DISABLE_CHAPTER_MERGING': '1' if self.disable_chapter_merging_var.get() else '0',
@@ -11678,6 +11682,11 @@ Important rules:
         tb.Checkbutton(section_frame, text="Use NCX-only Navigation (Compatibility Mode)", 
                       variable=self.force_ncx_only_var,
                       bootstyle="round-toggle").pack(anchor=tk.W, pady=(5, 5))
+                      
+        # CSS Attachment toggle - NEW!
+        tb.Checkbutton(section_frame, text="Attach CSS to Chapters (Fixes styling issues)", 
+                      variable=self.attach_css_to_chapters_var,
+              bootstyle="round-toggle").pack(anchor=tk.W, pady=(5, 5))      
 
     def _create_processing_options_section(self, parent):
         """Create processing options section"""
@@ -12698,6 +12707,7 @@ Important rules:
                 self.config.update({
                     'use_rolling_summary': self.rolling_summary_var.get(),
                     'summary_role': self.summary_role_var.get(),
+                    'attach_css_to_chapters': self.attach_css_to_chapters_var.get(),
                     'rolling_summary_exchanges': safe_int(self.rolling_summary_exchanges_var.get(), 5),
                     'rolling_summary_mode': self.rolling_summary_mode_var.get(),
                     'retry_truncated': self.retry_truncated_var.get(),
@@ -12784,6 +12794,7 @@ Important rules:
                 env_updates = {
                     "USE_ROLLING_SUMMARY": "1" if self.rolling_summary_var.get() else "0",
                     "SUMMARY_ROLE": self.summary_role_var.get(),
+                    "ATTACH_CSS_TO_CHAPTERS": "1" if self.attach_css_to_chapters_var.get() else "0",
                     "ROLLING_SUMMARY_EXCHANGES": str(self.config['rolling_summary_exchanges']),
                     "ROLLING_SUMMARY_MODE": self.rolling_summary_mode_var.get(),
                     "ROLLING_SUMMARY_SYSTEM_PROMPT": self.rolling_summary_system_prompt,
@@ -13364,6 +13375,7 @@ Important rules:
             # Save all other settings
             self.config['api_key'] = self.api_key_entry.get()
             self.config['REMOVE_AI_ARTIFACTS'] = self.REMOVE_AI_ARTIFACTS_var.get()
+            self.config['attach_css_to_chapters'] = self.attach_css_to_chapters_var.get()
             self.config['chapter_range'] = self.chapter_range_entry.get().strip()
             self.config['use_rolling_summary'] = self.rolling_summary_var.get()
             self.config['summary_role'] = self.summary_role_var.get()
