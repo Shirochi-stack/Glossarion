@@ -532,7 +532,7 @@ class UnifiedClient:
                     print(f"[DEBUG] ❌ No keys found in config, staying in single-key mode")
                     self._multi_key_mode = False
             except Exception as e:
-                logger.error(f"Failed to load multi-key config: {e}")
+                print(f"Failed to load multi-key config: {e}")
                 self._multi_key_mode = False
                 print(f"[DEBUG] ❌ Error loading config, falling back to single-key mode")
         else:
@@ -611,7 +611,7 @@ class UnifiedClient:
                             # Convert to tuple format expected below
                             key_info = (key, key_index)
                     except Exception as e:
-                        logger.error(f"[Thread-{thread_name}] Error getting key from pool: {e}")
+                        print(f"[Thread-{thread_name}] Error getting key from pool: {e}")
                         key_info = None
                 
                 # Fallback to our method with timeout check
@@ -1308,7 +1308,7 @@ class UnifiedClient:
                     print(f"[DEBUG] ❌ No keys found in config, staying in single-key mode")
                     self._multi_key_mode = False
             except Exception as e:
-                logger.error(f"Failed to load multi-key config: {e}")
+                print(f"Failed to load multi-key config: {e}")
                 self._multi_key_mode = False
                 print(f"[DEBUG] ❌ Error loading config, falling back to single-key mode")
         else:
@@ -2437,7 +2437,7 @@ class UnifiedClient:
                 except Exception as e:
                     last_error = e
                     error_str = str(e)
-                    logger.error(f"[{thread_name}] ✗ {self.key_identifier} error: {error_str[:100]}")
+                    print(f"[{thread_name}] ✗ {self.key_identifier} error: {error_str[:100]}")
                     
                     # Check for prohibited content FIRST
                     if any(indicator in error_str.lower() for indicator in content_filter_indicators):
@@ -2472,7 +2472,7 @@ class UnifiedClient:
                             # Check if we have any available keys
                             available_count = self._count_available_keys()
                             if available_count == 0:
-                                logger.error(f"[{thread_name}] All API keys are cooling down")
+                                print(f"[{thread_name}] All API keys are cooling down")
                                 
                                 if retry_count < max_retries - 1:
                                     cooldown_time = self._get_shortest_cooldown_time()
@@ -2498,7 +2498,7 @@ class UnifiedClient:
                             
                             # Check if we've tried too many keys
                             if len(attempted_keys) >= len(self._api_key_pool.keys):
-                                logger.error(f"[{thread_name}] Attempted all {len(self._api_key_pool.keys)} keys")
+                                print(f"[{thread_name}] Attempted all {len(self._api_key_pool.keys)} keys")
                                 raise UnifiedClientError("All API keys rate limited", error_type="rate_limit")
                             
                             retry_count += 1
@@ -2561,7 +2561,7 @@ class UnifiedClient:
                     # Can't retry - final error
                     else:
                         retry_reason = f"final_error_{type(e).__name__}"
-                        logger.error(f"[{thread_name}] Cannot retry request: {retry_reason}")
+                        print(f"[{thread_name}] Cannot retry request: {retry_reason}")
                         raise
             
             # === IMPROVED CACHE UPDATE AND CLEANUP ===
@@ -2595,7 +2595,7 @@ class UnifiedClient:
             
             # Exhausted retries
             if last_error:
-                logger.error(f"[{thread_name}] Exhausted {max_retries} retries, last reason: {retry_reason}")
+                print(f"[{thread_name}] Exhausted {max_retries} retries, last reason: {retry_reason}")
                 
                 # Clean up on failure too
                 with self._active_requests_lock:
@@ -3286,7 +3286,7 @@ class UnifiedClient:
                 except Exception as e:
                     last_error = e
                     error_str = str(e)
-                    logger.error(f"[{thread_name}] ✗ {self.key_identifier} image error: {error_str[:100]}")
+                    print(f"[{thread_name}] ✗ {self.key_identifier} image error: {error_str[:100]}")
                     
                     # Check for prohibited content FIRST (before rate limit check)
                     if any(indicator in error_str.lower() for indicator in content_filter_indicators):
@@ -3345,7 +3345,7 @@ class UnifiedClient:
                             # Check if we have any available keys
                             available_count = self._count_available_keys()
                             if available_count == 0:
-                                logger.error(f"[{thread_name}] All API keys are cooling down for images")
+                                print(f"[{thread_name}] All API keys are cooling down for images")
                                 
                                 # If we still have retries left, wait for the shortest cooldown
                                 if retry_count < max_retries - 1:
@@ -3373,7 +3373,7 @@ class UnifiedClient:
                             
                             # Check if we've tried too many keys
                             if len(attempted_keys) >= len(self._api_key_pool.keys):
-                                logger.error(f"[{thread_name}] Attempted all {len(self._api_key_pool.keys)} keys for image")
+                                print(f"[{thread_name}] Attempted all {len(self._api_key_pool.keys)} keys for image")
                                 raise UnifiedClientError("All API keys rate limited for image requests", error_type="rate_limit")
                             
                             retry_count += 1
@@ -3440,7 +3440,7 @@ class UnifiedClient:
                     # Can't retry - final error
                     else:
                         retry_reason = f"final_error_{type(e).__name__}"
-                        logger.error(f"[{thread_name}] Cannot retry image request: {retry_reason}")
+                        print(f"[{thread_name}] Cannot retry image request: {retry_reason}")
                         raise
             
             # === IMPROVED CACHE UPDATE AND CLEANUP FOR IMAGES ===
@@ -3474,7 +3474,7 @@ class UnifiedClient:
             
             # Exhausted retries
             if last_error:
-                logger.error(f"[{thread_name}] Exhausted {max_retries} image retries, last reason: {retry_reason}")
+                print(f"[{thread_name}] Exhausted {max_retries} image retries, last reason: {retry_reason}")
                 
                 # Clean up on failure too
                 with self._active_requests_lock:
@@ -4667,7 +4667,7 @@ class UnifiedClient:
                 logger.debug(f"[{thread_name}] Saved payload to: {filepath} (reason: {retry_reason or 'initial'})")
                 
         except Exception as e:
-            logger.error(f"Failed to save payload: {e}")
+            print(f"Failed to save payload: {e}")
 
 
     def _save_response(self, content: str, filename: str):
@@ -4734,7 +4734,7 @@ class UnifiedClient:
                     raise
                     
         except Exception as e:
-            logger.error(f"Failed to save response: {e}")
+            print(f"Failed to save response: {e}")
 
     def _get_file_lock(self, filepath: str) -> RLock:
         """Get or create a lock for a specific file"""
@@ -5881,7 +5881,7 @@ class UnifiedClient:
             
             print(f"Saved OpenRouter config to: {config_path}")
         except Exception as e:
-            logger.error(f"Failed to save OpenRouter config: {e}")
+            print(f"Failed to save OpenRouter config: {e}")
 
 
     def _send_openrouter(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
@@ -6051,27 +6051,27 @@ class UnifiedClient:
                 
                 # Enhanced response validation with detailed logging
                 if not resp:
-                    logger.error("OpenAI returned None response")
+                    print("OpenAI returned None response")
                     raise UnifiedClientError("OpenAI returned empty response object")
                 
                 if not hasattr(resp, 'choices'):
-                    logger.error(f"OpenAI response missing 'choices'. Response type: {type(resp)}")
-                    logger.error(f"Response attributes: {dir(resp)[:10]}")  # Log first 10 attributes
+                    print(f"OpenAI response missing 'choices'. Response type: {type(resp)}")
+                    print(f"Response attributes: {dir(resp)[:10]}")  # Log first 10 attributes
                     raise UnifiedClientError("Invalid OpenAI response structure - missing choices")
                 
                 if not resp.choices:
-                    logger.error("OpenAI response has empty choices array")
+                    print("OpenAI response has empty choices array")
                     # Check if this is a content filter issue
                     if hasattr(resp, 'model') and hasattr(resp, 'id'):
-                        logger.error(f"Response ID: {resp.id}, Model: {resp.model}")
+                        print(f"Response ID: {resp.id}, Model: {resp.model}")
                     raise UnifiedClientError("OpenAI returned empty choices array")
                 
                 choice = resp.choices[0]
                 
                 # Enhanced choice validation
                 if not hasattr(choice, 'message'):
-                    logger.error(f"OpenAI choice missing 'message'. Choice type: {type(choice)}")
-                    logger.error(f"Choice attributes: {dir(choice)[:10]}")
+                    print(f"OpenAI choice missing 'message'. Choice type: {type(choice)}")
+                    print(f"Choice attributes: {dir(choice)[:10]}")
                     raise UnifiedClientError("OpenAI choice missing message")
                 
                 # Check if this is actually Gemini using OpenAI endpoint
@@ -6093,7 +6093,7 @@ class UnifiedClient:
                             refusal = None
                         choice.message = MockMessage()
                     else:
-                        logger.error("OpenAI choice.message is None")
+                        print("OpenAI choice.message is None")
                         raise UnifiedClientError("OpenAI message is empty")
                 
                 # Check for content with detailed debugging
@@ -6160,7 +6160,7 @@ class UnifiedClient:
                     elif finish_reason == 'content_filter':
                         content = "[CONTENT BLOCKED BY OPENAI]"
                     else:
-                        logger.error(f"Empty content with finish_reason: {finish_reason}")
+                        print(f"Empty content with finish_reason: {finish_reason}")
                         content = f"[EMPTY - Reason: {finish_reason}]"
                 
                 # Get finish reason (with fallback)
@@ -6205,7 +6205,7 @@ class UnifiedClient:
                 try:
                     if hasattr(e, 'response') and hasattr(e.response, 'json'):
                         error_dict = e.response.json()
-                        logger.error(f"OpenAI error details: {error_dict}")
+                        print(f"OpenAI error details: {error_dict}")
                 except:
                     pass
                 
