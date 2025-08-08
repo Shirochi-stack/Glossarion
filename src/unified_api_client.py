@@ -567,6 +567,10 @@ class UnifiedClient:
     
     def _ensure_thread_client(self):
         """Ensure the current thread has a properly initialized client with thread safety"""
+        # Check if cancelled before proceeding
+        if self._cancelled:
+            raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+            
         tls = self._get_thread_local_client()
         thread_name = threading.current_thread().name
         thread_id = threading.current_thread().ident
@@ -683,7 +687,11 @@ class UnifiedClient:
         """Assign a key to the current thread"""
         thread_id = threading.current_thread().ident
         thread_name = threading.current_thread().name
-        
+
+        # Check if cancelled at start
+        if self._cancelled:
+            raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+            
         # Check if thread already has a key
         existing = self._get_thread_key()
         if existing and not self._should_rotate_thread_key():
@@ -754,6 +762,10 @@ class UnifiedClient:
         
         thread_name = threading.current_thread().name
         
+        # Stop check
+        if self._cancelled:
+            raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+        
         # Use the APIKeyPool's built-in thread-safe method
         if hasattr(self._api_key_pool, 'get_key_for_thread'):
             # Let the pool handle all the thread assignment logic
@@ -819,9 +831,10 @@ class UnifiedClient:
         # Wait with cancellation check
         wait_start = time.time()
         while time.time() - wait_start < wait_time:
-            if hasattr(self, '_cancelled') and self._cancelled:
+            # ← ADD THIS CHECK
+            if self._cancelled:
                 print(f"[Thread-{thread_name}] Wait cancelled by user")
-                return None
+                raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
             
             # Check every second if a key became available early
             with self.__class__._pool_lock:
@@ -1840,6 +1853,10 @@ class UnifiedClient:
 
     def _get_shortest_cooldown_time(self) -> int:
         """Get the shortest cooldown time among all keys"""
+        # Check if cancelled at start
+        if self._cancelled:
+            return 0  # Return immediately if cancelled
+            
         if not self._multi_key_mode or not self.__class__._api_key_pool:
             return 60  # Default cooldown
             
