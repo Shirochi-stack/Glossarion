@@ -5824,6 +5824,64 @@ class UnifiedClient:
                 model_name = model_name[len(prefix):]
                 break
         
+        # Handle special cases for model naming conventions
+        # OpenRouter expects provider-prefixed model names for many models
+        if not '/' in model_name:  # If no provider prefix exists
+            # Map common models to their OpenRouter format
+            model_mapping = {
+                # Google Gemini models
+                'gemini-2.0-flash': 'google/gemini-2.0-flash',
+                'gemini-2.0-flash-exp': 'google/gemini-2.0-flash-exp',
+                'gemini-2.0-flash-lite': 'google/gemini-2.0-flash-lite',
+                'gemini-2.5-flash': 'google/gemini-2.5-flash',
+                'gemini-2.5-flash-lite': 'google/gemini-2.5-flash-lite',
+                'gemini-2.5-pro': 'google/gemini-2.5-pro',
+                'gemini-1.5-flash': 'google/gemini-1.5-flash',
+                'gemini-1.5-flash-8b': 'google/gemini-1.5-flash-8b',
+                'gemini-1.5-pro': 'google/gemini-1.5-pro',
+                'gemini-pro': 'google/gemini-pro',
+                'gemini-pro-vision': 'google/gemini-pro-vision',
+                
+                # OpenAI models (may not need prefix but including for consistency)
+                'gpt-4': 'openai/gpt-4',
+                'gpt-4o': 'openai/gpt-4o',
+                'gpt-4o-mini': 'openai/gpt-4o-mini',
+                'gpt-4-turbo': 'openai/gpt-4-turbo',
+                'gpt-3.5-turbo': 'openai/gpt-3.5-turbo',
+                'o1-preview': 'openai/o1-preview',
+                'o1-mini': 'openai/o1-mini',
+                
+                # Claude models
+                'claude-3.5-sonnet': 'anthropic/claude-3.5-sonnet',
+                'claude-3-opus': 'anthropic/claude-3-opus',
+                'claude-3-sonnet': 'anthropic/claude-3-sonnet',
+                'claude-3-haiku': 'anthropic/claude-3-haiku',
+                'claude-2.1': 'anthropic/claude-2.1',
+                'claude-2': 'anthropic/claude-2',
+                'claude-instant-1.2': 'anthropic/claude-instant-1.2',
+                
+                # Add more mappings as needed
+            }
+            
+            # Check if we have a mapping for this model
+            if model_name in model_mapping:
+                model_name = model_mapping[model_name]
+                logger.info(f"🔄 Mapped model to OpenRouter format: {model_name}")
+                print(f"🔄 OpenRouter: Using model format: {model_name}")
+            else:
+                # For models starting with known prefixes, try to auto-detect provider
+                if model_name.startswith('gemini'):
+                    model_name = f'google/{model_name}'
+                elif model_name.startswith('gpt') or model_name.startswith('o1') or model_name.startswith('o3'):
+                    model_name = f'openai/{model_name}'
+                elif model_name.startswith('claude'):
+                    model_name = f'anthropic/{model_name}'
+                elif model_name.startswith('llama'):
+                    model_name = f'meta-llama/{model_name}'
+                elif model_name.startswith('mistral') or model_name.startswith('mixtral'):
+                    model_name = f'mistralai/{model_name}'
+                # If no known prefix, leave as-is (user may have specified correct format)
+        
         # OpenRouter specific headers
         headers = {
             'Authorization': f'Bearer {self.api_key}',
