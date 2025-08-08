@@ -148,7 +148,13 @@ try:
 except ImportError:
     openai = None
     class OpenAIError(Exception): pass
-
+try:
+    import httpx
+    from httpx import HTTPStatusError
+except ImportError:
+    httpx = None
+    class HTTPStatusError(Exception): pass
+    
 # Gemini SDK
 try:
     from google import genai
@@ -2025,6 +2031,21 @@ class UnifiedClient:
                 self.client_type = 'openai'  # This ensures _send_openai will be called
                 
                 print(f"[DEBUG] Gemini configured to use OpenAI-compatible endpoint: {gemini_endpoint}")
+                
+                disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
+                
+                config_data = {
+                    "type": "GEMINI_OPENAI_ENDPOINT_REQUEST",
+                    "model": self.model,
+                    "endpoint": gemini_endpoint,
+                    "safety_enabled": not disable_safety,
+                    "safety_settings": "DISABLED_VIA_OPENAI_ENDPOINT" if disable_safety else "DEFAULT",
+                    "timestamp": datetime.now().isoformat(),
+                }
+                
+                # Just call the existing save method
+                self._save_gemini_safety_config(config_data, None)
+    
                 #print(f"[DEBUG] Using API key ending in: ...{self.api_key[-4:]}")
                 #print(f"[DEBUG] Model for API call: {self.model}")
             else:
@@ -2782,7 +2803,7 @@ class UnifiedClient:
                     print(f"❌ Content prohibited in unexpected error: {error_str[:200]}")
                     
                     # Debug current state
-                    self._debug_multi_key_state()
+                    #self._debug_multi_key_state()
                     
                     # If we're in multi-key mode and haven't tried the main key yet
                     if (self._multi_key_mode and 
@@ -3725,7 +3746,7 @@ class UnifiedClient:
                     print(f"❌ Image content prohibited in unexpected error: {error_str[:200]}")
                     
                     # Debug current state
-                    self._debug_multi_key_state()
+                    #self._debug_multi_key_state()
                     
                     # If we're in multi-key mode and haven't tried the main key yet
                     if (self._multi_key_mode and 
@@ -5142,8 +5163,7 @@ class UnifiedClient:
                 }
                 
                 # Save configuration to file with thread isolation
-                if response_name:  # Only save if response_name is provided
-                    self._save_gemini_safety_config(config_data, response_name)
+                self._save_gemini_safety_config(config_data, response_name)
             
                 # Retry logic with token reduction
                 BOOST_FACTOR = 1
@@ -6081,10 +6101,19 @@ class UnifiedClient:
         os.makedirs(thread_dir, exist_ok=True)
         return thread_dir
 
-    def _save_gemini_safety_config(self, config_data: dict, response_name: str):
+    def _save_gemini_safety_config(self, config_data: dict, response_name: str = None):
         """Save Gemini safety configuration with proper thread organization"""
         if not os.getenv("SAVE_PAYLOAD", "1") == "1":
             return
+        
+        # Handle None or empty response_name
+        if not response_name:
+            response_name = f"safety_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        # Sanitize response_name to ensure it's filesystem-safe
+        # Remove or replace invalid characters
+        import re
+        response_name = re.sub(r'[<>:"/\\|?*]', '_', str(response_name))
         
         # Determine context from thread name
         thread_name = threading.current_thread().name
@@ -6103,14 +6132,20 @@ class UnifiedClient:
         
         # Create unique filename with timestamp
         timestamp = datetime.now().strftime("%H%M%S")
-        config_filename = f"gemini_safety_{timestamp}_{response_name}.json"
+        
+        # Ensure response_name doesn't already contain timestamp to avoid duplication
+        if timestamp not in response_name:
+            config_filename = f"gemini_safety_{timestamp}_{response_name}.json"
+        else:
+            config_filename = f"gemini_safety_{response_name}.json"
+        
         config_path = os.path.join(thread_dir, config_filename)
         
         try:
             with self._file_write_lock:
                 with open(config_path, 'w', encoding='utf-8') as f:
                     json.dump(config_data, f, indent=2, ensure_ascii=False)
-                logger.debug(f"Saved Gemini safety config to: {config_path}")
+                print(f"Saved Gemini safety status to: {config_path}")
         except Exception as e:
             logger.error(f"Failed to save Gemini safety config: {e}")
 
@@ -6157,10 +6192,6 @@ class UnifiedClient:
                 "timestamp": datetime.now().isoformat(),
             }
             
-            # Handle None response_name
-            if not response_name:
-                response_name = f"gemini_openai_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            
             # Save configuration to file with thread isolation
             self._save_gemini_safety_config(config_data, response_name)
             
@@ -6173,7 +6204,7 @@ class UnifiedClient:
                 response_name=response_name,
                 provider="gemini-openai"
             )
-        
+
         # Import types at the top
         from google.genai import types
         
@@ -6268,7 +6299,7 @@ class UnifiedClient:
         else:
             thinking_status = " (thinking not supported)"
             
-        print(f"🔒 Gemini Safety Status: {safety_status}{thinking_status}")
+        print(f"🔒 Gemini Safety Status: {safety_status} \n🧠 Thinking Status: {thinking_status}")
         
         # Save configuration to file
         config_data = {
@@ -6329,11 +6360,14 @@ class UnifiedClient:
                 
                 if supports_thinking:
                     if thinking_budget == 0:
-                        print(f"   🧠 Thinking: DISABLED")
+                        #print(f"   🧠 Thinking: DISABLED")
+                        pass
                     elif thinking_budget == -1:
-                        print(f"   🧠 Thinking: DYNAMIC (model decides)")
+                        #print(f"   🧠 Thinking: DYNAMIC (model decides)")
+                        pass
                     else:
-                        print(f"   🧠 Thinking Budget: {thinking_budget} tokens")
+                        #print(f"   🧠 Thinking Budget: {thinking_budget} tokens")
+                        pass
 
                 # Make the API call
                 response = self.gemini_client.models.generate_content(
@@ -7065,7 +7099,7 @@ class UnifiedClient:
     def _send_openai_compatible(self, messages, temperature, max_tokens, base_url, 
                                 response_name, provider="generic", headers=None) -> UnifiedResponse:
         """Send request to OpenAI-compatible APIs with safety settings"""
-        max_retries = 3
+        max_retries = 7
         api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
         
         # CUSTOM ENDPOINT OVERRIDE - Check if enabled and override base_url
@@ -7741,10 +7775,6 @@ class UnifiedClient:
                     "max_output_tokens": max_tokens,
                     "timestamp": datetime.now().isoformat(),
                 }
-                
-                # Handle None response_name
-                if not response_name:
-                    response_name = f"gemini_openai_image_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 
                 # Save configuration to file with thread isolation
                 self._save_gemini_safety_config(config_data, response_name)
