@@ -198,7 +198,7 @@ from functools import lru_cache
 from datetime import datetime, timedelta
 import threading
  
-def truncate_error_message(error_str: str, first_chars: int = 50, last_chars: int = 50) -> str:
+def truncate_error_message(error_str: str, first_chars: int = 100, last_chars: int = 50) -> str:
     """
     Truncate long error messages, keeping first and last parts (only for 429 errors)
     
@@ -212,15 +212,24 @@ def truncate_error_message(error_str: str, first_chars: int = 50, last_chars: in
     """
     error_str = str(error_str)
     
-    # Only truncate if it's a 429 error
-    if "429" not in error_str:
+    # Check for 429/resource exhausted errors more aggressively
+    error_lower = error_str.lower()
+    is_429_error = (
+        "429" in error_str or  # Keep original check
+        "resource_exhausted" in error_lower or
+        "resource exhausted" in error_lower or
+        "quota" in error_lower and "exceed" in error_lower
+    )
+    
+    # Only truncate if it's a 429-related error
+    if not is_429_error:
         return error_str
     
     # If the error is short enough, return as is
     if len(error_str) <= (first_chars + last_chars + 5):  # +5 for " ... "
         return error_str
     
-    # Truncate: keep first 100 chars and last 50 chars
+    # Truncate: keep first and last parts
     return f"{error_str[:first_chars]} ... {error_str[-last_chars:]}"
     
 @dataclass
@@ -600,7 +609,7 @@ class UnifiedClient:
                 # Get a key using thread-safe method
                 key_info = None
                 
-                # First try using the pool's method if available
+                # Use the pool's thread-safe method
                 if hasattr(self._api_key_pool, 'get_key_for_thread'):
                     try:
                         key_info = self._api_key_pool.get_key_for_thread(
@@ -620,14 +629,14 @@ class UnifiedClient:
                     key_info = self._get_next_available_key_for_thread()
                 
                 if key_info:
-                    key, key_index = key_info[:2]  # Handle both tuple formats
+                    key, key_index = key_info[:2]
                     
                     # Generate key identifier
                     key_id = f"Key#{key_index+1} ({key.model})"
                     if hasattr(key, 'identifier') and key.identifier:
                         key_id = key.identifier
                     
-                    # Update thread-local state
+                    # Update THREAD-LOCAL state (not instance state!)
                     tls.api_key = key.api_key
                     tls.model = key.model
                     tls.key_index = key_index
@@ -635,33 +644,34 @@ class UnifiedClient:
                     tls.initialized = True
                     tls.last_rotation = time.time()
                     
-                    # Copy to instance for compatibility
+                    # Copy to instance for compatibility (but this is not thread-safe!)
+                    # Only do this for logging/debugging purposes
                     self.api_key = tls.api_key
                     self.model = tls.model
                     self.key_identifier = tls.key_identifier
                     self.current_key_index = key_index
                     
                     # Log key assignment
-                    if len(self.api_key) > 12:
-                        masked_key = self.api_key[:4] + "..." + self.api_key[-4:]
-                    else:
-                        masked_key = self.api_key[:3] + "..." + self.api_key[-2:] if len(self.api_key) > 5 else "***"
+                    masked_key = tls.api_key[:4] + "..." + tls.api_key[-4:] if len(tls.api_key) > 12 else "***"
+                    print(f"[Thread-{thread_name}] 🔑 Using {tls.key_identifier} - {masked_key}")
                     
-                    print(f"[Thread-{thread_name}] 🔑 Using {self.key_identifier} - {masked_key}")
-                    
-                    # Setup client with new key
-                    self._setup_client()
+                    # Setup THREAD-LOCAL client
+                    self._setup_thread_local_client()
                     return
                 else:
                     # No keys available
                     raise UnifiedClientError("No available API keys for thread", error_type="no_keys")
             else:
-                # Not rotating, ensure instance variables match thread-local
+                # Not rotating, ensure instance variables match thread-local for compatibility
                 if tls.initialized:
                     self.api_key = tls.api_key
                     self.model = tls.model
                     self.key_identifier = tls.key_identifier
                     self.current_key_index = getattr(tls, 'key_index', None)
+                    
+                    # Ensure thread-local client exists
+                    if not hasattr(tls, 'openai_client') and self.client_type == 'openai':
+                        self._setup_thread_local_client()
         
         # Single key mode
         elif not tls.initialized:
@@ -676,8 +686,7 @@ class UnifiedClient:
             self.key_identifier = tls.key_identifier
             
             logger.debug(f"[Thread-{thread_name}] Single-key mode: Using {self.model}")
-            self._setup_client()
-
+            self._setup_client()  # Use regular setup for single-key mode
 
     def _get_thread_key(self) -> Optional[Tuple[str, int]]:
         """Get the API key assigned to current thread"""
@@ -1352,7 +1361,7 @@ class UnifiedClient:
             self.mistral_client = None
             self.cohere_client = None
             
-            # Re-setup the client with new key
+            # Re-setup the client with new key - THIS WILL SET client_type
             self._setup_client()
             
             # Re-apply custom endpoint if needed
@@ -1376,6 +1385,27 @@ class UnifiedClient:
         tls = self._get_thread_local_client()
         thread_name = threading.current_thread().name
         
+        # IMPORTANT: Ensure client_type is set BEFORE using it
+        # First, ensure the instance has client_type by calling _setup_client if needed
+        if not hasattr(self, 'client_type') or self.client_type is None:
+            # We need to determine the client type from the model
+            # This happens when thread-local client is being set up before main setup
+            model_lower = tls.model.lower() if hasattr(tls, 'model') and tls.model else self.model.lower()
+            
+            # Determine client type from model name
+            for prefix, provider in self.MODEL_PROVIDERS.items():
+                if model_lower.startswith(prefix):
+                    self.client_type = provider
+                    break
+            
+            # If still no client type, check for custom endpoint
+            if not self.client_type:
+                use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+                custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
+                if use_custom_endpoint and custom_base_url:
+                    self.client_type = 'openai'
+                    logger.info(f"[Thread-{thread_name}] Using OpenAI client for custom endpoint")
+        
         # Create thread-local client instances
         if not hasattr(tls, 'openai_client'):
             tls.openai_client = None
@@ -1386,7 +1416,7 @@ class UnifiedClient:
         if not hasattr(tls, 'cohere_client'):
             tls.cohere_client = None
         
-        # Store the client type for this thread
+        # Store the client type for this thread (now we're sure it exists)
         tls.client_type = self.client_type
         
         # Setup client based on type using thread-local API key
@@ -1428,6 +1458,22 @@ class UnifiedClient:
             
             logger.debug(f"[Thread-{thread_name}] Created thread-local Gemini client")
             
+        elif tls.client_type == 'mistral':
+            if MistralClient is None:
+                logger.info(f"[Thread-{thread_name}] Mistral SDK not installed, will use HTTP API")
+            else:
+                tls.mistral_client = MistralClient(api_key=tls.api_key)
+                self.mistral_client = tls.mistral_client
+                logger.debug(f"[Thread-{thread_name}] Created thread-local Mistral client")
+                
+        elif tls.client_type == 'cohere':
+            if cohere is not None:
+                tls.cohere_client = cohere.Client(tls.api_key)
+                self.cohere_client = tls.cohere_client
+                logger.debug(f"[Thread-{thread_name}] Created thread-local Cohere client")
+            else:
+                logger.info(f"[Thread-{thread_name}] Cohere SDK not installed, will use HTTP API")
+        
         # Add other client types as needed...
         
         print(f"[Thread-{thread_name}] Setup thread-local {tls.client_type} client with {tls.key_identifier}")
