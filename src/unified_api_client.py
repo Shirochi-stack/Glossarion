@@ -4712,6 +4712,7 @@ class UnifiedClient:
 
     def _send_vertex_model_garden(self, messages, temperature=0.7, max_tokens=None, stop_sequences=None, response_name=None):
         """Send request to Vertex AI Model Garden models (including Claude)"""
+        response = None
         try:
             from google.cloud import aiplatform
             from google.oauth2 import service_account
@@ -5222,7 +5223,7 @@ class UnifiedClient:
                 return UnifiedResponse(
                     content=result_text,
                     finish_reason='stop',
-                    raw_response=response if 'response' in locals() else None
+                    raw_response=response 
                 )
                 
         except UnifiedClientError:
@@ -9023,3 +9024,43 @@ class UnifiedClient:
             return "No user content found"
         except:
             return "Error extracting preview"
+            
+    def _debug_multi_key_state(self):
+        """Debug method to show current multi-key configuration state"""
+        print(f"\n[DEBUG] Multi-Key State Information:")
+        print(f"  Instance multi-key mode: {self._multi_key_mode}")
+        print(f"  Has original_api_key: {hasattr(self, 'original_api_key')}")
+        print(f"  Has original_model: {hasattr(self, 'original_model')}")
+        
+        if hasattr(self, 'original_api_key') and self.original_api_key:
+            masked_key = self.original_api_key[:8] + "..." + self.original_api_key[-4:] if len(self.original_api_key) > 12 else "***"
+            print(f"  Original API key: {masked_key}")
+        else:
+            print(f"  Original API key: None")
+        
+        if hasattr(self, 'original_model') and self.original_model:
+            print(f"  Original model: {self.original_model}")
+        else:
+            print(f"  Original model: None")
+        
+        print(f"  Current key identifier: {self.key_identifier if hasattr(self, 'key_identifier') else 'None'}")
+        print(f"  Current model: {self.model if hasattr(self, 'model') else 'None'}")
+        
+        # Check API key pool status
+        if hasattr(self.__class__, '_api_key_pool') and self.__class__._api_key_pool:
+            print(f"  API key pool exists: Yes")
+            print(f"  Number of keys in pool: {len(self.__class__._api_key_pool.keys)}")
+        else:
+            print(f"  API key pool exists: No")
+        
+        # Check environment variables
+        print(f"  USE_MULTI_API_KEYS env: {os.getenv('USE_MULTI_API_KEYS', 'Not set')}")
+        print(f"  MULTI_API_KEYS env exists: {'Yes' if os.getenv('MULTI_API_KEYS') else 'No'}")
+        
+        # Thread-local state
+        if hasattr(self, '_thread_local'):
+            tls = self._get_thread_local_client()
+            print(f"  Thread-local initialized: {getattr(tls, 'initialized', False)}")
+            print(f"  Thread-local key_index: {getattr(tls, 'key_index', None)}")
+        
+        print("[DEBUG] End of Multi-Key State\n")
