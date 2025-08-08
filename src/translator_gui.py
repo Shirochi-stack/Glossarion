@@ -1134,7 +1134,6 @@ class TranslatorGUI:
         self.current_file_index = 0
         self.use_gemini_openai_endpoint_var = tk.BooleanVar(value=self.config.get('use_gemini_openai_endpoint', False))
         self.gemini_openai_endpoint_var = tk.StringVar(value=self.config.get('gemini_openai_endpoint', ''))
-        self.attach_css_to_chapters_var = tk.BooleanVar(value=False)  # Default to disabled
 
         
         # Initialize the variables with default values
@@ -1184,6 +1183,8 @@ class TranslatorGUI:
         self.headers_per_batch_var = tk.StringVar(value=self.config.get('headers_per_batch', '400'))
         self.update_html_headers_var = tk.BooleanVar(value=self.config.get('update_html_headers', True))
         self.save_header_translations_var = tk.BooleanVar(value=self.config.get('save_header_translations', True))
+        self.attach_css_to_chapters_var = tk.BooleanVar(value=self.config.get('attach_css_to_chapters', False))
+
         
         self.max_output_tokens = self.config.get('max_output_tokens', self.max_output_tokens)
         self.master.after(500, lambda: self.on_model_change() if hasattr(self, 'model_var') else None)
