@@ -909,30 +909,85 @@ class UnifiedClient:
             self._rate_limit_cache.clear_expired()
 
     def _handle_rate_limit_for_thread(self):
-        """Handle rate limit by marking current thread's key and getting a new one"""
+        """Handle rate limit by marking current thread's key and getting a new one (thread-safe)"""
         if not self._multi_key_mode:  # Check INSTANCE variable
             return
             
         thread_id = threading.current_thread().ident
         thread_name = threading.current_thread().name
         
-        # Mark current key as rate limited
-        if self.current_key_index is not None:
-            key = self._api_key_pool.keys[self.current_key_index]
-            cooldown = getattr(key, 'cooldown', 60)
+        # Get thread-local state first (thread-safe by nature)
+        tls = self._get_thread_local_client()
+        
+        # Store the current key info before we change anything
+        current_key_index = None
+        current_key_identifier = None
+        
+        # Safely get current key information from thread-local storage
+        if hasattr(tls, 'key_index') and tls.key_index is not None:
+            current_key_index = tls.key_index
+            current_key_identifier = getattr(tls, 'key_identifier', f"Key#{current_key_index+1}")
+        elif hasattr(self, 'current_key_index') and self.current_key_index is not None:
+            # Fallback to instance variable if thread-local not set
+            current_key_index = self.current_key_index
+            current_key_identifier = self.key_identifier
+        
+        # Mark the current key as rate limited (if we have one)
+        if current_key_index is not None and self._api_key_pool:
+            # Use the pool's thread-safe method to mark the error
+            self._api_key_pool.mark_key_error(current_key_index, 429)
             
-            print(f"[THREAD-{thread_name}] 🕐 Marking {self.key_identifier} for cooldown ({cooldown}s)")
-            self._rate_limit_cache.add_rate_limit(self.key_identifier, cooldown)
-            self._mark_key_error(429)
+            # Get cooldown value safely
+            cooldown = 60  # Default
+            with self.__class__._pool_lock:
+                if current_key_index < len(self._api_key_pool.keys):
+                    key = self._api_key_pool.keys[current_key_index]
+                    cooldown = getattr(key, 'cooldown', 60)
+            
+            print(f"[THREAD-{thread_name}] 🕐 Marking {current_key_identifier} for cooldown ({cooldown}s)")
+            
+            # Add to rate limit cache (this is already thread-safe)
+            if hasattr(self.__class__, '_rate_limit_cache') and self.__class__._rate_limit_cache:
+                self.__class__._rate_limit_cache.add_rate_limit(current_key_identifier, cooldown)
         
-        # Remove current assignment
-        with self._assignment_lock:
-            if thread_id in self._key_assignments:
-                del self._key_assignments[thread_id]
+        # Clear thread-local state to force new key assignment
+        tls.initialized = False
+        tls.api_key = None
+        tls.model = None
+        tls.key_index = None
+        tls.key_identifier = None
+        tls.request_count = 0
         
-        # Force reassignment
-        self._thread_local.request_count = 0  # Reset rotation counter
-        self._assign_thread_key()
+        # Remove any legacy assignments (thread-safe with lock)
+        if hasattr(self, '_assignment_lock') and hasattr(self, '_key_assignments'):
+            with self._assignment_lock:
+                if thread_id in self._key_assignments:
+                    del self._key_assignments[thread_id]
+        
+        # Release thread assignment in the pool (if pool supports it)
+        if hasattr(self._api_key_pool, 'release_thread_assignment'):
+            self._api_key_pool.release_thread_assignment(thread_id)
+        
+        # Now force getting a new key
+        # This will call _ensure_thread_client which will get a new key
+        print(f"[THREAD-{thread_name}] 🔄 Requesting new key after rate limit...")
+        
+        try:
+            # Ensure we get a new client with a new key
+            self._ensure_thread_client()
+            
+            # Verify we got a different key
+            new_key_index = getattr(tls, 'key_index', None)
+            new_key_identifier = getattr(tls, 'key_identifier', 'Unknown')
+            
+            if new_key_index != current_key_index:
+                print(f"[THREAD-{thread_name}] ✅ Successfully rotated from {current_key_identifier} to {new_key_identifier}")
+            else:
+                print(f"[THREAD-{thread_name}] ⚠️ Warning: Got same key back: {new_key_identifier}")
+                
+        except Exception as e:
+            print(f"[THREAD-{thread_name}] ❌ Failed to get new key after rate limit: {e}")
+            raise UnifiedClientError(f"Failed to rotate key after rate limit: {e}", error_type="no_keys")
     
     # Helper methods that need to check instance state
     def _count_available_keys(self) -> int:
@@ -949,16 +1004,51 @@ class UnifiedClient:
         return count
     
     def _mark_key_success(self):
-        """Mark the current key as successful"""
-        if self._multi_key_mode:
-            tls = self._get_thread_local_client()
-            if tls.key_index is not None:
-                self.__class__._api_key_pool.mark_key_success(tls.key_index)
+        """Mark the current key as successful (thread-safe)"""
+        if not self._multi_key_mode:
+            return
+        
+        # Get thread-local state
+        tls = self._get_thread_local_client()
+        key_index = getattr(tls, 'key_index', None)
+        
+        # Fallback to instance variable if thread-local not set
+        if key_index is None:
+            key_index = getattr(self, 'current_key_index', None)
+        
+        if key_index is not None and self.__class__._api_key_pool:
+            # Use the pool's thread-safe method
+            self.__class__._api_key_pool.mark_key_success(key_index)
     
     def _mark_key_error(self, error_code: int = None):
-        """Mark current key as having an error and apply cooldown if rate limited"""
-        if self._multi_key_mode and self.current_key_index is not None and self.__class__._api_key_pool:
-            self.__class__._api_key_pool.mark_key_error(self.current_key_index, error_code)
+        """Mark current key as having an error and apply cooldown if rate limited (thread-safe)"""
+        if not self._multi_key_mode:
+            return
+        
+        # Get thread-local state
+        tls = self._get_thread_local_client()
+        key_index = getattr(tls, 'key_index', None)
+        
+        # Fallback to instance variable if thread-local not set
+        if key_index is None:
+            key_index = getattr(self, 'current_key_index', None)
+        
+        if key_index is not None and self.__class__._api_key_pool:
+            # Use the pool's thread-safe method
+            self.__class__._api_key_pool.mark_key_error(key_index, error_code)
+            
+            # If it's a rate limit error, also add to rate limit cache
+            if error_code == 429:
+                # Get key identifier safely
+                with self.__class__._pool_lock:
+                    if key_index < len(self.__class__._api_key_pool.keys):
+                        key = self.__class__._api_key_pool.keys[key_index]
+                        key_id = f"Key#{key_index+1} ({key.model})"
+                        cooldown = getattr(key, 'cooldown', 60)
+                        
+                        # Add to rate limit cache (already thread-safe)
+                        if hasattr(self.__class__, '_rate_limit_cache'):
+                            self.__class__._rate_limit_cache.add_rate_limit(key_id, cooldown)
 
     def _check_and_wait_for_duplicate(self, request_hash: str, context: str) -> Optional[Tuple[str, str]]:
         """Check for duplicate requests and wait for results if found"""
@@ -6005,7 +6095,12 @@ class UnifiedClient:
                 
                 # Handle rate limits
                 elif "rate limit" in error_str.lower() or "429" in error_str:
-                    if attempt < max_retries - 1:
+                    # In multi-key mode, don't retry here - let outer handler rotate keys
+                    if self._multi_key_mode:
+                        print(f"OpenAI rate limit hit in multi-key mode - passing to key rotation")
+                        raise UnifiedClientError(f"OpenAI rate limit: {e}", error_type="rate_limit")
+                    elif attempt < max_retries - 1:
+                        # Single key mode - wait and retry
                         wait_time = api_delay * 10
                         print(f"Rate limit hit, waiting {wait_time}s before retry")
                         time.sleep(wait_time)
@@ -7250,20 +7345,26 @@ class UnifiedClient:
                 except Exception as e:
                     error_str = str(e).lower()
                     
-                    # For rate limits, immediately re-raise to let multi-key system handle it
+                    # For rate limits, ALWAYS immediately re-raise to let multi-key system handle it
+                    # Don't retry at this level - let the outer send() method handle key rotation
                     if "rate limit" in error_str or "429" in error_str or "quota" in error_str:
                         print(f"{provider} rate limit hit - passing to multi-key handler")
                         raise UnifiedClientError(f"{provider} rate limit: {e}", error_type="rate_limit")
                     
-                    # For other errors, retry at this level
-                    if attempt < max_retries - 1:
+                    # For other errors, retry at this level ONLY if not in multi-key mode
+                    if not self._multi_key_mode and attempt < max_retries - 1:
                         print(f"{provider} SDK error (attempt {attempt + 1}): {e}")
                         time.sleep(api_delay)
                         continue
+                    elif self._multi_key_mode:
+                        # In multi-key mode, let outer handler manage retries with different keys
+                        print(f"{provider} error in multi-key mode - passing to outer handler")
+                        raise UnifiedClientError(f"{provider} error: {e}", error_type="api_error")
                         
                     # Final attempt failed
                     print(f"{provider} SDK error after all retries: {e}")
                     raise UnifiedClientError(f"{provider} SDK error: {e}")
+    
         else:
             # Use HTTP API with retry logic
             if headers is None:
