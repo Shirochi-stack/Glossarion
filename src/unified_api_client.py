@@ -198,7 +198,7 @@ from functools import lru_cache
 from datetime import datetime, timedelta
 import threading
  
-def truncate_error_message(error_str: str, first_chars: int = 100, last_chars: int = 50) -> str:
+def truncate_error_message(error_str: str, first_chars: int = 50, last_chars: int = 50) -> str:
     """
     Truncate long error messages, keeping first and last parts (only for 429 errors)
     
@@ -212,24 +212,15 @@ def truncate_error_message(error_str: str, first_chars: int = 100, last_chars: i
     """
     error_str = str(error_str)
     
-    # Check for 429/resource exhausted errors more aggressively
-    error_lower = error_str.lower()
-    is_429_error = (
-        "429" in error_str or  # Keep original check
-        "resource_exhausted" in error_lower or
-        "resource exhausted" in error_lower or
-        "quota" in error_lower and "exceed" in error_lower
-    )
-    
-    # Only truncate if it's a 429-related error
-    if not is_429_error:
+    # Only truncate if it's a 429 error
+    if "429" not in error_str:
         return error_str
     
     # If the error is short enough, return as is
     if len(error_str) <= (first_chars + last_chars + 5):  # +5 for " ... "
         return error_str
     
-    # Truncate: keep first and last parts
+    # Truncate: keep first 100 chars and last 50 chars
     return f"{error_str[:first_chars]} ... {error_str[-last_chars:]}"
     
 @dataclass
@@ -580,6 +571,114 @@ class UnifiedClient:
         
         return self._thread_local
     
+    def _ensure_thread_client(self):
+        """Ensure the current thread has a properly initialized client with thread safety"""
+        # Check if cancelled before proceeding
+        if self._cancelled:
+            raise UnifiedClientError("Operation cancelled", error_type="cancelled")
+            
+        tls = self._get_thread_local_client()
+        thread_name = threading.current_thread().name
+        thread_id = threading.current_thread().ident
+        
+        # Multi-key mode
+        if self._multi_key_mode:
+            # Check if we need to rotate
+            should_rotate = False
+            
+            if not tls.initialized:
+                should_rotate = True
+                print(f"[Thread-{thread_name}] Initializing with multi-key mode")
+            elif self._force_rotation:
+                tls.request_count = getattr(tls, 'request_count', 0) + 1
+                if tls.request_count >= self._rotation_frequency:
+                    should_rotate = True
+                    tls.request_count = 0
+                    print(f"[Thread-{thread_name}] Rotating key (reached {self._rotation_frequency} requests)")
+            
+            if should_rotate:
+                # Get a key using thread-safe method
+                key_info = None
+                
+                # First try using the pool's method if available
+                if hasattr(self._api_key_pool, 'get_key_for_thread'):
+                    try:
+                        key_info = self._api_key_pool.get_key_for_thread(
+                            force_rotation=should_rotate,
+                            rotation_frequency=self._rotation_frequency
+                        )
+                        if key_info:
+                            key, key_index, key_id = key_info
+                            # Convert to tuple format expected below
+                            key_info = (key, key_index)
+                    except Exception as e:
+                        logger.error(f"[Thread-{thread_name}] Error getting key from pool: {e}")
+                        key_info = None
+                
+                # Fallback to our method
+                if not key_info:
+                    key_info = self._get_next_available_key_for_thread()
+                
+                if key_info:
+                    key, key_index = key_info[:2]  # Handle both tuple formats
+                    
+                    # Generate key identifier
+                    key_id = f"Key#{key_index+1} ({key.model})"
+                    if hasattr(key, 'identifier') and key.identifier:
+                        key_id = key.identifier
+                    
+                    # Update thread-local state
+                    tls.api_key = key.api_key
+                    tls.model = key.model
+                    tls.key_index = key_index
+                    tls.key_identifier = key_id
+                    tls.initialized = True
+                    tls.last_rotation = time.time()
+                    
+                    # Copy to instance for compatibility
+                    self.api_key = tls.api_key
+                    self.model = tls.model
+                    self.key_identifier = tls.key_identifier
+                    self.current_key_index = key_index
+                    
+                    # Log key assignment
+                    if len(self.api_key) > 12:
+                        masked_key = self.api_key[:4] + "..." + self.api_key[-4:]
+                    else:
+                        masked_key = self.api_key[:3] + "..." + self.api_key[-2:] if len(self.api_key) > 5 else "***"
+                    
+                    print(f"[Thread-{thread_name}] 🔑 Using {self.key_identifier} - {masked_key}")
+                    
+                    # Setup client with new key
+                    self._setup_client()
+                    return
+                else:
+                    # No keys available
+                    raise UnifiedClientError("No available API keys for thread", error_type="no_keys")
+            else:
+                # Not rotating, ensure instance variables match thread-local
+                if tls.initialized:
+                    self.api_key = tls.api_key
+                    self.model = tls.model
+                    self.key_identifier = tls.key_identifier
+                    self.current_key_index = getattr(tls, 'key_index', None)
+        
+        # Single key mode
+        elif not tls.initialized:
+            tls.api_key = self.original_api_key
+            tls.model = self.original_model
+            tls.key_identifier = "Single Key"
+            tls.initialized = True
+            tls.request_count = 0
+            
+            self.api_key = tls.api_key
+            self.model = tls.model
+            self.key_identifier = tls.key_identifier
+            
+            logger.debug(f"[Thread-{thread_name}] Single-key mode: Using {self.model}")
+            self._setup_client()
+
+
     def _get_thread_key(self) -> Optional[Tuple[str, int]]:
         """Get the API key assigned to current thread"""
         thread_id = threading.current_thread().ident
@@ -1193,50 +1292,17 @@ class UnifiedClient:
             self._apply_key_change(key_info, old_key_identifier)
         else:
             print(f"[ERROR] Failed to rotate to next key")
-        
+    
     def _rotate_to_next_key(self) -> bool:
-        """Thread-safe rotation to the next available key and reinitialize client"""
+        """Rotate to the next available key and reinitialize client"""
         if not self.use_multi_keys or not self._api_key_pool:
             return False
         
-        # Use thread-local storage instead of modifying shared instance variables
-        thread_id = threading.current_thread().ident
-        thread_name = threading.current_thread().name
-        
-        # For thread safety in multi-key mode, each thread should manage its own client
-        # This method should NOT be called directly in parallel mode
-        # Instead, use _ensure_thread_client() which handles thread-local clients
-        
-        print(f"[WARNING] _rotate_to_next_key called by thread {thread_name}")
-        print(f"[WARNING] This method is not thread-safe for parallel execution!")
-        print(f"[WARNING] Use _ensure_thread_client() instead for thread-safe key rotation")
-        
-        # If we're in a thread context, delegate to thread-safe method
-        if hasattr(self, '_thread_local'):
-            # Force re-initialization of thread-local client
-            tls = self._get_thread_local_client()
-            tls.initialized = False
-            tls.request_count = self._rotation_frequency  # Force rotation
-            
-            # Call the thread-safe method
-            self._ensure_thread_client()
-            
-            # Return success if we have a valid key
-            return tls.initialized
-        
-        # SINGLE-THREADED FALLBACK (for backward compatibility)
-        # Only use this path if not in multi-threaded context
         old_key_identifier = self.key_identifier
         
-        # Get next available key with proper locking
-        with self.__class__._pool_lock:
-            key_info = self._get_next_available_key()
-            
-            if not key_info:
-                print(f"[WARNING] No available keys to rotate to")
-                return False
-            
-            # Update instance variables (only safe in single-threaded context)
+        key_info = self._get_next_available_key()
+        if key_info:
+            # Update key and model
             self.api_key = key_info[0].api_key
             self.model = key_info[0].model
             self.current_key_index = key_info[1]
@@ -1247,13 +1313,13 @@ class UnifiedClient:
             
             print(f"[DEBUG] 🔄 Rotating from {old_key_identifier} to {self.key_identifier} - {masked_key}")
             
-            # Reset clients (only safe in single-threaded context)
+            # Reset clients
             self.openai_client = None
             self.gemini_client = None
             self.mistral_client = None
             self.cohere_client = None
             
-            # Re-setup the client with new key - THIS WILL SET client_type
+            # Re-setup the client with new key
             self._setup_client()
             
             # Re-apply custom endpoint if needed
@@ -1271,258 +1337,9 @@ class UnifiedClient:
                 print(f"[DEBUG] Rotated key: Re-created OpenAI client with custom base URL")
             
             return True
-
-    def _ensure_thread_client(self):
-        """Ensure the current thread has a properly initialized client with thread safety"""
-        # Check if cancelled before proceeding
-        if self._cancelled:
-            raise UnifiedClientError("Operation cancelled", error_type="cancelled")
-            
-        tls = self._get_thread_local_client()
-        thread_name = threading.current_thread().name
-        thread_id = threading.current_thread().ident
         
-        # Multi-key mode
-        if self._multi_key_mode:
-            # Check if we need to rotate
-            should_rotate = False
-            
-            if not tls.initialized:
-                should_rotate = True
-                print(f"[Thread-{thread_name}] Initializing with multi-key mode")
-            elif self._force_rotation:
-                tls.request_count = getattr(tls, 'request_count', 0) + 1
-                if tls.request_count >= self._rotation_frequency:
-                    should_rotate = True
-                    tls.request_count = 0
-                    print(f"[Thread-{thread_name}] Rotating key (reached {self._rotation_frequency} requests)")
-            
-            if should_rotate:
-                # Get a key using thread-safe method
-                key_info = None
-                
-                # Use the pool's thread-safe method
-                if hasattr(self._api_key_pool, 'get_key_for_thread'):
-                    try:
-                        key_info = self._api_key_pool.get_key_for_thread(
-                            force_rotation=should_rotate,
-                            rotation_frequency=self._rotation_frequency
-                        )
-                        if key_info:
-                            key, key_index, key_id = key_info
-                            # Convert to tuple format expected below
-                            key_info = (key, key_index)
-                    except Exception as e:
-                        logger.error(f"[Thread-{thread_name}] Error getting key from pool: {e}")
-                        key_info = None
-                
-                # Fallback to our method
-                if not key_info:
-                    key_info = self._get_next_available_key_for_thread()
-                
-                if key_info:
-                    key, key_index = key_info[:2]
-                    
-                    # Generate key identifier
-                    key_id = f"Key#{key_index+1} ({key.model})"
-                    if hasattr(key, 'identifier') and key.identifier:
-                        key_id = key.identifier
-                    
-                    # Update THREAD-LOCAL state
-                    tls.api_key = key.api_key
-                    tls.model = key.model
-                    tls.key_index = key_index
-                    tls.key_identifier = key_id
-                    tls.initialized = True
-                    tls.last_rotation = time.time()
-                    
-                    # IMPORTANT: Also update instance variables for compatibility with existing code
-                    # This is needed because _get_response() and other methods expect self.client_type
-                    self.api_key = tls.api_key
-                    self.model = tls.model
-                    self.key_identifier = tls.key_identifier
-                    self.current_key_index = key_index
-                    
-                    # Log key assignment
-                    masked_key = tls.api_key[:4] + "..." + tls.api_key[-4:] if len(tls.api_key) > 12 else "***"
-                    print(f"[Thread-{thread_name}] 🔑 Using {tls.key_identifier} - {masked_key}")
-                    
-                    # Setup client - this will set self.client_type
-                    self._setup_thread_local_client()
-                    return
-                else:
-                    # No keys available
-                    raise UnifiedClientError("No available API keys for thread", error_type="no_keys")
-            else:
-                # Not rotating, ensure instance variables match thread-local for compatibility
-                if tls.initialized:
-                    self.api_key = tls.api_key
-                    self.model = tls.model
-                    self.key_identifier = tls.key_identifier
-                    self.current_key_index = getattr(tls, 'key_index', None)
-                    
-                    # Ensure client_type is set
-                    if hasattr(tls, 'client_type'):
-                        self.client_type = tls.client_type
-                    else:
-                        # Determine from model
-                        model_lower = tls.model.lower() if tls.model else ''
-                        for prefix, provider in self.MODEL_PROVIDERS.items():
-                            if model_lower.startswith(prefix):
-                                self.client_type = provider
-                                tls.client_type = provider
-                                break
-                    
-                    # Check if client exists and matches model
-                    expected_client_type = self.client_type
-                    
-                    # If client doesn't exist, recreate
-                    if expected_client_type == 'openai' and not hasattr(tls, 'openai_client'):
-                        self._setup_thread_local_client()
-                    elif expected_client_type == 'gemini' and not hasattr(tls, 'gemini_client'):
-                        self._setup_thread_local_client()
-                    elif expected_client_type == 'mistral' and not hasattr(tls, 'mistral_client'):
-                        self._setup_thread_local_client()
-                    elif expected_client_type == 'cohere' and not hasattr(tls, 'cohere_client'):
-                        self._setup_thread_local_client()
-        
-        # Single key mode
-        elif not tls.initialized:
-            tls.api_key = self.original_api_key
-            tls.model = self.original_model
-            tls.key_identifier = "Single Key"
-            tls.initialized = True
-            tls.request_count = 0
-            
-            self.api_key = tls.api_key
-            self.model = tls.model
-            self.key_identifier = tls.key_identifier
-            
-            logger.debug(f"[Thread-{thread_name}] Single-key mode: Using {self.model}")
-            self._setup_client()  # Use regular setup for single-key mode
-
-
-    def _setup_thread_local_client(self):
-        """Setup client for current thread with proper synchronization"""
-        tls = self._get_thread_local_client()
-        thread_name = threading.current_thread().name
-        
-        # Determine client type from the CURRENT model (which may have changed due to rotation)
-        current_model = tls.model if hasattr(tls, 'model') and tls.model else self.model
-        model_lower = current_model.lower() if current_model else ''
-        
-        # Determine client type from model name
-        determined_client_type = None
-        for prefix, provider in self.MODEL_PROVIDERS.items():
-            if model_lower.startswith(prefix):
-                determined_client_type = provider
-                break
-        
-        # If still no client type, check for custom endpoint
-        if not determined_client_type:
-            use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
-            custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
-            if use_custom_endpoint and custom_base_url:
-                determined_client_type = 'openai'
-                logger.info(f"[Thread-{thread_name}] Using OpenAI client for custom endpoint")
-            else:
-                raise ValueError(f"Cannot determine client type for model: {current_model}")
-        
-        # Update BOTH instance and thread-local client type
-        self.client_type = determined_client_type
-        tls.client_type = determined_client_type
-        
-        # Clear ALL old client instances to prevent cross-contamination
-        tls.openai_client = None
-        tls.gemini_client = None
-        tls.mistral_client = None
-        tls.cohere_client = None
-        
-        # Also clear instance clients to ensure clean state
-        self.openai_client = None
-        self.gemini_client = None
-        self.mistral_client = None
-        self.cohere_client = None
-        
-        # Setup client based on the determined type using thread-local API key
-        if tls.client_type == 'openai':
-            if openai is None:
-                raise ImportError("OpenAI library not installed")
-            
-            # Check for custom endpoint
-            use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
-            custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
-            
-            if use_custom_endpoint and custom_base_url:
-                if not custom_base_url.startswith(('http://', 'https://')):
-                    custom_base_url = 'https://' + custom_base_url
-                base_url = custom_base_url
-            else:
-                base_url = 'https://api.openai.com/v1'
-            
-            # Create thread-local OpenAI client with CORRECT API KEY
-            tls.openai_client = openai.OpenAI(
-                api_key=tls.api_key,
-                base_url=base_url
-            )
-            
-            # Store reference in instance for compatibility
-            self.openai_client = tls.openai_client
-            
-            logger.debug(f"[Thread-{thread_name}] Created thread-local OpenAI client for model {current_model}")
-            print(f"[Thread-{thread_name}] ✅ Created OpenAI client for {current_model}")
-            
-        elif tls.client_type == 'gemini':
-            if not GENAI_AVAILABLE:
-                raise ImportError("Google Gen AI library not installed")
-            
-            # Create thread-local Gemini client with CORRECT API KEY
-            tls.gemini_client = genai.Client(api_key=tls.api_key)
-            
-            # Store reference in instance for compatibility
-            self.gemini_client = tls.gemini_client
-            
-            logger.debug(f"[Thread-{thread_name}] Created thread-local Gemini client for model {current_model}")
-            print(f"[Thread-{thread_name}] ✅ Created Gemini client for {current_model}")
-            
-        elif tls.client_type == 'mistral':
-            if MistralClient is None:
-                logger.info(f"[Thread-{thread_name}] Mistral SDK not installed, will use HTTP API")
-            else:
-                tls.mistral_client = MistralClient(api_key=tls.api_key)
-                self.mistral_client = tls.mistral_client
-                logger.debug(f"[Thread-{thread_name}] Created thread-local Mistral client for model {current_model}")
-                print(f"[Thread-{thread_name}] ✅ Created Mistral client for {current_model}")
-                
-        elif tls.client_type == 'cohere':
-            if cohere is not None:
-                tls.cohere_client = cohere.Client(tls.api_key)
-                self.cohere_client = tls.cohere_client
-                logger.debug(f"[Thread-{thread_name}] Created thread-local Cohere client for model {current_model}")
-                print(f"[Thread-{thread_name}] ✅ Created Cohere client for {current_model}")
-            else:
-                logger.info(f"[Thread-{thread_name}] Cohere SDK not installed, will use HTTP API")
-        
-        elif tls.client_type == 'anthropic':
-            # Anthropic uses HTTP API or SDK
-            logger.debug(f"[Thread-{thread_name}] Anthropic client configured for model {current_model}")
-            print(f"[Thread-{thread_name}] ✅ Configured Anthropic for {current_model}")
-            
-        elif tls.client_type == 'deepseek':
-            # DeepSeek uses OpenAI-compatible client
-            if openai is not None:
-                deepseek_url = os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/v1")
-                tls.openai_client = openai.OpenAI(
-                    api_key=tls.api_key,
-                    base_url=deepseek_url
-                )
-                self.openai_client = tls.openai_client
-                logger.debug(f"[Thread-{thread_name}] Created DeepSeek client for model {current_model}")
-                print(f"[Thread-{thread_name}] ✅ Created DeepSeek client for {current_model}")
-        
-        # Add other client types as needed...
-        
-        print(f"[Thread-{thread_name}] 🔧 Setup thread-local {tls.client_type} client with {tls.key_identifier} for model {current_model}")
+        print(f"[WARNING] No available keys to rotate to")
+        return False  
     
     def get_stats(self) -> Dict[str, any]:
         """Get statistics about API usage"""
