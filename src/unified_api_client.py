@@ -655,7 +655,7 @@ class UnifiedClient:
                     masked_key = tls.api_key[:4] + "..." + tls.api_key[-4:] if len(tls.api_key) > 12 else "***"
                     print(f"[Thread-{thread_name}] 🔑 Using {tls.key_identifier} - {masked_key}")
                     
-                    # Setup THREAD-LOCAL client
+                    # *** CRITICAL FIX: Setup THREAD-LOCAL client instead of regular setup ***
                     self._setup_thread_local_client()
                     return
                 else:
@@ -669,8 +669,24 @@ class UnifiedClient:
                     self.key_identifier = tls.key_identifier
                     self.current_key_index = getattr(tls, 'key_index', None)
                     
-                    # Ensure thread-local client exists
-                    if not hasattr(tls, 'openai_client') and self.client_type == 'openai':
+                    # *** CRITICAL FIX: Check client type matches model ***
+                    # Ensure thread-local client exists AND is the right type
+                    model_lower = tls.model.lower() if tls.model else ''
+                    expected_client_type = None
+                    
+                    for prefix, provider in self.MODEL_PROVIDERS.items():
+                        if model_lower.startswith(prefix):
+                            expected_client_type = provider
+                            break
+                    
+                    # If client type doesn't match, recreate client
+                    if not hasattr(tls, 'client_type') or tls.client_type != expected_client_type:
+                        print(f"[Thread-{thread_name}] Client type mismatch, recreating client")
+                        self._setup_thread_local_client()
+                    # Also recreate if client doesn't exist
+                    elif expected_client_type == 'openai' and not hasattr(tls, 'openai_client'):
+                        self._setup_thread_local_client()
+                    elif expected_client_type == 'gemini' and not hasattr(tls, 'gemini_client'):
                         self._setup_thread_local_client()
         
         # Single key mode
@@ -1385,41 +1401,45 @@ class UnifiedClient:
         tls = self._get_thread_local_client()
         thread_name = threading.current_thread().name
         
-        # IMPORTANT: Ensure client_type is set BEFORE using it
-        # First, ensure the instance has client_type by calling _setup_client if needed
-        if not hasattr(self, 'client_type') or self.client_type is None:
-            # We need to determine the client type from the model
-            # This happens when thread-local client is being set up before main setup
-            model_lower = tls.model.lower() if hasattr(tls, 'model') and tls.model else self.model.lower()
-            
-            # Determine client type from model name
-            for prefix, provider in self.MODEL_PROVIDERS.items():
-                if model_lower.startswith(prefix):
-                    self.client_type = provider
-                    break
-            
-            # If still no client type, check for custom endpoint
-            if not self.client_type:
-                use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
-                custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
-                if use_custom_endpoint and custom_base_url:
-                    self.client_type = 'openai'
-                    logger.info(f"[Thread-{thread_name}] Using OpenAI client for custom endpoint")
+        # CRITICAL: Determine client type from the CURRENT model (which may have changed due to rotation)
+        # Use thread-local model if available, otherwise use instance model
+        current_model = tls.model if hasattr(tls, 'model') and tls.model else self.model
+        model_lower = current_model.lower() if current_model else ''
         
-        # Create thread-local client instances
-        if not hasattr(tls, 'openai_client'):
-            tls.openai_client = None
-        if not hasattr(tls, 'gemini_client'):
-            tls.gemini_client = None
-        if not hasattr(tls, 'mistral_client'):
-            tls.mistral_client = None
-        if not hasattr(tls, 'cohere_client'):
-            tls.cohere_client = None
+        # Determine client type from model name
+        determined_client_type = None
+        for prefix, provider in self.MODEL_PROVIDERS.items():
+            if model_lower.startswith(prefix):
+                determined_client_type = provider
+                break
         
-        # Store the client type for this thread (now we're sure it exists)
-        tls.client_type = self.client_type
+        # If still no client type, check for custom endpoint
+        if not determined_client_type:
+            use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+            custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
+            if use_custom_endpoint and custom_base_url:
+                determined_client_type = 'openai'
+                logger.info(f"[Thread-{thread_name}] Using OpenAI client for custom endpoint")
+            else:
+                raise ValueError(f"Cannot determine client type for model: {current_model}")
         
-        # Setup client based on type using thread-local API key
+        # Update both instance and thread-local client type
+        self.client_type = determined_client_type
+        tls.client_type = determined_client_type
+        
+        # Clear old client instances to prevent cross-contamination
+        tls.openai_client = None
+        tls.gemini_client = None
+        tls.mistral_client = None
+        tls.cohere_client = None
+        
+        # Also clear instance clients
+        self.openai_client = None
+        self.gemini_client = None
+        self.mistral_client = None
+        self.cohere_client = None
+        
+        # Setup client based on the determined type using thread-local API key
         if tls.client_type == 'openai':
             if openai is None:
                 raise ImportError("OpenAI library not installed")
@@ -1444,7 +1464,7 @@ class UnifiedClient:
             # Store reference in instance for compatibility
             self.openai_client = tls.openai_client
             
-            logger.debug(f"[Thread-{thread_name}] Created thread-local OpenAI client")
+            logger.debug(f"[Thread-{thread_name}] Created thread-local OpenAI client for model {current_model}")
             
         elif tls.client_type == 'gemini':
             if not GENAI_AVAILABLE:
@@ -1456,7 +1476,7 @@ class UnifiedClient:
             # Store reference in instance for compatibility
             self.gemini_client = tls.gemini_client
             
-            logger.debug(f"[Thread-{thread_name}] Created thread-local Gemini client")
+            logger.debug(f"[Thread-{thread_name}] Created thread-local Gemini client for model {current_model}")
             
         elif tls.client_type == 'mistral':
             if MistralClient is None:
@@ -1464,19 +1484,19 @@ class UnifiedClient:
             else:
                 tls.mistral_client = MistralClient(api_key=tls.api_key)
                 self.mistral_client = tls.mistral_client
-                logger.debug(f"[Thread-{thread_name}] Created thread-local Mistral client")
+                logger.debug(f"[Thread-{thread_name}] Created thread-local Mistral client for model {current_model}")
                 
         elif tls.client_type == 'cohere':
             if cohere is not None:
                 tls.cohere_client = cohere.Client(tls.api_key)
                 self.cohere_client = tls.cohere_client
-                logger.debug(f"[Thread-{thread_name}] Created thread-local Cohere client")
+                logger.debug(f"[Thread-{thread_name}] Created thread-local Cohere client for model {current_model}")
             else:
                 logger.info(f"[Thread-{thread_name}] Cohere SDK not installed, will use HTTP API")
         
         # Add other client types as needed...
         
-        print(f"[Thread-{thread_name}] Setup thread-local {tls.client_type} client with {tls.key_identifier}")
+        print(f"[Thread-{thread_name}] Setup thread-local {tls.client_type} client with {tls.key_identifier} for model {current_model}")
     
     def get_stats(self) -> Dict[str, any]:
         """Get statistics about API usage"""
