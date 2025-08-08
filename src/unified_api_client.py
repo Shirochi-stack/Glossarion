@@ -4198,14 +4198,7 @@ class UnifiedClient:
     def _extract_response_text(self, response, provider=None, **kwargs):
         """
         Universal response text extraction that works across all providers.
-        Includes enhanced Gemini-specific handling when needed.
-        
-        Args:
-            response: The API response object
-            provider: The provider name (e.g., 'gemini', 'openai')
-            **kwargs: Additional provider-specific parameters:
-                - supports_thinking (bool): For Gemini thinking models
-                - thinking_budget (int): For Gemini thinking token budget
+        Includes enhanced OpenAI-specific handling.
         """
         result = ""
         finish_reason = 'stop'
@@ -4214,54 +4207,137 @@ class UnifiedClient:
         if provider is None:
             provider = self.client_type
         
-        #print(f"   🔍 Extracting text from {provider} response...")
+        print(f"   🔍 Extracting text from {provider} response...")
         print(f"   🔍 Response type: {type(response)}")
         
-        # Get Gemini-specific parameters if provided
-        supports_thinking = kwargs.get('supports_thinking', False)
-        thinking_budget = kwargs.get('thinking_budget', -1)
-        
-        # ========== GEMINI-SPECIFIC: Early prohibited content check ==========
-        if provider == 'gemini' and hasattr(response, 'candidates') and response.candidates:
-            for i, candidate in enumerate(response.candidates):
-                if hasattr(candidate, 'finish_reason'):
-                    finish_reason_str = str(candidate.finish_reason)
-                    if 'PROHIBITED_CONTENT' in finish_reason_str:
-                        print(f"   🚫 [Gemini] Candidate {i+1} has prohibited content: {finish_reason_str}")
-                        # Return immediately with prohibited_content status
-                        return "", "prohibited_content"
-        
-        # Handle UnifiedResponse objects
+        # Handle UnifiedResponse objects first
         if isinstance(response, UnifiedResponse):
-            if response.content:
+            if response.content is not None:  # Check for None specifically
                 print(f"   ✅ Got text from UnifiedResponse.content: {len(response.content)} chars")
                 return response.content, response.finish_reason or 'stop'
+            elif response.error_details:
+                # Handle error responses
+                print(f"   ⚠️ UnifiedResponse has error_details: {response.error_details}")
+                return "", response.finish_reason or 'error'
+        
+        # ========== ENHANCED OPENAI HANDLING ==========
+        if provider == 'openai':
+            print(f"   🔍 [OpenAI] Attempting specialized extraction...")
+            
+            # Check if it's an OpenAI ChatCompletion object
+            if hasattr(response, 'choices'):
+                print(f"   🔍 [OpenAI] Found choices attribute, {len(response.choices)} choices")
+                
+                if response.choices:
+                    choice = response.choices[0]
+                    
+                    # Log choice details
+                    print(f"   🔍 [OpenAI] Choice type: {type(choice)}")
+                    
+                    # Get finish reason
+                    if hasattr(choice, 'finish_reason'):
+                        finish_reason = choice.finish_reason
+                        print(f"   🔍 [OpenAI] Finish reason: {finish_reason}")
+                        
+                        # Normalize finish reasons
+                        if finish_reason == 'max_tokens':
+                            finish_reason = 'length'
+                        elif finish_reason == 'content_filter':
+                            finish_reason = 'content_filter'
+                    
+                    # Extract message content
+                    if hasattr(choice, 'message'):
+                        message = choice.message
+                        print(f"   🔍 [OpenAI] Message type: {type(message)}")
+                        
+                        # Check for refusal first
+                        if hasattr(message, 'refusal') and message.refusal:
+                            print(f"   🚫 [OpenAI] Message was refused: {message.refusal}")
+                            return f"[REFUSED]: {message.refusal}", 'content_filter'
+                        
+                        # Try to get content
+                        if hasattr(message, 'content'):
+                            content = message.content
+                            
+                            # Handle None content
+                            if content is None:
+                                print(f"   ⚠️ [OpenAI] message.content is None")
+                                
+                                # Check if it's a function call instead
+                                if hasattr(message, 'function_call'):
+                                    print(f"   🔍 [OpenAI] Found function_call instead of content")
+                                    return "", 'function_call'
+                                elif hasattr(message, 'tool_calls'):
+                                    print(f"   🔍 [OpenAI] Found tool_calls instead of content")
+                                    return "", 'tool_call'
+                                else:
+                                    print(f"   ⚠️ [OpenAI] No content, refusal, or function calls found")
+                                    return "", finish_reason or 'error'
+                            
+                            # Handle empty string content
+                            elif content == "":
+                                print(f"   ⚠️ [OpenAI] message.content is empty string")
+                                if finish_reason == 'length':
+                                    print(f"   ⚠️ [OpenAI] Empty due to length limit (tokens too low)")
+                                return "", finish_reason or 'error'
+                            
+                            # Valid content found
+                            else:
+                                print(f"   ✅ [OpenAI] Got content: {len(content)} chars")
+                                return content, finish_reason
+                        
+                        # Try alternative attributes
+                        elif hasattr(message, 'text'):
+                            print(f"   🔍 [OpenAI] Trying message.text...")
+                            if message.text:
+                                print(f"   ✅ [OpenAI] Got text: {len(message.text)} chars")
+                                return message.text, finish_reason
+                        
+                        # Try dict access if message is dict-like
+                        elif hasattr(message, 'get'):
+                            content = message.get('content') or message.get('text')
+                            if content:
+                                print(f"   ✅ [OpenAI] Got content via dict access: {len(content)} chars")
+                                return content, finish_reason
+                        
+                        # Log all available attributes for debugging
+                        print(f"   ⚠️ [OpenAI] Message attributes: {[attr for attr in dir(message) if not attr.startswith('_')]}")
+                else:
+                    print(f"   ⚠️ [OpenAI] Empty choices array")
+                    
+                    # Check if there's metadata about why it's empty
+                    if hasattr(response, 'model'):
+                        print(f"   Model used: {response.model}")
+                    if hasattr(response, 'id'):
+                        print(f"   Response ID: {response.id}")
+                    if hasattr(response, 'usage'):
+                        print(f"   Token usage: {response.usage}")
+            
+            # If OpenAI extraction failed, continue to generic methods
+            print(f"   ⚠️ [OpenAI] Specialized extraction failed, trying generic methods...")
+        
+        # ========== GENERIC EXTRACTION METHODS ==========
         
         # Method 1: Direct text attributes (common patterns)
         text_attributes = ['text', 'content', 'message', 'output', 'response', 'answer', 'reply']
-        
-        # For Gemini, prioritize 'text' attribute
-        if provider == 'gemini':
-            text_attributes = ['text'] + [attr for attr in text_attributes if attr != 'text']
         
         for attr in text_attributes:
             if hasattr(response, attr):
                 try:
                     value = getattr(response, attr)
-                    if value and isinstance(value, str):
+                    if value is not None and isinstance(value, str):
                         result = value
                         print(f"   ✅ Got text from response.{attr}: {len(result)} chars")
                         return result, finish_reason
                 except Exception as e:
-                    # More detailed logging for Gemini
-                    if provider == 'gemini' and attr == 'text':
-                        print(f"   ⚠️ [Gemini] Failed to get response.text directly: {e}")
-                    pass
+                    print(f"   ⚠️ Failed to get response.{attr}: {e}")
         
         # Method 2: Common nested patterns
         nested_patterns = [
             # OpenAI/Mistral pattern
-            lambda r: r.choices[0].message.content if hasattr(r, 'choices') and r.choices else None,
+            lambda r: r.choices[0].message.content if hasattr(r, 'choices') and r.choices and hasattr(r.choices[0], 'message') and hasattr(r.choices[0].message, 'content') else None,
+            # Alternative OpenAI pattern
+            lambda r: r.choices[0].text if hasattr(r, 'choices') and r.choices and hasattr(r.choices[0], 'text') else None,
             # Anthropic SDK pattern
             lambda r: r.content[0].text if hasattr(r, 'content') and r.content and hasattr(r.content[0], 'text') else None,
             # Cohere pattern
@@ -4276,189 +4352,39 @@ class UnifiedClient:
         for i, pattern in enumerate(nested_patterns):
             try:
                 extracted = pattern(response)
-                if extracted and isinstance(extracted, str):
+                if extracted is not None and isinstance(extracted, str):
                     result = extracted
                     print(f"   ✅ Extracted via nested pattern {i+1}: {len(result)} chars")
                     return result, finish_reason
-            except:
-                pass
+            except Exception as e:
+                # Log pattern failures for debugging
+                if provider == 'openai' and i < 2:  # First two patterns are OpenAI-specific
+                    print(f"   ⚠️ [OpenAI] Pattern {i+1} failed: {e}")
         
-        # Method 3: Check for finish_reason in common locations
-        finish_reason_locations = [
-            lambda r: r.choices[0].finish_reason if hasattr(r, 'choices') and r.choices else None,
-            lambda r: r.finish_reason if hasattr(r, 'finish_reason') else None,
-            lambda r: r.get('choices', [{}])[0].get('finish_reason') if isinstance(r, dict) else None,
-        ]
-        
-        for location in finish_reason_locations:
-            try:
-                found_reason = location(response)
-                if found_reason:
-                    finish_reason = str(found_reason)
-                    # Normalize finish reasons
-                    if 'MAX_TOKENS' in finish_reason.upper() or finish_reason == 'max_tokens':
-                        finish_reason = 'length'
-                    elif 'SAFETY' in finish_reason.upper():
-                        finish_reason = 'safety'
-                    elif 'PROHIBITED_CONTENT' in finish_reason.upper():
-                        finish_reason = 'prohibited_content'
-                    elif 'STOP' in finish_reason.upper():
-                        finish_reason = 'stop'
-                    break
-            except:
-                pass
-        
-        # Method 4: Enhanced Gemini/candidates-style extraction
-        if hasattr(response, 'candidates') and response.candidates:
-            num_candidates = len(response.candidates)
-            if provider == 'gemini':
-                #print(f"   🔍 [Gemini] Attempting extraction from {num_candidates} candidates...")
-                pass
-            else:
-                #print(f"   🔍 Attempting candidates-style extraction from {num_candidates} candidates...")
-                pass
-            
-            for i, candidate in enumerate(response.candidates):
-                if provider == 'gemini':
-                    #print(f"   🔍 [Gemini] Checking candidate {i+1}")
-                    pass
-                
-                # Check finish reason with detailed logging for Gemini
-                if hasattr(candidate, 'finish_reason'):
-                    finish_reason_str = str(candidate.finish_reason)
-                    if provider == 'gemini':
-                        print(f"   🔍 [Gemini] Finish reason: {finish_reason_str}")
-                    
-                    if 'MAX_TOKENS' in finish_reason_str:
-                        finish_reason = 'length'
-                    elif 'SAFETY' in finish_reason_str:
-                        finish_reason = 'safety'
-                    elif 'PROHIBITED_CONTENT' in finish_reason_str:
-                        finish_reason = 'prohibited_content'
-                
-                # Try direct text on candidate (some models provide this)
-                if hasattr(candidate, 'text'):
-                    try:
-                        if candidate.text:
-                            result = candidate.text
-                            print(f"   ✅ Got text from candidate.text: {len(result)} chars")
-                            return result, finish_reason
-                    except:
-                        pass
-                
-                # Try to extract from content.parts
-                if hasattr(candidate, 'content'):
-                    # Try direct text on content
-                    if hasattr(candidate.content, 'text'):
-                        try:
-                            if candidate.content.text:
-                                result = candidate.content.text
-                                print(f"   ✅ Got text from candidate.content.text: {len(result)} chars")
-                                return result, finish_reason
-                        except:
-                            pass
-                    
-                    # Try parts with enhanced extraction
-                    if hasattr(candidate.content, 'parts'):
-                        parts = candidate.content.parts or []
-                        if provider == 'gemini':
-                            print(f"   🔍 [Gemini] Candidate has {len(parts)} parts")
-                        
-                        text_parts = []
-                        
-                        for j, part in enumerate(parts):
-                            # Skip thinking parts for Gemini
-                            if provider == 'gemini' and hasattr(part, 'thinking') and part.thinking:
-                                print(f"   🔍 [Gemini] Part {j+1} is a thinking part, skipping")
-                                continue
-                            
-                            part_text = self._extract_part_text(part, provider=provider, part_index=j+1)
-                            if part_text:
-                                text_parts.append(part_text)
-                                if provider == 'gemini':
-                                    print(f"   ✅ [Gemini] Successfully extracted {len(part_text)} chars from part {j+1}")
-                            else:
-                                if provider == 'gemini':
-                                    print(f"   ⚠️ [Gemini] Could not extract text from part {j+1}")
-                        
-                        if text_parts:
-                            result = ''.join(text_parts)
-                            total_parts = len(text_parts)
-                            if provider == 'gemini':
-                                print(f"   ✅ [Gemini] Extracted total text from {total_parts} parts: {len(result)} chars")
-                            else:
-                                print(f"   ✅ Extracted from {total_parts} parts: {len(result)} chars total")
-                            return result, finish_reason
-        
-        # Method 5: Gemini thinking-specific response structure
-        if provider == 'gemini' and supports_thinking and thinking_budget != 0:
-            #print("   🔍 [Gemini] Checking for thinking-specific response structure...")
-            pass
-            
-            # Some models might have a separate 'output' or 'response' field when thinking is enabled
-            if hasattr(response, 'output') and response.output:
-                result = str(response.output)
-                print(f"   ✅ [Gemini] Got text from response.output (thinking): {len(result)} chars")
-                return result, finish_reason
-            
-            if hasattr(response, 'response') and response.response:
-                result = str(response.response)
-                print(f"   ✅ [Gemini] Got text from response.response (thinking): {len(result)} chars")
-                return result, finish_reason
-        
-        # Method 6: String representation extraction (last resort)
+        # Method 3: String representation extraction (last resort)
         if not result:
-            if provider == 'gemini':
-                #print("   🔍 [Gemini] Attempting string extraction as last resort...")
-                pass
-            else:
-                #print("   🔍 Attempting string extraction as last resort...")
-                pass
-            
+            print(f"   🔍 Attempting string extraction as last resort...")
             result = self._extract_from_string(response, provider=provider)
             if result:
                 print(f"   🔧 Extracted from string representation: {len(result)} chars")
                 return result, finish_reason
         
-        # Method 7: Handle dictionary/JSON responses
-        if isinstance(response, dict):
-            # Look for common keys
-            for key in ['content', 'text', 'output', 'message', 'response', 'answer', 'result']:
-                if key in response:
-                    value = response[key]
-                    if isinstance(value, str):
-                        result = value
-                        print(f"   ✅ Got text from dict['{key}']: {len(result)} chars")
-                        return result, finish_reason
-                    elif isinstance(value, list) and value:
-                        # Handle list of content items (Anthropic HTTP style)
-                        if isinstance(value[0], dict) and 'text' in value[0]:
-                            result = value[0]['text']
-                            print(f"   ✅ Got text from dict['{key}'][0]['text']: {len(result)} chars")
-                            return result, finish_reason
+        # Final failure
+        print(f"   ❌ Failed to extract text from {provider} response")
         
-        # Method 8: Last resort attribute inspection (enhanced for Gemini)
-        if not result and provider == 'gemini':
-            print("   🔍 [Gemini] Last resort: inspecting all response attributes...")
-            attrs = dir(response)
-            text_attrs = [attr for attr in attrs if 'text' in attr.lower() or 'content' in attr.lower() or 'output' in attr.lower()]
-            print(f"   🔍 [Gemini] Potential text attributes: {text_attrs}")
-            
-            for attr in text_attrs:
-                if not attr.startswith('_'):  # Skip private attributes
-                    try:
-                        value = getattr(response, attr)
-                        if value and isinstance(value, str) and len(value) > 10:  # Likely actual content
-                            result = value
-                            print(f"   ✅ [Gemini] Got text from response.{attr}: {len(result)} chars")
-                            return result, finish_reason
-                    except:
-                        pass
-        
-        if provider == 'gemini':
-            print(f"   ❌ [Gemini] Failed to extract text from response")
-        else:
-            print(f"   ❌ Failed to extract text from {provider} response")
+        # Log the full response structure for debugging
+        if provider == 'openai':
+            print(f"   🔍 [OpenAI] Full response structure:")
+            print(f"   Type: {type(response)}")
+            print(f"   Has 'choices': {hasattr(response, 'choices')}")
+            if hasattr(response, 'choices'):
+                print(f"   Choices length: {len(response.choices) if response.choices else 0}")
+                if response.choices:
+                    print(f"   First choice type: {type(response.choices[0])}")
+                    if hasattr(response.choices[0], 'message'):
+                        msg = response.choices[0].message
+                        print(f"   Message type: {type(msg)}")
+                        print(f"   Message attributes: {[attr for attr in dir(msg) if not attr.startswith('_')][:20]}")
         
         return "", 'error'
 
@@ -5952,7 +5878,7 @@ class UnifiedClient:
     
     def _send_openai(self, messages, temperature, max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
         """Send request to OpenAI API with o-series model support"""
-        max_retries = 3
+        max_retries = 7
         api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
         
         # Track what fixes we've already tried
@@ -5968,7 +5894,7 @@ class UnifiedClient:
                 
                 # Get user-configured anti-duplicate parameters
                 anti_dupe_params = self._get_anti_duplicate_params(temperature)
-                params.update(anti_dupe_params)  # Add user's custom parameters
+                params.update(anti_dupe_params)
                 
                 # Apply any fixes from previous attempts
                 if fixes_attempted['temperature'] and 'temperature_override' in fixes_attempted:
@@ -5995,38 +5921,111 @@ class UnifiedClient:
                 if self._cancelled:
                     raise UnifiedClientError("Operation cancelled")
                 
+                # Log the request for debugging
+                logger.debug(f"OpenAI request - Model: {self.model}, Params: {list(params.keys())}")
+                
                 # Make the API call
                 resp = self.openai_client.chat.completions.create(
                     **params,
                     timeout=self.request_timeout
                 )
                 
-                # Validate response
-                if not resp or not hasattr(resp, 'choices') or not resp.choices:
-                    raise UnifiedClientError("Invalid OpenAI response structure")
+                # Enhanced response validation with detailed logging
+                if not resp:
+                    logger.error("OpenAI returned None response")
+                    raise UnifiedClientError("OpenAI returned empty response object")
+                
+                if not hasattr(resp, 'choices'):
+                    logger.error(f"OpenAI response missing 'choices'. Response type: {type(resp)}")
+                    logger.error(f"Response attributes: {dir(resp)[:10]}")  # Log first 10 attributes
+                    raise UnifiedClientError("Invalid OpenAI response structure - missing choices")
+                
+                if not resp.choices:
+                    logger.error("OpenAI response has empty choices array")
+                    # Check if this is a content filter issue
+                    if hasattr(resp, 'model') and hasattr(resp, 'id'):
+                        logger.error(f"Response ID: {resp.id}, Model: {resp.model}")
+                    raise UnifiedClientError("OpenAI returned empty choices array")
                 
                 choice = resp.choices[0]
-                if not hasattr(choice, 'message') or not hasattr(choice.message, 'content'):
-                    raise UnifiedClientError("OpenAI response missing content")
                 
-                content = choice.message.content or ""
-                finish_reason = choice.finish_reason
+                # Enhanced choice validation
+                if not hasattr(choice, 'message'):
+                    logger.error(f"OpenAI choice missing 'message'. Choice type: {type(choice)}")
+                    logger.error(f"Choice attributes: {dir(choice)[:10]}")
+                    raise UnifiedClientError("OpenAI choice missing message")
                 
-                if not content and finish_reason == 'length':
-                    print(f"OpenAI vision API returned empty content with finish_reason='length'")
-                    print(f"This usually means the token limit is too low. Current limit: {params.get('max_completion_tokens') or params.get('max_tokens', 'not set')}")
-                    # Return with error details
-                    return UnifiedResponse(
-                        content="",
-                        finish_reason='error',
-                        error_details={'error': 'Response truncated - increase max_completion_tokens', 
-                                     'finish_reason': 'length',
-                                     'token_limit': params.get('max_completion_tokens') or params.get('max_tokens')}
-                    )
+                if not choice.message:
+                    logger.error("OpenAI choice.message is None")
+                    raise UnifiedClientError("OpenAI message is empty")
+                
+                # Check for content with detailed debugging
+                content = None
+                
+                # Try different ways to get content
+                if hasattr(choice.message, 'content'):
+                    content = choice.message.content
+                elif hasattr(choice.message, 'text'):
+                    content = choice.message.text
+                elif isinstance(choice.message, dict):
+                    content = choice.message.get('content') or choice.message.get('text')
+                
+                # Log what we found
+                if content is None:
+                    logger.error(f"OpenAI message has no content. Message type: {type(choice.message)}")
+                    logger.error(f"Message attributes: {dir(choice.message)[:20]}")
+                    logger.error(f"Message representation: {str(choice.message)[:200]}")
                     
-                # Normalize OpenAI finish reasons for retry mechanisms
+                    # Check if this is a refusal
+                    if hasattr(choice.message, 'refusal') and choice.message.refusal:
+                        logger.error(f"OpenAI refused: {choice.message.refusal}")
+                        # Return the refusal as content
+                        content = f"[REFUSED BY OPENAI]: {choice.message.refusal}"
+                        finish_reason = 'content_filter'
+                    elif hasattr(choice, 'finish_reason'):
+                        finish_reason = choice.finish_reason
+                        logger.error(f"Finish reason: {finish_reason}")
+                        
+                        # Check for specific finish reasons
+                        if finish_reason == 'content_filter':
+                            content = "[CONTENT BLOCKED BY OPENAI SAFETY FILTER]"
+                        elif finish_reason == 'length':
+                            content = ""  # Empty but will be marked as truncated
+                        else:
+                            # Try to extract any available info
+                            content = f"[EMPTY RESPONSE - Finish reason: {finish_reason}]"
+                    else:
+                        content = "[EMPTY RESPONSE FROM OPENAI]"
+                
+                # Handle empty string content
+                elif content == "":
+                    logger.warning("OpenAI returned empty string content")
+                    finish_reason = getattr(choice, 'finish_reason', 'unknown')
+                    
+                    if finish_reason == 'length':
+                        logger.info("Empty content due to length limit")
+                        # This is a truncation at the start - token limit too low
+                        return UnifiedResponse(
+                            content="",
+                            finish_reason='length',
+                            error_details={
+                                'error': 'Response truncated - increase max_completion_tokens',
+                                'finish_reason': 'length',
+                                'token_limit': params.get('max_completion_tokens') or params.get('max_tokens')
+                            }
+                        )
+                    elif finish_reason == 'content_filter':
+                        content = "[CONTENT BLOCKED BY OPENAI]"
+                    else:
+                        logger.error(f"Empty content with finish_reason: {finish_reason}")
+                        content = f"[EMPTY - Reason: {finish_reason}]"
+                
+                # Get finish reason (with fallback)
+                finish_reason = getattr(choice, 'finish_reason', 'stop')
+                
+                # Normalize OpenAI finish reasons
                 if finish_reason == "max_tokens":
-                    finish_reason = "length"  # Standard truncation indicator
+                    finish_reason = "length"
                 
                 # Extract usage
                 usage = None
@@ -6036,8 +6035,10 @@ class UnifiedClient:
                         'completion_tokens': resp.usage.completion_tokens,
                         'total_tokens': resp.usage.total_tokens
                     }
+                    logger.debug(f"Token usage: {usage}")
                 
-                # Don't save here - the main send() method handles saving
+                # Log successful response
+                logger.info(f"OpenAI response - Content length: {len(content) if content else 0}, Finish reason: {finish_reason}")
                 
                 return UnifiedResponse(
                     content=content,
@@ -6054,6 +6055,7 @@ class UnifiedClient:
                 try:
                     if hasattr(e, 'response') and hasattr(e.response, 'json'):
                         error_dict = e.response.json()
+                        logger.error(f"OpenAI error details: {error_dict}")
                 except:
                     pass
                 
