@@ -597,8 +597,12 @@ class UnifiedClient:
                     print(f"[Thread-{thread_name}] Rotating key (reached {self._rotation_frequency} requests)")
             
             if should_rotate:
-                # Get a key using thread-safe method
+                # Get a key using thread-safe method with timeout
                 key_info = None
+                
+                # Add timeout protection for key retrieval
+                start_time = time.time()
+                max_wait = 120  # 120 seconds max to get a key
                 
                 # First try using the pool's method if available
                 if hasattr(self._api_key_pool, 'get_key_for_thread'):
@@ -615,8 +619,10 @@ class UnifiedClient:
                         logger.error(f"[Thread-{thread_name}] Error getting key from pool: {e}")
                         key_info = None
                 
-                # Fallback to our method
+                # Fallback to our method with timeout check
                 if not key_info:
+                    if time.time() - start_time > max_wait:
+                        raise UnifiedClientError(f"Timeout getting key for thread after {max_wait}s", error_type="timeout")
                     key_info = self._get_next_available_key_for_thread()
                 
                 if key_info:
@@ -821,8 +827,19 @@ class UnifiedClient:
         """Wait for a key to become available (called outside lock)"""
         thread_name = threading.current_thread().name
         
-        # Get shortest cooldown time
+        # Check if cancelled first
+        if self._cancelled:
+            logger.info(f"[Thread-{thread_name}] Operation cancelled, not waiting for key")
+            return None
+        
+        # Get shortest cooldown time with timeout protection
         wait_time = self._get_shortest_cooldown_time()
+        
+        # Cap maximum wait time to prevent infinite waits
+        max_wait_time = 120  # 2 minutes max
+        if wait_time > max_wait_time:
+            print(f"[Thread-{thread_name}] Cooldown time {wait_time}s exceeds max {max_wait_time}s")
+            wait_time = max_wait_time
         
         if wait_time <= 0:
             # Keys should be available now
@@ -2730,7 +2747,11 @@ class UnifiedClient:
                 # CRITICAL: Save response for duplicate detection
                 # This must happen even for truncated/empty responses
                 if extracted_content:
+                    logger.info(f"Saving response for {context} ({len(extracted_content)} chars)")
                     self._save_response(extracted_content, response_name)
+                    logger.info(f"Response saved successfully for {context}")
+                else:
+                    print(f"No content to save for {context}")
                 
                 # Handle empty responses
                 if not extracted_content or extracted_content.strip() in ["", "[]"]:
