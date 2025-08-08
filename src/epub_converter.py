@@ -934,6 +934,8 @@ class EPUBCompiler:
         self.css_dir = os.path.join(self.output_dir, "css")
         self.fonts_dir = os.path.join(self.output_dir, "fonts")
         self.metadata_path = os.path.join(self.output_dir, "metadata.json")
+        self.attach_css_to_chapters = os.getenv('ATTACH_CSS_TO_CHAPTERS', '0') == '1'
+
         
         # Set global log callback
         set_global_log_callback(log_callback)
@@ -1602,7 +1604,12 @@ class EPUBCompiler:
                 lang=metadata.get("language", "en")
             )
             chapter.content = FileUtils.ensure_bytes(final_content)
-            
+
+            # CSS ATTACHMENT FIX - Only if enabled
+            if self.attach_css_to_chapters:
+                for css_item in css_items:
+                    chapter.add_item(css_item)  
+                
             # Add to book
             book.add_item(chapter)
             spine.append(chapter)
@@ -1640,7 +1647,11 @@ class EPUBCompiler:
                     lang=metadata.get("language", "en")
                 )
                 chapter.content = FileUtils.ensure_bytes(placeholder_content)
-                
+
+                # Add CSS to placeholder chapters too
+                for css_item in css_items:
+                    chapter.add_item(css_item)
+                    
                 book.add_item(chapter)
                 spine.append(chapter)
                 toc.append(chapter)
@@ -2283,6 +2294,11 @@ img {
                 )
             )
             
+            # Associate CSS with cover page
+            if self.attach_css_to_chapters:
+                for css_item in css_items:
+                    cover_page.add_item(css_item)
+
             book.add_item(cover_page)
             self.log(f"✅ Set cover image: {cover_file}")
             return cover_page
@@ -2374,6 +2390,11 @@ img {
                 )
             )
         )
+        
+        # Associate CSS with gallery page
+        if self.attach_css_to_chapters:
+            for css_item in css_items:
+                gallery_page.add_item(css_item)
         
         book.add_item(gallery_page)
         return gallery_page
