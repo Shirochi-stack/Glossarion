@@ -5322,31 +5322,148 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
         client.cancel_current_operation()
     raise UnifiedClientError(f"API call timed out after {timeout} seconds")
 
+
 def handle_api_error(processor, error, chunk_info=""):
-    """Handle API errors with multi-key support"""
+    """Handle API errors with thread-safe multi-key support"""
     error_str = str(error)
+    thread_name = threading.current_thread().name if hasattr(threading, 'current_thread') else 'Main'
     
     # Check for rate limit
     if "429" in error_str or "rate limit" in error_str.lower():
         if processor.config.use_multi_api_keys:
-            # The client should have already rotated keys internally
-            print(f"⚠️ Rate limit hit {chunk_info}, client should rotate to next key")
-            # Get current stats
-            stats = processor.client.get_stats()
-            print(f"📊 API Stats - Active keys: {stats.get('active_keys', 0)}/{stats.get('total_keys', 0)}")
+            print(f"⚠️ [{thread_name}] Rate limit hit {chunk_info}")
             
-            # Check if any keys are available
-            if stats.get('active_keys', 0) == 0:
-                print("❌ All API keys are cooling down")
-                return False
-            return True
+            # The client should handle key rotation internally in a thread-safe manner
+            # Don't call _rotate_to_next_key() directly as it's not thread-safe!
+            
+            # Get current stats (thread-safe)
+            try:
+                stats = processor.client.get_stats()
+                active_keys = stats.get('active_keys', 0)
+                total_keys = stats.get('total_keys', 0)
+                print(f"📊 [{thread_name}] API Stats - Active keys: {active_keys}/{total_keys}")
+                
+                # Check if any keys are available
+                if active_keys == 0:
+                    print(f"❌ [{thread_name}] All API keys are cooling down")
+                    
+                    # Get shortest cooldown time
+                    if hasattr(processor.client, '_get_shortest_cooldown_time'):
+                        wait_time = processor.client._get_shortest_cooldown_time()
+                        print(f"⏳ [{thread_name}] Shortest cooldown: {wait_time}s")
+                        
+                        # Wait with cancellation check
+                        for i in range(wait_time):
+                            if is_stop_requested():
+                                print(f"⏹️ [{thread_name}] Stopped while waiting for keys")
+                                return False
+                            time.sleep(1)
+                            if i % 10 == 0 and i > 0:
+                                print(f"⏳ [{thread_name}] Still waiting... {wait_time - i}s remaining")
+                    else:
+                        # Fallback wait
+                        print(f"⏳ [{thread_name}] Waiting 60s for keys to become available...")
+                        time.sleep(60)
+                    
+                    return True  # Retry after wait
+                
+                # Keys are available, the client will handle rotation internally
+                print(f"✅ [{thread_name}] {active_keys} keys available, client will rotate internally")
+                return True  # Retry with rotated key
+                
+            except Exception as stats_error:
+                print(f"⚠️ [{thread_name}] Error getting stats: {stats_error}")
+                # Fall through to retry anyway
+                return True
         else:
-            print(f"⚠️ Rate limit hit {chunk_info}, waiting before retry...")
-            time.sleep(30)  # Wait 30 seconds for single key mode
+            # Single key mode
+            print(f"⚠️ [{thread_name}] Rate limit hit {chunk_info}, waiting before retry...")
+            
+            # Check for Retry-After header info in error
+            wait_time = 30  # Default wait time
+            
+            if "retry_after" in error_str.lower():
+                import re
+                match = re.search(r'retry.after.(\d+)', error_str.lower())
+                if match:
+                    wait_time = int(match.group(1))
+                    print(f"⏳ [{thread_name}] Server suggests retry after {wait_time}s")
+            
+            # Wait with cancellation check
+            for i in range(wait_time):
+                if is_stop_requested():
+                    print(f"⏹️ [{thread_name}] Stopped while waiting")
+                    return False
+                time.sleep(1)
+                if i % 10 == 0 and i > 0:
+                    print(f"⏳ [{thread_name}] Still waiting... {wait_time - i}s remaining")
+            
             return True
     
+    # Handle timeout errors
+    elif "timeout" in error_str.lower() or "timed out" in error_str.lower():
+        print(f"⏱️ [{thread_name}] Timeout error {chunk_info}: {error_str[:200]}")
+        
+        # Check if retry timeout is enabled
+        if os.getenv("RETRY_TIMEOUT", "0") == "1":
+            print(f"🔄 [{thread_name}] Will retry after timeout")
+            return True
+        else:
+            print(f"❌ [{thread_name}] Timeout retry disabled, skipping")
+            return False
+    
+    # Handle connection errors
+    elif any(conn_err in error_str.lower() for conn_err in ["connection", "network", "socket"]):
+        print(f"🌐 [{thread_name}] Connection error {chunk_info}: {error_str[:200]}")
+        
+        # Wait a bit and retry
+        print(f"⏳ [{thread_name}] Waiting 10s before retry...")
+        time.sleep(10)
+        return True
+    
+    # Handle server errors (500s)
+    elif any(srv_err in error_str for srv_err in ["500", "502", "503", "504"]):
+        print(f"🖥️ [{thread_name}] Server error {chunk_info}: {error_str[:200]}")
+        
+        # Exponential backoff for server errors
+        retry_count = getattr(processor, '_server_error_count', 0)
+        processor._server_error_count = retry_count + 1
+        
+        if retry_count < 5:
+            wait_time = min(10 * (2 ** retry_count), 60)
+            print(f"⏳ [{thread_name}] Waiting {wait_time}s before retry (attempt {retry_count + 1}/5)")
+            time.sleep(wait_time)
+            return True
+        else:
+            print(f"❌ [{thread_name}] Too many server errors, giving up")
+            processor._server_error_count = 0
+            return False
+    
+    # Handle authentication errors (don't retry)
+    elif "401" in error_str or "unauthorized" in error_str.lower():
+        print(f"🔐 [{thread_name}] Authentication error {chunk_info}: Invalid API key")
+        return False
+    
+    # Handle forbidden errors (don't retry)
+    elif "403" in error_str or "forbidden" in error_str.lower():
+        print(f"🚫 [{thread_name}] Access forbidden {chunk_info}")
+        return False
+    
     # Other errors
-    print(f"❌ API Error {chunk_info}: {error_str}")
+    print(f"❌ [{thread_name}] API Error {chunk_info}: {error_str[:500]}")
+    
+    # Generic retry for unknown errors (limited)
+    retry_count = getattr(processor, '_generic_error_count', 0)
+    processor._generic_error_count = retry_count + 1
+    
+    if retry_count < 3:
+        print(f"🔄 [{thread_name}] Generic retry (attempt {retry_count + 1}/3)")
+        time.sleep(5)
+        return True
+    else:
+        print(f"❌ [{thread_name}] Too many errors, giving up")
+        processor._generic_error_count = 0
+        return False
     
 def parse_token_limit(env_value):
     """Parse token limit from environment variable"""
