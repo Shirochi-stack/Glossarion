@@ -192,7 +192,7 @@ try:
     VERTEX_AI_AVAILABLE = True
 except ImportError:
     VERTEX_AI_AVAILABLE = False
-    logger.warning("Vertex AI SDK not installed. Install with: pip install google-cloud-aiplatform")
+    print("Vertex AI SDK not installed. Install with: pip install google-cloud-aiplatform")
 
 from functools import lru_cache
 from datetime import datetime, timedelta
@@ -786,11 +786,11 @@ class UnifiedClient:
                 return (key, key_index)
             else:
                 # Pool couldn't provide a key, all are on cooldown
-                logger.warning(f"[{thread_name}] No keys available from pool")
+                print(f"[{thread_name}] No keys available from pool")
                 return None
         
         # Fallback: If pool doesn't have the method, use simpler logic
-        logger.warning("APIKeyPool missing get_key_for_thread method, using fallback")
+        print("APIKeyPool missing get_key_for_thread method, using fallback")
         
         with self.__class__._pool_lock:
             # Simple round-robin without complex thread tracking
@@ -814,7 +814,7 @@ class UnifiedClient:
                     return (key, current_idx)
             
             # No available keys
-            logger.warning(f"[{thread_name}] All keys unavailable in fallback")
+            print(f"[{thread_name}] All keys unavailable in fallback")
             return None
 
     def _wait_for_available_key(self) -> Optional[Tuple]:
@@ -1081,7 +1081,7 @@ class UnifiedClient:
                 return cached_result
         
         # Timeout or no result, we'll process it ourselves
-        logger.warning(f"[{thread_name}] Other thread didn't complete, processing request ourselves")
+        print(f"[{thread_name}] Other thread didn't complete, processing request ourselves")
         return None
 
     def _get_cached_response(self, request_hash: str) -> Optional[Tuple[str, str]]:
@@ -1306,7 +1306,7 @@ class UnifiedClient:
             if self.google_creds_path:
                 logger.info(f"Vertex AI Model Garden: Using credentials from {self.google_creds_path}")
             else:
-                logger.warning("Vertex AI Model Garden: Google Cloud credentials not yet configured")
+                print("Vertex AI Model Garden: Google Cloud credentials not yet configured")
         else:
             # Only set up client if not in multi-key mode
             # Multi-key mode will set up the client when a key is selected
@@ -2319,7 +2319,7 @@ class UnifiedClient:
                                     return content, finish_reason
                         
                         # No cache entry found despite event being set, break and process ourselves
-                        logger.warning(f"[{thread_name}] Event set but no cache entry, processing {context_str} ourselves")
+                        print(f"[{thread_name}] Event set but no cache entry, processing {context_str} ourselves")
                         break
                     
                     total_waited += check_interval
@@ -2334,7 +2334,7 @@ class UnifiedClient:
                                     return content, finish_reason
                 
                 if total_waited >= wait_timeout:
-                    logger.warning(f"[{thread_name}] Timeout waiting for {context_str}, processing ourselves")
+                    print(f"[{thread_name}] Timeout waiting for {context_str}, processing ourselves")
         
         # === END OF IMPROVED DEDUPLICATION ===
         
@@ -3163,7 +3163,7 @@ class UnifiedClient:
                                     return content, finish_reason
                         
                         # No cache entry found despite event being set
-                        logger.warning(f"[{thread_name}] Event set but no cache entry for image, processing ourselves")
+                        print(f"[{thread_name}] Event set but no cache entry for image, processing ourselves")
                         break
                     
                     total_waited += check_interval
@@ -3178,7 +3178,7 @@ class UnifiedClient:
                                     return content, finish_reason
                 
                 if total_waited >= wait_timeout:
-                    logger.warning(f"[{thread_name}] Timeout waiting for image {context_str}, processing ourselves")
+                    print(f"[{thread_name}] Timeout waiting for image {context_str}, processing ourselves")
         
         # === END OF IMPROVED IMAGE DEDUPLICATION ===
         
@@ -5955,9 +5955,27 @@ class UnifiedClient:
                     logger.error(f"Choice attributes: {dir(choice)[:10]}")
                     raise UnifiedClientError("OpenAI choice missing message")
                 
+                # Check if this is actually Gemini using OpenAI endpoint
+                is_gemini_via_openai = False
+                if hasattr(self, '_original_client_type') and self._original_client_type == 'gemini':
+                    is_gemini_via_openai = True
+                    logger.info("This is Gemini using OpenAI-compatible endpoint")
+                elif self.model.lower().startswith('gemini'):
+                    is_gemini_via_openai = True
+                    logger.info("Detected Gemini model via OpenAI endpoint")
+                
                 if not choice.message:
-                    logger.error("OpenAI choice.message is None")
-                    raise UnifiedClientError("OpenAI message is empty")
+                    # Gemini via OpenAI sometimes returns None message
+                    if is_gemini_via_openai:
+                        print("Gemini via OpenAI returned None message - creating empty message")
+                        # Create a mock message object
+                        class MockMessage:
+                            content = ""
+                            refusal = None
+                        choice.message = MockMessage()
+                    else:
+                        logger.error("OpenAI choice.message is None")
+                        raise UnifiedClientError("OpenAI message is empty")
                 
                 # Check for content with detailed debugging
                 content = None
@@ -5972,19 +5990,25 @@ class UnifiedClient:
                 
                 # Log what we found
                 if content is None:
-                    logger.error(f"OpenAI message has no content. Message type: {type(choice.message)}")
-                    logger.error(f"Message attributes: {dir(choice.message)[:20]}")
-                    logger.error(f"Message representation: {str(choice.message)[:200]}")
+                    # For Gemini via OpenAI, None content is common and not an error
+                    if is_gemini_via_openai:
+                        print("Gemini via OpenAI returned None content - likely a safety filter")
+                        content = ""  # Set to empty string instead of raising error
+                        finish_reason = 'content_filter'
+                    else:
+                        print(f"OpenAI message has no content. Message type: {type(choice.message)}")
+                        print(f"Message attributes: {dir(choice.message)[:20]}")
+                        print(f"Message representation: {str(choice.message)[:200]}")
                     
-                    # Check if this is a refusal
-                    if hasattr(choice.message, 'refusal') and choice.message.refusal:
-                        logger.error(f"OpenAI refused: {choice.message.refusal}")
+                    # Check if this is a refusal (only if not already handled by Gemini)
+                    if content is None and hasattr(choice.message, 'refusal') and choice.message.refusal:
+                        print(f"OpenAI refused: {choice.message.refusal}")
                         # Return the refusal as content
                         content = f"[REFUSED BY OPENAI]: {choice.message.refusal}"
                         finish_reason = 'content_filter'
                     elif hasattr(choice, 'finish_reason'):
                         finish_reason = choice.finish_reason
-                        logger.error(f"Finish reason: {finish_reason}")
+                        print(f"Finish reason: {finish_reason}")
                         
                         # Check for specific finish reasons
                         if finish_reason == 'content_filter':
@@ -5999,7 +6023,7 @@ class UnifiedClient:
                 
                 # Handle empty string content
                 elif content == "":
-                    logger.warning("OpenAI returned empty string content")
+                    print("OpenAI returned empty string content")
                     finish_reason = getattr(choice, 'finish_reason', 'unknown')
                     
                     if finish_reason == 'length':
@@ -6026,6 +6050,13 @@ class UnifiedClient:
                 # Normalize OpenAI finish reasons
                 if finish_reason == "max_tokens":
                     finish_reason = "length"
+                
+                # Special handling for Gemini empty responses
+                if is_gemini_via_openai and content == "" and finish_reason == 'stop':
+                    # Empty content with 'stop' from Gemini usually means safety filter
+                    print("Empty Gemini response with finish_reason='stop' - likely safety filter")
+                    content = "[BLOCKED BY GEMINI SAFETY FILTER]"
+                    finish_reason = 'content_filter'
                 
                 # Extract usage
                 usage = None
@@ -7274,6 +7305,9 @@ class UnifiedClient:
                         timeout=float(self.request_timeout)
                     )
                     
+                    # Check if this is Gemini via OpenAI endpoint
+                    is_gemini_endpoint = provider == "gemini-openai" or self.model.lower().startswith('gemini')
+                    
                     # Get user-configured anti-duplicate parameters
                     anti_dupe_params = self._get_anti_duplicate_params(temperature)
 
@@ -7292,10 +7326,80 @@ class UnifiedClient:
                     
                     resp = client.chat.completions.create(**params)
                     
-                    content = resp.choices[0].message.content
-                    finish_reason = resp.choices[0].finish_reason
+                    # Enhanced extraction for Gemini endpoints
+                    content = None
+                    finish_reason = 'stop'
                     
-                    # ADD ELECTRONHUB TRUNCATION DETECTION HERE TOO!
+                    # Log response structure for debugging
+                    if is_gemini_endpoint:
+                        logger.debug(f"Gemini endpoint response type: {type(resp)}")
+                    
+                    # Extract content with Gemini awareness
+                    if hasattr(resp, 'choices') and resp.choices:
+                        choice = resp.choices[0]
+                        
+                        if hasattr(choice, 'finish_reason'):
+                            finish_reason = choice.finish_reason or 'stop'
+                        
+                        if hasattr(choice, 'message'):
+                            message = choice.message
+                            
+                            # Handle None message (can happen with Gemini)
+                            if message is None:
+                                content = ""
+                                if is_gemini_endpoint:
+                                    print("Gemini returned None message")
+                                    content = "[GEMINI RETURNED NULL MESSAGE]"
+                                    finish_reason = 'content_filter'
+                            # Try content attribute
+                            elif hasattr(message, 'content'):
+                                content = message.content
+                                # Gemini might return None instead of empty string
+                                if content is None:
+                                    content = ""
+                                    if is_gemini_endpoint:
+                                        print("Gemini returned None content - likely safety filter")
+                                        content = "[BLOCKED BY GEMINI SAFETY FILTER]"
+                                        finish_reason = 'content_filter'
+                            # Try text attribute
+                            elif hasattr(message, 'text'):
+                                content = message.text
+                            # Message might be a string directly (some Gemini endpoints)
+                            elif isinstance(message, str):
+                                content = message
+                            else:
+                                # Try to extract from string representation
+                                msg_str = str(message)
+                                if msg_str and not msg_str.startswith('<'):
+                                    content = msg_str
+                                else:
+                                    content = ""
+                        
+                        # Fallback: try text directly on choice
+                        elif hasattr(choice, 'text'):
+                            content = choice.text
+                        else:
+                            content = ""
+                    else:
+                        content = ""
+                        if is_gemini_endpoint:
+                            print("Gemini endpoint returned no choices")
+                    
+                    # Handle None content (final check)
+                    if content is None:
+                        content = ""
+                        if is_gemini_endpoint:
+                            print("Gemini final content is None")
+                            content = "[GEMINI RETURNED NULL CONTENT]"
+                            finish_reason = 'content_filter'
+                    
+                    # Check for Gemini safety blocks
+                    if is_gemini_endpoint and content == "" and finish_reason == 'stop':
+                        print("Empty Gemini response with finish_reason='stop' - likely safety filter")
+                        content = "[BLOCKED BY GEMINI SAFETY FILTER]"
+                        finish_reason = 'content_filter'
+                    
+                    #  ELECTRONHUB TRUNCATION
                     if provider == "electronhub" and content:
                         # Additional validation for ElectronHub responses
                         if len(content) < 50 and "cannot" in content.lower():
