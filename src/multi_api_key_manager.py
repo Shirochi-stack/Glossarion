@@ -124,15 +124,25 @@ class APIKeyPool:
     """Thread-safe API key pool with proper rotation"""
     def __init__(self):
         self.keys: List[APIKeyEntry] = []
-        self.lock = threading.Lock()
-        self._rotation_index = 0  # Global rotation index
-        self._thread_assignments = {}  # thread_id -> (key_index, assignment_time)
+        self.lock = threading.Lock()  # This already exists
+        self._rotation_index = 0
+        self._thread_assignments = {}
         self._rate_limit_cache = RateLimitCache()
+        
+        # NEW LOCKS:
+        self.key_locks = {}  # Will be populated when keys are loaded
+        self.key_selection_lock = threading.Lock()  # For coordinating key selection across threads
+        
+        # Track which keys are currently being used by which threads
+        self._keys_in_use = {}  # key_index -> set of thread_ids
+        self._usage_lock = threading.Lock()
     
     def load_from_list(self, key_list: List[dict]):
         with self.lock:
             self.keys.clear()
-            for key_data in key_list:
+            self.key_locks.clear()  # Clear existing locks
+            
+            for i, key_data in enumerate(key_list):
                 entry = APIKeyEntry(
                     api_key=key_data.get('api_key', ''),
                     model=key_data.get('model', ''),
@@ -140,8 +150,12 @@ class APIKeyPool:
                     enabled=key_data.get('enabled', True)
                 )
                 self.keys.append(entry)
+                # Create a lock for each key
+                self.key_locks[i] = threading.Lock()
+            
             self._rotation_index = 0
-            logger.info(f"Loaded {len(self.keys)} API keys into pool")
+            self._keys_in_use.clear()
+            logger.info(f"Loaded {len(self.keys)} API keys into pool with individual locks")
     
     def get_key_for_thread(self, force_rotation: bool = False, 
                           rotation_frequency: int = 1) -> Optional[Tuple[APIKeyEntry, int, str]]:
@@ -149,10 +163,11 @@ class APIKeyPool:
         thread_id = threading.current_thread().ident
         thread_name = threading.current_thread().name
         
-        # Clear expired rate limits first (do this before acquiring lock)
+        # Clear expired rate limits first
         self._rate_limit_cache.clear_expired()
         
-        with self.lock:
+        # Use key_selection_lock for the entire selection process
+        with self.key_selection_lock:
             if not self.keys:
                 return None
             
@@ -164,12 +179,21 @@ class APIKeyPool:
                     key_id = f"Key#{key_index+1} ({key.model})"
                     
                     # Check if the assigned key is still available
-                    if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
-                        logger.debug(f"[Thread-{thread_name}] Reusing assigned {key_id}")
-                        return key, key_index, key_id
-                    else:
-                        # Remove invalid assignment
-                        del self._thread_assignments[thread_id]
+                    # Use the key-specific lock for checking availability
+                    with self.key_locks.get(key_index, threading.Lock()):
+                        if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
+                            logger.debug(f"[Thread-{thread_name}] Reusing assigned {key_id}")
+                            
+                            # Track usage
+                            with self._usage_lock:
+                                if key_index not in self._keys_in_use:
+                                    self._keys_in_use[key_index] = set()
+                                self._keys_in_use[key_index].add(thread_id)
+                            
+                            return key, key_index, key_id
+                        else:
+                            # Remove invalid assignment
+                            del self._thread_assignments[thread_id]
             
             # Find next available key using round-robin
             start_index = self._rotation_index
@@ -183,22 +207,35 @@ class APIKeyPool:
                 key = self.keys[key_index]
                 key_id = f"Key#{key_index+1} ({key.model})"
                 
-                # Check availability (key.is_available() is now thread-safe)
-                if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
-                    # Assign to thread
-                    self._thread_assignments[thread_id] = (key_index, time.time())
-                    
-                    # Clean up old assignments while we have the lock
-                    current_time = time.time()
-                    expired_threads = [
-                        tid for tid, (_, ts) in self._thread_assignments.items()
-                        if current_time - ts > 300  # 5 minutes
-                    ]
-                    for tid in expired_threads:
-                        del self._thread_assignments[tid]
-                    
-                    logger.info(f"[Thread-{thread_name}] Assigned {key_id}")
-                    return key, key_index, key_id
+                # Use key-specific lock when checking and modifying key state
+                with self.key_locks.get(key_index, threading.Lock()):
+                    if key.is_available() and not self._rate_limit_cache.is_rate_limited(key_id):
+                        # Assign to thread
+                        self._thread_assignments[thread_id] = (key_index, time.time())
+                        
+                        # Track usage
+                        with self._usage_lock:
+                            if key_index not in self._keys_in_use:
+                                self._keys_in_use[key_index] = set()
+                            self._keys_in_use[key_index].add(thread_id)
+                        
+                        # Clean up old assignments
+                        current_time = time.time()
+                        expired_threads = [
+                            tid for tid, (_, ts) in self._thread_assignments.items()
+                            if current_time - ts > 300  # 5 minutes
+                        ]
+                        for tid in expired_threads:
+                            del self._thread_assignments[tid]
+                            # Remove from usage tracking
+                            with self._usage_lock:
+                                for k_idx in list(self._keys_in_use.keys()):
+                                    self._keys_in_use[k_idx].discard(tid)
+                                    if not self._keys_in_use[k_idx]:
+                                        del self._keys_in_use[k_idx]
+                        
+                        logger.info(f"[Thread-{thread_name}] Assigned {key_id}")
+                        return key, key_index, key_id
                 
                 attempts += 1
             
@@ -231,33 +268,50 @@ class APIKeyPool:
             return None
     
     def mark_key_error(self, key_index: int, error_code: int = None):
-        """Mark a key as having an error (thread-safe)"""
+        """Mark a key as having an error (thread-safe with key-specific lock)"""
         if 0 <= key_index < len(self.keys):
-            # Mark error on the key itself (now thread-safe)
-            self.keys[key_index].mark_error(error_code)
-            
-            # Add to rate limit cache if it's a 429
-            if error_code == 429:
-                with self.lock:
+            # Use key-specific lock for this operation
+            with self.key_locks.get(key_index, threading.Lock()):
+                # Mark error on the key itself
+                self.keys[key_index].mark_error(error_code)
+                
+                # Add to rate limit cache if it's a 429
+                if error_code == 429:
                     key = self.keys[key_index]
                     key_id = f"Key#{key_index+1} ({key.model})"
                     self._rate_limit_cache.add_rate_limit(key_id, key.cooldown)
+                    
+                    print(f"Marked key {key_id} with error code {error_code}")
 
     def mark_key_success(self, key_index: int):
-        """Mark a key as successful (thread-safe)"""
+        """Mark a key as successful (thread-safe with key-specific lock)"""
         if 0 <= key_index < len(self.keys):
-            # This is now thread-safe due to lock in mark_success
-            self.keys[key_index].mark_success()
+            # Use key-specific lock for this operation
+            with self.key_locks.get(key_index, threading.Lock()):
+                self.keys[key_index].mark_success()
+                
+                key = self.keys[key_index]
+                print(f"Marked key {key_index} ({key.model}) as successful")
     
     def release_thread_assignment(self, thread_id: int = None):
         """Release key assignment for a thread"""
         if thread_id is None:
             thread_id = threading.current_thread().ident
         
-        with self.lock:
+        with self.key_selection_lock:
+            # Remove from assignments
             if thread_id in self._thread_assignments:
+                key_index, _ = self._thread_assignments[thread_id]
                 del self._thread_assignments[thread_id]
-                logger.debug(f"Released key assignment for thread {thread_id}")
+                
+                # Remove from usage tracking
+                with self._usage_lock:
+                    if key_index in self._keys_in_use:
+                        self._keys_in_use[key_index].discard(thread_id)
+                        if not self._keys_in_use[key_index]:
+                            del self._keys_in_use[key_index]
+                
+                print(f"Released key assignment for thread {thread_id}")
 
     def get_all_keys(self) -> List[APIKeyEntry]:
         """Get all keys in the pool"""
