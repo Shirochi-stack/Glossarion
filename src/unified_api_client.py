@@ -80,7 +80,7 @@ Environment Variables:
 - AZURE_API_VERSION: Azure API version (default: 2024-02-01)
 - DATABRICKS_API_URL: Databricks workspace URL
 - SALESFORCE_API_URL: Salesforce API endpoint
-- OPENROUTER_REFERER: HTTP referer for OpenRouter (default: https://github.com/your-app)
+- OPENROUTER_REFERER: HTTP referer for OpenRouter (default: https://github.com/Shirochi-stack/Glossarion)
 - OPENROUTER_APP_NAME: App name for OpenRouter (default: Glossarion Translation)
 - POE_API_KEY: API key for Poe platform
 - GROQ_API_URL: Custom Groq endpoint (default: https://api.groq.com/openai/v1)
@@ -5811,18 +5811,70 @@ class UnifiedClient:
                 )
             raise UnifiedClientError(f"Poe API error: {e}")
             
+    def _save_openrouter_config(self, config_data: dict, response_name: str = None):
+        """Save OpenRouter configuration including model mapping and safety settings"""
+        if not os.getenv("SAVE_PAYLOAD", "1") == "1":
+            return
+        
+        # Handle None or empty response_name
+        if not response_name:
+            response_name = f"config_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        # Sanitize response_name to ensure it's filesystem-safe
+        import re
+        response_name = re.sub(r'[<>:"/\\|?*]', '_', str(response_name))
+        
+        # Determine context from thread name
+        thread_name = threading.current_thread().name
+        thread_id = threading.current_thread().ident
+        
+        if 'Translation' in thread_name:
+            context = 'translation'
+        elif 'Glossary' in thread_name:
+            context = 'glossary'
+        else:
+            context = 'general'
+        
+        # Use STABLE thread directory (same as other save methods)
+        thread_dir = os.path.join("Payloads", context, f"{thread_name}_{thread_id}")
+        os.makedirs(thread_dir, exist_ok=True)
+        
+        # Create unique filename with timestamp
+        timestamp = datetime.now().strftime("%H%M%S")
+        
+        # Ensure response_name doesn't already contain timestamp to avoid duplication
+        if timestamp not in response_name:
+            config_filename = f"openrouter_config_{timestamp}_{response_name}.json"
+        else:
+            config_filename = f"openrouter_config_{response_name}.json"
+        
+        config_path = os.path.join(thread_dir, config_filename)
+        
+        try:
+            with self._file_write_lock:
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    json.dump(config_data, f, indent=2, ensure_ascii=False)
+                print(f"Saved OpenRouter config to: {config_path}")
+        except Exception as e:
+            logger.error(f"Failed to save OpenRouter config: {e}")
+
     def _send_openrouter(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send request to OpenRouter API with safety settings"""
+        """Send request to OpenRouter API with safety settings and model mapping"""
         # Check if safety settings are disabled via GUI toggle
         disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
         
         # OpenRouter uses OpenAI-compatible format
         # Strip 'or/' or 'openrouter/' prefix
+        original_input_model = self.model
         model_name = self.model
         for prefix in ['or/', 'openrouter/']:
             if model_name.startswith(prefix):
                 model_name = model_name[len(prefix):]
                 break
+        
+        # Track if model was mapped
+        model_was_mapped = False
+        mapped_from = None
         
         # Handle special cases for model naming conventions
         # OpenRouter expects provider-prefixed model names for many models
@@ -5865,36 +5917,77 @@ class UnifiedClient:
             
             # Check if we have a mapping for this model
             if model_name in model_mapping:
+                mapped_from = model_name
                 model_name = model_mapping[model_name]
-                logger.info(f"🔄 Mapped model to OpenRouter format: {model_name}")
-                print(f"🔄 OpenRouter: Using model format: {model_name}")
+                model_was_mapped = True
+                logger.info(f"🔄 Mapped model to OpenRouter format: {mapped_from} -> {model_name}")
+                print(f"🔄 OpenRouter: Mapped {mapped_from} -> {model_name}")
             else:
                 # For models starting with known prefixes, try to auto-detect provider
+                mapped_from = model_name
                 if model_name.startswith('gemini'):
                     model_name = f'google/{model_name}'
+                    model_was_mapped = True
                 elif model_name.startswith('gpt') or model_name.startswith('o1') or model_name.startswith('o3'):
                     model_name = f'openai/{model_name}'
+                    model_was_mapped = True
                 elif model_name.startswith('claude'):
                     model_name = f'anthropic/{model_name}'
+                    model_was_mapped = True
                 elif model_name.startswith('llama'):
                     model_name = f'meta-llama/{model_name}'
+                    model_was_mapped = True
                 elif model_name.startswith('mistral') or model_name.startswith('mixtral'):
                     model_name = f'mistralai/{model_name}'
-                # If no known prefix, leave as-is (user may have specified correct format)
+                    model_was_mapped = True
+                
+                if model_was_mapped:
+                    logger.info(f"🔄 Auto-detected provider for model: {mapped_from} -> {model_name}")
+                    print(f"🔄 OpenRouter: Auto-detected {mapped_from} -> {model_name}")
         
         # OpenRouter specific headers
         headers = {
             'Authorization': f'Bearer {self.api_key}',
             'Content-Type': 'application/json',
-            'HTTP-Referer': os.getenv('OPENROUTER_REFERER', 'https://github.com/your-app'),
+            'HTTP-Referer': os.getenv('OPENROUTER_REFERER', 'https://github.com/Shirochi-stack/Glossarion'),
             'X-Title': os.getenv('OPENROUTER_APP_NAME', 'Glossarion Translation')
+        }
+        
+        # Prepare configuration data for saving
+        config_data = {
+            "provider": "openrouter",
+            "timestamp": datetime.now().isoformat(),
+            "original_model": original_input_model,
+            "final_model": model_name,
+            "model_mapping": {
+                "was_mapped": model_was_mapped,
+                "mapped_from": mapped_from,
+                "mapped_to": model_name if model_was_mapped else None
+            },
+            "safety_settings": {
+                "disabled": disable_safety,
+                "x_safe_mode": "false" if disable_safety else "default"
+            },
+            "headers": {
+                "HTTP-Referer": headers.get('HTTP-Referer'),
+                "X-Title": headers.get('X-Title'),
+                "X-Safe-Mode": headers.get('X-Safe-Mode', 'not_set')
+            },
+            "parameters": {
+                "temperature": temperature,
+                "max_tokens": max_tokens
+            }
         }
         
         # Add safety header if disabled
         if disable_safety:
             headers['X-Safe-Mode'] = 'false'
+            config_data["headers"]["X-Safe-Mode"] = 'false'
             logger.info("🔓 Safety toggle enabled for OpenRouter")
             print("🔓 OpenRouter Safety: Disabled via X-Safe-Mode header")
+        
+        # Save the configuration
+        self._save_openrouter_config(config_data, response_name)
         
         # Store original model and update for API call
         original_model = self.model
@@ -6354,7 +6447,7 @@ class UnifiedClient:
                     json.dump(config_data, f, indent=2, ensure_ascii=False)
                 print(f"Saved Gemini safety status to: {config_path}")
         except Exception as e:
-            logger.error(f"Failed to save Gemini safety config: {e}")
+            print(f"Failed to save Gemini safety config: {e}")
 
     def _send_gemini(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to Gemini API with support for both text and multi-image messages"""
@@ -8774,16 +8867,79 @@ class UnifiedClient:
             raise UnifiedClientError(f"Poe image API error: {e}")
     
     def _send_openrouter_image(self, messages, image_base64, temperature, max_tokens, response_name) -> UnifiedResponse:
-        """Send image request through OpenRouter"""
+        """Send image request through OpenRouter with model mapping and config saving"""
         # OpenRouter uses OpenAI-compatible format
         disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
         
         # Strip prefix
+        original_input_model = self.model
         model_name = self.model
         for prefix in ['or/', 'openrouter/']:
             if model_name.startswith(prefix):
                 model_name = model_name[len(prefix):]
                 break
+        
+        # Track if model was mapped
+        model_was_mapped = False
+        mapped_from = None
+        
+        # Handle special cases for model naming conventions
+        # OpenRouter expects provider-prefixed model names for many models
+        if not '/' in model_name:  # If no provider prefix exists
+            # Map common vision-capable models to their OpenRouter format
+            model_mapping = {
+                # Google Gemini Vision models
+                'gemini-2.0-flash': 'google/gemini-2.0-flash',
+                'gemini-2.0-flash-exp': 'google/gemini-2.0-flash-exp',
+                'gemini-2.5-flash': 'google/gemini-2.5-flash',
+                'gemini-2.5-pro': 'google/gemini-2.5-pro',
+                'gemini-1.5-flash': 'google/gemini-1.5-flash',
+                'gemini-1.5-pro': 'google/gemini-1.5-pro',
+                'gemini-pro-vision': 'google/gemini-pro-vision',
+                
+                # OpenAI Vision models
+                'gpt-4o': 'openai/gpt-4o',
+                'gpt-4o-mini': 'openai/gpt-4o-mini',
+                'gpt-4-turbo': 'openai/gpt-4-turbo',
+                'gpt-4-vision-preview': 'openai/gpt-4-vision-preview',
+                
+                # Claude Vision models
+                'claude-3.5-sonnet': 'anthropic/claude-3.5-sonnet',
+                'claude-3-opus': 'anthropic/claude-3-opus',
+                'claude-3-sonnet': 'anthropic/claude-3-sonnet',
+                'claude-3-haiku': 'anthropic/claude-3-haiku',
+                
+                # Other vision models
+                'llama-3.2-11b-vision': 'meta-llama/llama-3.2-11b-vision',
+                'llama-3.2-90b-vision': 'meta-llama/llama-3.2-90b-vision',
+            }
+            
+            # Check if we have a mapping for this model
+            if model_name in model_mapping:
+                mapped_from = model_name
+                model_name = model_mapping[model_name]
+                model_was_mapped = True
+                logger.info(f"🔄 Mapped vision model to OpenRouter format: {mapped_from} -> {model_name}")
+                print(f"🔄 OpenRouter Vision: Mapped {mapped_from} -> {model_name}")
+            else:
+                # For models starting with known prefixes, try to auto-detect provider
+                mapped_from = model_name
+                if model_name.startswith('gemini'):
+                    model_name = f'google/{model_name}'
+                    model_was_mapped = True
+                elif model_name.startswith('gpt'):
+                    model_name = f'openai/{model_name}'
+                    model_was_mapped = True
+                elif model_name.startswith('claude'):
+                    model_name = f'anthropic/{model_name}'
+                    model_was_mapped = True
+                elif model_name.startswith('llama'):
+                    model_name = f'meta-llama/{model_name}'
+                    model_was_mapped = True
+                
+                if model_was_mapped:
+                    logger.info(f"🔄 Auto-detected provider for vision model: {mapped_from} -> {model_name}")
+                    print(f"🔄 OpenRouter Vision: Auto-detected {mapped_from} -> {model_name}")
         
         # Format messages with image
         vision_messages = []
@@ -8804,15 +8960,52 @@ class UnifiedClient:
             else:
                 vision_messages.append(msg)
         
+        # OpenRouter specific headers
         headers = {
             'Authorization': f'Bearer {self.api_key}',
             'Content-Type': 'application/json',
-            'HTTP-Referer': os.getenv('OPENROUTER_REFERER', 'https://github.com/your-app'),
+            'HTTP-Referer': os.getenv('OPENROUTER_REFERER', 'https://github.com/Shirochi-stack/Glossarion'),
             'X-Title': os.getenv('OPENROUTER_APP_NAME', 'Glossarion Translation')
         }
         
+        # Prepare configuration data for saving
+        config_data = {
+            "provider": "openrouter",
+            "type": "vision_request",
+            "timestamp": datetime.now().isoformat(),
+            "original_model": original_input_model,
+            "final_model": model_name,
+            "model_mapping": {
+                "was_mapped": model_was_mapped,
+                "mapped_from": mapped_from,
+                "mapped_to": model_name if model_was_mapped else None
+            },
+            "safety_settings": {
+                "disabled": disable_safety,
+                "x_safe_mode": "false" if disable_safety else "default"
+            },
+            "headers": {
+                "HTTP-Referer": headers.get('HTTP-Referer'),
+                "X-Title": headers.get('X-Title'),
+                "X-Safe-Mode": headers.get('X-Safe-Mode', 'not_set')
+            },
+            "parameters": {
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "has_image": True,
+                "image_format": "base64"
+            }
+        }
+        
+        # Add safety header if disabled
         if disable_safety:
             headers['X-Safe-Mode'] = 'false'
+            config_data["headers"]["X-Safe-Mode"] = 'false'
+            logger.info("🔓 Safety toggle enabled for OpenRouter Vision")
+            print("🔓 OpenRouter Vision Safety: Disabled via X-Safe-Mode header")
+        
+        # Save the configuration
+        self._save_openrouter_config(config_data, f"vision_{response_name}" if response_name else "vision")
         
         payload = {
             "model": model_name,
@@ -8830,7 +9023,13 @@ class UnifiedClient:
             )
             
             if resp.status_code != 200:
-                raise UnifiedClientError(f"OpenRouter Vision API error: {resp.status_code} - {resp.text}")
+                error_msg = f"OpenRouter Vision API error: {resp.status_code} - {resp.text}"
+                
+                # Add helpful context for common errors
+                if resp.status_code == 400 and "not a valid model ID" in resp.text:
+                    error_msg += f"\n💡 Tip: Model '{original_input_model}' was mapped to '{model_name}'. Check if this model supports vision capabilities."
+                
+                raise UnifiedClientError(error_msg)
             
             json_resp = resp.json()
             content = json_resp['choices'][0]['message']['content']
@@ -8842,6 +9041,9 @@ class UnifiedClient:
                 raw_response=json_resp
             )
             
+        except requests.exceptions.RequestException as e:
+            print(f"OpenRouter Vision API network error: {e}")
+            raise UnifiedClientError(f"OpenRouter Vision API network error: {e}")
         except Exception as e:
             print(f"OpenRouter Vision API error: {e}")
             raise UnifiedClientError(f"OpenRouter Vision API error: {e}")
