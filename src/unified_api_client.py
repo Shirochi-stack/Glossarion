@@ -404,7 +404,10 @@ class UnifiedClient:
             
             # Load the validated keys
             cls._api_key_pool.load_from_list(validated_keys)
-            
+            cls._main_fallback_key = validated_keys[0]['api_key']
+            cls._main_fallback_model = validated_keys[0]['model']
+            print(f"🔑 Using {validated_keys[0]['model']} as main fallback key")
+
             # FIX 2: Store settings at class level (these affect all instances)
             # These are class variables since pool is shared
             if not hasattr(cls, '_force_rotation'):
@@ -3284,15 +3287,19 @@ class UnifiedClient:
         Create a temporary client with the main key and retry the request.
         This is used for prohibited content errors in multi-key mode.
         """
+        # Use the class-level fallback key if available, otherwise use original
+        fallback_key = getattr(self.__class__, '_main_fallback_key', self.original_api_key)
+        fallback_model = getattr(self.__class__, '_main_fallback_model', self.original_model)
+        
         print(f"[MAIN KEY RETRY] Starting retry with main key")
-        print(f"[MAIN KEY RETRY] Original key: {self.original_api_key[:8]}...{self.original_api_key[-4:]}")
-        print(f"[MAIN KEY RETRY] Original model: {self.original_model}")
+        print(f"[MAIN KEY RETRY] Fallback key: {fallback_key[:8]}...{fallback_key[-4:]}")
+        print(f"[MAIN KEY RETRY] Fallback model: {fallback_model}")
         
         try:
             # Create a new temporary UnifiedClient instance with the main key
             temp_client = UnifiedClient(
-                api_key=self.original_api_key,
-                model=self.original_model,
+                api_key=fallback_key,
+                model=fallback_model,
                 output_dir=self.output_dir
             )
             
@@ -4389,15 +4396,19 @@ class UnifiedClient:
         Create a temporary client with the main key and retry the image request.
         This is used for prohibited content errors in multi-key mode.
         """
+        # Use the class-level fallback key if available, otherwise use original
+        fallback_key = getattr(self.__class__, '_main_fallback_key', self.original_api_key)
+        fallback_model = getattr(self.__class__, '_main_fallback_model', self.original_model)
+        
         print(f"[MAIN KEY IMAGE RETRY] Starting image retry with main key")
-        print(f"[MAIN KEY IMAGE RETRY] Original key: {self.original_api_key[:8]}...{self.original_api_key[-4:]}")
-        print(f"[MAIN KEY IMAGE RETRY] Original model: {self.original_model}")
+        print(f"[MAIN KEY IMAGE RETRY] Fallback key: {fallback_key[:8]}...{fallback_key[-4:]}")
+        print(f"[MAIN KEY IMAGE RETRY] Fallback model: {fallback_model}")
         
         try:
             # Create a new temporary UnifiedClient instance with the main key
             temp_client = UnifiedClient(
-                api_key=self.original_api_key,
-                model=self.original_model,
+                api_key=fallback_key,
+                model=fallback_model,
                 output_dir=self.output_dir
             )
             
