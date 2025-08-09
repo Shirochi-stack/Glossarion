@@ -441,11 +441,13 @@ class UnifiedClient:
             return cls._api_key_pool
     
     def __init__(self, api_key: str, model: str, output_dir: str = None):
-        """Initialize the unified client"""
+        """Initialize the unified client with enhanced thread safety"""
         # Store original values
         self.original_api_key = api_key
         self.original_model = model
-        self._instance_model_lock = threading.RLock()
+        
+        # Add unique session ID for this client instance
+        self.session_id = str(uuid.uuid4())[:8]
         
         # INSTANCE-LEVEL multi-key configuration
         self._multi_key_mode = False  # INSTANCE variable, not class!
@@ -460,12 +462,64 @@ class UnifiedClient:
         self.context = None
         self.current_session_context = None
         
-        # Request tracking
+        # Request tracking (from first init)
         self._request_count = 0
         self._thread_request_count = 0
         
-        # Stats tracking (existing)
-        self.reset_stats()
+        # Thread coordination for key assignment
+        self._key_assignment_lock = RLock()
+        self._thread_key_assignments = {}  # {thread_id: (key_index, timestamp)}
+        self._instance_model_lock = threading.RLock()
+        
+        # ===== ENHANCED THREAD SAFETY STRUCTURES =====
+        
+        # Thread-safe request deduplication with caching
+        self._request_cache = {}  # {request_hash: (content, finish_reason, timestamp)}
+        self._request_cache_lock = RLock()
+        self._cache_expiry_seconds = 300  # 5 minutes
+        
+        # Active request tracking to prevent duplicate processing
+        self._active_requests = {}  # {request_hash: threading.Event}
+        self._active_requests_lock = RLock()
+        
+        # Thread-local storage for client instances
+        self._thread_local = threading.local()
+        
+        # Thread-specific request counters
+        self._thread_request_counters = defaultdict(int)
+        self._counter_lock = RLock()
+        
+        # File write coordination
+        self._file_write_locks = {}  # {filepath: RLock}
+        self._file_write_locks_lock = RLock()
+        if not hasattr(self, '_model_lock'):
+            self._model_lock = threading.RLock()
+        
+        # Duplicate request tracking (existing but enhanced)
+        self._chapter_request_tracker = {}  # {request_hash: {timestamp, thread, context}}
+        self._tracker_lock = RLock()
+        
+        # Stats tracking
+        self.stats = {
+            'total_requests': 0,
+            'successful_requests': 0,
+            'failed_requests': 0,
+            'errors': defaultdict(int),
+            'response_times': [],
+            'empty_results': 0  # Add this for completeness
+        }
+        
+        # Pattern recognition attributes
+        self.pattern_counts = {}  # Track pattern frequencies for reinforcement
+        self.last_pattern = None  # Track last seen pattern
+        
+        # Call reset_stats if it exists (from first init)
+        if hasattr(self, 'reset_stats'):
+            self.reset_stats()
+        
+        # File tracking for duplicate prevention
+        self._active_files = set()  # Track files being written
+        self._file_lock = RLock()
         
         # Timeout configuration
         retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
@@ -473,6 +527,22 @@ class UnifiedClient:
             self.request_timeout = int(os.getenv("CHUNK_TIMEOUT", "900"))
         else:
             self.request_timeout = 36000  # 10 hours
+        
+        # Initialize client references
+        self.api_key = api_key
+        self.model = model
+        self.key_identifier = "Single Key"
+        self.current_key_index = None
+        self.openai_client = None
+        self.gemini_client = None
+        self.mistral_client = None
+        self.cohere_client = None
+        self._actual_output_filename = None
+        self._current_output_file = None
+        self._last_response_filename = None
+        
+        # Store Google Cloud credentials path if available
+        self.google_creds_path = None
         
         # Check if multi-key mode should be enabled FOR THIS INSTANCE
         use_multi_keys_env = os.getenv('USE_MULTI_API_KEYS', '0') == '1'
@@ -515,6 +585,78 @@ class UnifiedClient:
             self.model = model
             self.key_identifier = "Single Key"
             self._setup_client()
+        
+        # Check for Vertex AI Model Garden models (contain @ symbol)
+        # NOTE: This happens AFTER the initial setup, as in the second version
+        if '@' in self.model or self.model.startswith('vertex/'):
+            # For Vertex AI, we need Google Cloud credentials, not API key
+            self.client_type = 'vertex_model_garden'
+            
+            # Try to find Google Cloud credentials
+            # 1. Check environment variable
+            self.google_creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+            
+            # 2. Check if passed as api_key (for compatibility)
+            if not self.google_creds_path and api_key and os.path.exists(api_key):
+                self.google_creds_path = api_key
+                # Use logger if available, otherwise print
+                if hasattr(self, 'logger'):
+                    self.logger.info("Using API key parameter as Google Cloud credentials path")
+                else:
+                    print("Using API key parameter as Google Cloud credentials path")
+            
+            # 3. Will check GUI config later during send if needed
+            
+            if self.google_creds_path:
+                msg = f"Vertex AI Model Garden: Using credentials from {self.google_creds_path}"
+                if hasattr(self, 'logger'):
+                    self.logger.info(msg)
+                else:
+                    print(msg)
+            else:
+                print("Vertex AI Model Garden: Google Cloud credentials not yet configured")
+        else:
+            # Only set up client if not in multi-key mode
+            # Multi-key mode will set up the client when a key is selected
+            if not self._multi_key_mode:
+                # NOTE: This is a SECOND call to _setup_client() in the else branch
+                # Determine client type from model name
+                self._setup_client()
+                print(f"[DEBUG] After setup - client_type: {getattr(self, 'client_type', None)}, openai_client: {self.openai_client}")
+                
+                # FORCE OPENAI CLIENT IF CUSTOM BASE URL IS SET AND ENABLED
+                use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+                custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
+
+                # Only force OpenAI client if:
+                # 1. Custom endpoint is enabled via toggle
+                # 2. We have a custom URL
+                # 3. No client was set up (or it's already openai)
+                if custom_base_url and use_custom_endpoint and self.openai_client is None:
+                    if self.client_type is None or self.client_type == 'openai':
+                        print(f"[DEBUG] Custom base URL detected and enabled, using OpenAI client for model: {self.model}")
+                        self.client_type = 'openai'
+                        
+                        # Check if openai module is available
+                        try:
+                            import openai
+                        except ImportError:
+                            raise ImportError("OpenAI library not installed. Install with: pip install openai")
+                        
+                        # Validate URL has protocol
+                        if not custom_base_url.startswith(('http://', 'https://')):
+                            print(f"[WARNING] Custom base URL missing protocol, adding https://")
+                            custom_base_url = 'https://' + custom_base_url
+                        
+                        self.openai_client = openai.OpenAI(
+                            api_key=self.api_key,
+                            base_url=custom_base_url
+                        )
+                        print(f"[DEBUG] OpenAI client created with custom base URL: {custom_base_url}")
+                    else:
+                        print(f"[DEBUG] Custom base URL set but model {self.model} uses {self.client_type}, not overriding")
+                elif custom_base_url and not use_custom_endpoint:
+                    print(f"[DEBUG] Custom base URL detected but disabled via toggle, using standard client")
     
     def _get_thread_local_client(self):
         """Get or create thread-local client"""
@@ -1163,201 +1305,6 @@ class UnifiedClient:
         """Property setter for backward compatibility"""
         self._multi_key_mode = value
 
-
-    
-
-    def __init__(self, api_key: str, model: str, output_dir: str = None):
-        """Initialize the unified client with enhanced thread safety"""
-        # Store original values
-        self.original_api_key = api_key
-        self.original_model = model
-        
-        # Add unique session ID for this client instance
-        self.session_id = str(uuid.uuid4())[:8]
-        
-        # INSTANCE-LEVEL multi-key configuration
-        self._multi_key_mode = False  # INSTANCE variable, not class!
-        self._force_rotation = True
-        self._rotation_frequency = 1
-        
-        # Instance variables
-        self.output_dir = output_dir
-        self._cancelled = False
-        self._in_cleanup = False
-        self.conversation_message_count = 0
-        self.context = None
-        self.current_session_context = None
-        
-        # Thread coordination for key assignment
-        self._key_assignment_lock = RLock()
-        self._thread_key_assignments = {}  # {thread_id: (key_index, timestamp)}
-        self._instance_model_lock = threading.RLock()
-        
-        # ===== ENHANCED THREAD SAFETY STRUCTURES =====
-        
-        # Thread-safe request deduplication with caching
-        self._request_cache = {}  # {request_hash: (content, finish_reason, timestamp)}
-        self._request_cache_lock = RLock()
-        self._cache_expiry_seconds = 300  # 5 minutes
-        
-        # Active request tracking to prevent duplicate processing
-        self._active_requests = {}  # {request_hash: threading.Event}
-        self._active_requests_lock = RLock()
-        
-        # Thread-local storage for client instances
-        self._thread_local = threading.local()
-        
-        # Thread-specific request counters
-        self._thread_request_counters = defaultdict(int)
-        self._counter_lock = RLock()
-        
-        # File write coordination
-        self._file_write_locks = {}  # {filepath: RLock}
-        self._file_write_locks_lock = RLock()
-        if not hasattr(self, '_model_lock'):
-            self._model_lock = threading.RLock()
-        
-        # Duplicate request tracking (existing but enhanced)
-        self._chapter_request_tracker = {}  # {request_hash: {timestamp, thread, context}}
-        self._tracker_lock = RLock()
-        
-        # Stats tracking (existing)
-        self.stats = {
-            'total_requests': 0,
-            'successful_requests': 0,
-            'failed_requests': 0,
-            'errors': defaultdict(int),
-            'response_times': []
-        }
-        
-        # File tracking for duplicate prevention
-        self._active_files = set()  # Track files being written
-        self._file_lock = RLock()
-        
-        # Timeout configuration
-        retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
-        if retry_timeout_enabled:
-            self.request_timeout = int(os.getenv("CHUNK_TIMEOUT", "900"))
-        else:
-            self.request_timeout = 36000  # 10 hours
-        
-        # Initialize client references
-        self.api_key = api_key
-        self.model = model
-        self.key_identifier = "Single Key"
-        self.current_key_index = None
-        self.openai_client = None
-        self.gemini_client = None
-        self.mistral_client = None
-        self.cohere_client = None
-        self._actual_output_filename = None
-        self._current_output_file = None
-        self._last_response_filename = None
-        
-        # Check if multi-key mode should be enabled FOR THIS INSTANCE
-        use_multi_keys_env = os.getenv('USE_MULTI_API_KEYS', '0') == '1'
-        print(f"[DEBUG] USE_MULTI_API_KEYS env var: {os.getenv('USE_MULTI_API_KEYS')}")
-        print(f"[DEBUG] Creating new instance - multi-key mode from env: {use_multi_keys_env}")
-        
-        if use_multi_keys_env:
-            # Initialize from environment
-            multi_keys_json = os.getenv('MULTI_API_KEYS', '[]')
-            print(f"[DEBUG] Loading multi-keys config...")
-            force_rotation = os.getenv('FORCE_KEY_ROTATION', '1') == '1'
-            rotation_frequency = int(os.getenv('ROTATION_FREQUENCY', '1'))
-            
-            try:
-                multi_keys = json.loads(multi_keys_json)
-                if multi_keys:
-                    # Setup the shared pool
-                    self.setup_multi_key_pool(multi_keys, force_rotation, rotation_frequency)
-                    
-                    # Enable multi-key mode FOR THIS INSTANCE
-                    self._multi_key_mode = True
-                    self._force_rotation = force_rotation
-                    self._rotation_frequency = rotation_frequency
-                    
-                    print(f"[DEBUG] ✅ This instance has multi-key mode ENABLED")
-                else:
-                    print(f"[DEBUG] ❌ No keys found in config, staying in single-key mode")
-                    self._multi_key_mode = False
-            except Exception as e:
-                print(f"Failed to load multi-key config: {e}")
-                self._multi_key_mode = False
-                print(f"[DEBUG] ❌ Error loading config, falling back to single-key mode")
-        else:
-            #print(f"[DEBUG] ❌ Multi-key mode is DISABLED for this instance (env var = 0)")
-            self._multi_key_mode = False
-        
-        # Initial setup based on THIS INSTANCE's mode
-        if not self._multi_key_mode:
-            self.api_key = api_key
-            self.model = model
-            self.key_identifier = "Single Key"
-            self._setup_client()
-        
-        # Store Google Cloud credentials path if available
-        self.google_creds_path = None
-        
-        # Check for Vertex AI Model Garden models (contain @ symbol)
-        if '@' in self.model or self.model.startswith('vertex/'):
-            # For Vertex AI, we need Google Cloud credentials, not API key
-            self.client_type = 'vertex_model_garden'
-            
-            # Try to find Google Cloud credentials
-            # 1. Check environment variable
-            self.google_creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
-            
-            # 2. Check if passed as api_key (for compatibility)
-            if not self.google_creds_path and api_key and os.path.exists(api_key):
-                self.google_creds_path = api_key
-                logger.info("Using API key parameter as Google Cloud credentials path")
-            
-            # 3. Will check GUI config later during send if needed
-            
-            if self.google_creds_path:
-                logger.info(f"Vertex AI Model Garden: Using credentials from {self.google_creds_path}")
-            else:
-                print("Vertex AI Model Garden: Google Cloud credentials not yet configured")
-        else:
-            # Only set up client if not in multi-key mode
-            # Multi-key mode will set up the client when a key is selected
-            if not self._multi_key_mode:
-                # Determine client type from model name
-                self._setup_client()
-                print(f"[DEBUG] After setup - client_type: {self.client_type}, openai_client: {self.openai_client}")
-                
-                # FORCE OPENAI CLIENT IF CUSTOM BASE URL IS SET AND ENABLED
-                use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
-                custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
-
-                # Only force OpenAI client if:
-                # 1. Custom endpoint is enabled via toggle
-                # 2. We have a custom URL
-                # 3. No client was set up (or it's already openai)
-                if custom_base_url and use_custom_endpoint and self.openai_client is None:
-                    if self.client_type is None or self.client_type == 'openai':
-                        print(f"[DEBUG] Custom base URL detected and enabled, using OpenAI client for model: {self.model}")
-                        self.client_type = 'openai'
-                        
-                        if openai is None:
-                            raise ImportError("OpenAI library not installed. Install with: pip install openai")
-                        
-                        # Validate URL has protocol
-                        if not custom_base_url.startswith(('http://', 'https://')):
-                            print(f"[WARNING] Custom base URL missing protocol, adding https://")
-                            custom_base_url = 'https://' + custom_base_url
-                        
-                        self.openai_client = openai.OpenAI(
-                            api_key=self.api_key,
-                            base_url=custom_base_url
-                        )
-                        print(f"[DEBUG] OpenAI client created with custom base URL: {custom_base_url}")
-                    else:
-                        print(f"[DEBUG] Custom base URL set but model {self.model} uses {self.client_type}, not overriding")
-                elif custom_base_url and not use_custom_endpoint:
-                    print(f"[DEBUG] Custom base URL detected but disabled via toggle, using standard client")
-
     def _ensure_key_rotation(self):
         """Ensure we have a key selected and rotate if in multi-key mode"""
         if not self.use_multi_keys:
@@ -1501,15 +1448,29 @@ class UnifiedClient:
         return stats
     
     def reset_stats(self):
-        """Reset usage statistics"""
+        """Reset usage statistics and pattern tracking"""
         self.stats = {
             'total_requests': 0,
             'successful_requests': 0,
             'failed_requests': 0,
-            'empty_results': 0,  # MUST HAVE THIS
             'errors': defaultdict(int),
-            'response_times': []
+            'response_times': [],
+            'empty_results': 0
         }
+        
+        # Reset pattern tracking
+        self.pattern_counts = {}
+        self.last_pattern = None
+        
+        # Reset conversation tracking if not already set
+        if not hasattr(self, 'conversation_message_count'):
+            self.conversation_message_count = 0
+        
+        # Log if logger is available
+        if hasattr(self, 'logger'):
+            self.logger.info("Statistics and pattern tracking reset")
+        else:
+            print("Statistics and pattern tracking reset")
     
     def _rotate_to_next_available_key(self, skip_current: bool = False) -> bool:
         """
@@ -1997,7 +1958,7 @@ class UnifiedClient:
             else:
                 return False
 
-    def _get_shortest_cooldown_time(self) -> int:
+    def get_shortest_cooldown_time(self) -> int:
         """Get the shortest cooldown time among all keys"""
         # Check if cancelled at start
         if self._cancelled:
@@ -2024,8 +1985,12 @@ class UnifiedClient:
                     if remaining > 0:
                         min_cooldown = min(min_cooldown, remaining)
         
-        # Return the minimum wait time, capped at 60 seconds
-        return min(int(min_cooldown) if min_cooldown != float('inf') else 30, 60)
+        # Add random jitter to prevent thundering herd (0-5 seconds)
+        jitter = random.randint(0, 5)
+        
+        # Return the minimum wait time plus jitter, capped at 60 seconds
+        base_time = int(min_cooldown) if min_cooldown != float('inf') else 30
+        return min(base_time + jitter, 60)
         
     def _get_thread_assigned_key(self) -> Optional[int]:
         """Get the key index assigned to current thread"""
