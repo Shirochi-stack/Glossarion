@@ -999,12 +999,16 @@ class UnifiedClient:
         """Count how many keys are currently available"""
         if not self._multi_key_mode or not self.__class__._api_key_pool:
             return 0
-            
+        
         count = 0
         for i, key in enumerate(self.__class__._api_key_pool.keys):
             if key.enabled:
                 key_id = f"Key#{i+1} ({key.model})"
-                if not self.__class__._rate_limit_cache.is_rate_limited(key_id):
+                # Check both rate limit cache AND key's own cooling status
+                is_rate_limited = self.__class__._rate_limit_cache.is_rate_limited(key_id)
+                is_cooling = key.is_cooling_down  # Also check the key's own status
+                
+                if not is_rate_limited and not is_cooling:
                     count += 1
         return count
     
@@ -2671,13 +2675,13 @@ class UnifiedClient:
                                 self._ensure_thread_client()
                                 continue
                             
-                            retry_count += 1
-                            logger.info(f"[{thread_name}] Retrying with new key, attempt {retry_count}/{max_retries}")
+                            #retry_count += 1
+                            #logger.info(f"[{thread_name}] Retrying with new key, attempt {retry_count}/{max_retries}")
                             continue
                         else:
-                            # Single key mode - wait and retry indefinitely
+                            # Single key mode - wait and retry
                             wait_time = min(60 * (retry_count + 1), 120)
-                            logger.info(f"[{thread_name}] Rate limit, waiting {wait_time}s")
+                            print(f"[{thread_name}] Rate limit, waiting {wait_time}s")
                             
                             for i in range(wait_time):
                                 if self._cancelled:
@@ -2716,11 +2720,11 @@ class UnifiedClient:
                                 tls.request_count = 0
                                 self._ensure_thread_client()
                                 retry_count += 1
-                                logger.info(f"[{thread_name}] Rotated to {self.key_identifier} after error")
+                                print(f"[{thread_name}] Rotated to {self.key_identifier} after error")
                                 continue
                         
                         # Retry with same key
-                        logger.info(f"[{thread_name}] Retrying after {retry_reason} (attempt {retry_count + 1}/{max_retries})")
+                        print(f"[{thread_name}] Retrying after {retry_reason} (attempt {retry_count + 1}/{max_retries})")
                         retry_count += 1
                         time.sleep(2)
                         continue
@@ -3707,8 +3711,8 @@ class UnifiedClient:
                                 self._ensure_thread_client()
                                 continue
                             
-                            retry_count += 1
-                            logger.info(f"[{thread_name}] Retrying with new key, attempt {retry_count}/{max_retries}")
+                            #retry_count += 1
+                            #logger.info(f"[{thread_name}] Retrying with new key, attempt {retry_count}/{max_retries}")
                             continue
                         else:
                             # Single key mode - wait and retry indefinitely
@@ -3748,7 +3752,7 @@ class UnifiedClient:
                             
                             if not self._force_rotation:
                                 # Error-based rotation - try a different key
-                                logger.info(f"[{thread_name}] Image error occurred ({retry_reason}), rotating to new key...")
+                                print(f"[{thread_name}] Image error occurred ({retry_reason}), rotating to new key...")
                                 
                                 # Force reassignment
                                 tls.initialized = False
@@ -3756,7 +3760,7 @@ class UnifiedClient:
                                 self._ensure_thread_client()
                                 
                                 retry_count += 1
-                                logger.info(f"[{thread_name}] Rotated to {self.key_identifier} after image error")
+                                print(f"[{thread_name}] Rotated to {self.key_identifier} after image error")
                                 continue
                         
                         # Retry with same key (or if rotation disabled)
