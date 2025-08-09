@@ -2081,7 +2081,8 @@ class UnifiedClient:
         
         # Prepare provider-specific settings (but don't create clients yet)
         if self.client_type == 'openai':
-            print(f"[DEBUG] Preparing OpenAI client setup")
+            #print(f"[DEBUG] Preparing OpenAI client setup")
+            pass
             if openai is None:
                 raise ImportError("OpenAI library not installed. Install with: pip install openai")
             
@@ -2117,7 +2118,8 @@ class UnifiedClient:
             
             if use_gemini_endpoint and gemini_endpoint:
                 # Use OpenAI client for Gemini with custom endpoint
-                print(f"[DEBUG] Preparing Gemini with OpenAI-compatible endpoint")
+                #print(f"[DEBUG] Preparing Gemini with OpenAI-compatible endpoint")
+                pass
                 if openai is None:
                     raise ImportError("OpenAI library not installed. Install with: pip install openai")
                 
@@ -3689,7 +3691,7 @@ class UnifiedClient:
                                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                                 time.sleep(1)
                             
-                            retry_count += 1
+                            #retry_count += 1
                             continue
                     
                     # Check for cancellation
@@ -7150,23 +7152,61 @@ class UnifiedClient:
                     
                     # For OpenAI endpoint, we already have a UnifiedResponse
                     # Extract any thinking tokens if available
-                    if hasattr(response, 'raw_response') and hasattr(response.raw_response, 'usage'):
-                        usage = response.raw_response.usage
-                        if supports_thinking:
-                            # Try to find thinking tokens in various fields
-                            thinking_tokens = 0
+                    thinking_tokens_displayed = False
+                    
+                    if hasattr(response, 'raw_response'):
+                        raw_resp = response.raw_response
+                        
+                        # Check multiple possible locations for thinking tokens
+                        thinking_tokens = 0
+                        
+                        # Check in usage object
+                        if hasattr(raw_resp, 'usage'):
+                            usage = raw_resp.usage
+                            
+                            # Try various field names that might contain thinking tokens
                             if hasattr(usage, 'thoughts_token_count'):
                                 thinking_tokens = usage.thoughts_token_count or 0
                             elif hasattr(usage, 'thinking_tokens'):
                                 thinking_tokens = usage.thinking_tokens or 0
+                            elif hasattr(usage, 'reasoning_tokens'):
+                                thinking_tokens = usage.reasoning_tokens or 0
                             
+                            # Also check if there's a breakdown in the usage
+                            if hasattr(usage, 'completion_tokens_details'):
+                                details = usage.completion_tokens_details
+                                if hasattr(details, 'reasoning_tokens'):
+                                    thinking_tokens = details.reasoning_tokens or 0
+                        
+                        # Check in the raw response itself
+                        if thinking_tokens == 0 and hasattr(raw_resp, '__dict__'):
+                            # Look for thinking-related fields in the response
+                            for field_name in ['thoughts_token_count', 'thinking_tokens', 'reasoning_tokens']:
+                                if field_name in raw_resp.__dict__:
+                                    thinking_tokens = raw_resp.__dict__[field_name] or 0
+                                    if thinking_tokens > 0:
+                                        break
+                        
+                        # Display thinking tokens if found or if thinking was requested
+                        if supports_thinking:
                             if thinking_tokens > 0:
                                 print(f"   💭 Thinking tokens used: {thinking_tokens}")
+                                thinking_tokens_displayed = True
                             elif thinking_budget == 0:
                                 print(f"   ✅ Thinking successfully disabled (0 thinking tokens)")
-                            else:
-                                # Thinking requested but not reported by endpoint
-                                logger.debug("Thinking tokens may have been used but are not reported via OpenAI endpoint")
+                                thinking_tokens_displayed = True
+                            elif thinking_budget == -1:
+                                # Dynamic thinking - might not be reported
+                                print(f"   💭 Thinking: Dynamic mode (tokens may not be reported via OpenAI endpoint)")
+                                thinking_tokens_displayed = True
+                            elif thinking_budget > 0:
+                                # Specific budget requested but not reported
+                                print(f"   ⚠️ Thinking budget set to {thinking_budget} but tokens not reported via OpenAI endpoint")
+                                thinking_tokens_displayed = True
+                    
+                    # If we haven't displayed thinking status yet and it's supported, show a message
+                    if not thinking_tokens_displayed and supports_thinking:
+                        logger.debug("Thinking tokens may have been used but are not reported via OpenAI endpoint")
                     
                     # Check finish reason for prohibited content
                     if response.finish_reason == 'content_filter' or response.finish_reason == 'prohibited_content':
@@ -8679,8 +8719,12 @@ class UnifiedClient:
                         gemini_endpoint = gemini_endpoint + 'openai/'
                     else:
                         gemini_endpoint = gemini_endpoint + '/openai/'
-                
+                        
                 print(f"🔄 Using OpenAI-compatible endpoint for Gemini image: {gemini_endpoint}")
+                
+                # Get thinking budget and check if model supports thinking
+                thinking_budget = int(os.getenv("THINKING_BUDGET", "-1"))
+                supports_thinking = self._supports_thinking()
                 
                 # SAVE SAFETY CONFIGURATION FOR GEMINI OPENAI ENDPOINT (IMAGE)
                 # Check if safety settings are disabled
@@ -8696,6 +8740,17 @@ class UnifiedClient:
                 
                 print(f"🔒 Gemini OpenAI Endpoint Safety Status (Image): {safety_status}")
                 
+                # Log thinking status
+                if supports_thinking:
+                    if thinking_budget == 0:
+                        print(f"🧠 Thinking Status: Disabled")
+                    elif thinking_budget == -1:
+                        print(f"🧠 Thinking Status: Dynamic (model decides)")
+                    elif thinking_budget > 0:
+                        print(f"🧠 Thinking Status: Budget of {thinking_budget} tokens")
+                else:
+                    print(f"🧠 Thinking Status: Not supported by model")
+                
                 # Save configuration to file
                 config_data = {
                     "type": "GEMINI_OPENAI_ENDPOINT_IMAGE_REQUEST",
@@ -8705,6 +8760,8 @@ class UnifiedClient:
                     "safety_settings": readable_safety,
                     "temperature": temperature,
                     "max_output_tokens": max_tokens,
+                    "thinking_supported": supports_thinking,
+                    "thinking_budget": thinking_budget if supports_thinking else None,
                     "timestamp": datetime.now().isoformat(),
                 }
                 
@@ -8712,7 +8769,7 @@ class UnifiedClient:
                 self._save_gemini_safety_config(config_data, response_name)
                 
                 # Route to OpenAI-compatible handler
-                return self._send_openai_compatible(
+                response = self._send_openai_compatible(
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
@@ -8720,6 +8777,41 @@ class UnifiedClient:
                     response_name=response_name,
                     provider="gemini-openai"
                 )
+                
+                # Extract and display thinking tokens if available
+                if supports_thinking and hasattr(response, 'raw_response'):
+                    raw_resp = response.raw_response
+                    thinking_tokens = 0
+                    
+                    # Check in usage object
+                    if hasattr(raw_resp, 'usage'):
+                        usage = raw_resp.usage
+                        
+                        # Try various field names
+                        if hasattr(usage, 'thoughts_token_count'):
+                            thinking_tokens = usage.thoughts_token_count or 0
+                        elif hasattr(usage, 'thinking_tokens'):
+                            thinking_tokens = usage.thinking_tokens or 0
+                        elif hasattr(usage, 'reasoning_tokens'):
+                            thinking_tokens = usage.reasoning_tokens or 0
+                        
+                        # Check completion_tokens_details
+                        if hasattr(usage, 'completion_tokens_details'):
+                            details = usage.completion_tokens_details
+                            if hasattr(details, 'reasoning_tokens'):
+                                thinking_tokens = details.reasoning_tokens or 0
+                    
+                    # Display thinking tokens status
+                    if thinking_tokens > 0:
+                        print(f"   💭 Thinking tokens used: {thinking_tokens}")
+                    elif thinking_budget == 0:
+                        print(f"   ✅ Thinking successfully disabled (0 thinking tokens)")
+                    elif thinking_budget == -1:
+                        print(f"   💭 Thinking: Dynamic mode (tokens may not be reported via OpenAI endpoint)")
+                    elif thinking_budget > 0:
+                        print(f"   ⚠️ Thinking budget set to {thinking_budget} but tokens not reported via OpenAI endpoint")
+                
+                return response
         
             # Import types at the top
             from google.genai import types
