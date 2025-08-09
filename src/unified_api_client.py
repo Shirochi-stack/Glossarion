@@ -2615,53 +2615,11 @@ class UnifiedClient:
                             
                             print(f"[Thread-{thread_name}] Will retry with main key for prohibited content")
                             should_try_main_key = True
-                            
-                            # Try with main key WITHOUT incrementing retry count
-                            try:
-                                main_response = self._retry_with_main_key(
-                                    messages, temperature, max_tokens, max_completion_tokens, context
-                                )
-                                
-                                if main_response:
-                                    content, finish_reason = main_response
-                                    if content and content.strip() and len(content) > 10:
-                                        print(f"✅ Main key succeeded! Got {len(content)} chars")
-                                        successful_response = main_response
-                                        break  # Exit retry loop with success
-                                    else:
-                                        print(f"❌ Main key returned minimal content: {len(content) if content else 0} chars")
-                                else:
-                                    print(f"❌ Main key returned None")
-                                    
-                            except UnifiedClientError as main_error:
-                                # Handle specific error types from main key retry
-                                if main_error.error_type == "cancelled":
-                                    print(f"❌ Main key retry was cancelled")
-                                    # Don't increment retry count, just continue
-                                elif main_error.error_type == "prohibited_content":
-                                    print(f"❌ Main key also hit content filter")
-                                else:
-                                    print(f"❌ Main key error: {str(main_error)[:200]}")
-                                    
-                            except Exception as main_error:
-                                print(f"❌ Main key error: {str(main_error)[:200]}")
-                                # Check if main key also hit content filter
-                                main_error_str = str(main_error).lower()
-                                if any(indicator in main_error_str for indicator in content_filter_indicators):
-                                    print(f"❌ Main key also hit content filter")
-                            
-                            # Continue to next retry with different key
                             retry_count += 1
                             continue
                         else:
-                            # Either not in multi-key mode, or already tried main key
-                            if not self._multi_key_mode:
-                                print(f"[Thread-{thread_name}] Not in multi-key mode - cannot retry with main key")
-                            elif should_try_main_key:
-                                print(f"[Thread-{thread_name}] Already tried main key")
-                            else:
-                                print(f"[Thread-{thread_name}] Main key not available for retry")
-                            raise  # Re-raise the original error
+                            print(f"[Thread-{thread_name}] Prohibited content - cannot retry")
+                            raise
                     
                     # Check for rate limit
                     elif "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
@@ -3601,8 +3559,8 @@ class UnifiedClient:
         # Track which keys we've already tried to avoid infinite loops
         attempted_keys = set()
         
-        # Flag to track if we've tried main key for prohibited content
-        main_key_tried = False
+        # Flag to track if we should try main key for prohibited content
+        should_try_main_key = False
         
         # Define content filter indicators at method level
         content_filter_indicators = [
@@ -3654,12 +3612,12 @@ class UnifiedClient:
                             hasattr(self, 'original_model') and
                             self.original_api_key and 
                             self.original_model and
-                            not main_key_tried):
+                            not should_try_main_key):
                             
                             print(f"[Thread-{thread_name}] Will retry with main key for prohibited image content")
-                            main_key_tried = True
+                            should_try_main_key = True
                             
-                            # Try with main key WITHOUT incrementing retry count initially
+                            # Try with main key
                             try:
                                 main_response = self._retry_image_with_main_key(
                                     messages, image_data, temperature, max_tokens, max_completion_tokens, context
@@ -3667,24 +3625,11 @@ class UnifiedClient:
                                 
                                 if main_response:
                                     content, finish_reason = main_response
-                                    if content and content.strip() and len(content) > 10:
-                                        print(f"✅ Main key succeeded for image! Got {len(content)} chars")
-                                        successful_response = main_response
-                                        break  # Exit retry loop with success
-                                    else:
-                                        print(f"❌ Main key returned minimal image content: {len(content) if content else 0} chars")
+                                    print(f"✅ Main key succeeded for image! Returning response")
+                                    successful_response = main_response
+                                    break  # Exit retry loop with success
                                 else:
                                     print(f"❌ Main key returned None for image")
-                                    
-                            except UnifiedClientError as main_error:
-                                # Handle specific error types from main key retry
-                                if main_error.error_type == "cancelled":
-                                    print(f"❌ Main key image retry was cancelled")
-                                    # Don't count as failure, just continue
-                                elif main_error.error_type == "prohibited_content":
-                                    print(f"❌ Main key also hit content filter for image")
-                                else:
-                                    print(f"❌ Main key image error: {str(main_error)[:200]}")
                                     
                             except Exception as main_error:
                                 print(f"❌ Main key image error: {str(main_error)[:200]}")
@@ -3693,18 +3638,13 @@ class UnifiedClient:
                                 if any(indicator in main_error_str for indicator in content_filter_indicators):
                                     print(f"❌ Main key also hit content filter for image")
                             
-                            # Continue to next retry with different key
+                            # Don't count this as a retry, just continue
                             retry_count += 1
                             continue
                         else:
                             # Either not in multi-key mode, or already tried main key
-                            if not self._multi_key_mode:
-                                print(f"[Thread-{thread_name}] Not in multi-key mode - cannot retry image with main key")
-                            elif main_key_tried:
-                                print(f"[Thread-{thread_name}] Already tried main key for image")
-                            else:
-                                print(f"[Thread-{thread_name}] Main key not available for image retry")
-                            raise  # Re-raise the original error
+                            print(f"[Thread-{thread_name}] Prohibited image content - cannot retry")
+                            raise
                     
                     # Check for rate limit
                     elif "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
