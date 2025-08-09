@@ -1027,7 +1027,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.7.9"
+        __version__ = "3.8.5"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1134,6 +1134,9 @@ class TranslatorGUI:
         self.current_file_index = 0
         self.use_gemini_openai_endpoint_var = tk.BooleanVar(value=self.config.get('use_gemini_openai_endpoint', False))
         self.gemini_openai_endpoint_var = tk.StringVar(value=self.config.get('gemini_openai_endpoint', ''))
+        # Initialize fuzzy threshold variable
+        if not hasattr(self, 'fuzzy_threshold_var'):
+            self.fuzzy_threshold_var = tk.DoubleVar(value=self.config.get('glossary_fuzzy_threshold', 0.90))
 
         
         # Initialize the variables with default values
@@ -1723,9 +1726,10 @@ Recent translations to summarize:
         self.api_key_visible = False  # Default to hidden
         
         if 'glossary_duplicate_key_mode' not in self.config:
-            self.config['glossary_duplicate_key_mode'] = 'auto'
-        if 'glossary_fuzzy_threshold' not in self.config:
-            self.config['glossary_fuzzy_threshold'] = '85'        
+            self.config['glossary_duplicate_key_mode'] = 'fuzzy'
+        # Initialize fuzzy threshold variable
+        if not hasattr(self, 'fuzzy_threshold_var'):
+            self.fuzzy_threshold_var = tk.DoubleVar(value=self.config.get('glossary_fuzzy_threshold', 0.90))        
         
         # Create all config variables with helper
         def create_var(var_type, key, default):
@@ -1837,7 +1841,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.7.9 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.8.5 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def create_file_section(self):
@@ -4039,38 +4043,38 @@ Recent translations to summarize:
                   bootstyle="secondary").grid(row=1, column=2, columnspan=2, padx=5, pady=10, sticky="ew")
         
     def glossary_manager(self):
-       """Open comprehensive glossary management dialog"""
-       # Create scrollable dialog (stays hidden)
-       dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
-           self.master, 
-           "Glossary Manager",
-           width=0,  # Will be auto-sized
-           height=None,
-           max_width_ratio=0.9,
-           max_height_ratio=0.85
-       )
-       
-       # Create notebook for tabs
-       notebook = ttk.Notebook(scrollable_frame)
-       notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-       
-       # Create and add tabs
-       tabs = [
-           ("Manual Glossary Extraction", self._setup_manual_glossary_tab),
-           ("Automatic Glossary Generation", self._setup_auto_glossary_tab),
-           ("Glossary Editor", self._setup_glossary_editor_tab)
-       ]
-       
-       for tab_name, setup_method in tabs:
-           frame = ttk.Frame(notebook)
-           notebook.add(frame, text=tab_name)
-           setup_method(frame)
-       
-       # Dialog Controls
-       control_frame = tk.Frame(dialog)
-       control_frame.pack(fill=tk.X, padx=10, pady=10)
-       
-       def save_glossary_settings():
+        """Open comprehensive glossary management dialog"""
+        # Create scrollable dialog (stays hidden)
+        dialog, scrollable_frame, canvas = self.wm.setup_scrollable(
+            self.master, 
+            "Glossary Manager",
+            width=0,  # Will be auto-sized
+            height=None,
+            max_width_ratio=0.9,
+            max_height_ratio=0.85
+        )
+        
+        # Create notebook for tabs
+        notebook = ttk.Notebook(scrollable_frame)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Create and add tabs
+        tabs = [
+            ("Manual Glossary Extraction", self._setup_manual_glossary_tab),
+            ("Automatic Glossary Generation", self._setup_auto_glossary_tab),
+            ("Glossary Editor", self._setup_glossary_editor_tab)
+        ]
+        
+        for tab_name, setup_method in tabs:
+            frame = ttk.Frame(notebook)
+            notebook.add(frame, text=tab_name)
+            setup_method(frame)
+        
+        # Dialog Controls
+        control_frame = tk.Frame(dialog)
+        control_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        def save_glossary_settings():
             try:
                 # Save custom fields
                 self.config['custom_glossary_fields'] = self.custom_glossary_fields
@@ -4105,10 +4109,14 @@ Recent translations to summarize:
                 # Honorifics filter toggle
                 self.config['glossary_disable_honorifics_filter'] = self.disable_honorifics_var.get()
                 
+                # Fuzzy matching threshold
+                self.config['glossary_fuzzy_threshold'] = self.fuzzy_threshold_var.get()
+                
                 # Update environment variables
                 os.environ['GLOSSARY_SYSTEM_PROMPT'] = self.manual_glossary_prompt
                 os.environ['AUTO_GLOSSARY_PROMPT'] = self.auto_glossary_prompt
                 os.environ['GLOSSARY_DISABLE_HONORIFICS_FILTER'] = '1' if self.disable_honorifics_var.get() else '0'
+                os.environ['GLOSSARY_FUZZY_THRESHOLD'] = str(self.fuzzy_threshold_var.get())
                 
                 # Set custom entry types as environment variable
                 os.environ['GLOSSARY_CUSTOM_ENTRY_TYPES'] = json.dumps(self.custom_entry_types)
@@ -4136,33 +4144,33 @@ Recent translations to summarize:
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to save settings: {e}")
                 self.append_log(f"❌ Failed to save glossary settings: {e}")
-               
-       # Create button container
-       button_container = tk.Frame(control_frame)
-       button_container.pack(expand=True)
-       
-       # Add buttons
-       tb.Button(
-           button_container, 
-           text="Save All Settings", 
-           command=save_glossary_settings, 
-           bootstyle="success", 
-           width=20
-       ).pack(side=tk.LEFT, padx=5)
-       
-       tb.Button(
-           button_container, 
-           text="Cancel", 
-           command=lambda: [dialog._cleanup_scrolling(), dialog.destroy()], 
-           bootstyle="secondary", 
-           width=20
-       ).pack(side=tk.LEFT, padx=5)
-       
-       # Auto-resize and show
-       self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.5)
-       
-       dialog.protocol("WM_DELETE_WINDOW", 
-                      lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
+                
+        # Create button container
+        button_container = tk.Frame(control_frame)
+        button_container.pack(expand=True)
+        
+        # Add buttons
+        tb.Button(
+            button_container, 
+            text="Save All Settings", 
+            command=save_glossary_settings, 
+            bootstyle="success", 
+            width=20
+        ).pack(side=tk.LEFT, padx=5)
+        
+        tb.Button(
+            button_container, 
+            text="Cancel", 
+            command=lambda: [dialog._cleanup_scrolling(), dialog.destroy()], 
+            bootstyle="secondary", 
+            width=20
+        ).pack(side=tk.LEFT, padx=5)
+        
+        # Auto-resize and show
+        self.wm.auto_resize_dialog(dialog, canvas, max_width_ratio=0.9, max_height_ratio=1.5)
+        
+        dialog.protocol("WM_DELETE_WINDOW", 
+                       lambda: [dialog._cleanup_scrolling(), dialog.destroy()])
 
     def _setup_manual_glossary_tab(self, parent):
         """Setup manual glossary tab - simplified for new format"""
@@ -4358,20 +4366,83 @@ Recent translations to summarize:
         tb.Button(custom_controls, text="Add", command=add_custom_field, width=10).pack(side=tk.LEFT, padx=2)
         tb.Button(custom_controls, text="Remove", command=remove_custom_field, width=10).pack(side=tk.LEFT, padx=2)
         
-        # Continue with rest of the original code...
-        # Honorifics filter toggle
-        honorifics_frame = tk.LabelFrame(manual_container, text="Honorifics Handling", padx=10, pady=10)
-        honorifics_frame.pack(fill=tk.X, pady=(0, 10))
+        # Duplicate Detection Settings
+        duplicate_frame = tk.LabelFrame(manual_container, text="Duplicate Detection", padx=10, pady=10)
+        duplicate_frame.pack(fill=tk.X, pady=(0, 10))
         
+        # Honorifics filter toggle
         if not hasattr(self, 'disable_honorifics_var'):
             self.disable_honorifics_var = tk.BooleanVar(value=self.config.get('glossary_disable_honorifics_filter', False))
         
-        tb.Checkbutton(honorifics_frame, text="Disable honorifics filtering", 
+        tb.Checkbutton(duplicate_frame, text="Disable honorifics filtering", 
                       variable=self.disable_honorifics_var,
                       bootstyle="round-toggle").pack(anchor=tk.W)
         
-        tk.Label(honorifics_frame, text="When enabled, honorifics (님, さん, 先生, etc.) will NOT be removed from raw names",
+        tk.Label(duplicate_frame, text="When enabled, honorifics (님, さん, 先生, etc.) will NOT be removed from raw names",
                 font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, padx=20, pady=(0, 5))
+        
+        # Fuzzy matching slider
+        fuzzy_frame = tk.Frame(duplicate_frame)
+        fuzzy_frame.pack(fill=tk.X, pady=(10, 0))
+
+        tk.Label(fuzzy_frame, text="Fuzzy Matching Threshold:",
+                font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W)
+
+        tk.Label(fuzzy_frame, text="Controls how similar names must be to be considered duplicates",
+                font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, pady=(0, 5))
+
+        # Slider frame
+        slider_frame = tk.Frame(fuzzy_frame)
+        slider_frame.pack(fill=tk.X, pady=(5, 0))
+
+        # Initialize fuzzy threshold variable
+        if not hasattr(self, 'fuzzy_threshold_var'):
+            self.fuzzy_threshold_var = tk.DoubleVar(value=self.config.get('glossary_fuzzy_threshold', 0.90))
+
+        # Slider
+        fuzzy_slider = tb.Scale(
+            slider_frame,
+            from_=0.5,
+            to=1.0,
+            orient=tk.HORIZONTAL,
+            variable=self.fuzzy_threshold_var,
+            style="info.Horizontal.TScale",
+            length=300
+        )
+        fuzzy_slider.pack(side=tk.LEFT, padx=(0, 10))
+
+        # Value label
+        self.fuzzy_value_label = tk.Label(slider_frame, text=f"{self.fuzzy_threshold_var.get():.2f}")
+        self.fuzzy_value_label.pack(side=tk.LEFT)
+
+        # Description label - CREATE THIS FIRST
+        fuzzy_desc_label = tk.Label(fuzzy_frame, text="", font=('TkDefaultFont', 9), fg='blue')
+        fuzzy_desc_label.pack(anchor=tk.W, pady=(5, 0))
+
+        # Update label when slider moves - DEFINE AFTER CREATING THE LABEL
+        def update_fuzzy_label(*args):
+            value = self.fuzzy_threshold_var.get()
+            self.fuzzy_value_label.config(text=f"{value:.2f}")
+            
+            # Show description
+            if value >= 0.95:
+                desc = "Exact match only (strict)"
+            elif value >= 0.85:
+                desc = "Very similar names (recommended)"
+            elif value >= 0.75:
+                desc = "Moderately similar names"
+            elif value >= 0.65:
+                desc = "Loosely similar names"
+            else:
+                desc = "Very loose matching (may over-merge)"
+            
+            fuzzy_desc_label.config(text=desc)
+
+        # Set up the trace AFTER creating the label
+        self.fuzzy_threshold_var.trace('w', update_fuzzy_label)
+
+        # Initialize description by calling the function
+        update_fuzzy_label()
         
         # Prompt section (continues as before)
         prompt_frame = tk.LabelFrame(manual_container, text="Extraction Prompt", padx=10, pady=10)
@@ -4392,15 +4463,15 @@ Recent translations to summarize:
         if not hasattr(self, 'manual_glossary_prompt') or not self.manual_glossary_prompt:
             self.manual_glossary_prompt = """Extract character names and important terms from the following text.
 
-Output format:
-{fields}
+    Output format:
+    {fields}
 
-Rules:
-- Output ONLY CSV lines in the exact format shown above
-- No headers, no extra text, no JSON
-- One entry per line
-- Leave gender empty for terms (just end with comma)
-"""
+    Rules:
+    - Output ONLY CSV lines in the exact format shown above
+    - No headers, no extra text, no JSON
+    - One entry per line
+    - Leave gender empty for terms (just end with comma)
+    """
         
         self.manual_prompt_text.insert('1.0', self.manual_glossary_prompt)
         self.manual_prompt_text.edit_reset()
@@ -4413,15 +4484,15 @@ Rules:
                 self.manual_prompt_text.delete('1.0', tk.END)
                 default_prompt = """Extract character names and important terms from the following text.
 
-Output format:
-{fields}
+    Output format:
+    {fields}
 
-Rules:
-- Output ONLY CSV lines in the exact format shown above
-- No headers, no extra text, no JSON
-- One entry per line
-- Leave gender empty for terms (just end with comma)
-"""
+    Rules:
+    - Output ONLY CSV lines in the exact format shown above
+    - No headers, no extra text, no JSON
+    - One entry per line
+    - Leave gender empty for terms (just end with comma)
+    """
                 self.manual_prompt_text.insert('1.0', default_prompt)
         
         tb.Button(prompt_controls, text="Reset to Default", command=reset_manual_prompt, 
@@ -5538,7 +5609,7 @@ Rules:
         buttons_row2 = [
            ("Trim Entries", smart_trim_dialog, "primary"),
            ("Filter Entries", filter_entries_dialog, "primary"),
-           ("Convert Format", lambda: self._convert_glossary_format(load_glossary_for_editing), "info"),
+           ("Convert Format", lambda: self.convert_glossary_format(load_glossary_for_editing), "info"),
            ("Export Selection", export_selection, "secondary"),
            ("About Format", duplicate_detection_settings, "info")
         ]
@@ -5628,81 +5699,118 @@ Rules:
        
        dialog.deiconify()
 
-    def _convert_glossary_format(self, reload_callback):
-        """Convert between old and new glossary formats"""
+    def convert_glossary_format(self, reload_callback):
+        """Export glossary to CSV format"""
         if not self.current_glossary_data:
             messagebox.showerror("Error", "No glossary loaded")
             return
         
         # Create backup before conversion
-        if not self.create_glossary_backup("before_convert"):
+        if not self.create_glossary_backup("before_export"):
             return
         
-        if isinstance(self.current_glossary_data, list) and self.current_glossary_data:
-            # Check current format
-            if 'type' in self.current_glossary_data[0]:
-                # Convert from new format to old format
-                if messagebox.askyesno("Convert Format", 
-                    "Convert from simple format to old format?\n\n"
-                    "This will convert:\n"
-                    "type/raw_name/translated_name → original_name/name"):
-                    
-                    converted = []
-                    for entry in self.current_glossary_data:
-                        new_entry = {
-                            'original_name': entry.get('raw_name', ''),
-                            'name': entry.get('translated_name', '')
-                        }
-                        if entry.get('type') == 'character' and 'gender' in entry:
-                            new_entry['gender'] = entry['gender']
-                        converted.append(new_entry)
-                    
-                    self.current_glossary_data = converted
-                    
-                    path = self.editor_file_var.get()
-                    with open(path, 'w', encoding='utf-8') as f:
-                        json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
-                    
-                    messagebox.showinfo("Success", "Converted to old format")
-                    reload_callback()
-            else:
-                # Convert from old format to new format
-                if messagebox.askyesno("Convert Format", 
-                    "Convert from old format to simple format?\n\n"
-                    "This will convert:\n"
-                    "original_name/name → type/raw_name/translated_name"):
-                    
-                    converted = []
-                    for entry in self.current_glossary_data:
-                        # Determine type based on content
-                        is_location = False
-                        if 'locations' in entry and entry['locations']:
-                            is_location = True
-                        elif 'title' in entry and any(term in str(entry.get('title', '')).lower() 
-                                                     for term in ['location', 'place', 'city', 'region']):
-                            is_location = True
-                        
-                        new_entry = {
-                            'type': 'term' if is_location else 'character',
-                            'raw_name': entry.get('original_name', entry.get('original', '')),
-                            'translated_name': entry.get('name', entry.get('translated', ''))
-                        }
-                        
-                        if new_entry['type'] == 'character':
-                            new_entry['gender'] = entry.get('gender', 'Unknown')
-                        
-                        converted.append(new_entry)
-                    
-                    self.current_glossary_data = converted
-                    
-                    path = self.editor_file_var.get()
-                    with open(path, 'w', encoding='utf-8') as f:
-                        json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
-                    
-                    messagebox.showinfo("Success", "Converted to simple format")
-                    reload_callback()
-        else:
-            messagebox.showinfo("Info", "Format conversion only works with list-based glossaries")
+        # Get current file path
+        current_path = self.editor_file_var.get()
+        default_csv_path = current_path.replace('.json', '.csv')
+        
+        # Ask user for CSV save location
+        from tkinter import filedialog
+        csv_path = filedialog.asksaveasfilename(
+            title="Export Glossary to CSV",
+            defaultextension=".csv",
+            initialfile=os.path.basename(default_csv_path),
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        
+        if not csv_path:
+            return
+        
+        try:
+            import csv
+            
+            # Get custom types for gender info
+            custom_types = self.config.get('custom_entry_types', {
+                'character': {'enabled': True, 'has_gender': True},
+                'term': {'enabled': True, 'has_gender': False}
+            })
+            
+            # Get custom fields
+            custom_fields = self.config.get('custom_glossary_fields', [])
+            
+            with open(csv_path, 'w', encoding='utf-8', newline='') as f:
+                writer = csv.writer(f)
+                
+                # Build header row
+                header = ['type', 'raw_name', 'translated_name', 'gender']
+                if custom_fields:
+                    header.extend(custom_fields)
+                
+                # Write header row
+                writer.writerow(header)
+                
+                # Process based on format
+                if isinstance(self.current_glossary_data, list) and self.current_glossary_data:
+                    if 'type' in self.current_glossary_data[0]:
+                        # New format - direct export
+                        for entry in self.current_glossary_data:
+                            entry_type = entry.get('type', 'term')
+                            type_config = custom_types.get(entry_type, {})
+                            
+                            row = [
+                                entry_type,
+                                entry.get('raw_name', ''),
+                                entry.get('translated_name', '')
+                            ]
+                            
+                            # Add gender
+                            if type_config.get('has_gender', False):
+                                row.append(entry.get('gender', ''))
+                            else:
+                                row.append('')
+                            
+                            # Add custom field values
+                            for field in custom_fields:
+                                row.append(entry.get(field, ''))
+                            
+                            writer.writerow(row)
+                    else:
+                        # Old format - convert then export
+                        for entry in self.current_glossary_data:
+                            # Determine type
+                            is_location = False
+                            if 'locations' in entry and entry['locations']:
+                                is_location = True
+                            elif 'title' in entry and any(term in str(entry.get('title', '')).lower() 
+                                                         for term in ['location', 'place', 'city', 'region']):
+                                is_location = True
+                            
+                            entry_type = 'term' if is_location else 'character'
+                            type_config = custom_types.get(entry_type, {})
+                            
+                            row = [
+                                entry_type,
+                                entry.get('original_name', entry.get('original', '')),
+                                entry.get('name', entry.get('translated', ''))
+                            ]
+                            
+                            # Add gender
+                            if type_config.get('has_gender', False):
+                                row.append(entry.get('gender', 'Unknown'))
+                            else:
+                                row.append('')
+                            
+                            # Add empty custom fields
+                            for field in custom_fields:
+                                row.append('')
+                            
+                            writer.writerow(row)
+            
+            messagebox.showinfo("Success", f"Glossary exported to CSV:\n{csv_path}")
+            self.append_log(f"✅ Exported glossary to: {csv_path}")
+            
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export CSV: {e}")
+            self.append_log(f"❌ CSV export failed: {e}")
 
     def _make_bottom_toolbar(self):
         """Create the bottom toolbar with all action buttons"""
@@ -7023,6 +7131,7 @@ Rules:
             'USE_GEMINI_OPENAI_ENDPOINT': '1' if self.use_gemini_openai_endpoint_var.get() else '0',
             'GEMINI_OPENAI_ENDPOINT': self.gemini_openai_endpoint_var.get() if self.gemini_openai_endpoint_var.get() else '',
             "ATTACH_CSS_TO_CHAPTERS": "1" if self.attach_css_to_chapters_var.get() else "0",
+            'GLOSSARY_FUZZY_THRESHOLD': str(self.config.get('glossary_fuzzy_threshold', 0.90)),
 
             # Extraction settings
             "EXTRACTION_MODE": extraction_mode,
@@ -13511,6 +13620,14 @@ Important rules:
                 return
             self.config['translation_history_limit'] = safe_int(trans_history_val, 2)
             
+            # Add fuzzy matching threshold
+            if hasattr(self, 'fuzzy_threshold_var'):
+                fuzzy_val = self.fuzzy_threshold_var.get()
+                if 0.5 <= fuzzy_val <= 1.0:
+                    self.config['glossary_fuzzy_threshold'] = fuzzy_val
+                else:
+                    self.config['glossary_fuzzy_threshold'] = 0.90  # default
+                
             # Save all other settings
             self.config['api_key'] = self.api_key_entry.get()
             self.config['REMOVE_AI_ARTIFACTS'] = self.REMOVE_AI_ARTIFACTS_var.get()
@@ -13678,7 +13795,7 @@ Important rules:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.7.9...")
+    print("🚀 Starting Glossarion v3.8.5...")
     
     # Initialize splash screen
     splash_manager = None
