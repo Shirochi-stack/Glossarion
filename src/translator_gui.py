@@ -2028,6 +2028,7 @@ Recent translations to summarize:
             # OpenAI Models
             "gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4.1-nano", "gpt-4.1-mini", "gpt-4.1",
             "gpt-3.5-turbo", "gpt-3.5-turbo-16k", "gpt-4", "gpt-4-32k",
+            "gpt-5-mini","gpt-5","gpt-5-nano",
             "o1-preview", "o1-mini", "o3", "o4-mini",
             
             # Google Gemini Models
@@ -2492,10 +2493,20 @@ Recent translations to summarize:
             if splash_callback:
                 splash_callback("Loading translation modules...")
             
-            # Global module imports (unchanged for compatibility)
+            # Initialize global variables to None FIRST to avoid NameError
             global translation_main, translation_stop_flag, translation_stop_check
             global glossary_main, glossary_stop_flag, glossary_stop_check
             global fallback_compile_epub, scan_html_folder
+            
+            # Set all to None initially in case imports fail
+            translation_main = None
+            translation_stop_flag = None
+            translation_stop_check = None
+            glossary_main = None
+            glossary_stop_flag = None
+            glossary_stop_check = None
+            fallback_compile_epub = None
+            scan_html_folder = None
             
             # Enhanced module configuration with validation and retry info
             modules = [
@@ -2569,7 +2580,9 @@ Recent translations to summarize:
                             import TransateKRtoEN
                             # Verify the module has required functions
                             if hasattr(TransateKRtoEN, 'main') and hasattr(TransateKRtoEN, 'set_stop_flag'):
-                                from TransateKRtoEN import main as translation_main, set_stop_flag as translation_stop_flag, is_stop_requested as translation_stop_check
+                                translation_main = TransateKRtoEN.main
+                                translation_stop_flag = TransateKRtoEN.set_stop_flag
+                                translation_stop_check = TransateKRtoEN.is_stop_requested if hasattr(TransateKRtoEN, 'is_stop_requested') else None
                             else:
                                 raise ImportError("TransateKRtoEN module missing required functions")
                                 
@@ -2577,7 +2590,9 @@ Recent translations to summarize:
                             # Validate the module before importing critical functions  
                             import extract_glossary_from_epub
                             if hasattr(extract_glossary_from_epub, 'main') and hasattr(extract_glossary_from_epub, 'set_stop_flag'):
-                                from extract_glossary_from_epub import main as glossary_main, set_stop_flag as glossary_stop_flag, is_stop_requested as glossary_stop_check
+                                glossary_main = extract_glossary_from_epub.main
+                                glossary_stop_flag = extract_glossary_from_epub.set_stop_flag
+                                glossary_stop_check = extract_glossary_from_epub.is_stop_requested if hasattr(extract_glossary_from_epub, 'is_stop_requested') else None
                             else:
                                 raise ImportError("extract_glossary_from_epub module missing required functions")
                                 
@@ -2585,15 +2600,15 @@ Recent translations to summarize:
                             # Validate the module before importing
                             import epub_converter
                             if hasattr(epub_converter, 'fallback_compile_epub'):
-                                from epub_converter import fallback_compile_epub
+                                fallback_compile_epub = epub_converter.fallback_compile_epub
                             else:
                                 raise ImportError("epub_converter module missing fallback_compile_epub function")
                                 
                         elif module_name == 'scan_html_folder':
                             # Validate the module before importing
-                            import scan_html_folder
-                            if hasattr(scan_html_folder, 'scan_html_folder'):
-                                from scan_html_folder import scan_html_folder
+                            import scan_html_folder as scan_module
+                            if hasattr(scan_module, 'scan_html_folder'):
+                                scan_html_folder = scan_module.scan_html_folder
                             else:
                                 raise ImportError("scan_html_folder module missing scan_html_folder function")
                         
@@ -2667,6 +2682,16 @@ Recent translations to summarize:
                         for failure in non_critical_failures:
                             self.append_log(f"⚠️ Optional module failed: {failure['display_name']} - {failure['error']}")
             
+            # Store references to imported modules in instance variables for later use
+            self._translation_main = translation_main
+            self._translation_stop_flag = translation_stop_flag
+            self._translation_stop_check = translation_stop_check
+            self._glossary_main = glossary_main
+            self._glossary_stop_flag = glossary_stop_flag
+            self._glossary_stop_check = glossary_stop_check
+            self._fallback_compile_epub = fallback_compile_epub
+            self._scan_html_folder = scan_html_folder
+            
             # Final module state update with enhanced error checking
             self._modules_loaded = True
             self._modules_loading = False
@@ -2713,17 +2738,20 @@ Recent translations to summarize:
         if not self._modules_loaded:
             return
         
+        # Use the stored instance variables instead of globals
         button_checks = [
-            (translation_main, 'run_button', "Translation"),
-            (glossary_main, 'glossary_button', "Glossary extraction"),
-            (fallback_compile_epub, 'epub_button', "EPUB converter"),
-            (scan_html_folder, 'qa_button', "QA scanner")
+            (self._translation_main if hasattr(self, '_translation_main') else None, 'button_run', "Translation"),
+            (self._glossary_main if hasattr(self, '_glossary_main') else None, 'glossary_button', "Glossary extraction"),
+            (self._fallback_compile_epub if hasattr(self, '_fallback_compile_epub') else None, 'epub_button', "EPUB converter"),
+            (self._scan_html_folder if hasattr(self, '_scan_html_folder') else None, 'qa_button', "QA scanner")
         ]
         
         for module, button_attr, name in button_checks:
             if module is None and hasattr(self, button_attr):
-                getattr(self, button_attr).config(state='disabled')
-                self.append_log(f"⚠️ {name} module not available")
+                button = getattr(self, button_attr, None)
+                if button:
+                    button.config(state='disabled')
+                    self.append_log(f"⚠️ {name} module not available")
 
     def configure_title_prompt(self):
         """Configure the book title translation prompt"""
@@ -5742,7 +5770,6 @@ Rules:
         self.config['force_safe_ratios'] = is_safe
         self.save_config()
     
-    # Updated Translation Methods
     def run_translation_thread(self):
         """Start translation in a separate thread"""
         if hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive():
@@ -5756,7 +5783,6 @@ Rules:
         
         # Check if files are selected
         if not hasattr(self, 'selected_files') or not self.selected_files:
-            # Try to get file from entry field (backward compatibility)
             file_path = self.entry_epub.get().strip()
             if not file_path or file_path.startswith("No file selected") or "files selected" in file_path:
                 messagebox.showerror("Error", "Please select file(s) to translate.")
@@ -5776,10 +5802,120 @@ Rules:
         except:
             pass
         
+        # Update button immediately to show translation is starting
+        if hasattr(self, 'button_run'):
+            self.button_run.config(text="⏹ Stop", state="normal")
+        
+        # Start thread IMMEDIATELY - no heavy operations here
         thread_name = f"TranslationThread_{int(time.time())}"
-        self.translation_thread = threading.Thread(target=self.run_translation_direct, name=thread_name, daemon=True)
+        self.translation_thread = threading.Thread(
+            target=self.run_translation_wrapper, 
+            name=thread_name, 
+            daemon=True
+        )
         self.translation_thread.start()
+        
+        # Schedule button update check
         self.master.after(100, self.update_run_button)
+
+    def run_translation_wrapper(self):
+        """Wrapper that handles ALL initialization in background thread"""
+        try:
+            # Show initial feedback immediately
+            self.append_log("🚀 Starting translation process...")
+            
+            # Load modules in background thread (not main thread!)
+            if not self._modules_loaded:
+                self.append_log("📦 Loading translation modules...")
+                
+                # Create a progress callback that uses append_log
+                def module_progress(msg):
+                    self.append_log(f"   {msg}")
+                
+                # Load modules with progress feedback
+                if not self._lazy_load_modules(splash_callback=module_progress):
+                    self.append_log("❌ Failed to load required modules")
+                    return
+            
+            # Check for large EPUBs and set optimization parameters
+            epub_files = [f for f in self.selected_files if f.lower().endswith('.epub')]
+            
+            for epub_path in epub_files:
+                try:
+                    import zipfile
+                    with zipfile.ZipFile(epub_path, 'r') as zf:
+                        # Quick count without reading content
+                        html_files = [f for f in zf.namelist() if f.lower().endswith(('.html', '.xhtml', '.htm'))]
+                        file_count = len(html_files)
+                        
+                        if file_count > 50:
+                            self.append_log(f"📚 Large EPUB detected: {file_count} chapters")
+                            
+                            # Get user-configured worker count
+                            if hasattr(self, 'config') and 'ai_hunter_config' in self.config:
+                                max_workers = self.config.get('ai_hunter_config', {}).get('ai_hunter_max_workers', 4)
+                            else:
+                                max_workers = 4  # Default value
+                            
+                            # Set extraction parameters
+                            os.environ['EXTRACTION_WORKERS'] = str(max_workers)
+                            os.environ['EXTRACTION_PROGRESS_CALLBACK'] = 'enabled'
+                            
+                            # Set progress interval based on file count
+                            if file_count > 500:
+                                progress_interval = 50
+                                os.environ['EXTRACTION_BATCH_SIZE'] = '100'
+                                self.append_log(f"⚡ Using {max_workers} workers with batch size 100")
+                            elif file_count > 200:
+                                progress_interval = 25
+                                os.environ['EXTRACTION_BATCH_SIZE'] = '50'
+                                self.append_log(f"⚡ Using {max_workers} workers with batch size 50")
+                            elif file_count > 100:
+                                progress_interval = 20
+                                os.environ['EXTRACTION_BATCH_SIZE'] = '25'
+                                self.append_log(f"⚡ Using {max_workers} workers with batch size 25")
+                            else:
+                                progress_interval = 10
+                                os.environ['EXTRACTION_BATCH_SIZE'] = '20'
+                                self.append_log(f"⚡ Using {max_workers} workers with batch size 20")
+                            
+                            os.environ['EXTRACTION_PROGRESS_INTERVAL'] = str(progress_interval)
+                            
+                            # Enable performance flags for large files
+                            os.environ['FAST_EXTRACTION'] = '1'
+                            os.environ['PARALLEL_PARSE'] = '1'
+                            
+                            # For very large files, enable aggressive optimization
+                            if file_count > 300:
+                                os.environ['SKIP_VALIDATION'] = '1'
+                                os.environ['LAZY_LOAD_CONTENT'] = '1'
+                                self.append_log("🚀 Enabled aggressive optimization for very large file")
+                            
+                except Exception as e:
+                    # If we can't check, just continue
+                    pass
+            
+            # Now run the actual translation
+            self.run_translation_direct()
+            
+        except Exception as e:
+            self.append_log(f"❌ Translation error: {e}")
+            import traceback
+            self.append_log(f"❌ Full error: {traceback.format_exc()}")
+        finally:
+            # Clean up environment variables
+            env_vars = [
+                'EXTRACTION_WORKERS', 'EXTRACTION_BATCH_SIZE',
+                'EXTRACTION_PROGRESS_CALLBACK', 'EXTRACTION_PROGRESS_INTERVAL',
+                'FAST_EXTRACTION', 'PARALLEL_PARSE', 'SKIP_VALIDATION',
+                'LAZY_LOAD_CONTENT'
+            ]
+            for var in env_vars:
+                if var in os.environ:
+                    del os.environ[var]
+            
+            # Update button state on main thread
+            self.master.after(0, self.update_run_button)
 
     def run_translation_direct(self):
         """Run translation directly - handles multiple files and different file types"""
@@ -5787,13 +5923,15 @@ Rules:
             # Check stop at the very beginning
             if self.stop_requested:
                 return
-                
-            self.append_log("🔄 Loading translation modules...")
-            if not self._lazy_load_modules():
-                self.append_log("❌ Failed to load translation modules")
+            
+            # DON'T CALL _lazy_load_modules HERE!
+            # Modules are already loaded in the wrapper
+            # Just verify they're loaded
+            if not self._modules_loaded:
+                self.append_log("❌ Translation modules not loaded")
                 return
 
-            # Check stop after loading modules
+            # Check stop after verification
             if self.stop_requested:
                 return
 
@@ -6192,7 +6330,7 @@ Rules:
             # Check if it's a vision-capable model
             vision_models = [
                 'claude-opus-4-20250514', 'claude-sonnet-4-20250514',
-                'gpt-4-turbo', 'gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini',
+                'gpt-4-turbo', 'gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-5-mini','gpt-5','gpt-5-nano',
                 'gpt-4-vision-preview',
                 'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-exp',
                 'gemini-2.5-pro', 'gemini-2.5-flash',
