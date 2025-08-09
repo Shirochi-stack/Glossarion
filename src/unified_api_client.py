@@ -3864,7 +3864,7 @@ class UnifiedClient:
     def _extract_response_text(self, response, provider=None, **kwargs):
         """
         Universal response text extraction that works across all providers.
-        Includes enhanced OpenAI-specific handling.
+        Includes enhanced OpenAI-specific handling and proper Gemini support.
         """
         result = ""
         finish_reason = 'stop'
@@ -3876,18 +3876,110 @@ class UnifiedClient:
         print(f"   🔍 Extracting text from {provider} response...")
         print(f"   🔍 Response type: {type(response)}")
         
-        # Handle UnifiedResponse objects first
+        # Handle UnifiedResponse objects
         if isinstance(response, UnifiedResponse):
-            if response.content is not None:  # Check for None specifically
+            # Check if content exists and is not empty
+            if response.content and isinstance(response.content, str) and len(response.content) > 0:
                 print(f"   ✅ Got text from UnifiedResponse.content: {len(response.content)} chars")
                 return response.content, response.finish_reason or 'stop'
             elif response.error_details:
                 # Handle error responses
                 print(f"   ⚠️ UnifiedResponse has error_details: {response.error_details}")
                 return "", response.finish_reason or 'error'
+            else:
+                # Content is None or empty, try to extract from raw_response if available
+                print(f"   ⚠️ UnifiedResponse.content is empty or None, checking raw_response...")
+                if hasattr(response, 'raw_response') and response.raw_response:
+                    print(f"   🔍 Found raw_response, attempting extraction...")
+                    # Continue to provider-specific extraction using raw_response
+                    response = response.raw_response
+                else:
+                    print(f"   ⚠️ No raw_response found in UnifiedResponse")
+                    # Continue with the UnifiedResponse object itself
+        
+        # ========== GEMINI-SPECIFIC HANDLING ==========
+        if provider == 'gemini':
+            print(f"   🔍 [Gemini] Attempting specialized extraction...")
+            
+            # Check for Gemini-specific response structure
+            if hasattr(response, 'candidates'):
+                print(f"   🔍 [Gemini] Found candidates attribute")
+                if response.candidates:
+                    candidate = response.candidates[0]
+                    
+                    # Check finish reason
+                    if hasattr(candidate, 'finish_reason'):
+                        finish_reason = str(candidate.finish_reason).lower()
+                        print(f"   🔍 [Gemini] Finish reason: {finish_reason}")
+                        
+                        # Map Gemini finish reasons
+                        if 'max_tokens' in finish_reason:
+                            finish_reason = 'length'
+                        elif 'safety' in finish_reason or 'blocked' in finish_reason:
+                            finish_reason = 'content_filter'
+                        elif 'stop' in finish_reason:
+                            finish_reason = 'stop'
+                    
+                    # Extract content from candidate
+                    if hasattr(candidate, 'content'):
+                        content = candidate.content
+                        
+                        # Content might have parts
+                        if hasattr(content, 'parts'):
+                            print(f"   🔍 [Gemini] Found {len(content.parts)} parts in content")
+                            text_parts = []
+                            
+                            for i, part in enumerate(content.parts):
+                                part_text = self._extract_part_text(part, provider='gemini', part_index=i+1)
+                                if part_text:
+                                    text_parts.append(part_text)
+                            
+                            if text_parts:
+                                result = ''.join(text_parts)
+                                print(f"   ✅ [Gemini] Extracted from parts: {len(result)} chars")
+                                return result, finish_reason
+                        
+                        # Try direct text access on content
+                        elif hasattr(content, 'text'):
+                            if content.text:
+                                print(f"   ✅ [Gemini] Got text from content.text: {len(content.text)} chars")
+                                return content.text, finish_reason
+                    
+                    # Try to get text directly from candidate
+                    if hasattr(candidate, 'text'):
+                        if candidate.text:
+                            print(f"   ✅ [Gemini] Got text from candidate.text: {len(candidate.text)} chars")
+                            return candidate.text, finish_reason
+            
+            # Alternative Gemini response structure (for native SDK)
+            if hasattr(response, 'text'):
+                try:
+                    # This might be a property that needs to be called
+                    text = response.text
+                    if text:
+                        print(f"   ✅ [Gemini] Got text via response.text property: {len(text)} chars")
+                        return text, finish_reason
+                except Exception as e:
+                    print(f"   ⚠️ [Gemini] Error accessing response.text: {e}")
+            
+            # Try parts directly on response
+            if hasattr(response, 'parts'):
+                print(f"   🔍 [Gemini] Found parts directly on response")
+                text_parts = []
+                for i, part in enumerate(response.parts):
+                    part_text = self._extract_part_text(part, provider='gemini', part_index=i+1)
+                    if part_text:
+                        text_parts.append(part_text)
+                
+                if text_parts:
+                    result = ''.join(text_parts)
+                    print(f"   ✅ [Gemini] Extracted from direct parts: {len(result)} chars")
+                    return result, finish_reason
+            
+            print(f"   ⚠️ [Gemini] Specialized extraction failed, trying generic methods...")
         
         # ========== ENHANCED OPENAI HANDLING ==========
-        if provider == 'openai':
+        elif provider == 'openai':
             print(f"   🔍 [OpenAI] Attempting specialized extraction...")
             
             # Check if it's an OpenAI ChatCompletion object
@@ -3991,7 +4083,7 @@ class UnifiedClient:
             if hasattr(response, attr):
                 try:
                     value = getattr(response, attr)
-                    if value is not None and isinstance(value, str):
+                    if value is not None and isinstance(value, str) and len(value) > 0:
                         result = value
                         print(f"   ✅ Got text from response.{attr}: {len(result)} chars")
                         return result, finish_reason
@@ -4006,6 +4098,8 @@ class UnifiedClient:
             lambda r: r.choices[0].text if hasattr(r, 'choices') and r.choices and hasattr(r.choices[0], 'text') else None,
             # Anthropic SDK pattern
             lambda r: r.content[0].text if hasattr(r, 'content') and r.content and hasattr(r.content[0], 'text') else None,
+            # Gemini pattern - candidates structure
+            lambda r: r.candidates[0].content.parts[0].text if hasattr(r, 'candidates') and r.candidates and hasattr(r.candidates[0], 'content') and hasattr(r.candidates[0].content, 'parts') and r.candidates[0].content.parts else None,
             # Cohere pattern
             lambda r: r.text if hasattr(r, 'text') else None,
             # JSON response pattern
@@ -4018,14 +4112,14 @@ class UnifiedClient:
         for i, pattern in enumerate(nested_patterns):
             try:
                 extracted = pattern(response)
-                if extracted is not None and isinstance(extracted, str):
+                if extracted is not None and isinstance(extracted, str) and len(extracted) > 0:
                     result = extracted
                     print(f"   ✅ Extracted via nested pattern {i+1}: {len(result)} chars")
                     return result, finish_reason
             except Exception as e:
                 # Log pattern failures for debugging
-                if provider == 'openai' and i < 2:  # First two patterns are OpenAI-specific
-                    print(f"   ⚠️ [OpenAI] Pattern {i+1} failed: {e}")
+                if provider in ['openai', 'gemini'] and i < 4:  # First patterns are provider-specific
+                    print(f"   ⚠️ [{provider}] Pattern {i+1} failed: {e}")
         
         # Method 3: String representation extraction (last resort)
         if not result:
@@ -4035,22 +4129,28 @@ class UnifiedClient:
                 print(f"   🔧 Extracted from string representation: {len(result)} chars")
                 return result, finish_reason
         
-        # Final failure
+        # Final failure - log detailed debug info
         print(f"   ❌ Failed to extract text from {provider} response")
         
         # Log the full response structure for debugging
-        if provider == 'openai':
-            print(f"   🔍 [OpenAI] Full response structure:")
-            print(f"   Type: {type(response)}")
-            print(f"   Has 'choices': {hasattr(response, 'choices')}")
-            if hasattr(response, 'choices'):
-                print(f"   Choices length: {len(response.choices) if response.choices else 0}")
-                if response.choices:
-                    print(f"   First choice type: {type(response.choices[0])}")
-                    if hasattr(response.choices[0], 'message'):
-                        msg = response.choices[0].message
-                        print(f"   Message type: {type(msg)}")
-                        print(f"   Message attributes: {[attr for attr in dir(msg) if not attr.startswith('_')][:20]}")
+        print(f"   🔍 [{provider}] Full response structure:")
+        print(f"   Type: {type(response)}")
+        
+        # Log available attributes
+        if hasattr(response, '__dict__'):
+            attrs = list(response.__dict__.keys())[:20]
+            print(f"   Attributes: {attrs}")
+        else:
+            attrs = [attr for attr in dir(response) if not attr.startswith('_')][:20]
+            print(f"   Dir attributes: {attrs}")
+        
+        # Try to get any text representation as absolute last resort
+        try:
+            response_str = str(response)
+            if len(response_str) > 100 and len(response_str) < 100000:  # Reasonable size
+                print(f"   🔍 Response string representation: {response_str[:500]}...")
+        except:
+            pass
         
         return "", 'error'
 
