@@ -5418,24 +5418,23 @@ def handle_api_error(processor, error, chunk_info=""):
     # Check for rate limit
     if "429" in error_str or "rate limit" in error_str.lower():
         if processor.config.use_multi_api_keys:
-            # The client should have already rotated keys internally
             print(f"⚠️ Rate limit hit {chunk_info}, client should rotate to next key")
-            # Get current stats
             stats = processor.client.get_stats()
             print(f"📊 API Stats - Active keys: {stats.get('active_keys', 0)}/{stats.get('total_keys', 0)}")
             
-            # Check if any keys are available
+            # Always return True for multi-key mode
             if stats.get('active_keys', 0) == 0:
-                print("❌ All API keys are cooling down")
-                return False
-            return True
+                print("⏳ All API keys are cooling down - will wait and retry")
+            return True  # Always retry in multi-key mode
         else:
+            # Single key mode - will eventually fail after max retries
             print(f"⚠️ Rate limit hit {chunk_info}, waiting before retry...")
-            time.sleep(30)  # Wait 30 seconds for single key mode
+            time.sleep(30)
             return True
     
     # Other errors
     print(f"❌ API Error {chunk_info}: {error_str}")
+    return False  # Return False for non-rate-limit errors
     
 def parse_token_limit(env_value):
     """Parse token limit from environment variable"""
