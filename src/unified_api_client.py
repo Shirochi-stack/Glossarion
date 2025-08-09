@@ -464,14 +464,8 @@ class UnifiedClient:
         self._request_count = 0
         self._thread_request_count = 0
         
-        # Stats tracking
-        self.stats = {
-            'total_requests': 0,
-            'successful_requests': 0,
-            'failed_requests': 0,
-            'errors': defaultdict(int),
-            'response_times': []
-        }
+        # Stats tracking (existing)
+        self.reset_stats()
         
         # Timeout configuration
         retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
@@ -1508,6 +1502,7 @@ class UnifiedClient:
             'total_requests': 0,
             'successful_requests': 0,
             'failed_requests': 0,
+            'empty_results': 0,  # MUST HAVE THIS
             'errors': defaultdict(int),
             'response_times': []
         }
