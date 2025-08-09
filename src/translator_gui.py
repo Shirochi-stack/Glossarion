@@ -2045,6 +2045,9 @@ Recent translations to summarize:
             "claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307",
             "claude-2.1", "claude-2", "claude-instant-1.2",
             
+            # Grok Models
+            "grok-grok-4-0709", "grok-3", "grok-3-mini",
+            
             # Vertex AI Model Garden - Claude models (confirmed)
             "claude-4-opus@20250514",
             "claude-4-sonnet@20250514",
