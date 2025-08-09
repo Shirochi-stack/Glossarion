@@ -2653,7 +2653,7 @@ class UnifiedClient:
                                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                                 time.sleep(1)
                             
-                            retry_count += 1
+                            #retry_count += 1
                             continue
                     
                     # Check for cancellation
