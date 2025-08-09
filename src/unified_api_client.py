@@ -2630,51 +2630,62 @@ class UnifiedClient:
                             if available_count == 0:
                                 print(f"[{thread_name}] All API keys are cooling down")
                                 
-                                if retry_count < max_retries - 1:
-                                    cooldown_time = self._get_shortest_cooldown_time()
-                                    print(f"⏳ [Thread-{thread_name}] All keys cooling down, waiting {cooldown_time}s...")
-                                    
-                                    # Wait with cancellation check
-                                    for i in range(cooldown_time):
-                                        if self._cancelled:
-                                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                                        time.sleep(1)
-                                        if i % 10 == 0 and i > 0:
-                                            print(f"⏳ [Thread-{thread_name}] Still waiting... {cooldown_time - i}s remaining")
-                                    
-                                    # Force re-initialization after cooldown
-                                    tls = self._get_thread_local_client()
-                                    tls.initialized = False
-                                    self._ensure_thread_client()
-                                    
-                                    retry_count += 1
-                                    continue
-                                else:
-                                    raise UnifiedClientError("All API keys are cooling down", error_type="rate_limit")
+                                # Get the shortest cooldown time from all keys
+                                cooldown_time = self._get_shortest_cooldown_time()
+                                print(f"⏳ [Thread-{thread_name}] All keys cooling down, waiting {cooldown_time}s...")
+                                
+                                # Wait with cancellation check
+                                for i in range(cooldown_time):
+                                    if self._cancelled:
+                                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                    time.sleep(1)
+                                    if i % 10 == 0 and i > 0:
+                                        print(f"⏳ [Thread-{thread_name}] Still waiting... {cooldown_time - i}s remaining")
+                                
+                                # Force re-initialization after cooldown
+                                tls = self._get_thread_local_client()
+                                tls.initialized = False
+                                self._ensure_thread_client()
+                                
+                                # DON'T increment retry_count - we want to retry indefinitely
+                                # Just continue the loop without counting this as a retry
+                                continue
+                                # REMOVED the else clause here - it would never execute
                             
                             # Check if we've tried too many keys
                             if len(attempted_keys) >= len(self._api_key_pool.keys):
                                 print(f"[{thread_name}] Attempted all {len(self._api_key_pool.keys)} keys")
-                                raise UnifiedClientError("All API keys rate limited", error_type="rate_limit")
+                                # Instead of raising error, wait for cooldown
+                                cooldown_time = self._get_shortest_cooldown_time()
+                                print(f"⏳ [Thread-{thread_name}] All keys attempted, waiting {cooldown_time}s for cooldown...")
+                                
+                                for i in range(cooldown_time):
+                                    if self._cancelled:
+                                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                    time.sleep(1)
+                                
+                                # Clear attempted keys and try again
+                                attempted_keys.clear()
+                                tls = self._get_thread_local_client()
+                                tls.initialized = False
+                                self._ensure_thread_client()
+                                continue
                             
                             retry_count += 1
                             logger.info(f"[{thread_name}] Retrying with new key, attempt {retry_count}/{max_retries}")
                             continue
                         else:
-                            # Single key mode - wait and retry
-                            if retry_count < max_retries - 1:
-                                wait_time = min(30 * (retry_count + 1), 120)
-                                logger.info(f"[{thread_name}] Rate limit, waiting {wait_time}s")
-                                
-                                for i in range(wait_time):
-                                    if self._cancelled:
-                                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                                    time.sleep(1)
-                                
-                                retry_count += 1
-                                continue
-                            else:
-                                raise UnifiedClientError("Rate limit exceeded", error_type="rate_limit")
+                            # Single key mode - wait and retry indefinitely
+                            wait_time = min(60 * (retry_count + 1), 120)
+                            logger.info(f"[{thread_name}] Rate limit, waiting {wait_time}s")
+                            
+                            for i in range(wait_time):
+                                if self._cancelled:
+                                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                time.sleep(1)
+                            
+                            retry_count += 1
+                            continue
                     
                     # Check for cancellation
                     elif isinstance(e, UnifiedClientError) and e.error_type in ["cancelled", "timeout"]:
@@ -3643,9 +3654,9 @@ class UnifiedClient:
                     
                     # Check for rate limit
                     elif "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
-                        retry_reason = "rate_limit_image"
+                        retry_reason = "rate_limit"
                         if self._multi_key_mode:
-                            print(f"[Thread-{thread_name}] Image rate limit hit on {self.key_identifier}")
+                            print(f"[Thread-{thread_name}] Rate limit hit on {self.key_identifier}")
                             
                             # Handle rate limit for this thread
                             self._handle_rate_limit_for_thread()
@@ -3653,55 +3664,64 @@ class UnifiedClient:
                             # Check if we have any available keys
                             available_count = self._count_available_keys()
                             if available_count == 0:
-                                print(f"[{thread_name}] All API keys are cooling down for images")
+                                print(f"[{thread_name}] All API keys are cooling down")
                                 
-                                # If we still have retries left, wait for the shortest cooldown
-                                if retry_count < max_retries - 1:
-                                    cooldown_time = self._get_shortest_cooldown_time()
-                                    print(f"⏳ [Thread-{thread_name}] All keys cooling down for image, waiting {cooldown_time}s...")
-                                    
-                                    # Wait with cancellation check
-                                    for i in range(cooldown_time):
-                                        if self._cancelled:
-                                            raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                                        time.sleep(1)
-                                        if i % 10 == 0 and i > 0:
-                                            print(f"⏳ [Thread-{thread_name}] Still waiting... {cooldown_time - i}s remaining")
-                                    
-                                    # Force re-initialization after cooldown
-                                    tls = self._get_thread_local_client()
-                                    tls.initialized = False
-                                    self._ensure_thread_client()
-                                    
-                                    retry_count += 1
-                                    continue
-                                else:
-                                    # No more retries, raise the error
-                                    raise UnifiedClientError("All API keys are cooling down", error_type="rate_limit")
-                            
-                            # Check if we've tried too many keys
-                            if len(attempted_keys) >= len(self._api_key_pool.keys):
-                                print(f"[{thread_name}] Attempted all {len(self._api_key_pool.keys)} keys for image")
-                                raise UnifiedClientError("All API keys rate limited for image requests", error_type="rate_limit")
-                            
-                            retry_count += 1
-                            logger.info(f"[{thread_name}] Retrying image with new key, attempt {retry_count}/{max_retries}")
-                            continue
-                        else:
-                            # Single key mode - wait and retry
-                            if retry_count < max_retries - 1:
-                                wait_time = min(30 * (retry_count + 1), 120)
-                                logger.info(f"[{thread_name}] Image rate limit, waiting {wait_time}s")
+                                # Get the shortest cooldown time from all keys
+                                cooldown_time = self._get_shortest_cooldown_time()
+                                print(f"⏳ [Thread-{thread_name}] All keys cooling down, waiting {cooldown_time}s...")
                                 
-                                for i in range(wait_time):
+                                # Wait with cancellation check
+                                for i in range(cooldown_time):
                                     if self._cancelled:
                                         raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                                     time.sleep(1)
-                                    
-                                retry_count += 1
+                                    if i % 10 == 0 and i > 0:
+                                        print(f"⏳ [Thread-{thread_name}] Still waiting... {cooldown_time - i}s remaining")
+                                
+                                # Force re-initialization after cooldown
+                                tls = self._get_thread_local_client()
+                                tls.initialized = False
+                                self._ensure_thread_client()
+                                
+                                # DON'T increment retry_count - we want to retry indefinitely
+                                # Just continue the loop without counting this as a retry
                                 continue
-                            else:
-                                raise UnifiedClientError("Image rate limit exceeded", error_type="rate_limit")
+                                # REMOVED the else clause here - it would never execute
+                            
+                            # Check if we've tried too many keys
+                            if len(attempted_keys) >= len(self._api_key_pool.keys):
+                                print(f"[{thread_name}] Attempted all {len(self._api_key_pool.keys)} keys")
+                                # Instead of raising error, wait for cooldown
+                                cooldown_time = self._get_shortest_cooldown_time()
+                                print(f"⏳ [Thread-{thread_name}] All keys attempted, waiting {cooldown_time}s for cooldown...")
+                                
+                                for i in range(cooldown_time):
+                                    if self._cancelled:
+                                        raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                    time.sleep(1)
+                                
+                                # Clear attempted keys and try again
+                                attempted_keys.clear()
+                                tls = self._get_thread_local_client()
+                                tls.initialized = False
+                                self._ensure_thread_client()
+                                continue
+                            
+                            retry_count += 1
+                            logger.info(f"[{thread_name}] Retrying with new key, attempt {retry_count}/{max_retries}")
+                            continue
+                        else:
+                            # Single key mode - wait and retry indefinitely
+                            wait_time = min(60 * (retry_count + 1), 120)
+                            print(f"[{thread_name}] Rate limit, waiting {wait_time}s")
+                            
+                            for i in range(wait_time):
+                                if self._cancelled:
+                                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
+                                time.sleep(1)
+                            
+                            retry_count += 1
+                            continue
                     
                     # Check for cancellation
                     elif isinstance(e, UnifiedClientError) and e.error_type in ["cancelled", "timeout"]:
