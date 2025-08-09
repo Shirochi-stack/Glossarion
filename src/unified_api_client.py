@@ -1958,7 +1958,7 @@ class UnifiedClient:
             else:
                 return False
 
-    def get_shortest_cooldown_time(self) -> int:
+    def _get_shortest_cooldown_time(self) -> int:
         """Get the shortest cooldown time among all keys"""
         # Check if cancelled at start
         if self._cancelled:
