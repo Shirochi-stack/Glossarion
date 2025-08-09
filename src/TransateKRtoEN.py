@@ -1337,6 +1337,31 @@ class ContentProcessor:
     def is_meaningful_text_content(html_content):
         """Check if chapter has meaningful text beyond just structure"""
         try:
+            # Check if this is plain text from enhanced extraction (html2text output)
+            # html2text output characteristics:
+            # - Often starts with # for headers
+            # - Contains markdown-style formatting
+            # - Doesn't have HTML tags
+            content_stripped = html_content.strip()
+            
+            # Quick check for plain text/markdown content
+            is_plain_text = False
+            if content_stripped and (
+                not content_stripped.startswith('<') or  # Doesn't start with HTML tag
+                content_stripped.startswith('#') or      # Markdown header
+                '\n\n' in content_stripped[:500] or      # Markdown paragraphs
+                not '<p>' in content_stripped[:500] and not '<div>' in content_stripped[:500]  # No common HTML tags
+            ):
+                # This looks like plain text or markdown from html2text
+                is_plain_text = True
+                
+            if is_plain_text:
+                # For plain text, just check the length
+                text_length = len(content_stripped)
+                # Be more lenient with plain text since it's already extracted
+                return text_length > 50  # Much lower threshold for plain text
+            
+            # Original HTML parsing logic
             soup = BeautifulSoup(html_content, 'html.parser')
             
             soup_copy = BeautifulSoup(str(soup), 'html.parser')
