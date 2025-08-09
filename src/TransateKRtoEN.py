@@ -5422,19 +5422,17 @@ def handle_api_error(processor, error, chunk_info=""):
             stats = processor.client.get_stats()
             print(f"📊 API Stats - Active keys: {stats.get('active_keys', 0)}/{stats.get('total_keys', 0)}")
             
-            # Always return True for multi-key mode
             if stats.get('active_keys', 0) == 0:
                 print("⏳ All API keys are cooling down - will wait and retry")
-            return True  # Always retry in multi-key mode
+            return True  # Always retry
         else:
-            # Single key mode - will eventually fail after max retries
             print(f"⚠️ Rate limit hit {chunk_info}, waiting before retry...")
-            time.sleep(30)
-            return True
+            time.sleep(60)
+            return True  # Always retry
     
     # Other errors
     print(f"❌ API Error {chunk_info}: {error_str}")
-    return False  # Return False for non-rate-limit errors
+    return False
     
 def parse_token_limit(env_value):
     """Parse token limit from environment variable"""
@@ -5656,22 +5654,6 @@ def is_qa_failed_response(content):
     ]
     
     for marker in timeout_markers:
-        if marker in content_lower:
-            return True
-    
-    # 5. RATE LIMITING AND QUOTA ERRORS
-    rate_limit_markers = [
-        "rate limit exceeded",
-        "quota exceeded",
-        "too many requests",
-        "rate limited",
-        "api quota",
-        "usage limit",
-        "billing error",
-        "insufficient quota"
-    ]
-    
-    for marker in rate_limit_markers:
         if marker in content_lower:
             return True
     
