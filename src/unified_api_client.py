@@ -2309,7 +2309,7 @@ class UnifiedClient:
                         tls.gemini_api_key = self.api_key
                         tls.gemini_client = self.gemini_client
                 
-                print(f"[DEBUG] Created native Gemini client for model: {self.model}")
+                #print(f"[DEBUG] Created native Gemini client for model: {self.model}")
         
         elif self.client_type == 'mistral':
             if MistralClient is not None:
@@ -7386,7 +7386,7 @@ class UnifiedClient:
         return UnifiedResponse(
             content="",
             finish_reason='error',
-            raw_response=None,
+            raw_response=response,
             error_details={'error': 'all_retries_failed', 'attempts': attempts, 'details': error_details}
         )
     
