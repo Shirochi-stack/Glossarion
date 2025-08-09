@@ -2615,11 +2615,53 @@ class UnifiedClient:
                             
                             print(f"[Thread-{thread_name}] Will retry with main key for prohibited content")
                             should_try_main_key = True
+                            
+                            # Try with main key WITHOUT incrementing retry count
+                            try:
+                                main_response = self._retry_with_main_key(
+                                    messages, temperature, max_tokens, max_completion_tokens, context
+                                )
+                                
+                                if main_response:
+                                    content, finish_reason = main_response
+                                    if content and content.strip() and len(content) > 10:
+                                        print(f"✅ Main key succeeded! Got {len(content)} chars")
+                                        successful_response = main_response
+                                        break  # Exit retry loop with success
+                                    else:
+                                        print(f"❌ Main key returned minimal content: {len(content) if content else 0} chars")
+                                else:
+                                    print(f"❌ Main key returned None")
+                                    
+                            except UnifiedClientError as main_error:
+                                # Handle specific error types from main key retry
+                                if main_error.error_type == "cancelled":
+                                    print(f"❌ Main key retry was cancelled")
+                                    # Don't increment retry count, just continue
+                                elif main_error.error_type == "prohibited_content":
+                                    print(f"❌ Main key also hit content filter")
+                                else:
+                                    print(f"❌ Main key error: {str(main_error)[:200]}")
+                                    
+                            except Exception as main_error:
+                                print(f"❌ Main key error: {str(main_error)[:200]}")
+                                # Check if main key also hit content filter
+                                main_error_str = str(main_error).lower()
+                                if any(indicator in main_error_str for indicator in content_filter_indicators):
+                                    print(f"❌ Main key also hit content filter")
+                            
+                            # Continue to next retry with different key
                             retry_count += 1
                             continue
                         else:
-                            print(f"[Thread-{thread_name}] Prohibited content - cannot retry")
-                            raise
+                            # Either not in multi-key mode, or already tried main key
+                            if not self._multi_key_mode:
+                                print(f"[Thread-{thread_name}] Not in multi-key mode - cannot retry with main key")
+                            elif should_try_main_key:
+                                print(f"[Thread-{thread_name}] Already tried main key")
+                            else:
+                                print(f"[Thread-{thread_name}] Main key not available for retry")
+                            raise  # Re-raise the original error
                     
                     # Check for rate limit
                     elif "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
@@ -3320,7 +3362,6 @@ class UnifiedClient:
             )
             
             # FORCE single-key mode after initialization
-            # This is thread-safe because we're modifying the instance, not the environment
             temp_client._multi_key_mode = False
             temp_client.use_multi_keys = False
             temp_client.key_identifier = "Main Key (Fallback)"
@@ -3332,30 +3373,36 @@ class UnifiedClient:
                 temp_client.model = self.original_model
                 temp_client._setup_client()
             
-            # Copy relevant state
+            # Copy relevant state BUT NOT THE CANCELLATION FLAG
             temp_client.context = context
-            temp_client._cancelled = self._cancelled
-            temp_client._in_cleanup = self._in_cleanup
+            # DON'T COPY THE CANCELLED FLAG - This is the bug!
+            # temp_client._cancelled = self._cancelled  # REMOVE THIS LINE
+            temp_client._cancelled = False  # ALWAYS start fresh for main key retry
+            temp_client._in_cleanup = False  # Reset cleanup state too
             temp_client.current_session_context = self.current_session_context
             temp_client.conversation_message_count = self.conversation_message_count
+            temp_client.request_timeout = self.request_timeout  # Copy timeout settings
             
             print(f"[MAIN KEY RETRY] Created temp client with model: {temp_client.model}")
             print(f"[MAIN KEY RETRY] Temp client type: {getattr(temp_client, 'client_type', 'NOT SET')}")
             print(f"[MAIN KEY RETRY] Multi-key mode: {temp_client._multi_key_mode}")
+            print(f"[MAIN KEY RETRY] Cancelled flag: {temp_client._cancelled}")  # Debug log
             
             # Get file names for response tracking
             payload_name, response_name = self._get_file_names(messages, context=context)
             
-            # Try to send the request
+            # Try to send the request using _send_internal instead of send
+            # This avoids the outer retry loop and goes directly to the implementation
             print(f"[MAIN KEY RETRY] Sending request...")
             
-            # Use the send method instead of _get_response for better compatibility
-            result = temp_client.send(
+            # Use _send_internal directly to avoid nested retry loops
+            result = temp_client._send_internal(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 max_completion_tokens=max_completion_tokens,
-                context=context
+                context=context,
+                retry_reason="main_key_fallback"
             )
             
             # Check the result
@@ -3372,6 +3419,31 @@ class UnifiedClient:
             else:
                 print(f"[MAIN KEY RETRY] Unexpected result type: {type(result)}")
                 return None
+            
+        except UnifiedClientError as e:
+            # Check if it's a cancellation from the temp client
+            if e.error_type == "cancelled":
+                print(f"[MAIN KEY RETRY] Operation was cancelled during main key retry")
+                # Don't propagate cancellation - just return None
+                return None
+            
+            print(f"[MAIN KEY RETRY] UnifiedClientError: {type(e).__name__}: {str(e)[:500]}")
+            
+            # Check if it's also a content filter error
+            error_str = str(e).lower()
+            content_filter_indicators = [
+                "content_filter", "content was blocked", "response was blocked",
+                "safety filter", "content policy", "harmful content",
+                "blocked by safety", "harm_category", "content_policy_violation",
+                "unsafe content", "violates our usage policies",
+                "prohibited_content", "blockedreason", "content blocked"
+            ]
+            
+            if any(indicator in error_str for indicator in content_filter_indicators):
+                print(f"[MAIN KEY RETRY] Main key also hit content filter")
+            
+            # Re-raise other errors so the calling method can handle them
+            raise
             
         except Exception as e:
             print(f"[MAIN KEY RETRY] Exception: {type(e).__name__}: {str(e)[:500]}")
@@ -3529,8 +3601,8 @@ class UnifiedClient:
         # Track which keys we've already tried to avoid infinite loops
         attempted_keys = set()
         
-        # Flag to track if we should try main key for prohibited content
-        should_try_main_key = False
+        # Flag to track if we've tried main key for prohibited content
+        main_key_tried = False
         
         # Define content filter indicators at method level
         content_filter_indicators = [
@@ -3582,12 +3654,12 @@ class UnifiedClient:
                             hasattr(self, 'original_model') and
                             self.original_api_key and 
                             self.original_model and
-                            not should_try_main_key):
+                            not main_key_tried):
                             
                             print(f"[Thread-{thread_name}] Will retry with main key for prohibited image content")
-                            should_try_main_key = True
+                            main_key_tried = True
                             
-                            # Try with main key
+                            # Try with main key WITHOUT incrementing retry count initially
                             try:
                                 main_response = self._retry_image_with_main_key(
                                     messages, image_data, temperature, max_tokens, max_completion_tokens, context
@@ -3595,11 +3667,24 @@ class UnifiedClient:
                                 
                                 if main_response:
                                     content, finish_reason = main_response
-                                    print(f"✅ Main key succeeded for image! Returning response")
-                                    successful_response = main_response
-                                    break  # Exit retry loop with success
+                                    if content and content.strip() and len(content) > 10:
+                                        print(f"✅ Main key succeeded for image! Got {len(content)} chars")
+                                        successful_response = main_response
+                                        break  # Exit retry loop with success
+                                    else:
+                                        print(f"❌ Main key returned minimal image content: {len(content) if content else 0} chars")
                                 else:
                                     print(f"❌ Main key returned None for image")
+                                    
+                            except UnifiedClientError as main_error:
+                                # Handle specific error types from main key retry
+                                if main_error.error_type == "cancelled":
+                                    print(f"❌ Main key image retry was cancelled")
+                                    # Don't count as failure, just continue
+                                elif main_error.error_type == "prohibited_content":
+                                    print(f"❌ Main key also hit content filter for image")
+                                else:
+                                    print(f"❌ Main key image error: {str(main_error)[:200]}")
                                     
                             except Exception as main_error:
                                 print(f"❌ Main key image error: {str(main_error)[:200]}")
@@ -3608,13 +3693,18 @@ class UnifiedClient:
                                 if any(indicator in main_error_str for indicator in content_filter_indicators):
                                     print(f"❌ Main key also hit content filter for image")
                             
-                            # Don't count this as a retry, just continue
+                            # Continue to next retry with different key
                             retry_count += 1
                             continue
                         else:
                             # Either not in multi-key mode, or already tried main key
-                            print(f"[Thread-{thread_name}] Prohibited image content - cannot retry")
-                            raise
+                            if not self._multi_key_mode:
+                                print(f"[Thread-{thread_name}] Not in multi-key mode - cannot retry image with main key")
+                            elif main_key_tried:
+                                print(f"[Thread-{thread_name}] Already tried main key for image")
+                            else:
+                                print(f"[Thread-{thread_name}] Main key not available for image retry")
+                            raise  # Re-raise the original error
                     
                     # Check for rate limit
                     elif "429" in error_str or "rate limit" in error_str.lower() or "quota" in error_str.lower():
@@ -4386,7 +4476,6 @@ class UnifiedClient:
             )
             
             # FORCE single-key mode after initialization
-            # This is thread-safe because we're modifying the instance, not the environment
             temp_client._multi_key_mode = False
             temp_client.use_multi_keys = False
             temp_client.key_identifier = "Main Key (Image Fallback)"
@@ -4398,10 +4487,11 @@ class UnifiedClient:
                 temp_client.model = self.original_model
                 temp_client._setup_client()
             
-            # Copy relevant state
+            # Copy relevant state BUT NOT THE CANCELLATION FLAG
             temp_client.context = context or 'image_translation'
-            temp_client._cancelled = self._cancelled
-            temp_client._in_cleanup = self._in_cleanup
+            # DON'T COPY THE CANCELLED FLAG - This is the bug!
+            temp_client._cancelled = False  # ALWAYS start fresh for main key retry
+            temp_client._in_cleanup = False
             temp_client.current_session_context = self.current_session_context
             temp_client.conversation_message_count = self.conversation_message_count
             
@@ -4413,21 +4503,23 @@ class UnifiedClient:
             print(f"[MAIN KEY IMAGE RETRY] Created temp client with model: {temp_client.model}")
             print(f"[MAIN KEY IMAGE RETRY] Temp client type: {getattr(temp_client, 'client_type', 'NOT SET')}")
             print(f"[MAIN KEY IMAGE RETRY] Multi-key mode: {temp_client._multi_key_mode}")
+            print(f"[MAIN KEY IMAGE RETRY] Cancelled flag: {temp_client._cancelled}")  # Debug log
             
             # Get file names for response tracking
             payload_name, response_name = self._get_file_names(messages, context=context)
             
-            # Try to send the image request
+            # Try to send the image request using _send_image_internal
             print(f"[MAIN KEY IMAGE RETRY] Sending image request...")
             
-            # Use the send_image method instead of _get_response for better compatibility
-            result = temp_client.send_image(
+            # Use _send_image_internal directly to avoid nested retry loops
+            result = temp_client._send_image_internal(
                 messages=messages,
                 image_data=image_data,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 max_completion_tokens=max_completion_tokens,
-                context=context
+                context=context,
+                retry_reason="main_key_image_fallback"
             )
             
             # Check the result
@@ -4444,6 +4536,32 @@ class UnifiedClient:
             else:
                 print(f"[MAIN KEY IMAGE RETRY] Unexpected result type: {type(result)}")
                 return None
+            
+        except UnifiedClientError as e:
+            # Check if it's a cancellation from the temp client
+            if e.error_type == "cancelled":
+                print(f"[MAIN KEY IMAGE RETRY] Operation was cancelled during main key retry")
+                # Don't propagate cancellation - just return None
+                return None
+                
+            print(f"[MAIN KEY IMAGE RETRY] UnifiedClientError: {type(e).__name__}: {str(e)[:500]}")
+            
+            # Check if it's also a content filter error
+            error_str = str(e).lower()
+            content_filter_indicators = [
+                "content_filter", "content was blocked", "response was blocked",
+                "safety filter", "content policy", "harmful content",
+                "blocked by safety", "harm_category", "content_policy_violation",
+                "unsafe content", "violates our usage policies",
+                "prohibited_content", "blockedreason", "content blocked",
+                "inappropriate image", "inappropriate content"
+            ]
+            
+            if any(indicator in error_str for indicator in content_filter_indicators):
+                print(f"[MAIN KEY IMAGE RETRY] Main key also hit content filter for image")
+            
+            # Re-raise other errors
+            raise
             
         except Exception as e:
             print(f"[MAIN KEY IMAGE RETRY] Exception: {type(e).__name__}: {str(e)[:500]}")
