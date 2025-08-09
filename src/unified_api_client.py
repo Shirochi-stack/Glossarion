@@ -198,31 +198,7 @@ from functools import lru_cache
 from datetime import datetime, timedelta
 import threading
  
-def truncate_error_message(error_str: str, first_chars: int = 50, last_chars: int = 50) -> str:
-    """
-    Truncate long error messages, keeping first and last parts (only for 429 errors)
-    
-    Args:
-        error_str: The error message to truncate
-        first_chars: Number of characters to keep from the beginning
-        last_chars: Number of characters to keep from the end
-    
-    Returns:
-        Truncated error message if it's a 429 error, otherwise returns original
-    """
-    error_str = str(error_str)
-    
-    # Only truncate if it's a 429 error
-    if "429" not in error_str:
-        return error_str
-    
-    # If the error is short enough, return as is
-    if len(error_str) <= (first_chars + last_chars + 5):  # +5 for " ... "
-        return error_str
-    
-    # Truncate: keep first 100 chars and last 50 chars
-    return f"{error_str[:first_chars]} ... {error_str[-last_chars:]}"
-    
+
 @dataclass
 class UnifiedResponse:
     """Standardized response format for all API providers"""
@@ -374,9 +350,9 @@ class UnifiedClient:
     
     # Model-specific constraints
     MODEL_CONSTRAINTS = {
-        'temperature_fixed': ['o4-mini', 'o1-mini', 'o1-preview', 'o3-mini', 'o3', 'o3-pro', 'o4-mini'],
+        'temperature_fixed': ['o4-mini', 'o1-mini', 'o1-preview', 'o3-mini', 'o3', 'o3-pro', 'o4-mini', 'gpt-5-mini','gpt-5','gpt-5-nano'],
         'no_system_message': ['o1', 'o1-preview', 'o3', 'o3-pro'],
-        'max_completion_tokens': ['o4', 'o1', 'o3'],
+        'max_completion_tokens': ['o4', 'o1', 'o3', 'gpt-5-mini','gpt-5','gpt-5-nano'],
         'chinese_optimized': ['qwen', 'yi', 'glm', 'chatglm', 'baichuan', 'ernie', 'hunyuan'],
     }
     
@@ -1422,7 +1398,7 @@ class UnifiedClient:
             print(f"[ERROR] Failed to rotate to next key")
     
     def _rotate_to_next_key(self) -> bool:
-        """Rotate to the next available key and reinitialize client"""
+        """Rotate to the next available key and reinitialize client - THREAD SAFE"""
         if not self.use_multi_keys or not self._api_key_pool:
             return False
         
@@ -1430,22 +1406,36 @@ class UnifiedClient:
         
         key_info = self._get_next_available_key()
         if key_info:
-            # Update key and model
-            self.api_key = key_info[0].api_key
-            self.model = key_info[0].model
-            self.current_key_index = key_info[1]
+            # MICROSECOND LOCK: Protect all instance variable modifications
+            if hasattr(self, '_instance_model_lock'):
+                with self._instance_model_lock:
+                    # Update key and model
+                    self.api_key = key_info[0].api_key
+                    self.model = key_info[0].model
+                    self.current_key_index = key_info[1]
+                    
+                    # Update key identifier
+                    self.key_identifier = f"Key#{key_info[1]+1} ({self.model})"
+                    
+                    # Reset clients (these are instance variables too!)
+                    self.openai_client = None
+                    self.gemini_client = None
+                    self.mistral_client = None
+                    self.cohere_client = None
+            else:
+                # No lock available, fall back (not thread-safe!)
+                self.api_key = key_info[0].api_key
+                self.model = key_info[0].model
+                self.current_key_index = key_info[1]
+                self.key_identifier = f"Key#{key_info[1]+1} ({self.model})"
+                self.openai_client = None
+                self.gemini_client = None
+                self.mistral_client = None
+                self.cohere_client = None
             
-            # Update key identifier
-            self.key_identifier = f"Key#{key_info[1]+1} ({self.model})"
+            # Logging (outside lock - just reading)
             masked_key = self.api_key[:8] + "..." + self.api_key[-4:] if len(self.api_key) > 12 else self.api_key
-            
             print(f"[DEBUG] 🔄 Rotating from {old_key_identifier} to {self.key_identifier} - {masked_key}")
-            
-            # Reset clients
-            self.openai_client = None
-            self.gemini_client = None
-            self.mistral_client = None
-            self.cohere_client = None
             
             # Re-setup the client with new key
             self._setup_client()
@@ -1458,16 +1448,25 @@ class UnifiedClient:
                 if not custom_base_url.startswith(('http://', 'https://')):
                     custom_base_url = 'https://' + custom_base_url
                 
-                self.openai_client = openai.OpenAI(
-                    api_key=self.api_key,
-                    base_url=custom_base_url
-                )
+                # MICROSECOND LOCK: When modifying client instance
+                if hasattr(self, '_instance_model_lock'):
+                    with self._instance_model_lock:
+                        self.openai_client = openai.OpenAI(
+                            api_key=self.api_key,
+                            base_url=custom_base_url
+                        )
+                else:
+                    self.openai_client = openai.OpenAI(
+                        api_key=self.api_key,
+                        base_url=custom_base_url
+                    )
+                
                 print(f"[DEBUG] Rotated key: Re-created OpenAI client with custom base URL")
             
             return True
         
         print(f"[WARNING] No available keys to rotate to")
-        return False  
+        return False
     
     def get_stats(self) -> Dict[str, any]:
         """Get statistics about API usage"""
@@ -1589,8 +1588,22 @@ class UnifiedClient:
         self.current_key_index = key_info[1]
         self.key_identifier = f"Key#{key_info[1]+1} ({key_info[0].model})"
         
-        masked_key = self.api_key[:8] + "..." + self.api_key[-4:] if len(self.api_key) > 12 else self.api_key
-        print(f"[DEBUG] 🔄 Switched from {old_key_identifier} to {self.key_identifier} - {masked_key}")
+        # MICROSECOND LOCK: Atomic update of all key-related variables
+        with self._instance_model_lock:
+            self.api_key = key_info[0].api_key
+            self.model = key_info[0].model
+            self.current_key_index = key_info[1]
+            self.key_identifier = f"Key#{key_info[1]+1} ({key_info[0].model})"
+            
+            # Reset clients atomically
+            self.openai_client = None
+            self.gemini_client = None
+            self.mistral_client = None
+            self.cohere_client = None
+        
+        # Logging OUTSIDE the lock
+        masked_key = self.api_key[:8] + "..." + self.api_key[-4:]
+        print(f"[DEBUG] 🔄 Switched from {old_key_identifier} to {self.key_identifier}")
         
         # Reset clients
         self.openai_client = None
@@ -2047,19 +2060,17 @@ class UnifiedClient:
             for tid in expired_threads:
                 del self._thread_key_assignments[tid]
                 
-            
+                
     def _setup_client(self):
         """Setup the appropriate client based on model type"""
         model_lower = self.model.lower()
         tls = self._get_thread_local_client()
-        #print(f"[DEBUG] _setup_client called with model: {self.model}")
         
-        # Check model prefixes FIRST to determine provider
+        # Determine client_type (no lock needed, just reading)
         self.client_type = None
         for prefix, provider in self.MODEL_PROVIDERS.items():
             if model_lower.startswith(prefix):
                 self.client_type = provider
-                #print(f"[DEBUG] Matched prefix '{prefix}' -> provider '{provider}'")
                 break
         
         # Check if we're using a custom OpenAI base URL
@@ -2099,36 +2110,41 @@ class UnifiedClient:
             error_msg += f"Supported prefixes: {list(self.MODEL_PROVIDERS.keys())}"
             raise ValueError(error_msg)
         
-        # Initialize provider-specific settings
+        # Initialize variables at method scope for all client types
+        base_url = None
+        use_gemini_endpoint = False
+        gemini_endpoint = ""
+        
+        # Prepare provider-specific settings (but don't create clients yet)
         if self.client_type == 'openai':
-            print(f"[DEBUG] Setting up OpenAI client")
+            print(f"[DEBUG] Preparing OpenAI client setup")
             if openai is None:
                 raise ImportError("OpenAI library not installed. Install with: pip install openai")
             
             # Check if custom endpoints are enabled
             use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
             
+            # Initialize base_url with default value
+            base_url = 'https://api.openai.com/v1'  # Default OpenAI endpoint
+            
             # Check for custom base URL
             if use_custom_endpoint:
-                base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', os.getenv('OPENAI_API_BASE', 'https://api.openai.com/v1'))
-                
-                # Validate URL has protocol if it's not the default
-                if base_url != 'https://api.openai.com/v1' and not base_url.startswith(('http://', 'https://')):
-                    print(f"[WARNING] Custom base URL missing protocol, adding https://")
-                    base_url = 'https://' + base_url
+                custom_url = os.getenv('OPENAI_CUSTOM_BASE_URL', os.getenv('OPENAI_API_BASE', ''))
+                if custom_url:  # Only override if custom URL is provided
+                    base_url = custom_url
+                    
+                    # Validate URL has protocol
+                    if not base_url.startswith(('http://', 'https://')):
+                        print(f"[WARNING] Custom base URL missing protocol, adding https://")
+                        base_url = 'https://' + base_url
+                    print(f"[DEBUG] Custom endpoints enabled, using: {base_url}")
+                else:
+                    print(f"[DEBUG] Custom endpoints enabled but no URL provided, using default")
             else:
-                # Force default endpoint when toggle is off
-                base_url = 'https://api.openai.com/v1'
+                # Use default endpoint when toggle is off
                 print(f"[DEBUG] Custom endpoints disabled, using default OpenAI endpoint")
             
-            print(f"[DEBUG] Using base URL: {base_url}")
-            
-            # Create OpenAI client with custom base URL support
-            self.openai_client = openai.OpenAI(
-                api_key=self.api_key,
-                base_url=base_url
-            )
-            print(f"[DEBUG] OpenAI client created: {self.openai_client}")
+            print(f"[DEBUG] Will use base URL: {base_url}")
             
         elif self.client_type == 'gemini':
             # Check if we should use OpenAI-compatible endpoint for Gemini
@@ -2137,8 +2153,7 @@ class UnifiedClient:
             
             if use_gemini_endpoint and gemini_endpoint:
                 # Use OpenAI client for Gemini with custom endpoint
-                #print(f"[DEBUG] Setting up Gemini with OpenAI-compatible endpoint")
-                pass
+                print(f"[DEBUG] Preparing Gemini with OpenAI-compatible endpoint")
                 if openai is None:
                     raise ImportError("OpenAI library not installed. Install with: pip install openai")
                 
@@ -2149,16 +2164,10 @@ class UnifiedClient:
                     else:
                         gemini_endpoint = gemini_endpoint + '/openai/'
                 
-                self.openai_client = openai.OpenAI(
-                    api_key=self.api_key,
-                    base_url=gemini_endpoint
-                )
+                # Set base_url for Gemini OpenAI endpoint
+                base_url = gemini_endpoint
                 
-                # Store original client type for logging but use openai for dispatch
-                self._original_client_type = 'gemini'
-                self.client_type = 'openai'  # This ensures _send_openai will be called
-                
-                print(f"[DEBUG] Gemini configured to use OpenAI-compatible endpoint: {gemini_endpoint}")
+                print(f"[DEBUG] Gemini will use OpenAI-compatible endpoint: {gemini_endpoint}")
                 
                 disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
                 
@@ -2173,50 +2182,29 @@ class UnifiedClient:
                 
                 # Just call the existing save method
                 self._save_gemini_safety_config(config_data, None)
-    
-                #print(f"[DEBUG] Using API key ending in: ...{self.api_key[-4:]}")
-                #print(f"[DEBUG] Model for API call: {self.model}")
             else:
                 # Use native Gemini client
-                #print(f"[DEBUG] Setting up native Gemini client")
-                pass
+                print(f"[DEBUG] Preparing native Gemini client")
                 if not GENAI_AVAILABLE:
                     raise ImportError(
                         "Google Gen AI library not installed. Install with: "
                         "pip install google-genai"
                     )
-                
-                # Create Gemini client with the new API
-                # The new SDK can use API key from environment or passed directly
-                self.gemini_client = genai.Client(api_key=self.api_key)
-                
-                # Store thread-local reference if in multi-key mode
-                if hasattr(tls, 'model'):
-                    tls.gemini_configured = True
-                    tls.gemini_api_key = self.api_key
-                    tls.gemini_client = self.gemini_client
-                
-                #print(f"[DEBUG] Created native Gemini client for model: {self.model}")
-                #print(f"[DEBUG] Using API key ending in: ...{self.api_key[-4:]}")
-            
+        
         elif self.client_type == 'electronhub':
             # ElectronHub uses OpenAI SDK if available
             if openai is not None:
                 logger.info("ElectronHub will use OpenAI SDK for API calls")
             else:
                 logger.info("ElectronHub will use HTTP API for API calls")
-            
+        
         elif self.client_type == 'mistral':
             if MistralClient is None:
                 # Fall back to HTTP API if SDK not installed
                 logger.info("Mistral SDK not installed, will use HTTP API")
-            else:
-                self.mistral_client = MistralClient(api_key=self.api_key)
-                
+        
         elif self.client_type == 'cohere':
-            if cohere is not None:
-                self.cohere_client = cohere.Client(self.api_key)
-            else:
+            if cohere is None:
                 logger.info("Cohere SDK not installed, will use HTTP API")
         
         elif self.client_type == 'anthropic':
@@ -2229,61 +2217,234 @@ class UnifiedClient:
         
         elif self.client_type == 'deepseek':
             # DeepSeek typically uses OpenAI-compatible endpoint
-            if openai is not None:
-                deepseek_url = os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/v1")
-                self.openai_client = openai.OpenAI(
-                    api_key=self.api_key,
-                    base_url=deepseek_url
-                )
-                logger.info(f"DeepSeek client configured with endpoint: {deepseek_url}")
-            else:
+            if openai is None:
                 logger.info("DeepSeek will use HTTP API")
+            else:
+                base_url = os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/v1")
+                logger.info(f"DeepSeek will use endpoint: {base_url}")
         
         elif self.client_type == 'groq':
             # Groq uses OpenAI-compatible endpoint
-            if openai is not None:
-                groq_url = os.getenv("GROQ_API_URL", "https://api.groq.com/openai/v1")
-                self.openai_client = openai.OpenAI(
-                    api_key=self.api_key,
-                    base_url=groq_url
-                )
-                logger.info(f"Groq client configured with endpoint: {groq_url}")
-            else:
+            if openai is None:
                 logger.info("Groq will use HTTP API")
+            else:
+                base_url = os.getenv("GROQ_API_URL", "https://api.groq.com/openai/v1")
+                logger.info(f"Groq will use endpoint: {base_url}")
         
         elif self.client_type == 'fireworks':
             # Fireworks uses OpenAI-compatible endpoint
-            if openai is not None:
-                fireworks_url = os.getenv("FIREWORKS_API_URL", "https://api.fireworks.ai/inference/v1")
-                self.openai_client = openai.OpenAI(
-                    api_key=self.api_key,
-                    base_url=fireworks_url
-                )
-                logger.info(f"Fireworks client configured with endpoint: {fireworks_url}")
-            else:
+            if openai is None:
                 logger.info("Fireworks will use HTTP API")
+            else:
+                base_url = os.getenv("FIREWORKS_API_URL", "https://api.fireworks.ai/inference/v1")
+                logger.info(f"Fireworks will use endpoint: {base_url}")
         
         elif self.client_type == 'xai':
             # xAI (Grok) uses OpenAI-compatible endpoint
-            if openai is not None:
-                xai_url = os.getenv("XAI_API_URL", "https://api.x.ai/v1")
+            if openai is None:
+                logger.info("xAI will use HTTP API")
+            else:
+                base_url = os.getenv("XAI_API_URL", "https://api.x.ai/v1")
+                logger.info(f"xAI will use endpoint: {base_url}")
+        
+        # =====================================================
+        # MICROSECOND LOCK: Create ALL clients with thread safety
+        # =====================================================
+        
+        if self.client_type == 'openai':
+            # Ensure base_url is set
+            if base_url is None:
+                base_url = 'https://api.openai.com/v1'
+            
+            # MICROSECOND LOCK for OpenAI client
+            if hasattr(self, '_instance_model_lock'):
+                with self._instance_model_lock:
+                    self.openai_client = openai.OpenAI(
+                        api_key=self.api_key,
+                        base_url=base_url
+                    )
+            else:
                 self.openai_client = openai.OpenAI(
                     api_key=self.api_key,
-                    base_url=xai_url
+                    base_url=base_url
                 )
-                logger.info(f"xAI client configured with endpoint: {xai_url}")
+            print(f"[DEBUG] OpenAI client created with base_url: {base_url}")
+        
+        elif self.client_type == 'gemini':
+            if use_gemini_endpoint and gemini_endpoint:
+                # Use OpenAI client for Gemini endpoint
+                if base_url is None:
+                    base_url = gemini_endpoint
+                
+                # MICROSECOND LOCK for Gemini with OpenAI endpoint
+                if hasattr(self, '_instance_model_lock'):
+                    with self._instance_model_lock:
+                        self.openai_client = openai.OpenAI(
+                            api_key=self.api_key,
+                            base_url=base_url
+                        )
+                        self._original_client_type = 'gemini'
+                        self.client_type = 'openai'
+                else:
+                    self.openai_client = openai.OpenAI(
+                        api_key=self.api_key,
+                        base_url=base_url
+                    )
+                    self._original_client_type = 'gemini'
+                    self.client_type = 'openai'
+                print(f"[DEBUG] Gemini using OpenAI-compatible endpoint: {base_url}")
             else:
-                logger.info("xAI will use HTTP API")
+                # MICROSECOND LOCK for native Gemini client
+                if hasattr(self, '_instance_model_lock'):
+                    with self._instance_model_lock:
+                        self.gemini_client = genai.Client(api_key=self.api_key)
+                        if hasattr(tls, 'model'):
+                            tls.gemini_configured = True
+                            tls.gemini_api_key = self.api_key
+                            tls.gemini_client = self.gemini_client
+                else:
+                    self.gemini_client = genai.Client(api_key=self.api_key)
+                    if hasattr(tls, 'model'):
+                        tls.gemini_configured = True
+                        tls.gemini_api_key = self.api_key
+                        tls.gemini_client = self.gemini_client
+                
+                print(f"[DEBUG] Created native Gemini client for model: {self.model}")
+        
+        elif self.client_type == 'mistral':
+            if MistralClient is not None:
+                # MICROSECOND LOCK for Mistral client
+                if hasattr(self, '_instance_model_lock'):
+                    with self._instance_model_lock:
+                        self.mistral_client = MistralClient(api_key=self.api_key)
+                else:
+                    self.mistral_client = MistralClient(api_key=self.api_key)
+                logger.info("Mistral client created")
+        
+        elif self.client_type == 'cohere':
+            if cohere is not None:
+                # MICROSECOND LOCK for Cohere client
+                if hasattr(self, '_instance_model_lock'):
+                    with self._instance_model_lock:
+                        self.cohere_client = cohere.Client(self.api_key)
+                else:
+                    self.cohere_client = cohere.Client(self.api_key)
+                logger.info("Cohere client created")
+        
+        elif self.client_type == 'deepseek':
+            if openai is not None:
+                if base_url is None:
+                    base_url = os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/v1")
+                
+                # MICROSECOND LOCK for DeepSeek client
+                if hasattr(self, '_instance_model_lock'):
+                    with self._instance_model_lock:
+                        self.openai_client = openai.OpenAI(
+                            api_key=self.api_key,
+                            base_url=base_url
+                        )
+                else:
+                    self.openai_client = openai.OpenAI(
+                        api_key=self.api_key,
+                        base_url=base_url
+                    )
+                logger.info(f"DeepSeek client configured with endpoint: {base_url}")
+        
+        elif self.client_type == 'groq':
+            if openai is not None:
+                if base_url is None:
+                    base_url = os.getenv("GROQ_API_URL", "https://api.groq.com/openai/v1")
+                
+                # MICROSECOND LOCK for Groq client
+                if hasattr(self, '_instance_model_lock'):
+                    with self._instance_model_lock:
+                        self.openai_client = openai.OpenAI(
+                            api_key=self.api_key,
+                            base_url=base_url
+                        )
+                else:
+                    self.openai_client = openai.OpenAI(
+                        api_key=self.api_key,
+                        base_url=base_url
+                    )
+                logger.info(f"Groq client configured with endpoint: {base_url}")
+        
+        elif self.client_type == 'fireworks':
+            if openai is not None:
+                if base_url is None:
+                    base_url = os.getenv("FIREWORKS_API_URL", "https://api.fireworks.ai/inference/v1")
+                
+                # MICROSECOND LOCK for Fireworks client
+                if hasattr(self, '_instance_model_lock'):
+                    with self._instance_model_lock:
+                        self.openai_client = openai.OpenAI(
+                            api_key=self.api_key,
+                            base_url=base_url
+                        )
+                else:
+                    self.openai_client = openai.OpenAI(
+                        api_key=self.api_key,
+                        base_url=base_url
+                    )
+                logger.info(f"Fireworks client configured with endpoint: {base_url}")
+        
+        elif self.client_type == 'xai':
+            if openai is not None:
+                if base_url is None:
+                    base_url = os.getenv("XAI_API_URL", "https://api.x.ai/v1")
+                
+                # MICROSECOND LOCK for xAI client
+                if hasattr(self, '_instance_model_lock'):
+                    with self._instance_model_lock:
+                        self.openai_client = openai.OpenAI(
+                            api_key=self.api_key,
+                            base_url=base_url
+                        )
+                else:
+                    self.openai_client = openai.OpenAI(
+                        api_key=self.api_key,
+                        base_url=base_url
+                    )
+                logger.info(f"xAI client configured with endpoint: {base_url}")
+        
+        elif self.client_type == 'vertex_model_garden':
+            # Vertex AI doesn't need a client created here
+            logger.info("Vertex AI Model Garden will initialize on demand")
+        
+        elif self.client_type in ['yi', 'qwen', 'baichuan', 'zhipu', 'moonshot', 'baidu', 
+                                  'tencent', 'iflytek', 'bytedance', 'minimax', 
+                                  'sensenova', 'internlm', 'tii', 'microsoft', 
+                                  'azure', 'google', 'alephalpha', 'databricks', 
+                                  'huggingface', 'salesforce', 'bigscience', 'meta',
+                                  'electronhub', 'poe', 'openrouter']:
+            # These providers will use HTTP API or OpenAI-compatible endpoints
+            # No client initialization needed here
+            logger.info(f"{self.client_type} will use HTTP API or compatible endpoint")
         
         # Store thread-local client reference if in multi-key mode
         if self._multi_key_mode and hasattr(tls, 'model'):
-            tls.client_type = self.client_type
-            if hasattr(self, 'openai_client'):
-                tls.openai_client = self.openai_client
-            if hasattr(self, 'mistral_client'):
-                tls.mistral_client = self.mistral_client
-            if hasattr(self, 'cohere_client'):
-                tls.cohere_client = self.cohere_client
+            # MICROSECOND LOCK for thread-local storage
+            if hasattr(self, '_instance_model_lock'):
+                with self._instance_model_lock:
+                    tls.client_type = self.client_type
+                    if hasattr(self, 'openai_client'):
+                        tls.openai_client = self.openai_client
+                    if hasattr(self, 'gemini_client'):
+                        tls.gemini_client = self.gemini_client
+                    if hasattr(self, 'mistral_client'):
+                        tls.mistral_client = self.mistral_client
+                    if hasattr(self, 'cohere_client'):
+                        tls.cohere_client = self.cohere_client
+            else:
+                tls.client_type = self.client_type
+                if hasattr(self, 'openai_client'):
+                    tls.openai_client = self.openai_client
+                if hasattr(self, 'gemini_client'):
+                    tls.gemini_client = self.gemini_client
+                if hasattr(self, 'mistral_client'):
+                    tls.mistral_client = self.mistral_client
+                if hasattr(self, 'cohere_client'):
+                    tls.cohere_client = self.cohere_client
         
         # Log retry feature support
         logger.info(f"✅ Initialized {self.client_type} client for model: {self.model}")
@@ -2778,33 +2939,64 @@ class UnifiedClient:
                 if not extracted_content or extracted_content.strip() in ["", "[]", "[IMAGE TRANSLATION FAILED]"]:
                     print(f"Empty or error response: {finish_reason}")
                     
-                    # Check if this is likely a safety filter issue (especially for Gemini)
+                    # Check if this is likely a safety filter issue (for ALL providers, not just Gemini)
                     is_likely_safety_filter = False
                     
-                    # Check various indicators that this is a safety filter
-                    if self.client_type == 'gemini' or 'gemini' in self.model.lower():
-                        # Gemini often returns empty with 'length' or 'stop' when it's actually a safety filter
-                        if finish_reason in ['length', 'stop'] and not extracted_content:
-                            print(f"❌ Likely Gemini safety filter (empty content with finish_reason={finish_reason})")
-                            is_likely_safety_filter = True
+                    # Pattern 1: Empty content with suspicious finish_reasons (applies to all providers)
+                    if not extracted_content and finish_reason in ['length', 'stop', 'max_tokens', None]:
+                        print(f"⚠️ Suspicious empty response from {self.client_type} (finish_reason={finish_reason}) - possible safety filter")
+                        is_likely_safety_filter = True
                     
-                    # Check for safety-related content in response
-                    if response and hasattr(response, 'raw_response'):
-                        response_str = str(response.raw_response).lower()
-                        safety_indicators = ['safety', 'blocked', 'prohibited', 'harmful', 'inappropriate']
+                    # Pattern 2: Check for safety-related content in raw response
+                    if response:
+                        response_str = ""
+                        if hasattr(response, 'raw_response'):
+                            response_str = str(response.raw_response).lower()
+                        elif hasattr(response, 'error_details'):
+                            response_str = str(response.error_details).lower()
+                        else:
+                            response_str = str(response).lower()
+                        
+                        safety_indicators = [
+                            'safety', 'blocked', 'prohibited', 'harmful', 'inappropriate',
+                            'refused', 'content_filter', 'content_policy', 'violation',
+                            'cannot assist', 'unable to process', 'against guidelines',
+                            'ethical', 'responsible ai', 'harm_category'
+                        ]
+                        
                         if any(indicator in response_str for indicator in safety_indicators):
-                            print(f"❌ Safety indicators found in response")
+                            print(f"❌ Safety indicators found in response from {self.client_type}")
                             is_likely_safety_filter = True
                     
-                    # Check for specific safety filter messages in extracted content
+                    # Pattern 3: Check for specific safety filter messages in extracted content
                     if extracted_content:
                         content_lower = extracted_content.lower()
-                        if any(phrase in content_lower for phrase in [
+                        safety_phrases = [
                             'blocked', 'safety', 'cannot', 'unable', 'prohibited',
-                            'content filter', 'refused', 'inappropriate'
-                        ]):
-                            print(f"❌ Safety filter phrases detected in content")
+                            'content filter', 'refused', 'inappropriate', 'i cannot',
+                            "i can't", "i'm not able", "not able to", "against my",
+                            'content policy', 'guidelines', 'ethical'
+                        ]
+                        if any(phrase in content_lower for phrase in safety_phrases):
+                            print(f"❌ Safety filter phrases detected in content from {self.client_type}")
                             is_likely_safety_filter = True
+                    
+                    # Pattern 4: Provider-specific patterns
+                    actual_provider = self._get_actual_provider()
+
+                    if actual_provider in ['openai', 'azure', 'electronhub', 'openrouter', 'poe', 'gemini']:
+                        # These providers often return empty on safety issues
+                        if not extracted_content and finish_reason != 'error':
+                            print(f"⚠️ {actual_provider} returned empty content - likely safety filter")
+                            is_likely_safety_filter = True
+                    
+                    # Pattern 5: Check content length vs input length
+                    if extracted_content and len(extracted_content) < 50:
+                        input_length = sum(len(msg.get('content', '')) for msg in messages if msg.get('role') == 'user')
+                        if input_length > 200:  # Substantial input but tiny output
+                            print(f"⚠️ Suspiciously short response ({len(extracted_content)} chars) for {input_length} char input")
+                            if any(word in extracted_content.lower() for word in ['cannot', 'unable', 'sorry', 'assist']):
+                                is_likely_safety_filter = True
                     
                     # If it's likely a safety filter and we haven't tried main key yet
                     if is_likely_safety_filter and not main_key_attempted:
@@ -2815,8 +3007,9 @@ class UnifiedClient:
                             self.original_api_key and 
                             self.original_model):
                             
-                            print(f"🔄 Empty response likely due to safety filter - attempting main key fallback")
-                            print(f"   Current key: {self.key_identifier}")
+                            print(f"🔄 Empty/blocked response likely due to safety filter - attempting main key fallback")
+                            print(f"   Provider: {self.client_type}")
+                            print(f"   Current model: {self.model} ({self.key_identifier})")
                             print(f"   Main key model: {self.original_model}")
                             
                             main_key_attempted = True
@@ -2829,11 +3022,11 @@ class UnifiedClient:
                                 
                                 if main_response:
                                     content, finish_reason = main_response
-                                    if content and content.strip():  # Make sure we got actual content
+                                    if content and content.strip() and len(content) > 10:  # Make sure we got actual content
                                         print(f"✅ Main key succeeded! Got {len(content)} chars")
                                         return content, finish_reason
                                     else:
-                                        print(f"❌ Main key also returned empty content")
+                                        print(f"❌ Main key also returned empty/minimal content: {len(content) if content else 0} chars")
                                 else:
                                     print(f"❌ Main key returned None")
                                     
@@ -2843,14 +3036,17 @@ class UnifiedClient:
                                 main_error_str = str(main_error).lower()
                                 if any(indicator in main_error_str for indicator in content_filter_indicators):
                                     print(f"❌ Main key also hit content filter")
+                                # Continue to normal error handling
                         else:
                             if not self._multi_key_mode:
                                 print(f"❌ Not in multi-key mode, cannot retry with main key")
                             else:
-                                print(f"❌ Main key not available for retry")
+                                print(f"❌ Main key not available for retry (check configuration)")
+                    elif main_key_attempted:
+                        print(f"❌ Already attempted main key for this request")
                     
                     # If we couldn't retry or retry failed, continue with normal error handling
-                    self._save_failed_request(messages, "Empty response (possible safety filter)", context, response)
+                    self._save_failed_request(messages, f"Empty response from {self.client_type} (possible safety filter)", context, response)
                     
                     # Log the failure
                     self._log_truncation_failure(
@@ -2862,20 +3058,25 @@ class UnifiedClient:
                             'likely_safety_filter': is_likely_safety_filter,
                             'original_finish_reason': finish_reason,
                             'provider': self.client_type,
-                            'model': self.model
+                            'model': self.model,
+                            'key_identifier': self.key_identifier
                         } if is_likely_safety_filter else getattr(response, 'error_details', None)
                     )
                     
                     self._track_stats(context, False, "empty_response", time.time() - start_time)
                     
-                    # Use fallback
-                    fallback_reason = "safety_filter" if is_likely_safety_filter else "empty"
+                    # Use fallback with appropriate reason
+                    if is_likely_safety_filter:
+                        fallback_reason = f"safety_filter_{self.client_type}"
+                    else:
+                        fallback_reason = "empty"
+                    
                     fallback_content = self._handle_empty_result(messages, context, 
                         getattr(response, 'error_details', fallback_reason) if response else fallback_reason)
                     
                     # Return with appropriate finish_reason
                     return fallback_content, 'content_filter' if is_likely_safety_filter else 'error'
-                
+                                
                 # Track success
                 self._track_stats(context, True, None, time.time() - start_time)
                 
@@ -3801,35 +4002,67 @@ class UnifiedClient:
                 
                 # Handle empty responses
                 if not extracted_content or extracted_content.strip() in ["", "[]", "[IMAGE TRANSLATION FAILED]"]:
-                    print(f"Empty or error response: {finish_reason}")
+                    print(f"Empty or error image response: {finish_reason}")
                     
-                    # Check if this is likely a safety filter issue (especially for Gemini)
+                    # Check if this is likely a safety filter issue (for ALL providers, not just Gemini)
                     is_likely_safety_filter = False
                     
-                    # Check various indicators that this is a safety filter
-                    if self.client_type == 'gemini' or 'gemini' in self.model.lower():
-                        # Gemini often returns empty with 'length' or 'stop' when it's actually a safety filter
-                        if finish_reason in ['length', 'stop'] and not extracted_content:
-                            print(f"❌ Likely Gemini safety filter (empty content with finish_reason={finish_reason})")
-                            is_likely_safety_filter = True
+                    # Pattern 1: Empty content with suspicious finish_reasons (applies to all providers)
+                    if not extracted_content and finish_reason in ['length', 'stop', 'max_tokens', None]:
+                        print(f"⚠️ Suspicious empty image response from {self.client_type} (finish_reason={finish_reason}) - possible safety filter")
+                        is_likely_safety_filter = True
                     
-                    # Check for safety-related content in response
-                    if response and hasattr(response, 'raw_response'):
-                        response_str = str(response.raw_response).lower()
-                        safety_indicators = ['safety', 'blocked', 'prohibited', 'harmful', 'inappropriate']
+                    # Pattern 2: Check for safety-related content in raw response
+                    if response:
+                        response_str = ""
+                        if hasattr(response, 'raw_response'):
+                            response_str = str(response.raw_response).lower()
+                        elif hasattr(response, 'error_details'):
+                            response_str = str(response.error_details).lower()
+                        else:
+                            response_str = str(response).lower()
+                        
+                        safety_indicators = [
+                            'safety', 'blocked', 'prohibited', 'harmful', 'inappropriate',
+                            'refused', 'content_filter', 'content_policy', 'violation',
+                            'cannot assist', 'unable to process', 'against guidelines',
+                            'ethical', 'responsible ai', 'harm_category', 'nsfw',
+                            'adult content', 'explicit', 'violence', 'disturbing'
+                        ]
+                        
                         if any(indicator in response_str for indicator in safety_indicators):
-                            print(f"❌ Safety indicators found in response")
+                            print(f"❌ Safety indicators found in image response from {self.client_type}")
                             is_likely_safety_filter = True
                     
-                    # Check for specific safety filter messages in extracted content
+                    # Pattern 3: Check for specific safety filter messages in extracted content
                     if extracted_content:
                         content_lower = extracted_content.lower()
-                        if any(phrase in content_lower for phrase in [
+                        safety_phrases = [
                             'blocked', 'safety', 'cannot', 'unable', 'prohibited',
-                            'content filter', 'refused', 'inappropriate'
-                        ]):
-                            print(f"❌ Safety filter phrases detected in content")
+                            'content filter', 'refused', 'inappropriate', 'i cannot',
+                            "i can't", "i'm not able", "not able to", "against my",
+                            'content policy', 'guidelines', 'ethical', 'analyze this image',
+                            'process this image', 'describe this image', 'nsfw'
+                        ]
+                        if any(phrase in content_lower for phrase in safety_phrases):
+                            print(f"❌ Safety filter phrases detected in image content from {self.client_type}")
                             is_likely_safety_filter = True
+                    
+                    # Pattern 4: Provider-specific patterns for vision models
+                    actual_provider = self._get_actual_provider()
+
+                    if actual_provider in ['openai', 'azure', 'electronhub', 'openrouter', 'poe', 'gemini']:
+                        # These providers often return empty on safety issues
+                        if not extracted_content and finish_reason != 'error':
+                            print(f"⚠️ {actual_provider} returned empty content - likely safety filter")
+                            is_likely_safety_filter = True
+                    
+                    # Pattern 5: Image-specific safety checks
+                    # Images are more likely to trigger safety filters
+                    if not extracted_content:
+                        print(f"⚠️ Empty response for image request - checking for safety filter")
+                        # For image requests, empty responses are almost always safety filters
+                        is_likely_safety_filter = True
                     
                     # If it's likely a safety filter and we haven't tried main key yet
                     if is_likely_safety_filter and not main_key_attempted:
@@ -3840,42 +4073,46 @@ class UnifiedClient:
                             self.original_api_key and 
                             self.original_model):
                             
-                            print(f"🔄 Empty response likely due to safety filter - attempting main key fallback")
-                            print(f"   Current key: {self.key_identifier}")
+                            print(f"🔄 Empty/blocked image response likely due to safety filter - attempting main key fallback")
+                            print(f"   Provider: {self.client_type}")
+                            print(f"   Current model: {self.model} ({self.key_identifier})")
                             print(f"   Main key model: {self.original_model}")
                             
                             main_key_attempted = True
                             
                             try:
-                                # Create temporary client with main key
-                                main_response = self._retry_with_main_key(
-                                    messages, temperature, max_tokens, max_completion_tokens, context
+                                # Create temporary client with main key for image
+                                main_response = self._retry_image_with_main_key(
+                                    messages, image_data, temperature, max_tokens, max_completion_tokens, context
                                 )
                                 
                                 if main_response:
                                     content, finish_reason = main_response
-                                    if content and content.strip():  # Make sure we got actual content
-                                        print(f"✅ Main key succeeded! Got {len(content)} chars")
+                                    if content and content.strip() and len(content) > 10:  # Make sure we got actual content
+                                        print(f"✅ Main key succeeded for image! Got {len(content)} chars")
                                         return content, finish_reason
                                     else:
-                                        print(f"❌ Main key also returned empty content")
+                                        print(f"❌ Main key also returned empty/minimal image content: {len(content) if content else 0} chars")
                                 else:
-                                    print(f"❌ Main key returned None")
+                                    print(f"❌ Main key returned None for image")
                                     
                             except Exception as main_error:
-                                print(f"❌ Main key error: {str(main_error)[:200]}")
+                                print(f"❌ Main key image error: {str(main_error)[:200]}")
                                 # Check if main key also hit content filter
                                 main_error_str = str(main_error).lower()
                                 if any(indicator in main_error_str for indicator in content_filter_indicators):
-                                    print(f"❌ Main key also hit content filter")
+                                    print(f"❌ Main key also hit content filter for image")
+                                # Continue to normal error handling
                         else:
                             if not self._multi_key_mode:
-                                print(f"❌ Not in multi-key mode, cannot retry with main key")
+                                print(f"❌ Not in multi-key mode, cannot retry image with main key")
                             else:
-                                print(f"❌ Main key not available for retry")
+                                print(f"❌ Main key not available for image retry (check configuration)")
+                    elif main_key_attempted:
+                        print(f"❌ Already attempted main key for this image request")
                     
                     # If we couldn't retry or retry failed, continue with normal error handling
-                    self._save_failed_request(messages, "Empty response (possible safety filter)", context, response)
+                    self._save_failed_request(messages, f"Empty image response from {self.client_type} (possible safety filter)", context, response)
                     
                     # Log the failure
                     self._log_truncation_failure(
@@ -3887,14 +4124,20 @@ class UnifiedClient:
                             'likely_safety_filter': is_likely_safety_filter,
                             'original_finish_reason': finish_reason,
                             'provider': self.client_type,
-                            'model': self.model
+                            'model': self.model,
+                            'key_identifier': self.key_identifier,
+                            'request_type': 'image'
                         } if is_likely_safety_filter else getattr(response, 'error_details', None)
                     )
                     
-                    self._track_stats(context, False, "empty_response", time.time() - start_time)
+                    self._track_stats(context, False, "empty_image_response", time.time() - start_time)
                     
-                    # Use fallback
-                    fallback_reason = "safety_filter" if is_likely_safety_filter else "empty"
+                    # Use fallback with appropriate reason
+                    if is_likely_safety_filter:
+                        fallback_reason = f"image_safety_filter_{self.client_type}"
+                    else:
+                        fallback_reason = "empty_image"
+                    
                     fallback_content = self._handle_empty_result(messages, context, 
                         getattr(response, 'error_details', fallback_reason) if response else fallback_reason)
                     
@@ -4224,10 +4467,18 @@ class UnifiedClient:
  
     def reset_conversation_for_new_context(self, new_context):
         """Reset conversation state when context changes"""
-        self.current_session_context = new_context
-        self.conversation_message_count = 0
-        self.pattern_counts.clear()
-        self.last_pattern = None
+        if hasattr(self, '_instance_model_lock'):
+            with self._instance_model_lock:
+                self.current_session_context = new_context
+                self.conversation_message_count = 0
+                self.pattern_counts.clear()
+                self.last_pattern = None
+        else:
+            self.current_session_context = new_context
+            self.conversation_message_count = 0
+            self.pattern_counts.clear()
+            self.last_pattern = None
+        
         logger.info(f"Reset conversation state for new context: {new_context}")
     
     def _apply_pure_reinforcement(self, messages):
@@ -4246,12 +4497,20 @@ class UnifiedClient:
             
             if len(pattern) >= 2:
                 pattern_key = f"reinforcement_{pattern[0]}_{pattern[1]}"
-                self.pattern_counts[pattern_key] = self.pattern_counts.get(pattern_key, 0) + 1
+                
+                # MICROSECOND LOCK: When modifying pattern_counts
+                if hasattr(self, '_instance_model_lock'):
+                    with self._instance_model_lock:
+                        self.pattern_counts[pattern_key] = self.pattern_counts.get(pattern_key, 0) + 1
+                        count = self.pattern_counts[pattern_key]
+                else:
+                    self.pattern_counts[pattern_key] = self.pattern_counts.get(pattern_key, 0) + 1
+                    count = self.pattern_counts[pattern_key]
                 
                 # Apply reinforcement if pattern occurs frequently
-                if self.pattern_counts[pattern_key] >= 3:
+                if count >= 3:
                     logger.info(f"Applying reinforcement for pattern: {pattern_key}")
-                    # Add reinforcement to system message
+                    # Modifying messages parameter is safe (it's local to this call)
                     for msg in messages:
                         if msg.get('role') == 'system':
                             msg['content'] += "\n\n[PATTERN REINFORCEMENT ACTIVE]"
@@ -5518,6 +5777,9 @@ class UnifiedClient:
             max_completion_tokens: Maximum completion tokens (for o-series models)
             response_name: Name for saving response
         """
+        # Check if this is actually Gemini (including when using OpenAI endpoint)
+        actual_provider = self._get_actual_provider()
+        
         # Map client types to their handler methods
         handlers = {
             'openai': self._send_openai,
@@ -5561,7 +5823,14 @@ class UnifiedClient:
             'vertex_model_garden': self._send_vertex_model_garden,
         }
         
-        handler = handlers.get(self.client_type)
+        # IMPORTANT: Use actual_provider for routing, not client_type
+        # This ensures Gemini always uses its native handler even when using OpenAI endpoint
+        handler = handlers.get(actual_provider)
+        
+        if not handler:
+            # Fallback to client_type if no actual_provider match
+            handler = handlers.get(self.client_type)
+        
         if not handler:
             # Try fallback to Together AI for open models
             if self.client_type in ['bigscience', 'meta', 'databricks', 'huggingface', 'salesforce']:
@@ -5569,24 +5838,38 @@ class UnifiedClient:
                 return self._send_together(messages, temperature, max_tokens, response_name)
             raise UnifiedClientError(f"No handler for client type: {self.client_type}")
         
-        # SIMPLIFIED: Just call the handler directly
-        # Your multi-key system already handles thread-specific models/keys
-        # The handlers should read from self.model and self.api_key which are
-        # already thread-local in multi-key mode
-        
-        # For OpenAI, pass the max_completion_tokens parameter
-        if self.client_type == 'openai':
+        # Route based on actual provider (handles Gemini with OpenAI endpoint correctly)
+        if actual_provider == 'gemini':
+            # Always use Gemini handler for Gemini models, regardless of transport
+            logger.debug(f"Routing to Gemini handler (actual provider: {actual_provider}, client_type: {self.client_type})")
+            return self._send_gemini(messages, temperature, max_tokens, response_name)
+        elif actual_provider == 'openai' or self.client_type == 'openai':
+            # For OpenAI, pass the max_completion_tokens parameter
             return handler(messages, temperature, max_tokens, max_completion_tokens, response_name)
         elif self.client_type == 'vertex_model_garden':
             # Vertex AI doesn't use response_name parameter
             return handler(messages, temperature, max_tokens or max_completion_tokens, None, response_name)
-        elif self.client_type == 'gemini':
-            # Gemini handler will check thinking support internally
-            return handler(messages, temperature, max_tokens, response_name)
         else:
             # Other providers don't use max_completion_tokens
             return handler(messages, temperature, max_tokens, response_name)
 
+
+    def _get_actual_provider(self) -> str:
+        """
+        Get the actual provider name, accounting for Gemini using OpenAI endpoint.
+        This is used for proper routing and detection.
+        """
+        # Check if this is Gemini using OpenAI endpoint
+        if hasattr(self, '_original_client_type') and self._original_client_type:
+            return self._original_client_type
+        return self.client_type
+
+    def _is_gemini_request(self) -> bool:
+        """
+        Check if this is a Gemini request (native or via OpenAI endpoint)
+        """
+        return self._get_actual_provider() == 'gemini'
+    
     def _get_anti_duplicate_params(self, temperature):
         """Get user-configured anti-duplicate parameters from GUI settings"""
         # Check if user enabled anti-duplicate
@@ -5652,9 +5935,10 @@ class UnifiedClient:
             last_char = content_stripped[-1]
             # Define valid ending punctuation marks
             valid_endings = [
-                '.', '!', '?', '"', "'", '»', '】', '）', ')', 
-                '。', '！', '？', '"', ''', '】', '"', '''
+                ".", "!", "?", '"', "'", "»", "】", "）", ")", 
+                "。", "！", "？", "’", "”"
             ]
+            
             # Check if ends with incomplete sentence (no proper punctuation)
             if last_char not in valid_endings:
                 # Additional check: is the last word incomplete?
@@ -6568,54 +6852,6 @@ class UnifiedClient:
         use_openai_endpoint = os.getenv("USE_GEMINI_OPENAI_ENDPOINT", "0") == "1"
         gemini_endpoint = os.getenv("GEMINI_OPENAI_ENDPOINT", "")
         
-        if use_openai_endpoint and gemini_endpoint:
-            # Ensure the endpoint ends with /openai/ for compatibility
-            if not gemini_endpoint.endswith('/openai/'):
-                if gemini_endpoint.endswith('/'):
-                    gemini_endpoint = gemini_endpoint + 'openai/'
-                else:
-                    gemini_endpoint = gemini_endpoint + '/openai/'
-            
-            print(f"🔄 Using OpenAI-compatible endpoint for Gemini: {gemini_endpoint}")
-            
-            # Check if safety settings are disabled
-            disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
-            
-            # Prepare safety configuration data
-            if disable_safety:
-                safety_status = "DISABLED - Using OpenAI-compatible endpoint"
-                readable_safety = "DISABLED_VIA_OPENAI_ENDPOINT"
-            else:
-                safety_status = "ENABLED - Using default settings via OpenAI endpoint"
-                readable_safety = "DEFAULT"
-            
-            print(f"🔒 Gemini OpenAI Endpoint Safety Status: {safety_status}")
-            
-            # Save configuration to file
-            config_data = {
-                "type": "GEMINI_OPENAI_ENDPOINT_REQUEST",
-                "model": self.model,
-                "endpoint": gemini_endpoint,
-                "safety_enabled": not disable_safety,
-                "safety_settings": readable_safety,
-                "temperature": temperature,
-                "max_output_tokens": max_tokens,
-                "timestamp": datetime.now().isoformat(),
-            }
-            
-            # Save configuration to file with thread isolation
-            self._save_gemini_safety_config(config_data, response_name)
-            
-            # Route to OpenAI-compatible handler
-            return self._send_openai_compatible(
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                base_url=gemini_endpoint,
-                response_name=response_name,
-                provider="gemini-openai"
-            )
-
         # Import types at the top
         from google.genai import types
         
@@ -6646,7 +6882,7 @@ class UnifiedClient:
         # Check if this model supports thinking
         supports_thinking = self._supports_thinking()
         
-        # Configure safety settings based on toggle
+        # Configure safety settings based on toggle (SAME FOR BOTH ENDPOINTS)
         if disable_safety:
             # Set all safety categories to BLOCK_NONE (most permissive)
             safety_settings = [
@@ -6699,6 +6935,9 @@ class UnifiedClient:
             readable_safety = "DEFAULT"
         
         # Log to console with thinking status
+        endpoint_info = f" (via OpenAI endpoint: {gemini_endpoint})" if use_openai_endpoint else " (native API)"
+        print(f"🔒 Gemini Safety Status: {safety_status}{endpoint_info}")
+        
         thinking_status = ""
         if supports_thinking:
             if thinking_budget == 0:
@@ -6709,13 +6948,14 @@ class UnifiedClient:
                 thinking_status = f" (thinking budget: {thinking_budget})"
         else:
             thinking_status = " (thinking not supported)"
-            
-        print(f"🔒 Gemini Safety Status: {safety_status} \n🧠 Thinking Status: {thinking_status}")
+        
+        print(f"🧠 Thinking Status: {thinking_status}")
         
         # Save configuration to file
         config_data = {
-            "type": "TEXT_REQUEST",
+            "type": "GEMINI_OPENAI_ENDPOINT_REQUEST" if use_openai_endpoint else "TEXT_REQUEST",
             "model": self.model,
+            "endpoint": gemini_endpoint if use_openai_endpoint else "native",
             "safety_enabled": not disable_safety,
             "safety_settings": readable_safety,
             "temperature": temperature,
@@ -6728,7 +6968,7 @@ class UnifiedClient:
         # Save configuration to file with thread isolation
         self._save_gemini_safety_config(config_data, response_name)
         
-        # Main attempt loop
+        # Main attempt loop - SAME FOR BOTH ENDPOINTS
         while attempt < attempts:
             try:
                 if self._cancelled:
@@ -6744,123 +6984,163 @@ class UnifiedClient:
                     **anti_dupe_params  # Add user's custom parameters
                 }
                 
-                # Only add thinking_config if the model supports it
-                if supports_thinking:
-                    # Create thinking config separately
-                    thinking_config = types.ThinkingConfig(
-                        thinking_budget=thinking_budget
-                    )
-                    
-                    # Create generation config with thinking_config as a parameter
-                    generation_config = types.GenerateContentConfig(
-                        thinking_config=thinking_config,
-                        **generation_config_params
-                    )
-                else:
-                    # Create generation config without thinking_config
-                    generation_config = types.GenerateContentConfig(
-                        **generation_config_params
-                    )
-                
-                # Add safety settings to config if they exist
-                if safety_settings:
-                    generation_config.safety_settings = safety_settings
-                
-                # Log the request with thinking info
+                # Log the request
                 print(f"   📊 Temperature: {temperature}, Max tokens: {current_tokens}")
-                
-                if supports_thinking:
-                    if thinking_budget == 0:
-                        #print(f"   🧠 Thinking: DISABLED")
-                        pass
-                    elif thinking_budget == -1:
-                        #print(f"   🧠 Thinking: DYNAMIC (model decides)")
-                        pass
-                    else:
-                        #print(f"   🧠 Thinking Budget: {thinking_budget} tokens")
-                        pass
 
-                # Make the API call
-                response = self.gemini_client.models.generate_content(
-                    model=self.model,
-                    contents=formatted_prompt,
-                    config=generation_config
-                )
-                
-                # Check for blocked content in prompt_feedback
-                if hasattr(response, 'prompt_feedback'):
-                    feedback = response.prompt_feedback
-                    if hasattr(feedback, 'block_reason') and feedback.block_reason:
-                        error_details['block_reason'] = str(feedback.block_reason)
-                        if disable_safety:
-                            print(f"Content blocked despite safety disabled: {feedback.block_reason}")
+                # ========== MAKE THE API CALL - DIFFERENT FOR EACH ENDPOINT ==========
+                if use_openai_endpoint and gemini_endpoint:
+                    # Ensure the endpoint ends with /openai/ for compatibility
+                    if not gemini_endpoint.endswith('/openai/'):
+                        if gemini_endpoint.endswith('/'):
+                            gemini_endpoint = gemini_endpoint + 'openai/'
                         else:
-                            print(f"Content blocked: {feedback.block_reason}")
-                        
-                        # Raise as UnifiedClientError with prohibited_content type
-                        raise UnifiedClientError(
-                            f"Content blocked: {feedback.block_reason}",
-                            error_type="prohibited_content",
-                            details={"block_reason": str(feedback.block_reason)}
-                        )
-                
-                # Check if response has candidates with prohibited content finish reason
-                # This is important for early detection before extraction
-                prohibited_detected = False
-                finish_reason = 'stop'  # Default
-                
-                if hasattr(response, 'candidates') and response.candidates:
-                    for candidate in response.candidates:
-                        if hasattr(candidate, 'finish_reason'):
-                            finish_reason_str = str(candidate.finish_reason)
-                            if 'PROHIBITED_CONTENT' in finish_reason_str:
-                                prohibited_detected = True
-                                finish_reason = 'prohibited_content'
-                                print(f"   🚫 Candidate has prohibited content finish reason: {finish_reason_str}")
-                                break
-                            elif 'MAX_TOKENS' in finish_reason_str:
-                                finish_reason = 'length'
-                            elif 'SAFETY' in finish_reason_str:
-                                finish_reason = 'safety'
-                
-                # If prohibited content detected, raise error for retry logic
-                if prohibited_detected:
-                    # Get thinking tokens if available for debugging
-                    thinking_tokens_wasted = 0
-                    if hasattr(response, 'usage_metadata') and hasattr(response.usage_metadata, 'thoughts_token_count'):
-                        thinking_tokens_wasted = response.usage_metadata.thoughts_token_count or 0
-                        if thinking_tokens_wasted > 0:
-                            print(f"   ⚠️ Wasted {thinking_tokens_wasted} thinking tokens on prohibited content")
+                            gemini_endpoint = gemini_endpoint + '/openai/'
                     
-                    raise UnifiedClientError(
-                        "Content blocked: FinishReason.PROHIBITED_CONTENT",
-                        error_type="prohibited_content",
-                        details={
-                            "finish_reason": "PROHIBITED_CONTENT",
-                            "thinking_tokens_wasted": thinking_tokens_wasted
-                        }
+                    # Call OpenAI-compatible endpoint
+                    response = self._send_openai_compatible(
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=current_tokens,
+                        base_url=gemini_endpoint,
+                        response_name=response_name,
+                        provider="gemini-openai"
                     )
-                
-                # Log thinking token usage if available
-                if hasattr(response, 'usage_metadata'):
-                    usage = response.usage_metadata
-                    if supports_thinking and hasattr(usage, 'thoughts_token_count'):
-                        if usage.thoughts_token_count and usage.thoughts_token_count > 0:
-                            print(f"   💭 Thinking tokens used: {usage.thoughts_token_count}")
-                        else:
-                            print(f"   ✅ Thinking successfully disabled (0 thinking tokens)")
-                
-                # IMPORTANT: Return the raw response wrapped in UnifiedResponse
-                # Let the universal extractor in _send_internal handle the extraction
-                return UnifiedResponse(
-                    content="",  # Leave empty - will be extracted by universal method
-                    finish_reason=finish_reason,
-                    raw_response=response,  # Pass the full Gemini response object
-                    error_details=error_details if error_details else None
-                )
-                
+                    
+                    # For OpenAI endpoint, we already have a UnifiedResponse
+                    # Extract any thinking tokens if available
+                    if hasattr(response, 'raw_response') and hasattr(response.raw_response, 'usage'):
+                        usage = response.raw_response.usage
+                        if supports_thinking:
+                            # Try to find thinking tokens in various fields
+                            thinking_tokens = 0
+                            if hasattr(usage, 'thoughts_token_count'):
+                                thinking_tokens = usage.thoughts_token_count or 0
+                            elif hasattr(usage, 'thinking_tokens'):
+                                thinking_tokens = usage.thinking_tokens or 0
+                            
+                            if thinking_tokens > 0:
+                                print(f"   💭 Thinking tokens used: {thinking_tokens}")
+                            elif thinking_budget == 0:
+                                print(f"   ✅ Thinking successfully disabled (0 thinking tokens)")
+                            else:
+                                # Thinking requested but not reported by endpoint
+                                logger.debug("Thinking tokens may have been used but are not reported via OpenAI endpoint")
+                    
+                    # Check finish reason for prohibited content
+                    if response.finish_reason == 'content_filter' or response.finish_reason == 'prohibited_content':
+                        raise UnifiedClientError(
+                            "Content blocked by Gemini OpenAI endpoint",
+                            error_type="prohibited_content",
+                            details={"endpoint": "openai", "finish_reason": response.finish_reason}
+                        )
+                    
+                    return response
+                    
+                else:
+                    # Native Gemini API call
+                    # Only add thinking_config if the model supports it
+                    if supports_thinking:
+                        # Create thinking config separately
+                        thinking_config = types.ThinkingConfig(
+                            thinking_budget=thinking_budget
+                        )
+                        
+                        # Create generation config with thinking_config as a parameter
+                        generation_config = types.GenerateContentConfig(
+                            thinking_config=thinking_config,
+                            **generation_config_params
+                        )
+                    else:
+                        # Create generation config without thinking_config
+                        generation_config = types.GenerateContentConfig(
+                            **generation_config_params
+                        )
+                    
+                    # Add safety settings to config if they exist
+                    if safety_settings:
+                        generation_config.safety_settings = safety_settings
+
+                    # Make the native API call
+                    response = self.gemini_client.models.generate_content(
+                        model=self.model,
+                        contents=formatted_prompt,
+                        config=generation_config
+                    )
+                    
+                    # Check for blocked content in prompt_feedback
+                    if hasattr(response, 'prompt_feedback'):
+                        feedback = response.prompt_feedback
+                        if hasattr(feedback, 'block_reason') and feedback.block_reason:
+                            error_details['block_reason'] = str(feedback.block_reason)
+                            if disable_safety:
+                                print(f"Content blocked despite safety disabled: {feedback.block_reason}")
+                            else:
+                                print(f"Content blocked: {feedback.block_reason}")
+                            
+                            # Raise as UnifiedClientError with prohibited_content type
+                            raise UnifiedClientError(
+                                f"Content blocked: {feedback.block_reason}",
+                                error_type="prohibited_content",
+                                details={"block_reason": str(feedback.block_reason)}
+                            )
+                    
+                    # Check if response has candidates with prohibited content finish reason
+                    prohibited_detected = False
+                    finish_reason = 'stop'  # Default
+                    
+                    if hasattr(response, 'candidates') and response.candidates:
+                        for candidate in response.candidates:
+                            if hasattr(candidate, 'finish_reason'):
+                                finish_reason_str = str(candidate.finish_reason)
+                                if 'PROHIBITED_CONTENT' in finish_reason_str:
+                                    prohibited_detected = True
+                                    finish_reason = 'prohibited_content'
+                                    print(f"   🚫 Candidate has prohibited content finish reason: {finish_reason_str}")
+                                    break
+                                elif 'MAX_TOKENS' in finish_reason_str:
+                                    finish_reason = 'length'
+                                elif 'SAFETY' in finish_reason_str:
+                                    finish_reason = 'safety'
+                    
+                    # If prohibited content detected, raise error for retry logic
+                    if prohibited_detected:
+                        # Get thinking tokens if available for debugging
+                        thinking_tokens_wasted = 0
+                        if hasattr(response, 'usage_metadata') and hasattr(response.usage_metadata, 'thoughts_token_count'):
+                            thinking_tokens_wasted = response.usage_metadata.thoughts_token_count or 0
+                            if thinking_tokens_wasted > 0:
+                                print(f"   ⚠️ Wasted {thinking_tokens_wasted} thinking tokens on prohibited content")
+                        
+                        raise UnifiedClientError(
+                            "Content blocked: FinishReason.PROHIBITED_CONTENT",
+                            error_type="prohibited_content",
+                            details={
+                                "finish_reason": "PROHIBITED_CONTENT",
+                                "thinking_tokens_wasted": thinking_tokens_wasted
+                            }
+                        )
+                    
+                    # Log thinking token usage if available
+                    if hasattr(response, 'usage_metadata'):
+                        usage = response.usage_metadata
+                        if supports_thinking and hasattr(usage, 'thoughts_token_count'):
+                            if usage.thoughts_token_count and usage.thoughts_token_count > 0:
+                                print(f"   💭 Thinking tokens used: {usage.thoughts_token_count}")
+                            else:
+                                print(f"   ✅ Thinking successfully disabled (0 thinking tokens)")
+                    
+                    # Return the raw response wrapped in UnifiedResponse
+                    return UnifiedResponse(
+                        content="",  # Leave empty - will be extracted by universal method
+                        finish_reason=finish_reason,
+                        raw_response=response,  # Pass the full Gemini response object
+                        error_details=error_details if error_details else None
+                    )
+                # ========== END OF API CALL SECTION ==========
+                    
             except UnifiedClientError as e:
                 # Re-raise UnifiedClientErrors (including prohibited content)
+                # This will trigger main key retry in the outer send() method
                 raise
                 
             except Exception as e:
@@ -6881,26 +7161,10 @@ class UnifiedClient:
                     )
                 
                 # Check if this is a rate limit error
-                if "429" in error_str and "RESOURCE_EXHAUSTED" in error_str:
-                    # Try to extract retryDelay from the error
-                    retry_delay = 60  # Default to 60 seconds
-                    
-                    try:
-                        # Look for retryDelay in the error message
-                        import re
-                        delay_match = re.search(r"'retryDelay':\s*'(\d+)s'", error_str)
-                        if delay_match:
-                            retry_delay = int(delay_match.group(1))
-                            if retry_delay == 0:
-                                retry_delay = 1  # Minimum 1 second delay
-                    except:
-                        pass
-                    
-                    print(f"⏳ Rate limited. Google suggests waiting {retry_delay}s before retry")
-                    
-                    # Create a UnifiedClientError with proper error_type for rate limit
+                if "429" in error_str or "rate limit" in error_str.lower():
+                    # Re-raise for multi-key handling
                     raise UnifiedClientError(
-                        f"Rate limit exceeded (429). Retry after {retry_delay}s", 
+                        f"Rate limit exceeded: {e}", 
                         error_type="rate_limit",
                         http_status=429
                     )
@@ -8198,7 +8462,7 @@ class UnifiedClient:
         return self._send_vertex_model_garden(messages_with_image, temperature, max_tokens, response_name=response_name)
 
     def _is_o_series_model(self) -> bool:
-        """Check if the current model is an o-series model (o1, o3, o4, etc.)"""
+        """Check if the current model is an o-series model (o1, o3, o4, etc.) or GPT-5"""
         if not self.model:
             return False
         
@@ -8214,6 +8478,10 @@ class UnifiedClient:
         
         # Check for o4 models
         if 'o4-mini' in model_lower:
+            return True
+        
+        # Check for GPT-5 models (including variants)
+        if 'gpt-5' in model_lower or 'gpt5' in model_lower:
             return True
         
         # Check if it starts with o followed by a digit
