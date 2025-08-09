@@ -841,6 +841,18 @@ class ProgressManager:
         
     def check_chapter_status(self, chapter_idx, actual_num, content_hash, output_dir):
         """Check if a chapter needs translation with fallback"""
+        
+        # FIRST: Check if this chapter number is already completed
+        for key, info in self.prog["chapters"].items():
+            if info.get("actual_num") == actual_num and info.get("status") == "completed":
+                output_file = info.get("output_file")
+                if output_file:
+                    output_path = os.path.join(output_dir, output_file)
+                    if os.path.exists(output_path):
+                        # Chapter is already completed with a file that exists
+                        return False, f"Chapter {actual_num} already translated: {output_file}", output_file
+        
+        # THEN: Do the normal content hash check
         chapter_key = content_hash
         
         if chapter_key in self.prog["chapters"]:
@@ -934,10 +946,62 @@ class ProgressManager:
         return True, None, None
     
     def cleanup_missing_files(self, output_dir):
-        """Scan progress tracking and clean up any references to missing files"""
+        """Scan progress tracking and clean up any references to missing files AND duplicate entries"""
         cleaned_count = 0
         marked_count = 0
         
+        # First, find all actual_num values and their entries
+        chapter_nums = {}
+        for chapter_key, chapter_info in self.prog["chapters"].items():
+            actual_num = chapter_info.get("actual_num")
+            if actual_num is not None:
+                if actual_num not in chapter_nums:
+                    chapter_nums[actual_num] = []
+                chapter_nums[actual_num].append((chapter_key, chapter_info))
+        
+        # Check for duplicates and clean them up
+        for actual_num, entries in chapter_nums.items():
+            if len(entries) > 1:
+                # Multiple entries for same chapter number - keep the best one
+                print(f"⚠️ Found {len(entries)} entries for chapter {actual_num}")
+                
+                # Sort by priority: completed > in_progress > failed > qa_failed > file_deleted
+                status_priority = {
+                    'completed': 5,
+                    'completed_empty': 4,
+                    'completed_image_only': 4,
+                    'in_progress': 3,
+                    'failed': 2,
+                    'qa_failed': 1,
+                    'file_deleted': 0
+                }
+                
+                entries_sorted = sorted(entries, 
+                                      key=lambda x: (status_priority.get(x[1].get('status', ''), 0),
+                                                   x[1].get('last_updated', 0)),
+                                      reverse=True)
+                
+                # Keep the best entry (first in sorted list)
+                keep_key, keep_info = entries_sorted[0]
+                
+                # Remove the others
+                for remove_key, remove_info in entries_sorted[1:]:
+                    print(f"  🗑️ Removing duplicate entry for chapter {actual_num}: status={remove_info.get('status')} (keeping {keep_info.get('status')})")
+                    
+                    # Remove the duplicate entry
+                    if remove_key in self.prog["chapters"]:
+                        del self.prog["chapters"][remove_key]
+                        cleaned_count += 1
+                    
+                    # Remove from content_hashes if it's there
+                    if remove_key in self.prog.get("content_hashes", {}):
+                        del self.prog["content_hashes"][remove_key]
+                    
+                    # Remove chunk data
+                    if remove_key in self.prog.get("chapter_chunks", {}):
+                        del self.prog["chapter_chunks"][remove_key]
+        
+        # Now do the original missing file check
         for chapter_key, chapter_info in list(self.prog["chapters"].items()):
             output_file = chapter_info.get("output_file")
             
@@ -6955,7 +7019,7 @@ def main(log_callback=None, stop_callback=None):
                 # DEBUG: Check what we're about to save
                 print(f"🔍 DEBUG: About to save to {fname}")
                 print(f"   Content length: {len(translated_html)}")
-                print(f"   Content preview: {translated_html[:200]}...")
+                #print(f"   Content preview: {translated_html[:200]}...")
                 
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
                     f.write(translated_html)
