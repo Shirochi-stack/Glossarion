@@ -813,10 +813,15 @@ Return the data in the exact format specified above."""
 
 def skip_duplicate_entries(glossary):
     """
-    Skip entries with duplicate raw names (after removing honorifics).
+    Skip entries with duplicate raw names using fuzzy matching.
     Returns deduplicated list maintaining first occurrence of each unique raw name.
     """
-    seen_raw_names = set()
+    import difflib
+    
+    # Get fuzzy threshold from environment
+    fuzzy_threshold = float(os.getenv('GLOSSARY_FUZZY_THRESHOLD', '0.9'))
+    
+    seen_raw_names = []  # List of (cleaned_name, original_entry) tuples
     deduplicated = []
     skipped_count = 0
     
@@ -829,24 +834,27 @@ def skip_duplicate_entries(glossary):
         # Remove honorifics for comparison (unless disabled)
         cleaned_name = remove_honorifics(raw_name)
         
-        # Check if we've seen this cleaned name before
-        if cleaned_name.lower() in seen_raw_names:
-            skipped_count += 1
-            print(f"[Skip] Duplicate entry: {raw_name} (cleaned: {cleaned_name})")
-            continue
+        # Check for fuzzy matches with seen names
+        is_duplicate = False
+        for seen_clean, seen_original in seen_raw_names:
+            similarity = difflib.SequenceMatcher(None, cleaned_name.lower(), seen_clean.lower()).ratio()
+            
+            if similarity >= fuzzy_threshold:
+                skipped_count += 1
+                print(f"[Skip] Duplicate entry: {raw_name} (cleaned: {cleaned_name}) - {similarity*100:.1f}% match with {seen_original}")
+                is_duplicate = True
+                break
         
-        # Add to seen set and keep the entry
-        seen_raw_names.add(cleaned_name.lower())
-        deduplicated.append(entry)
+        if not is_duplicate:
+            # Add to seen list and keep the entry
+            seen_raw_names.append((cleaned_name, entry.get('raw_name', '')))
+            deduplicated.append(entry)
     
     if skipped_count > 0:
-        print(f"⏭️ Skipped {skipped_count} duplicate entries")
+        print(f"⏭️ Skipped {skipped_count} duplicate entries (threshold: {fuzzy_threshold:.2f})")
         print(f"✅ Kept {len(deduplicated)} unique entries")
     
     return deduplicated
-
-# Replace the merge_glossary_entries function with skip_duplicate_entries
-merge_glossary_entries = skip_duplicate_entries  # For backward compatibility
 
 # Batch processing functions
 def process_chapter_batch(chapters_batch: List[Tuple[int, str]], 
@@ -1243,13 +1251,33 @@ def main(log_callback=None, stop_callback=None):
     
     # Process chapters based on mode
     if batch_enabled and len(chapters_to_process) > 0:
-        # BATCH MODE: Process in batches
+        # BATCH MODE: Process in batches with per-entry saving
         total_batches = (len(chapters_to_process) + batch_size - 1) // batch_size
         
         for batch_num in range(total_batches):
             # Check for stop at the beginning of each batch
             if check_stop():
                 print(f"❌ Glossary extraction stopped at batch {batch_num+1}")
+                # Apply deduplication before stopping
+                if glossary:
+                    print("🔀 Applying deduplication and sorting before exit...")
+                    glossary[:] = skip_duplicate_entries(glossary)
+                    
+                    # Sort glossary
+                    custom_types = get_custom_entry_types()
+                    type_order = {'character': 0, 'term': 1}
+                    other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
+                    for i, t in enumerate(other_types):
+                        type_order[t] = i + 2
+                    glossary.sort(key=lambda x: (
+                        type_order.get(x.get('type', 'term'), 999),
+                        x.get('raw_name', '').lower()
+                    ))
+                    
+                    save_progress(completed, glossary, history)
+                    save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                    save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                    print(f"✅ Saved {len(glossary)} deduplicated entries before exit")
                 return
             
             # Get current batch
@@ -1261,100 +1289,179 @@ def main(log_callback=None, stop_callback=None):
             print(f"[BATCH] Submitting {len(current_batch)} chapters for parallel processing...")
             batch_start_time = time.time()
             
-            # Process batch in parallel
-            batch_results = process_chapter_batch(
-                current_batch, client, config, contextual_enabled,
-                history, ctx_limit, rolling_window, check_stop, chunk_timeout
-            )
+            # Process batch in parallel BUT handle results as they complete
+            temp = float(os.getenv("GLOSSARY_TEMPERATURE") or config.get('temperature', 0.1))
+            env_max_output = os.getenv("MAX_OUTPUT_TOKENS")
+            if env_max_output and env_max_output.isdigit():
+                mtoks = int(env_max_output)
+            else:
+                mtoks = config.get('max_tokens', 4196)
+            
+            batch_entry_count = 0
+            
+            with ThreadPoolExecutor(max_workers=len(current_batch)) as executor:
+                futures = {}
+                
+                # Submit all chapters in the batch
+                for idx, chap in current_batch:
+                    if check_stop():
+                        # Apply deduplication before breaking
+                        if glossary:
+                            print("🔀 Applying deduplication before stopping...")
+                            glossary[:] = skip_duplicate_entries(glossary)
+                            save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                            save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                        break
+                        
+                    # Get system and user prompts
+                    system_prompt, user_prompt = build_prompt(chap)
+                    
+                    # Build messages
+                    if not contextual_enabled:
+                        msgs = [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt}
+                        ]
+                    else:
+                        msgs = [{"role": "system", "content": system_prompt}] \
+                             + trim_context_history(history, ctx_limit, rolling_window) \
+                             + [{"role": "user", "content": user_prompt}]
+                    
+                    # Submit to thread pool
+                    future = executor.submit(
+                        process_single_chapter_api_call,
+                        idx, chap, msgs, client, temp, mtoks, check_stop, chunk_timeout
+                    )
+                    futures[future] = (idx, chap)
+                
+                # Process results AS THEY COMPLETE, not all at once
+                for future in as_completed(futures):
+                    if check_stop():
+                        print("🛑 Stop detected - cancelling all pending operations...")
+                        cancelled = cancel_all_futures(list(futures.keys()))
+                        if cancelled > 0:
+                            print(f"✅ Cancelled {cancelled} pending API calls")
+                        
+                        # Apply deduplication before stopping
+                        if glossary:
+                            print("🔀 Applying deduplication and sorting before exit...")
+                            glossary[:] = skip_duplicate_entries(glossary)
+                            
+                            # Sort glossary
+                            custom_types = get_custom_entry_types()
+                            type_order = {'character': 0, 'term': 1}
+                            other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
+                            for i, t in enumerate(other_types):
+                                type_order[t] = i + 2
+                            glossary.sort(key=lambda x: (
+                                type_order.get(x.get('type', 'term'), 999),
+                                x.get('raw_name', '').lower()
+                            ))
+                            
+                            save_progress(completed, glossary, history)
+                            save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                            save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                            print(f"✅ Saved {len(glossary)} deduplicated entries before exit")
+                        
+                        executor.shutdown(wait=False)
+                        break
+                    
+                    idx, chap = futures[future]
+                    
+                    try:
+                        result = future.result(timeout=0.5)
+                        
+                        # Process this chapter's results immediately
+                        data = result.get('data', [])
+                        resp = result.get('resp', '')
+                        error = result.get('error')
+                        
+                        if error:
+                            print(f"[Chapter {idx+1}] Error: {error}")
+                            completed.append(idx)
+                            continue
+                        
+                        # Process and save entries IMMEDIATELY as each chapter completes
+                        if data and len(data) > 0:
+                            total_ent = len(data)
+                            batch_entry_count += total_ent
+                            
+                            for eidx, entry in enumerate(data, start=1):
+                                elapsed = time.time() - start
+                                
+                                # Get entry info
+                                entry_type = entry.get("type", "?")
+                                raw_name = entry.get("raw_name", "?")
+                                trans_name = entry.get("translated_name", "?")
+                                
+                                print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed) → {entry_type}: {raw_name} ({trans_name})')
+                                
+                                # Add entry immediately WITHOUT deduplication
+                                glossary.append(entry)
+                                
+                                # Save immediately after EACH entry
+                                save_progress(completed, glossary, history)
+                                save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                                save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                        
+                        completed.append(idx)
+                        
+                        # Add to history if contextual is enabled
+                        if contextual_enabled and resp and chap:
+                            system_prompt, user_prompt = build_prompt(chap)
+                            history.append({"user": user_prompt, "assistant": resp})
+                        
+                    except Exception as e:
+                        if "stopped by user" in str(e).lower():
+                            print(f"✅ Chapter {idx+1} stopped by user")
+                        else:
+                            print(f"Error processing chapter {idx+1}: {e}")
+                        completed.append(idx)
             
             batch_elapsed = time.time() - batch_start_time
-            print(f"[BATCH] All {len(current_batch)} chapters completed in {batch_elapsed:.1f}s total")
-            avg_time = batch_elapsed / len(current_batch)
-            print(f"[BATCH] Average time per chapter: {avg_time:.1f}s (vs sequential: ~{api_delay + avg_time:.1f}s)")
+            print(f"[BATCH] Batch {batch_num+1} completed in {batch_elapsed:.1f}s total")
             
-            # Process results from the batch
-            batch_glossary_entries = []
-            batch_entry_count = 0  # Track total entries in this batch
-            
-            for result in batch_results:
-                if check_stop():
-                    print(f"❌ Glossary extraction stopped during batch processing")
-                    return
+            # After batch completes, apply deduplication and sorting
+            if batch_entry_count > 0:
+                print(f"\n🔀 Applying deduplication and sorting after batch {batch_num+1}/{total_batches}")
+                original_size = len(glossary)
                 
-                idx = result.get('idx', -1)
-                data = result.get('data', [])
-                resp = result.get('resp', '')
-                chap = result.get('chap', '')
-                error = result.get('error')
-                
-                if error:
-                    print(f"[Chapter {idx+1}] Error: {error}")
-                    continue
-                
-                # Process and log entries (similar to sequential mode)
-                if data and len(data) > 0:
-                    total_ent = len(data)
-                    batch_entry_count += total_ent  # Add to batch total
-                    
-                    for eidx, entry in enumerate(data, start=1):
-                        elapsed = time.time() - start
-                        # Calculate ETA based on all chapters, not just this batch
-                        entries_so_far = sum(len(result.get('data', [])) for result in batch_results[:batch_results.index(result)]) + eidx
-                        total_entries_estimate = (entries_so_far / (batch_results.index(result) + 1)) * len(batch_results) * (total_chapters / len(chapters_to_process))
-                        
-                        if entries_so_far == 1:
-                            eta = 0
-                        else:
-                            avg = elapsed / entries_so_far
-                            eta = avg * (total_entries_estimate - entries_so_far)
-                        
-                        # Get entry info based on new format
-                        entry_type = entry.get("type", "?")
-                        raw_name = entry.get("raw_name", "?")
-                        trans_name = entry.get("translated_name", "?")
-                        
-                        print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed, ETA {eta:.1f}s) → {entry_type}: {raw_name} ({trans_name})')
-                    
-                    # Collect entries for batch merging
-                    batch_glossary_entries.extend(data)
-                
-                completed.append(idx)
-                
-                # Only add to history if contextual is enabled
-                if contextual_enabled and resp and chap:
-                    # For history, we need to reconstruct what was sent
-                    system_prompt, user_prompt = build_prompt(chap)
-                    history.append({"user": user_prompt, "assistant": resp})
-            
-            # Apply skip logic to batch entries
-            if batch_glossary_entries:
-                print(f"\n🔀 Processing {len(batch_glossary_entries)} entries from batch {batch_num+1}/{total_batches}")
-                original_glossary_size = len(glossary)
-                glossary.extend(batch_glossary_entries)
+                # Apply deduplication to entire glossary
                 glossary[:] = skip_duplicate_entries(glossary)
-                new_entries = len(glossary) - original_glossary_size
-                if new_entries > 0:
-                    print(f"✅ Added {new_entries} new unique entries to glossary (total: {len(glossary)})")
-                else:
-                    print(f"ℹ️  All entries in this batch were duplicates (total remains: {len(glossary)})")
-            else:
-                print(f"[BATCH] No entries found in batch {batch_num+1}")
-            
-            # Save progress after each batch
-            save_progress(completed, glossary, history)
-            save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
-            save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                
+                # Sort glossary by type and name
+                custom_types = get_custom_entry_types()
+                type_order = {'character': 0, 'term': 1}
+                other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
+                for i, t in enumerate(other_types):
+                    type_order[t] = i + 2
+                
+                glossary.sort(key=lambda x: (
+                    type_order.get(x.get('type', 'term'), 999),
+                    x.get('raw_name', '').lower()
+                ))
+                
+                deduplicated_size = len(glossary)
+                removed = original_size - deduplicated_size
+                
+                if removed > 0:
+                    print(f"✅ Removed {removed} duplicates (fuzzy threshold: {os.getenv('GLOSSARY_FUZZY_THRESHOLD', '0.90')})")
+                print(f"📊 Glossary size: {deduplicated_size} unique entries")
+                
+                # Save final deduplicated and sorted glossary
+                save_progress(completed, glossary, history)
+                save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
             
             # Print batch summary
             if batch_entry_count > 0:
                 print(f"\n📊 Batch {batch_num+1}/{total_batches} Summary:")
-                print(f"   • Chapters processed: {len(batch_results)}")
+                print(f"   • Chapters processed: {len(current_batch)}")
                 print(f"   • Total entries extracted: {batch_entry_count}")
                 print(f"   • Glossary size: {len(glossary)} unique entries")
             
             # Handle context history
             if contextual_enabled:
-                # Reset history when limit reached without rolling window
                 if not rolling_window and len(history) >= ctx_limit and ctx_limit > 0:
                     print(f"🔄 Resetting glossary context (reached {ctx_limit} chapter limit)")
                     history = []
@@ -1365,21 +1472,26 @@ def main(log_callback=None, stop_callback=None):
                 print(f"\n⏱️  Waiting {api_delay}s before next batch...")
                 if not interruptible_sleep(api_delay, check_stop, 0.1):
                     print(f"❌ Glossary extraction stopped during delay")
-                    return
-            
-            # Handle context history
-            if contextual_enabled:
-                # Reset history when limit reached without rolling window
-                if not rolling_window and len(history) >= ctx_limit and ctx_limit > 0:
-                    print(f"🔄 Resetting glossary context (reached {ctx_limit} chapter limit)")
-                    history = []
-                    prog['context_history'] = []
-            
-            # Add delay between batches (but not after the last batch)
-            if batch_num < total_batches - 1:
-                print(f"⏱️  Waiting {api_delay}s before next batch...")
-                if not interruptible_sleep(api_delay, check_stop, 0.1):
-                    print(f"❌ Glossary extraction stopped during delay")
+                    # Apply deduplication before stopping
+                    if glossary:
+                        print("🔀 Applying deduplication and sorting before exit...")
+                        glossary[:] = skip_duplicate_entries(glossary)
+                        
+                        # Sort glossary
+                        custom_types = get_custom_entry_types()
+                        type_order = {'character': 0, 'term': 1}
+                        other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
+                        for i, t in enumerate(other_types):
+                            type_order[t] = i + 2
+                        glossary.sort(key=lambda x: (
+                            type_order.get(x.get('type', 'term'), 999),
+                            x.get('raw_name', '').lower()
+                        ))
+                        
+                        save_progress(completed, glossary, history)
+                        save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                        save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                        print(f"✅ Saved {len(glossary)} deduplicated entries before exit")
                     return
     
     else:
