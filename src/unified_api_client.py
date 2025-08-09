@@ -1996,7 +1996,7 @@ class UnifiedClient:
                 }
             
             # Return the minimum wait time (capped at 120) and the reserved key
-            cooldown = min(int(min_cooldown) if min_cooldown != float('inf') else 30, 120)
+            cooldown = min(int(min_cooldown) if min_cooldown != float('inf') else 30, 60)
             return (cooldown, best_key_id if request_id else None)
         
     def _get_thread_assigned_key(self) -> Optional[int]:
