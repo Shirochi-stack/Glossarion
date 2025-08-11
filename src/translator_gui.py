@@ -1165,7 +1165,55 @@ class TranslatorGUI:
         self.optimize_for_ocr_var = tk.BooleanVar(value=self.config.get('optimize_for_ocr', True))
         self.progressive_encoding_var = tk.BooleanVar(value=self.config.get('progressive_encoding', True))
         self.save_compressed_images_var = tk.BooleanVar(value=self.config.get('save_compressed_images', False))
+        # Glossary-related variables (existing)
+        self.enable_auto_glossary_var = tk.BooleanVar(value=self.config.get('enable_auto_glossary', False))
+        self.append_glossary_var = tk.BooleanVar(value=self.config.get('append_glossary', False))
+        self.glossary_min_frequency_var = tk.StringVar(value=str(self.config.get('glossary_min_frequency', 2)))
+        self.glossary_max_names_var = tk.StringVar(value=str(self.config.get('glossary_max_names', 50)))
+        self.glossary_max_titles_var = tk.StringVar(value=str(self.config.get('glossary_max_titles', 30)))
+        self.glossary_batch_size_var = tk.StringVar(value=str(self.config.get('glossary_batch_size', 50)))
+        
+        # NEW: Additional glossary settings
+        self.strip_honorifics_var = tk.BooleanVar(value=self.config.get('strip_honorifics', True))
+        self.disable_honorifics_var = tk.BooleanVar(value=self.config.get('glossary_disable_honorifics_filter', False))
+        self.manual_temp_var = tk.StringVar(value=str(self.config.get('manual_glossary_temperature', 0.3)))
+        self.manual_context_var = tk.StringVar(value=str(self.config.get('manual_context_limit', 5)))
+        
+        # Custom glossary fields and entry types
+        self.custom_glossary_fields = self.config.get('custom_glossary_fields', [])
+        self.custom_entry_types = self.config.get('custom_entry_types', {
+            'character': {'enabled': True, 'has_gender': True},
+            'term': {'enabled': True, 'has_gender': False}
+        })
+        
+        # Glossary prompts
+        self.manual_glossary_prompt = self.config.get('manual_glossary_prompt', 
+            """Extract character names and important terms from the text.
+Format each entry as: type,raw_name,translated_name,gender
+For terms use: term,raw_name,translated_name,""")
+        
+        self.auto_glossary_prompt = self.config.get('auto_glossary_prompt', 
+            """Extract all character names and important terms from the text.
+Focus on:
+1. Character names (maximum {max_names})
+2. Important titles and positions (maximum {max_titles})
+3. Terms that appear at least {min_frequency} times
 
+Return as JSON: {"term": "translation", ...}""")
+        
+        self.append_glossary_prompt = self.config.get('append_glossary_prompt', 
+            'Character/Term Glossary (use these translations consistently):')
+        
+        self.glossary_translation_prompt = self.config.get('glossary_translation_prompt', 
+            """You are translating {language} character names and important terms to English.
+For character names, provide English transliterations or keep as romanized.
+Keep honorifics/suffixes only if they are integral to the name.
+Respond with the same numbered format.
+
+Terms to translate:
+{terms_list}
+
+Provide translations in the same numbered format.""")
         
         # Initialize custom API endpoint variables
         self.openai_base_url_var = tk.StringVar(value=self.config.get('openai_base_url', ''))
@@ -4079,26 +4127,34 @@ Recent translations to summarize:
         
         def save_glossary_settings():
             try:
+                # Update prompts from text widgets
+                self.update_glossary_prompts()
+                
                 # Save custom fields
                 self.config['custom_glossary_fields'] = self.custom_glossary_fields
                 
                 # Update enabled status from checkboxes
-                for type_name, var in self.type_enabled_vars.items():
-                    if type_name in self.custom_entry_types:
-                        self.custom_entry_types[type_name]['enabled'] = var.get()
+                if hasattr(self, 'type_enabled_vars'):
+                    for type_name, var in self.type_enabled_vars.items():
+                        if type_name in self.custom_entry_types:
+                            self.custom_entry_types[type_name]['enabled'] = var.get()
                 
                 # Save custom entry types
                 self.config['custom_entry_types'] = self.custom_entry_types
                 
-                # Prompts
-                self.manual_glossary_prompt = self.manual_prompt_text.get('1.0', tk.END).strip()
-                self.auto_glossary_prompt = self.auto_prompt_text.get('1.0', tk.END).strip()
-                self.config['manual_glossary_prompt'] = self.manual_glossary_prompt
+                # Save all glossary-related settings
                 self.config['enable_auto_glossary'] = self.enable_auto_glossary_var.get()
                 self.config['append_glossary'] = self.append_glossary_var.get()
-                self.config['auto_glossary_prompt'] = self.auto_glossary_prompt
-                self.append_glossary_prompt = self.append_prompt_text.get('1.0', tk.END).strip()
-                self.config['append_glossary_prompt'] = self.append_glossary_prompt
+                self.config['glossary_min_frequency'] = int(self.glossary_min_frequency_var.get())
+                self.config['glossary_max_names'] = int(self.glossary_max_names_var.get())
+                self.config['glossary_max_titles'] = int(self.glossary_max_titles_var.get())
+                self.config['glossary_batch_size'] = int(self.glossary_batch_size_var.get())
+                
+                # Honorifics and other settings
+                if hasattr(self, 'strip_honorifics_var'):
+                    self.config['strip_honorifics'] = self.strip_honorifics_var.get()
+                if hasattr(self, 'disable_honorifics_var'):
+                    self.config['glossary_disable_honorifics_filter'] = self.disable_honorifics_var.get()
                 
                 # Temperature and context limit
                 try:
@@ -4109,28 +4165,30 @@ Recent translations to summarize:
                         "Please enter valid numbers for temperature and context limit")
                     return
                 
-                # Honorifics filter toggle
-                self.config['glossary_disable_honorifics_filter'] = self.disable_honorifics_var.get()
-                
                 # Fuzzy matching threshold
                 self.config['glossary_fuzzy_threshold'] = self.fuzzy_threshold_var.get()
                 
-                # Update environment variables
+                # Save prompts
+                self.config['manual_glossary_prompt'] = self.manual_glossary_prompt
+                self.config['auto_glossary_prompt'] = self.auto_glossary_prompt
+                self.config['append_glossary_prompt'] = self.append_glossary_prompt
+                self.config['glossary_translation_prompt'] = getattr(self, 'glossary_translation_prompt', '')
+                
+                # Update environment variables for immediate use
                 os.environ['GLOSSARY_SYSTEM_PROMPT'] = self.manual_glossary_prompt
                 os.environ['AUTO_GLOSSARY_PROMPT'] = self.auto_glossary_prompt
                 os.environ['GLOSSARY_DISABLE_HONORIFICS_FILTER'] = '1' if self.disable_honorifics_var.get() else '0'
+                os.environ['GLOSSARY_STRIP_HONORIFICS'] = '1' if self.strip_honorifics_var.get() else '0'
                 os.environ['GLOSSARY_FUZZY_THRESHOLD'] = str(self.fuzzy_threshold_var.get())
+                os.environ['GLOSSARY_TRANSLATION_PROMPT'] = getattr(self, 'glossary_translation_prompt', '')
                 
-                # Set custom entry types as environment variable
+                # Set custom entry types and fields as environment variables
                 os.environ['GLOSSARY_CUSTOM_ENTRY_TYPES'] = json.dumps(self.custom_entry_types)
-                
-                # Set custom fields
                 if self.custom_glossary_fields:
                     os.environ['GLOSSARY_CUSTOM_FIELDS'] = json.dumps(self.custom_glossary_fields)
                 
-                # Save config
-                with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(self.config, f, ensure_ascii=False, indent=2)
+                # Save config using the main save_config method to ensure encryption
+                self.save_config(show_message=False)
                 
                 self.append_log("✅ Glossary settings saved successfully")
                 
@@ -4524,8 +4582,25 @@ Recent translations to summarize:
         tk.Label(settings_grid, text="When context limit is reached, keep recent chapters instead of clearing all history",
                 font=('TkDefaultFont', 11), fg='gray').grid(row=2, column=0, columnspan=4, sticky=tk.W, padx=20, pady=(0, 5))
 
+    def update_glossary_prompts(self):
+        """Update glossary prompts from text widgets if they exist"""
+        try:
+            if hasattr(self, 'manual_prompt_text'):
+                self.manual_glossary_prompt = self.manual_prompt_text.get('1.0', tk.END).strip()
+            
+            if hasattr(self, 'auto_prompt_text'):
+                self.auto_glossary_prompt = self.auto_prompt_text.get('1.0', tk.END).strip()
+            
+            if hasattr(self, 'append_prompt_text'):
+                self.append_glossary_prompt = self.append_prompt_text.get('1.0', tk.END).strip()
+            
+            if hasattr(self, 'translation_prompt_text'):
+                self.glossary_translation_prompt = self.translation_prompt_text.get('1.0', tk.END).strip()
+        except Exception as e:
+            print(f"Error updating glossary prompts: {e}")
+            
     def _setup_auto_glossary_tab(self, parent):
-        """Setup automatic glossary tab"""
+        """Setup automatic glossary tab with fully configurable prompts"""
         auto_container = tk.Frame(parent)
         auto_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
@@ -4563,6 +4638,9 @@ Recent translations to summarize:
         )
         self.append_prompt_text.pack(fill=tk.X)
         
+        # Set default append prompt if not already set
+        if not hasattr(self, 'append_glossary_prompt') or not self.append_glossary_prompt:
+            self.append_glossary_prompt = "Character/Term Glossary (use these translations consistently):"
         
         self.append_prompt_text.insert('1.0', self.append_glossary_prompt)
         self.append_prompt_text.edit_reset()
@@ -4578,12 +4656,17 @@ Recent translations to summarize:
         tb.Button(append_prompt_controls, text="Reset to Default", command=reset_append_prompt, 
                  bootstyle="warning").pack(side=tk.LEFT, padx=5)
         
-        # Extraction settings
-        settings_container = tk.Frame(auto_container)
-        settings_container.pack(fill=tk.BOTH, expand=True)
+        # Create notebook for tabs
+        notebook = ttk.Notebook(auto_container)
+        notebook.pack(fill=tk.BOTH, expand=True)
         
-        settings_label_frame = tk.LabelFrame(settings_container, text="Targeted Extraction Settings", padx=10, pady=10)
-        settings_label_frame.pack(fill=tk.X, pady=(0, 15))
+        # Tab 1: Extraction Settings
+        extraction_tab = tk.Frame(notebook)
+        notebook.add(extraction_tab, text="Extraction Settings")
+        
+        # Extraction settings
+        settings_label_frame = tk.LabelFrame(extraction_tab, text="Targeted Extraction Settings", padx=10, pady=10)
+        settings_label_frame.pack(fill=tk.X, padx=10, pady=10)
         
         extraction_grid = tk.Frame(settings_label_frame)
         extraction_grid.pack(fill=tk.X)
@@ -4602,22 +4685,38 @@ Recent translations to summarize:
         tk.Label(extraction_grid, text="Translation batch:").grid(row=1, column=2, sticky=tk.W, padx=(0, 5), pady=(5, 0))
         tb.Entry(extraction_grid, textvariable=self.glossary_batch_size_var, width=10).grid(row=1, column=3, sticky=tk.W, pady=(5, 0))
         
+        # Row 3 - NEW: Honorifics handling
+        tk.Label(extraction_grid, text="Strip honorifics:").grid(row=2, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        
+        # Initialize the variable if not exists
+        if not hasattr(self, 'strip_honorifics_var'):
+            self.strip_honorifics_var = tk.BooleanVar(value=True)
+        
+        tb.Checkbutton(extraction_grid, text="Remove honorifics from extracted names", 
+                      variable=self.strip_honorifics_var,
+                      bootstyle="round-toggle").grid(row=2, column=1, columnspan=3, sticky=tk.W, pady=(5, 0))
+        
         # Help text
-        help_frame = tk.Frame(settings_container)
-        help_frame.pack(fill=tk.X, pady=(10, 0))
+        help_frame = tk.Frame(extraction_tab)
+        help_frame.pack(fill=tk.X, padx=10, pady=(10, 0))
         
         tk.Label(help_frame, text="💡 Settings Guide:", font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W)
         help_texts = [
             "• Min frequency: How many times a name must appear (lower = more terms)",
             "• Max names/titles: Limits to prevent huge glossaries",
-            "• Translation batch: Terms per API call (larger = faster but may reduce quality)"
+            "• Translation batch: Terms per API call (larger = faster but may reduce quality)",
+            "• Strip honorifics: Extract clean names without suffixes (e.g., '김' instead of '김님')"
         ]
         for txt in help_texts:
             tk.Label(help_frame, text=txt, font=('TkDefaultFont', 11), fg='gray').pack(anchor=tk.W, padx=20)
         
+        # Tab 2: Extraction Prompt
+        extraction_prompt_tab = tk.Frame(notebook)
+        notebook.add(extraction_prompt_tab, text="Extraction Prompt")
+        
         # Auto prompt section
-        auto_prompt_frame = tk.LabelFrame(settings_container, text="Extraction Prompt Template", padx=10, pady=10)
-        auto_prompt_frame.pack(fill=tk.BOTH, expand=True)
+        auto_prompt_frame = tk.LabelFrame(extraction_prompt_tab, text="Extraction Prompt Template", padx=10, pady=10)
+        auto_prompt_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
         tk.Label(auto_prompt_frame, text="Available placeholders: {language}, {min_frequency}, {max_names}, {max_titles}",
                 font=('TkDefaultFont', 9), fg='blue').pack(anchor=tk.W, pady=(0, 5))
@@ -4626,11 +4725,16 @@ Recent translations to summarize:
             auto_prompt_frame, height=12, wrap=tk.WORD
         )
         self.auto_prompt_text.pack(fill=tk.BOTH, expand=True)
+        
+        # Set default extraction prompt if not set
+        if not hasattr(self, 'auto_glossary_prompt') or not self.auto_glossary_prompt:
+            self.auto_glossary_prompt = self.default_auto_glossary_prompt
+        
         self.auto_prompt_text.insert('1.0', self.auto_glossary_prompt)
         self.auto_prompt_text.edit_reset()
         
-        auto_prompt_controls = tk.Frame(settings_container)
-        auto_prompt_controls.pack(fill=tk.X, pady=(10, 0))
+        auto_prompt_controls = tk.Frame(extraction_prompt_tab)
+        auto_prompt_controls.pack(fill=tk.X, padx=10, pady=(0, 10))
         
         def reset_auto_prompt():
             if messagebox.askyesno("Reset Prompt", "Reset automatic glossary prompt to default?"):
@@ -4640,6 +4744,59 @@ Recent translations to summarize:
         tb.Button(auto_prompt_controls, text="Reset to Default", command=reset_auto_prompt, 
                  bootstyle="warning").pack(side=tk.LEFT, padx=5)
         
+        # Tab 3: Translation Prompt - NEW
+        translation_prompt_tab = tk.Frame(notebook)
+        notebook.add(translation_prompt_tab, text="Translation Prompt")
+        
+        # Translation prompt section
+        trans_prompt_frame = tk.LabelFrame(translation_prompt_tab, text="Glossary Translation Prompt Template", padx=10, pady=10)
+        trans_prompt_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        tk.Label(trans_prompt_frame, text="This prompt is used to translate extracted terms to English:",
+                font=('TkDefaultFont', 10)).pack(anchor=tk.W, pady=(0, 5))
+        
+        tk.Label(trans_prompt_frame, text="Available placeholders: {language}, {terms_list}, {batch_size}",
+                font=('TkDefaultFont', 9), fg='blue').pack(anchor=tk.W, pady=(0, 5))
+        
+        # Initialize translation prompt variable and text widget
+        if not hasattr(self, 'glossary_translation_prompt'):
+            self.glossary_translation_prompt = """You are translating {language} character names and important terms to English.
+    For character names, provide English transliterations or keep as romanized.
+    Keep honorifics/suffixes only if they are integral to the name.
+    Respond with the same numbered format.
+
+    Terms to translate:
+    {terms_list}
+
+    Provide translations in the same numbered format."""
+        
+        self.translation_prompt_text = self.ui.setup_scrollable_text(
+            trans_prompt_frame, height=12, wrap=tk.WORD
+        )
+        self.translation_prompt_text.pack(fill=tk.BOTH, expand=True)
+        self.translation_prompt_text.insert('1.0', self.glossary_translation_prompt)
+        self.translation_prompt_text.edit_reset()
+        
+        trans_prompt_controls = tk.Frame(translation_prompt_tab)
+        trans_prompt_controls.pack(fill=tk.X, padx=10, pady=(0, 10))
+        
+        def reset_trans_prompt():
+            if messagebox.askyesno("Reset Prompt", "Reset translation prompt to default?"):
+                default_trans_prompt = """You are translating {language} character names and important terms to English.
+    For character names, provide English transliterations or keep as romanized.
+    Keep honorifics/suffixes only if they are integral to the name.
+    Respond with the same numbered format.
+
+    Terms to translate:
+    {terms_list}
+
+    Provide translations in the same numbered format."""
+                self.translation_prompt_text.delete('1.0', tk.END)
+                self.translation_prompt_text.insert('1.0', default_trans_prompt)
+        
+        tb.Button(trans_prompt_controls, text="Reset to Default", command=reset_trans_prompt, 
+                 bootstyle="warning").pack(side=tk.LEFT, padx=5)
+        
         # Update states function with proper error handling
         def update_auto_glossary_state():
             try:
@@ -4647,11 +4804,16 @@ Recent translations to summarize:
                     return
                 state = tk.NORMAL if self.enable_auto_glossary_var.get() else tk.DISABLED
                 for widget in extraction_grid.winfo_children():
-                    if isinstance(widget, (tb.Entry, ttk.Entry)):
+                    if isinstance(widget, (tb.Entry, ttk.Entry, tb.Checkbutton, ttk.Checkbutton)):
                         widget.config(state=state)
                 if self.auto_prompt_text.winfo_exists():
                     self.auto_prompt_text.config(state=state)
+                if hasattr(self, 'translation_prompt_text') and self.translation_prompt_text.winfo_exists():
+                    self.translation_prompt_text.config(state=state)
                 for widget in auto_prompt_controls.winfo_children():
+                    if isinstance(widget, (tb.Button, ttk.Button)) and widget.winfo_exists():
+                        widget.config(state=state)
+                for widget in trans_prompt_controls.winfo_children():
                     if isinstance(widget, (tb.Button, ttk.Button)) and widget.winfo_exists():
                         widget.config(state=state)
             except tk.TclError:
@@ -7102,8 +7264,6 @@ Recent translations to summarize:
             'TRANSLATION_TEMPERATURE': str(self.trans_temp.get()),
             'TRANSLATION_HISTORY_LIMIT': str(self.trans_history.get()),
             'EPUB_OUTPUT_DIR': os.getcwd(),
-            'DISABLE_AUTO_GLOSSARY': "0" if self.enable_auto_glossary_var.get() else "1",
-            'DISABLE_GLOSSARY_TRANSLATION': "0",
             'APPEND_GLOSSARY': "1" if self.append_glossary_var.get() else "0",
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt,
             'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var.get() else "0",
@@ -7117,6 +7277,10 @@ Recent translations to summarize:
             'GLOSSARY_MAX_NAMES': self.glossary_max_names_var.get(),
             'GLOSSARY_MAX_TITLES': self.glossary_max_titles_var.get(),
             'GLOSSARY_BATCH_SIZE': self.glossary_batch_size_var.get(),
+            'GLOSSARY_STRIP_HONORIFICS': "1" if self.strip_honorifics_var.get() else "0",
+            'AUTO_GLOSSARY_PROMPT': self.auto_glossary_prompt if hasattr(self, 'auto_glossary_prompt') else '',
+            'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') else '',
+            'GLOSSARY_TRANSLATION_PROMPT': self.glossary_translation_prompt if hasattr(self, 'glossary_translation_prompt') else '',
             'ENABLE_IMAGE_TRANSLATION': "1" if self.enable_image_translation_var.get() else "0",
             'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var.get() else "0",
             'WEBNOVEL_MIN_HEIGHT': self.webnovel_min_height_var.get(),
@@ -8056,6 +8220,23 @@ Important rules:
                     'SEND_INTERVAL_SECONDS': str(self.delay_entry.get()),
                     'CONTEXTUAL': '1' if self.contextual_var.get() else '0',
                     'GOOGLE_APPLICATION_CREDENTIALS': os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),
+                    
+                    # NEW GLOSSARY ADDITIONS
+                    'GLOSSARY_MIN_FREQUENCY': str(self.glossary_min_frequency_var.get()),
+                    'GLOSSARY_MAX_NAMES': str(self.glossary_max_names_var.get()),
+                    'GLOSSARY_MAX_TITLES': str(self.glossary_max_titles_var.get()),
+                    'GLOSSARY_BATCH_SIZE': str(self.glossary_batch_size_var.get()),
+                    'ENABLE_AUTO_GLOSSARY': "1" if self.enable_auto_glossary_var.get() else "0",
+                    'DISABLE_AUTO_GLOSSARY': "0" if self.enable_auto_glossary_var.get() else "1",  # Inverted!
+                    'APPEND_GLOSSARY': "1" if self.append_glossary_var.get() else "0",
+                    'GLOSSARY_STRIP_HONORIFICS': '1' if hasattr(self, 'strip_honorifics_var') and self.strip_honorifics_var.get() else '1',
+                    'AUTO_GLOSSARY_PROMPT': getattr(self, 'auto_glossary_prompt', ''),
+                    'APPEND_GLOSSARY_PROMPT': getattr(self, 'append_glossary_prompt', 'Character/Term Glossary (use these translations consistently):'),
+                    'GLOSSARY_TRANSLATION_PROMPT': getattr(self, 'glossary_translation_prompt', ''),
+                    'GLOSSARY_CUSTOM_ENTRY_TYPES': json.dumps(getattr(self, 'custom_entry_types', {})),
+                    'GLOSSARY_CUSTOM_FIELDS': json.dumps(getattr(self, 'custom_glossary_fields', [])),
+                    'GLOSSARY_FUZZY_THRESHOLD': str(self.config.get('glossary_fuzzy_threshold', 0.90)),
+                    'MANUAL_GLOSSARY': self.manual_glossary_path if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path else '',
                 }
                 
                 # Add project ID for Vertex AI
@@ -13691,6 +13872,28 @@ Important rules:
             self.config['enable_parallel_extraction'] = self.enable_parallel_extraction_var.get()
             self.config['extraction_workers'] = self.extraction_workers_var.get()
 
+            # NEW: Save strip honorifics setting
+            self.config['strip_honorifics'] = self.strip_honorifics_var.get()
+            
+            # NEW: Save prompts from text widgets if they exist
+            if hasattr(self, 'auto_prompt_text'):
+                try:
+                    self.config['auto_glossary_prompt'] = self.auto_prompt_text.get('1.0', tk.END).strip()
+                except:
+                    pass
+            
+            if hasattr(self, 'append_prompt_text'):
+                try:
+                    self.config['append_glossary_prompt'] = self.append_prompt_text.get('1.0', tk.END).strip()
+                except:
+                    pass
+            
+            if hasattr(self, 'translation_prompt_text'):
+                try:
+                    self.config['glossary_translation_prompt'] = self.translation_prompt_text.get('1.0', tk.END).strip()
+                except:
+                    pass
+                    
             # Update environment variable when saving
             if self.enable_parallel_extraction_var.get():
                 os.environ["EXTRACTION_WORKERS"] = str(self.extraction_workers_var.get())
