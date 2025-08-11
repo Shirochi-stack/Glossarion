@@ -1217,19 +1217,19 @@ Terms to translate:
 Provide translations in the same numbered format.""")
         self.glossary_format_instructions = self.config.get('glossary_format_instructions', 
             """
-        Return the results in EXACT CSV format with this header:
-        type,raw_name,translated_name
+Return the results in EXACT CSV format with this header:
+type,raw_name,translated_name
 
-        For example:
-        character,김상현,Kim Sang-hyu
-        character,갈편제,Gale Hardest  
-        character,디히릿 아데,Dihirit Ade
+For example:
+character,김상현,Kim Sang-hyu
+character,갈편제,Gale Hardest  
+character,디히릿 아데,Dihirit Ade
 
-        Only include terms that actually appear in the text.
-        Do not use quotes around values unless they contain commas.
+Only include terms that actually appear in the text.
+Do not use quotes around values unless they contain commas.
 
-        Text to analyze:
-        {text_sample}""")  
+Text to analyze:
+{text_sample}""")  
         
         # Initialize custom API endpoint variables
         self.openai_base_url_var = tk.StringVar(value=self.config.get('openai_base_url', ''))
