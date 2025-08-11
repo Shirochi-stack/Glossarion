@@ -478,7 +478,7 @@ class UnifiedClient:
         # Thread-safe request deduplication with caching
         self._request_cache = {}  # {request_hash: (content, finish_reason, timestamp)}
         self._request_cache_lock = RLock()
-        self._cache_expiry_seconds = 0  # Cache disabled
+        self._cache_expiry_seconds = 300  # 5 minutes
         
         # Active request tracking to prevent duplicate processing
         self._active_requests = {}  # {request_hash: threading.Event}
@@ -1647,13 +1647,19 @@ class UnifiedClient:
         return thread_dir
 
     def _get_request_hash(self, messages) -> str:
-        """Generate a unique hash for request deduplication - THREAD-SAFE VERSION"""
+        """Generate a STABLE hash for request deduplication - THREAD-SAFE VERSION
+        WITH MICROSECOND LOCKING for thread safety."""
         
-        # Get thread-specific identifier to prevent cross-thread cache collisions
-        thread_id = threading.current_thread().ident
-        thread_name = threading.current_thread().name
+        # MICROSECOND LOCK: Ensure atomic hash generation
+        with self._instance_model_lock:
+            # Get thread-specific identifier to prevent cross-thread cache collisions
+            thread_id = threading.current_thread().ident
+            thread_name = threading.current_thread().name
+            
+            # REMOVED: request_uuid, request_timestamp, request_timestamp_micro
+            # We want STABLE hashes for caching to work!
         
-        # Create a normalized representation
+        # Create normalized representation (can be done outside lock)
         normalized_messages = []
         
         for msg in messages:
@@ -1681,45 +1687,51 @@ class UnifiedClient:
             
             normalized_messages.append(normalized_msg)
         
-        # CRITICAL FIX: Include thread_id to prevent cross-thread cache collisions
-        hash_data = {
-            'thread_id': thread_id,  # THIS PREVENTS CROSS-THREAD CONTAMINATION
-            'thread_name': thread_name,  # Additional context for debugging
-            'messages': normalized_messages,
-            'model': self.model,
-            'temperature': getattr(self, 'temperature', 0.3),
-            'max_tokens': getattr(self, 'max_tokens', 8192)
-        }
+        # MICROSECOND LOCK: Ensure atomic hash generation
+        with self._instance_model_lock:
+            # Include thread_id but NO request-specific IDs for stable caching
+            hash_data = {
+                'thread_id': thread_id,  # THREAD ISOLATION
+                'thread_name': thread_name,  # Additional context for debugging
+                # REMOVED: request_uuid, request_time, request_time_ns
+                'messages': normalized_messages,
+                'model': self.model,
+                'temperature': getattr(self, 'temperature', 0.3),
+                'max_tokens': getattr(self, 'max_tokens', 8192)
+            }
+            
+            # Debug logging if needed
+            if os.getenv("DEBUG_HASH", "0") == "1":
+                print(f"[HASH] Thread: {thread_name} (ID: {thread_id})")
+                print(f"[HASH] Model: {self.model}")
+            
+            # Create stable JSON representation
+            hash_str = json.dumps(hash_data, sort_keys=True, ensure_ascii=False)
+            
+            # Use SHA256 for better distribution
+            final_hash = hashlib.sha256(hash_str.encode()).hexdigest()
         
-        # Debug logging if needed
         if os.getenv("DEBUG_HASH", "0") == "1":
-            print(f"[HASH] Thread: {thread_name} (ID: {thread_id})")
-            print(f"[HASH] Model: {self.model}")
-            content_preview = str(normalized_messages)[:100] if normalized_messages else "empty"
-            print(f"[HASH] Content preview: {content_preview}...")
-        
-        # Create stable JSON representation
-        hash_str = json.dumps(hash_data, sort_keys=True, ensure_ascii=False)
-        
-        # Use SHA256 for better distribution
-        final_hash = hashlib.sha256(hash_str.encode()).hexdigest()
-        
-        if os.getenv("DEBUG_HASH", "0") == "1":
-            print(f"[HASH] Generated: {final_hash[:16]}...")
+            print(f"[HASH] Generated stable hash: {final_hash[:16]}...")
         
         return final_hash
 
     def _get_request_hash_with_context(self, messages, context=None) -> str:
         """
-        Generate a unique hash that includes context AND thread info for better deduplication.
-        This ensures that the same content in different contexts/threads gets different hashes.
+        Generate a STABLE hash that includes context AND thread info for better deduplication.
+        WITH MICROSECOND LOCKING for thread safety.
         """
         
-        # Get thread-specific identifier
-        thread_id = threading.current_thread().ident
-        thread_name = threading.current_thread().name
+        # MICROSECOND LOCK: Ensure atomic reading of model/settings
+        with self._instance_model_lock:
+            # Get thread-specific identifier
+            thread_id = threading.current_thread().ident
+            thread_name = threading.current_thread().name
+            
+            # REMOVED: request_uuid, request_timestamp, request_timestamp_micro
+            # We want STABLE hashes for caching to work!
         
-        # Create normalized representation
+        # Create normalized representation (can be done outside lock)
         normalized_messages = []
         
         for msg in messages:
@@ -1749,31 +1761,109 @@ class UnifiedClient:
             
             normalized_messages.append(normalized_msg)
         
-        # Include context AND thread info in hash to differentiate same content
-        hash_data = {
-            'thread_id': thread_id,  # THREAD ISOLATION
-            'thread_name': thread_name,  # Additional thread context
-            'context': context,  # Include context (e.g., 'translation', 'glossary', etc.)
-            'messages': normalized_messages,
-            'model': self.model,
-            'temperature': getattr(self, 'temperature', 0.3),
-            'max_tokens': getattr(self, 'max_tokens', 8192)
-        }
+        # MICROSECOND LOCK: Ensure atomic hash generation
+        with self._instance_model_lock:
+            # Include context, thread info, but NO request-specific IDs
+            hash_data = {
+                'thread_id': thread_id,  # THREAD ISOLATION
+                'thread_name': thread_name,  # Additional thread context
+                # REMOVED: request_uuid, request_time, request_time_ns
+                'context': context,  # Include context (e.g., 'translation', 'glossary', etc.)
+                'messages': normalized_messages,
+                'model': self.model,
+                'temperature': getattr(self, 'temperature', 0.3),
+                'max_tokens': getattr(self, 'max_tokens', 8192)
+            }
+            
+            # Debug logging if needed
+            if os.getenv("DEBUG_HASH", "0") == "1":
+                print(f"[HASH_CONTEXT] Thread: {thread_name} (ID: {thread_id})")
+                print(f"[HASH_CONTEXT] Context: {context}")
+                print(f"[HASH_CONTEXT] Model: {self.model}")
+            
+            # Create stable JSON representation
+            hash_str = json.dumps(hash_data, sort_keys=True, ensure_ascii=False)
+            
+            # Use SHA256 for better distribution
+            final_hash = hashlib.sha256(hash_str.encode()).hexdigest()
         
-        # Debug logging if needed
         if os.getenv("DEBUG_HASH", "0") == "1":
-            print(f"[HASH_CONTEXT] Thread: {thread_name} (ID: {thread_id})")
-            print(f"[HASH_CONTEXT] Context: {context}")
-            print(f"[HASH_CONTEXT] Model: {self.model}")
+            print(f"[HASH_CONTEXT] Generated stable hash: {final_hash[:16]}...")
         
-        # Create stable JSON representation
-        hash_str = json.dumps(hash_data, sort_keys=True, ensure_ascii=False)
+        return final_hash
+
+    def _get_unique_file_suffix(self, attempt: int = 0) -> str:
+        """Generate a unique suffix for file names to prevent overwrites
+        WITH MICROSECOND LOCKING for thread safety."""
         
-        # Use SHA256 for better distribution
-        final_hash = hashlib.sha256(hash_str.encode()).hexdigest()
+        # MICROSECOND LOCK: Ensure atomic generation of unique identifiers
+        with self._instance_model_lock:
+            thread_id = threading.current_thread().ident
+            timestamp = datetime.now().strftime("%H%M%S%f")[:10]
+            request_uuid = str(uuid.uuid4())[:8]
+            
+            # Create unique suffix for files
+            suffix = f"_T{thread_id}_A{attempt}_{timestamp}_{request_uuid}"
+        
+        return suffix
+
+    def _get_request_hash_with_request_id(self, messages, request_id: str) -> str:
+        """Generate hash WITH request ID for per-call caching
+        WITH MICROSECOND LOCKING for thread safety."""
+        
+        # MICROSECOND LOCK: Ensure atomic hash generation
+        with self._instance_model_lock:
+            thread_id = threading.current_thread().ident
+            thread_name = threading.current_thread().name
+        
+        # Create normalized representation
+        normalized_messages = []
+        
+        for msg in messages:
+            normalized_msg = {
+                'role': msg.get('role', ''),
+                'content': msg.get('content', '')
+            }
+            
+            # For image messages, include image size/hash instead of full data
+            if isinstance(normalized_msg['content'], list):
+                content_parts = []
+                for part in normalized_msg['content']:
+                    if isinstance(part, dict) and 'image_url' in part:
+                        image_data = part.get('image_url', {}).get('url', '')
+                        if image_data.startswith('data:'):
+                            image_hash = hashlib.md5(image_data.encode()).hexdigest()
+                            content_parts.append(f"image:{image_hash}")
+                        else:
+                            content_parts.append(f"image_url:{image_data}")
+                    else:
+                        content_parts.append(str(part))
+                normalized_msg['content'] = '|'.join(content_parts)
+            
+            normalized_messages.append(normalized_msg)
+        
+        # MICROSECOND LOCK: Ensure atomic hash generation
+        with self._instance_model_lock:
+            hash_data = {
+                'thread_id': thread_id,
+                'thread_name': thread_name,
+                'request_id': request_id,  # THIS MAKES EACH send() CALL UNIQUE
+                'messages': normalized_messages,
+                'model': self.model,
+                'temperature': getattr(self, 'temperature', 0.3),
+                'max_tokens': getattr(self, 'max_tokens', 8192)
+            }
+            
+            if os.getenv("DEBUG_HASH", "0") == "1":
+                print(f"[HASH] Thread: {thread_name} (ID: {thread_id})")
+                print(f"[HASH] Request ID: {request_id}")  # Debug the request ID
+                print(f"[HASH] Model: {self.model}")
+            
+            hash_str = json.dumps(hash_data, sort_keys=True, ensure_ascii=False)
+            final_hash = hashlib.sha256(hash_str.encode()).hexdigest()
         
         if os.getenv("DEBUG_HASH", "0") == "1":
-            print(f"[HASH_CONTEXT] Generated: {final_hash[:16]}...")
+            print(f"[HASH] Generated hash for request {request_id}: {final_hash[:16]}...")
         
         return final_hash
 
@@ -1814,7 +1904,7 @@ class UnifiedClient:
         if not hasattr(self, '_request_cache_lock'):
             self._request_cache_lock = RLock()
         if not hasattr(self, '_cache_expiry_seconds'):
-            self._cache_expiry_seconds = 0  # 50 minutes
+            self._cache_expiry_seconds = 300  # 5 minutes
         
         # Active request tracking
         if not hasattr(self, '_active_requests'):
@@ -2514,14 +2604,17 @@ class UnifiedClient:
         # Log retry feature support
         logger.info(f"✅ Initialized {self.client_type} client for model: {self.model}")
         logger.debug("✅ GUI retry features supported: truncation detection, timeout handling, duplicate detection")
- 
+    
     def send(self, messages, temperature=None, max_tokens=None, 
              max_completion_tokens=None, context=None) -> Tuple[str, Optional[str]]:
         """Thread-safe send with proper key management and deduplication for batch translation"""
         thread_name = threading.current_thread().name
         
-        # Generate request hash for duplicate detection
-        request_hash = self._get_request_hash(messages)
+        # GENERATE UNIQUE REQUEST ID FOR THIS CALL
+        request_id = str(uuid.uuid4())[:8]
+        
+        # Generate request hash WITH request ID (unique per send() call)
+        request_hash = self._get_request_hash_with_request_id(messages, request_id)
         
         # Extract chapter info for better logging
         chapter_info = self._extract_chapter_info(messages)
@@ -2654,7 +2747,7 @@ class UnifiedClient:
                     
                     # Call the actual implementation with retry reason
                     result = self._send_internal(messages, temperature, max_tokens, 
-                                               max_completion_tokens, context, retry_reason=retry_reason)
+                                               max_completion_tokens, context, retry_reason=retry_reason,request_id=request_id)
                     
                     # Mark success
                     if self._multi_key_mode:
@@ -2861,15 +2954,27 @@ class UnifiedClient:
             raise
 
     def _send_internal(self, messages, temperature=None, max_tokens=None, 
-                       max_completion_tokens=None, context=None, retry_reason=None) -> Tuple[str, Optional[str]]:
+                       max_completion_tokens=None, context=None, retry_reason=None,
+                       request_id=None) -> Tuple[str, Optional[str]]:  # ADD request_id parameter
         """
         Internal send implementation with integrated 500 error retry logic and prohibited content handling
         """
         start_time = time.time()
         
-        # Generate request hash early
-        request_hash = self._get_request_hash(messages)
+        # Generate request hash WITH request ID if provided
+        if request_id:
+            request_hash = self._get_request_hash_with_request_id(messages, request_id)
+        else:
+            # Fallback for direct calls (shouldn't happen in normal flow)
+            request_id = str(uuid.uuid4())[:8]
+            request_hash = self._get_request_hash_with_request_id(messages, request_id)
+        
         thread_name = threading.current_thread().name
+        
+        # Log with hash for tracking
+        logger.debug(f"  Request ID: {request_id}")
+        logger.debug(f"  Hash: {request_hash[:8]}...")
+        logger.debug(f"  Retry reason: {retry_reason}")
         
         # Log with hash for tracking
         logger.debug(f"[{thread_name}] _send_internal starting for {context} (hash: {request_hash[:8]}...) retry_reason: {retry_reason}")
@@ -2912,25 +3017,39 @@ class UnifiedClient:
                 # Apply reinforcement
                 messages = self._apply_pure_reinforcement(messages)
                 
-                # Get file names - IMPORTANT for duplicate detection
+                # Get file names - now unique per request AND attempt
                 payload_name, response_name = self._get_file_names(messages, context=self.context)
                 
-                # MINIMAL FIX: Save payload ONCE with retry reason
+                # Add request ID and attempt to filename for complete isolation
+                base_payload, ext_payload = os.path.splitext(payload_name)
+                base_response, ext_response = os.path.splitext(response_name)
+                
+                # Include request_id and attempt in filename
+                unique_suffix = f"_{request_id}_A{attempt}"
+                payload_name = f"{base_payload}{unique_suffix}{ext_payload}"
+                response_name = f"{base_response}{unique_suffix}{ext_response}"
+                
+                # Save payload with retry reason
+                # On internal retries (500 errors), add that info too
                 if attempt > 0:
                     internal_retry_reason = f"500_error_attempt_{attempt}"
                     if retry_reason:
                         combined_reason = f"{retry_reason}_{internal_retry_reason}"
                     else:
                         combined_reason = internal_retry_reason
+                    self._save_payload(messages, payload_name, retry_reason=combined_reason)
                 else:
-                    combined_reason = retry_reason
+                    self._save_payload(messages, payload_name, retry_reason=retry_reason)
                 
-                # Save the payload only ONCE
-                self._save_payload(messages, payload_name, retry_reason=combined_reason)
+                # FIX: Define payload_messages BEFORE using it
+                # Create a sanitized version for payload (without actual image data)
+                payload_messages = [
+                    {**msg, 'content': 'IMAGE_DATA_OMITTED' if isinstance(msg.get('content'), list) else msg.get('content')}
+                    for msg in messages
+                ]
                 
-                # REMOVED the duplicate save that was causing the problem:
-                # - The payload_messages creation (not needed for text)
-                # - The second self._save_payload() call
+                # Now save the payload (payload_messages is now defined)
+                #self._save_payload(payload_messages, payload_name)
                 
                 # Check for timeout toggle from GUI
                 retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
@@ -3094,7 +3213,7 @@ class UnifiedClient:
                             try:
                                 # Create temporary client with main key
                                 main_response = self._retry_with_main_key(
-                                    messages, temperature, max_tokens, max_completion_tokens, context
+                                    messages, temperature, max_tokens, max_completion_tokens, context, request_id=request_id
                                 )
                                 
                                 if main_response:
@@ -3379,7 +3498,8 @@ class UnifiedClient:
 
                     
     def _retry_with_main_key(self, messages, temperature=None, max_tokens=None, 
-                            max_completion_tokens=None, context=None) -> Optional[Tuple[str, Optional[str]]]:
+                            max_completion_tokens=None, context=None,
+                            request_id=None) -> Optional[Tuple[str, Optional[str]]]: 
         """
         Create a temporary client with the main key and retry the request.
         This is used for prohibited content errors in multi-key mode.
@@ -3446,7 +3566,8 @@ class UnifiedClient:
                 max_tokens=max_tokens,
                 max_completion_tokens=max_completion_tokens,
                 context=context,
-                retry_reason="main_key_fallback"
+                retry_reason="main_key_fallback",
+                request_id=request_id
             )
             
             # Check the result
@@ -3517,7 +3638,10 @@ class UnifiedClient:
                   context: str = 'image_translation') -> Tuple[str, str]:
         """Thread-safe image send with proper key management and deduplication for batch translation"""
         thread_name = threading.current_thread().name
-
+        
+        # GENERATE UNIQUE REQUEST ID FOR THIS CALL
+        request_id = str(uuid.uuid4())[:8]
+        
         # Generate request hash for duplicate detection with better image hashing
         image_size = len(image_data) if isinstance(image_data, (bytes, str)) else 0
         
@@ -3532,8 +3656,8 @@ class UnifiedClient:
         else:
             image_hash = "empty"
         
-        # Include image hash in request hash for better uniqueness
-        messages_hash = self._get_request_hash(messages)
+        # Include image hash AND request ID in request hash for better uniqueness
+        messages_hash = self._get_request_hash_with_request_id(messages, request_id)  # USE REQUEST ID
         request_hash = f"{messages_hash}_img_{image_size}_{image_hash}"
         
         # Extract any chapter/context info from messages
@@ -3676,7 +3800,7 @@ class UnifiedClient:
                     # Call the actual implementation with retry reason
                     result = self._send_image_internal(messages, image_data, temperature,
                                                      max_tokens, max_completion_tokens, context,
-                                                     retry_reason=retry_reason)
+                                                     retry_reason=retry_reason, request_id=request_id)
                     
                     # Mark success
                     if self._multi_key_mode:
@@ -3915,15 +4039,24 @@ class UnifiedClient:
                             max_tokens: Optional[int] = None,
                             max_completion_tokens: Optional[int] = None,
                             context: str = 'image_translation',
-                            retry_reason: Optional[str] = None) -> Tuple[str, str]:
+                            retry_reason: Optional[str] = None, 
+                            request_id=None) -> Tuple[str, str]:  # request_id already in signature
         """
         Internal implementation of send_image with integrated 500 error retry logic and universal extraction
         """
         start_time = time.time()
         
-        # Generate request hash early (with image size)
+        # Generate request hash WITH request ID if provided
         image_size = len(image_data) if isinstance(image_data, (bytes, str)) else 0
-        request_hash = self._get_request_hash(messages) + f"_img{image_size}"
+        
+        if request_id:
+            messages_hash = self._get_request_hash_with_request_id(messages, request_id)
+        else:
+            # Fallback for direct calls (shouldn't happen in normal flow)
+            request_id = str(uuid.uuid4())[:8]
+            messages_hash = self._get_request_hash_with_request_id(messages, request_id)
+        
+        request_hash = f"{messages_hash}_img{image_size}"
         thread_name = threading.current_thread().name
         
         # Log with hash for tracking
@@ -3991,37 +4124,44 @@ class UnifiedClient:
                 # Validate request (basic validation for images)
                 if not messages:
                     raise UnifiedClientError("No messages provided for image request", error_type="validation")
-                
+
                 os.makedirs("Payloads", exist_ok=True)
-                
+
                 # Apply reinforcement
                 messages = self._apply_pure_reinforcement(messages)
-                
-                # Get file names - IMPORTANT for duplicate detection
+
+                # Get file names - now unique per request AND attempt
                 payload_name, response_name = self._get_file_names(messages, context=self.context)
                 
+                # Add request ID and attempt to filename for complete isolation
+                base_payload, ext_payload = os.path.splitext(payload_name)
+                base_response, ext_response = os.path.splitext(response_name)
+                
+                # Include request_id and attempt in filename
+                unique_suffix = f"_{request_id}_A{attempt}"
+                payload_name = f"{base_payload}{unique_suffix}{ext_payload}"
+                response_name = f"{base_response}{unique_suffix}{ext_response}"
+
                 # Create a sanitized version for payload (without actual image data)
                 payload_messages = [
                     {**msg, 'content': 'IMAGE_DATA_OMITTED' if isinstance(msg.get('content'), list) else msg.get('content')}
                     for msg in messages
                 ]
-                
-                # MINIMAL FIX: Save payload ONCE with retry reason
+
+                # Save payload with retry reason
+                # On internal retries (500 errors), add that info too
                 if attempt > 0:
-                    internal_retry_reason = f"500_error_image_attempt_{attempt}"
+                    internal_retry_reason = f"500_error_imageattempt{attempt}"
                     if retry_reason:
                         combined_reason = f"{retry_reason}_{internal_retry_reason}"
                     else:
                         combined_reason = internal_retry_reason
+                    self._save_payload(payload_messages, payload_name, retry_reason=combined_reason)
                 else:
-                    combined_reason = retry_reason
-                
-                # Save the sanitized payload ONCE
-                self._save_payload(payload_messages, payload_name, retry_reason=combined_reason)
-                
-                # REMOVED: The duplicate payload_messages creation and second save
-                # - Removed the duplicate "FIX: Define payload_messages BEFORE using it" section
-                # - Removed the second self._save_payload() call
+                    self._save_payload(payload_messages, payload_name, retry_reason=retry_reason)
+
+                # Now save the payload (payload_messages is now defined)
+                #self._save_payload(payload_messages, payload_name)
         
                 # Check for timeout toggle from GUI
                 retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
@@ -4209,7 +4349,7 @@ class UnifiedClient:
                             try:
                                 # Create temporary client with main key for image
                                 main_response = self._retry_image_with_main_key(
-                                    messages, image_data, temperature, max_tokens, max_completion_tokens, context
+                                    messages, image_data, temperature, max_tokens, max_completion_tokens, context, request_id=request_id
                                 )
                                 
                                 if main_response:
@@ -4494,7 +4634,7 @@ class UnifiedClient:
                 return fallback_content, 'error'
 
     def _retry_image_with_main_key(self, messages, image_data, temperature=None, max_tokens=None, 
-                                   max_completion_tokens=None, context=None) -> Optional[Tuple[str, Optional[str]]]:
+                                   max_completion_tokens=None, context=None, request_id=None) -> Optional[Tuple[str, Optional[str]]]:
         """
         Create a temporary client with the main key and retry the image request.
         This is used for prohibited content errors in multi-key mode.
@@ -4564,7 +4704,8 @@ class UnifiedClient:
                 max_tokens=max_tokens,
                 max_completion_tokens=max_completion_tokens,
                 context=context,
-                retry_reason="main_key_image_fallback"
+                retry_reason="main_key_image_fallback",
+                request_id=request_id
             )
             
             # Check the result
