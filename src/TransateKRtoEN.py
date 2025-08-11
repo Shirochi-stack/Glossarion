@@ -5437,7 +5437,7 @@ def cleanup_previous_extraction(output_dir):
     """Clean up any files from previous extraction runs (preserves CSS files)"""
     # Remove 'css' from cleanup_items to preserve CSS files
     cleanup_items = [
-        'fonts', 'images',  # Removed 'css' from this list
+         'images',  # Removed 'css' from this list
         '.resources_extracted'
     ]
     
