@@ -5434,9 +5434,10 @@ def check_epub_readiness(output_dir):
         return False
 
 def cleanup_previous_extraction(output_dir):
-    """Clean up any files from previous extraction runs"""
+    """Clean up any files from previous extraction runs (preserves CSS files)"""
+    # Remove 'css' from cleanup_items to preserve CSS files
     cleanup_items = [
-        'css', 'fonts', 'images',
+        'fonts', 'images',  # Removed 'css' from this list
         '.resources_extracted'
     ]
     
@@ -5446,6 +5447,7 @@ def cleanup_previous_extraction(output_dir):
     
     cleaned_count = 0
     
+    # Clean up directories (except CSS)
     for item in cleanup_items:
         if item.startswith('.'):
             continue
@@ -5458,6 +5460,7 @@ def cleanup_previous_extraction(output_dir):
         except Exception as e:
             print(f"⚠️ Could not remove directory {item}: {e}")
     
+    # Clean up EPUB structure files
     for epub_file in epub_structure_files:
         file_path = os.path.join(output_dir, epub_file)
         try:
@@ -5468,6 +5471,7 @@ def cleanup_previous_extraction(output_dir):
         except Exception as e:
             print(f"⚠️ Could not remove {epub_file}: {e}")
     
+    # Clean up any loose .opf and .ncx files
     try:
         for file in os.listdir(output_dir):
             if file.lower().endswith(('.opf', '.ncx')):
@@ -5479,6 +5483,7 @@ def cleanup_previous_extraction(output_dir):
     except Exception as e:
         print(f"⚠️ Error scanning for EPUB files: {e}")
     
+    # Remove extraction marker
     marker_path = os.path.join(output_dir, '.resources_extracted')
     try:
         if os.path.isfile(marker_path):
@@ -5488,8 +5493,18 @@ def cleanup_previous_extraction(output_dir):
     except Exception as e:
         print(f"⚠️ Could not remove extraction marker: {e}")
     
+    # Check if CSS files exist and inform user they're being preserved
+    css_path = os.path.join(output_dir, 'css')
+    if os.path.exists(css_path):
+        try:
+            css_files = [f for f in os.listdir(css_path) if os.path.isfile(os.path.join(css_path, f))]
+            if css_files:
+                print(f"📚 Preserving {len(css_files)} CSS files")
+        except Exception:
+            pass
+    
     if cleaned_count > 0:
-        print(f"🧹 Cleaned up {cleaned_count} items from previous runs")
+        print(f"🧹 Cleaned up {cleaned_count} items from previous runs (CSS files preserved)")
     
     return cleaned_count
 
