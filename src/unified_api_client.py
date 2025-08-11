@@ -4609,7 +4609,7 @@ class UnifiedClient:
         
         return messages
     
-    def _validate_request(self, messages, max_tokens):
+    def _validate_request(self, messages, max_tokens=None):
         """Validate request parameters before sending"""
         if not messages:
             return False, "Empty messages list"
@@ -4618,6 +4618,10 @@ class UnifiedClient:
         total_chars = sum(len(msg.get('content', '')) for msg in messages)
         if total_chars == 0:
             return False, "Empty request content"
+        
+        # Handle None max_tokens
+        if max_tokens is None:
+            max_tokens = getattr(self, 'max_tokens', 8192)  # Use instance default or 8192
         
         # Estimate tokens (rough approximation)
         estimated_tokens = total_chars / 4
