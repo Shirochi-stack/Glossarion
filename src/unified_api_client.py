@@ -3338,15 +3338,20 @@ class UnifiedClient:
         fallback_key = getattr(self.__class__, '_main_fallback_key', self.original_api_key)
         fallback_model = getattr(self.__class__, '_main_fallback_model', self.original_model)
         
+        # Don't retry with the same key that just failed
+        if fallback_model == self.model and fallback_key == self.api_key:
+            print(f"[MAIN KEY RETRY] Fallback is same as current key ({self.model}), skipping retry")
+            return None
+        
         print(f"[MAIN KEY RETRY] Starting retry with main key")
-        print(f"[MAIN KEY RETRY] Fallback key: {fallback_key[:8]}...{fallback_key[-4:]}")
+        print(f"[MAIN KEY RETRY] Current failing model: {self.model}")
         print(f"[MAIN KEY RETRY] Fallback model: {fallback_model}")
         
         try:
-            # Create a new temporary UnifiedClient instance with the main key
+            # Create a new temporary UnifiedClient instance with the fallback key
             temp_client = UnifiedClient(
-                api_key=fallback_key,
-                model=fallback_model,
+                api_key=fallback_key,  # Use fallback instead of original
+                model=fallback_model,   # Use fallback instead of original
                 output_dir=self.output_dir
             )
             
@@ -4453,15 +4458,20 @@ class UnifiedClient:
         fallback_key = getattr(self.__class__, '_main_fallback_key', self.original_api_key)
         fallback_model = getattr(self.__class__, '_main_fallback_model', self.original_model)
         
+        # Don't retry with the same key that just failed
+        if fallback_model == self.model and fallback_key == self.api_key:
+            print(f"[MAIN KEY IMAGE RETRY] Fallback is same as current key ({self.model}), skipping retry")
+            return None
+        
         print(f"[MAIN KEY IMAGE RETRY] Starting image retry with main key")
-        print(f"[MAIN KEY IMAGE RETRY] Fallback key: {fallback_key[:8]}...{fallback_key[-4:]}")
+        print(f"[MAIN KEY IMAGE RETRY] Current failing model: {self.model}")
         print(f"[MAIN KEY IMAGE RETRY] Fallback model: {fallback_model}")
         
         try:
-            # Create a new temporary UnifiedClient instance with the main key
+            # Create a new temporary UnifiedClient instance with the fallback key
             temp_client = UnifiedClient(
-                api_key=fallback_key,
-                model=fallback_model,
+                api_key=fallback_key,  # Use fallback instead of original
+                model=fallback_model,   # Use fallback instead of original
                 output_dir=self.output_dir
             )
             
@@ -6147,72 +6157,201 @@ class UnifiedClient:
         if not content:
             return False
         
-        # Pattern 1: Check for incomplete sentence endings
-        # Most complete responses end with proper punctuation
         content_stripped = content.strip()
-        if content_stripped:
-            last_char = content_stripped[-1]
-            # Define valid ending punctuation marks
-            valid_endings = [
-                ".", "!", "?", '"', "'", "»", "】", "）", ")", 
-                "。", "！", "？", "’", "”"
-            ]
+        if not content_stripped:
+            return False
+        
+        # Pattern 1: Check for incomplete sentence endings (with improved logic)
+        # Skip this check for code contexts, JSON, or when content contains code blocks
+        if context not in ['code', 'json', 'data', 'list', 'python', 'javascript', 'programming']:
+            # Also skip if content appears to contain code
+            if '```' in content or 'def ' in content or 'class ' in content or 'import ' in content or 'function ' in content:
+                pass  # Skip punctuation check for code content
+            else:
+                last_char = content_stripped[-1]
+                # Valid endings for PROSE/NARRATIVE text only
+                # Removed quotes since they're common in code
+                valid_endings = [
+                    ".", "!", "?", "»", "】", "）", ")", 
+                    "。", "！", "？", ":", ";", "]", "}",
+                    "…", "—", "–", "*", "/", ">", "~", "%"
+                ]
             
             # Check if ends with incomplete sentence (no proper punctuation)
             if last_char not in valid_endings:
-                # Additional check: is the last word incomplete?
-                words = content_stripped.split()
-                if words:
-                    last_word = words[-1]
-                    # Check for common incomplete patterns
-                    if len(last_word) > 2 and last_word[-1].isalpha():
-                        print(f"Possible silent truncation detected: incomplete sentence ending")
-                        return True
+                # Look at the last few characters for better context
+                last_segment = content_stripped[-50:] if len(content_stripped) > 50 else content_stripped
+                
+                # Check for common false positive patterns
+                false_positive_patterns = [
+                    # Lists or enumerations often don't end with punctuation
+                    r'\n\s*[-•*]\s*[^.!?]+$',  # Bullet points
+                    r'\n\s*\d+\)\s*[^.!?]+$',   # Numbered lists
+                    r'\n\s*[a-z]\)\s*[^.!?]+$', # Letter lists
+                    # Code or technical content
+                    r'```[^`]*$',                # Inside code block
+                    r'\$[^$]+$',                 # Math expressions
+                    # Single words or short phrases (likely labels/headers)
+                    r'^\w+$',                    # Single word
+                    r'^[\w\s]{1,15}$',          # Very short content
+                ]
+                
+                import re
+                is_false_positive = any(re.search(pattern, last_segment) for pattern in false_positive_patterns)
+                
+                if not is_false_positive:
+                    # Additional check: is the last word incomplete?
+                    words = content_stripped.split()
+                    if words and len(words) > 3:  # Only check if we have enough content
+                        last_word = words[-1]
+                        # Check for common incomplete patterns
+                        # But exclude common abbreviations
+                        common_abbreviations = {'etc', 'vs', 'eg', 'ie', 'vol', 'no', 'pg', 'ch', 'pt'}
+                        if (len(last_word) > 2 and 
+                            last_word[-1].isalpha() and 
+                            last_word.lower() not in common_abbreviations and
+                            not last_word.isupper()):  # Exclude acronyms
+                            
+                            # Final check: does it look like mid-sentence?
+                            # Look for sentence starters before the last segment
+                            preceding_text = ' '.join(words[-10:-1]) if len(words) > 10 else ' '.join(words[:-1])
+                            sentence_starters = ['the', 'a', 'an', 'and', 'but', 'or', 'so', 'because', 'when', 'if', 'that']
+                            
+                            # Check if we're likely mid-sentence
+                            if any(starter in preceding_text.lower().split() for starter in sentence_starters):
+                                print(f"Possible silent truncation detected: incomplete sentence ending")
+                                return True
         
-        # Pattern 2: Check for significantly short responses
+        # Pattern 2: Check for significantly short responses (with improved thresholds)
         if context == 'translation':
-            # Estimate expected length based on input
-            input_length = sum(len(msg.get('content', '')) for msg in messages if msg.get('role') == 'user')
-            if input_length > 500 and len(content_stripped) < input_length * 0.3:
-                print(f"Possible silent truncation: output ({len(content_stripped)} chars) much shorter than input ({input_length} chars)")
-                return True
-        
-        # Pattern 3: Check for incomplete HTML/XML structures
-        if '<' in content and '>' in content:
-            # Count opening and closing tags
-            opening_tags = content.count('<') - content.count('</')
-            closing_tags = content.count('</')
-            if opening_tags > closing_tags + 2:  # Allow small mismatch
-                print(f"Possible silent truncation: unclosed HTML tags detected")
-                return True
-        
-        # Pattern 4: Check for mature content indicators followed by abrupt ending
-        mature_indicators = [
-            'mature content', 'explicit', 'sexual', 'violence', 'adult',
-            'inappropriate', 'sensitive', 'censored', 'restricted'
-        ]
-        content_lower = content_stripped.lower()
-        for indicator in mature_indicators:
-            if indicator in content_lower:
-                # Check if response is suspiciously short after mentioning mature content
-                indicator_pos = content_lower.rfind(indicator)
-                remaining_content = content_stripped[indicator_pos + len(indicator):]
-                if len(remaining_content) < 50:  # Very little content after indicator
-                    print(f"Possible censorship truncation: content ends shortly after '{indicator}'")
+            # Calculate input length more accurately
+            input_content = []
+            for msg in messages:
+                if msg.get('role') == 'user':
+                    msg_content = msg.get('content', '')
+                    # Handle both string and list content formats
+                    if isinstance(msg_content, list):
+                        for item in msg_content:
+                            if isinstance(item, dict) and item.get('type') == 'text':
+                                input_content.append(item.get('text', ''))
+                    else:
+                        input_content.append(msg_content)
+            
+            input_length = sum(len(text) for text in input_content)
+            
+            # Adjusted threshold - translations can legitimately be shorter
+            # Only flag if output is less than 20% of input AND input is substantial
+            if input_length > 1000 and len(content_stripped) < input_length * 0.2:
+                # Additional check: does the content seem complete?
+                if not content_stripped.endswith(('.', '!', '?', '"', "'", '。', '！', '？')):
+                    print(f"Possible silent truncation: output ({len(content_stripped)} chars) much shorter than input ({input_length} chars)")
                     return True
         
-        # Pattern 5: Check for incomplete code blocks or quotes
+        # Pattern 3: Check for incomplete HTML/XML structures (improved)
+        if '<' in content and '>' in content:
+            # More sophisticated tag matching
+            import re
+            
+            # Find all opening tags (excluding self-closing)
+            opening_tags = re.findall(r'<([a-zA-Z][^/>]*?)(?:\s[^>]*)?>',content)
+            closing_tags = re.findall(r'</([a-zA-Z][^>]*?)>', content)
+            self_closing = re.findall(r'<[^>]*?/>', content)
+            
+            # Count tag mismatches
+            from collections import Counter
+            open_counts = Counter(opening_tags)
+            close_counts = Counter(closing_tags)
+            
+            # Check for significant mismatches
+            unclosed_tags = []
+            for tag, count in open_counts.items():
+                # Ignore void elements that don't need closing
+                void_elements = {'br', 'hr', 'img', 'input', 'meta', 'area', 'base', 'col', 'embed', 'link', 'param', 'source', 'track', 'wbr'}
+                if tag.lower() not in void_elements:
+                    close_count = close_counts.get(tag, 0)
+                    if count > close_count + 1:  # Allow 1 tag mismatch
+                        unclosed_tags.append(tag)
+            
+            if len(unclosed_tags) > 2:  # Multiple unclosed tags indicate truncation
+                print(f"Possible silent truncation: unclosed HTML tags detected: {unclosed_tags}")
+                return True
+        
+        # Pattern 4: Check for mature content indicators (reduced false positives)
+        # Only check if the content is suspiciously short
+        if len(content_stripped) < 200:
+            mature_indicators = [
+                'cannot provide explicit', 'cannot generate adult',
+                'unable to create sexual', 'cannot assist with mature',
+                'against my guidelines to create explicit'
+            ]
+            content_lower = content_stripped.lower()
+            
+            for indicator in mature_indicators:
+                if indicator in content_lower:
+                    # This is likely a refusal, not truncation
+                    # Don't mark as truncation, let the calling code handle it
+                    print(f"Content appears to be refused (contains '{indicator[:20]}...')")
+                    return False  # This is a refusal, not truncation
+        
+        # Pattern 5: Check for incomplete code blocks
         if '```' in content:
             code_block_count = content.count('```')
             if code_block_count % 2 != 0:  # Odd number means unclosed
-                print(f"Possible silent truncation: unclosed code block")
-                return True
+                # Additional check: is there actual code content?
+                last_block_pos = content.rfind('```')
+                content_after_block = content[last_block_pos + 3:].strip()
+                
+                # Only flag if there's substantial content after the opening ```
+                if len(content_after_block) > 10:
+                    print(f"Possible silent truncation: unclosed code block")
+                    return True
         
-        # Pattern 6: For glossary context, check for incomplete JSON
-        if context == 'glossary' and content_stripped.startswith('['):
-            if not content_stripped.endswith(']') and not content_stripped.endswith('],'):
-                print(f"Possible silent truncation: incomplete JSON array")
-                return True
+        # Pattern 6: For glossary/JSON context, check for incomplete JSON (improved)
+        if context in ['glossary', 'json', 'data']:
+            # Try to detect JSON-like content
+            if content_stripped.startswith(('[', '{')):
+                # Check for matching brackets
+                open_brackets = content_stripped.count('[') + content_stripped.count('{')
+                close_brackets = content_stripped.count(']') + content_stripped.count('}')
+                
+                if open_brackets > close_brackets:
+                    # Additional validation: try to parse as JSON
+                    import json
+                    try:
+                        json.loads(content_stripped)
+                        # It's valid JSON, not truncated
+                        return False
+                    except json.JSONDecodeError as e:
+                        # Check if the error is at the end (indicating truncation)
+                        if e.pos >= len(content_stripped) - 10:
+                            print(f"Possible silent truncation: incomplete JSON structure")
+                            return True
+        
+        # Pattern 7: Check for sudden endings in long content
+        if len(content_stripped) > 500:
+            # Look for patterns that indicate mid-thought truncation
+            last_100_chars = content_stripped[-100:]
+            
+            # Check for incomplete patterns at the end
+            incomplete_patterns = [
+                r',\s*$',                    # Ends with comma
+                r';\s*$',                    # Ends with semicolon  
+                r'\w+ing\s+$',               # Ends with -ing word (often mid-action)
+                r'\b(and|or|but|with|for|to|in|on|at)\s*$',  # Ends with conjunction/preposition
+                r'\b(the|a|an)\s*$',        # Ends with article
+            ]
+            
+            import re
+            for pattern in incomplete_patterns:
+                if re.search(pattern, last_100_chars, re.IGNORECASE):
+                    # Double-check this isn't a false positive
+                    # Look at the broader context
+                    sentences = content_stripped.split('.')
+                    if len(sentences) > 3:  # Has multiple sentences
+                        last_sentence = sentences[-1].strip()
+                        if len(last_sentence) > 20:  # Substantial incomplete sentence
+                            print(f"Possible silent truncation: content ends mid-thought")
+                            return True
         
         return False
 
