@@ -478,7 +478,7 @@ class UnifiedClient:
         # Thread-safe request deduplication with caching
         self._request_cache = {}  # {request_hash: (content, finish_reason, timestamp)}
         self._request_cache_lock = RLock()
-        self._cache_expiry_seconds = 300  # 5 minutes
+        self._cache_expiry_seconds = 0  # 5 minutes
         
         # Active request tracking to prevent duplicate processing
         self._active_requests = {}  # {request_hash: threading.Event}
@@ -1809,7 +1809,7 @@ class UnifiedClient:
         if not hasattr(self, '_request_cache_lock'):
             self._request_cache_lock = RLock()
         if not hasattr(self, '_cache_expiry_seconds'):
-            self._cache_expiry_seconds = 300  # 5 minutes
+            self._cache_expiry_seconds = 0  # 5 minutes
         
         # Active request tracking
         if not hasattr(self, '_active_requests'):
@@ -5972,6 +5972,13 @@ class UnifiedClient:
             max_completion_tokens: Maximum completion tokens (for o-series models)
             response_name: Name for saving response
         """
+        # FIX: Ensure max_tokens has a value before passing to handlers
+        if max_tokens is None and max_completion_tokens is None:
+            # Use instance default or standard default
+            max_tokens = getattr(self, 'max_tokens', 8192)
+        elif max_tokens is None and max_completion_tokens is not None:
+            # For o-series models, use max_completion_tokens as fallback
+            max_tokens = max_completion_tokens
         # Check if this is actually Gemini (including when using OpenAI endpoint)
         actual_provider = self._get_actual_provider()
         
