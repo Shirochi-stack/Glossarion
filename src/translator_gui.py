@@ -1203,7 +1203,7 @@ Focus on:
 Return as JSON: {"term": "translation", ...}""")
         
         self.append_glossary_prompt = self.config.get('append_glossary_prompt', 
-            'Character/Term Glossary (use these translations consistently):')
+           '\n- Follow this reference glossary (USE but DON\'T OUTPUT):\n')
         
         self.glossary_translation_prompt = self.config.get('glossary_translation_prompt', 
             """You are translating {language} character names and important terms to English.
@@ -1781,7 +1781,7 @@ Recent translations to summarize:
         self.auto_glossary_prompt = self.config.get('auto_glossary_prompt', self.default_auto_glossary_prompt)
         self.rolling_summary_system_prompt = self.config.get('rolling_summary_system_prompt', self.default_rolling_summary_system_prompt)
         self.rolling_summary_user_prompt = self.config.get('rolling_summary_user_prompt', self.default_rolling_summary_user_prompt)
-        self.append_glossary_prompt = self.config.get('append_glossary_prompt', "Character Entry Glossary (use these translations consistently):")
+        self.append_glossary_prompt = self.config.get('append_glossary_prompt', "\n- Follow this reference glossary (USE but DON\'T OUTPUT):\n")
         self.translation_chunk_prompt = self.config.get('translation_chunk_prompt', self.default_translation_chunk_prompt)
         self.image_chunk_prompt = self.config.get('image_chunk_prompt', self.default_image_chunk_prompt)
         
@@ -4662,7 +4662,7 @@ Recent translations to summarize:
         
         # Set default append prompt if not already set
         if not hasattr(self, 'append_glossary_prompt') or not self.append_glossary_prompt:
-            self.append_glossary_prompt = "Character/Term Glossary (use these translations consistently):"
+            self.append_glossary_prompt = "\n- Follow this reference glossary (USE but DON\'T OUTPUT):\n"
         
         self.append_prompt_text.insert('1.0', self.append_glossary_prompt)
         self.append_prompt_text.edit_reset()
@@ -4673,7 +4673,7 @@ Recent translations to summarize:
         def reset_append_prompt():
             if messagebox.askyesno("Reset Prompt", "Reset to default glossary append format?"):
                 self.append_prompt_text.delete('1.0', tk.END)
-                self.append_prompt_text.insert('1.0', "Character/Term Glossary (use these translations consistently):")
+                self.append_prompt_text.insert('1.0', "\n- Follow this reference glossary (USE but DON\'T OUTPUT):\n")
         
         tb.Button(append_prompt_controls, text="Reset to Default", command=reset_append_prompt, 
                  bootstyle="warning").pack(side=tk.LEFT, padx=5)
@@ -6793,7 +6793,7 @@ Recent translations to summarize:
                     os.environ['DEFER_GLOSSARY_APPEND'] = '1'
                     # Store the append prompt for later use
                     glossary_prompt = self.config.get('append_glossary_prompt', 
-                        "Character/Term Glossary (use these translations consistently):")
+                        "\n- Follow this reference glossary (USE but DON\'T OUTPUT):\n")
                     os.environ['GLOSSARY_APPEND_PROMPT'] = glossary_prompt
                 else:
                     # Original behavior - append manual glossary immediately
@@ -6853,7 +6853,7 @@ Recent translations to summarize:
                                 
                                 # Get custom glossary prompt or use default
                                 glossary_prompt = self.config.get('append_glossary_prompt', 
-                                    "Character/Term Glossary (use these translations consistently):")
+                                    "\n- Follow this reference glossary (USE but DON\'T OUTPUT):\n")
                                 
                                 system_prompt += f"{glossary_prompt}\n{glossary_block}"
                                 
@@ -8322,7 +8322,7 @@ Important rules:
                     'APPEND_GLOSSARY': "1" if self.append_glossary_var.get() else "0",
                     'GLOSSARY_STRIP_HONORIFICS': '1' if hasattr(self, 'strip_honorifics_var') and self.strip_honorifics_var.get() else '1',
                     'AUTO_GLOSSARY_PROMPT': getattr(self, 'auto_glossary_prompt', ''),
-                    'APPEND_GLOSSARY_PROMPT': getattr(self, 'append_glossary_prompt', 'Character/Term Glossary (use these translations consistently):'),
+                    'APPEND_GLOSSARY_PROMPT': getattr(self, 'append_glossary_prompt', '\n- Follow this reference glossary (USE but DON\'T OUTPUT):\n'),
                     'GLOSSARY_TRANSLATION_PROMPT': getattr(self, 'glossary_translation_prompt', ''),
                     'GLOSSARY_CUSTOM_ENTRY_TYPES': json.dumps(getattr(self, 'custom_entry_types', {})),
                     'GLOSSARY_CUSTOM_FIELDS': json.dumps(getattr(self, 'custom_glossary_fields', [])),
