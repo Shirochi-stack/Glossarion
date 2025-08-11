@@ -1950,41 +1950,27 @@ class UnifiedClient:
         with self._file_lock:
             self._active_files.discard(filepath)
 
-    def _extract_chapter_info(self, progress_manager, chapter_key) -> dict:
-        """Extract chapter and chunk information from progress tracking
-        
-        Args:
-            progress_manager: ProgressManager instance with progress data
-            chapter_key: Content hash or chapter key to look up
-        
-        Returns:
-            dict with 'chapter', 'chunk', 'total_chunks'
-        """
+    def _extract_chapter_info(self, messages) -> dict:
+        """Extract chapter and chunk information from messages"""
         info = {
             'chapter': None,
             'chunk': None,
-            'total_chunks': None
+            'total_chunks': None, 
+            'chapter_key': chapter_key
         }
         
-        if not progress_manager or not chapter_key:
-            return info
+        messages_str = str(messages)
         
-        prog = progress_manager.prog
+        # Extract chapter number
+        chapter_match = re.search(r'Chapter (\d+)', messages_str)
+        if chapter_match:
+            info['chapter'] = chapter_match.group(1)
         
-        # Get chapter info
-        if chapter_key in prog.get("chapters", {}):
-            chapter_info = prog["chapters"][chapter_key]
-            info['chapter'] = str(chapter_info.get('actual_num', 0))
-        
-        # Get chunk info
-        if chapter_key in prog.get("chapter_chunks", {}):
-            chunk_data = prog["chapter_chunks"][chapter_key]
-            info['total_chunks'] = chunk_data.get('total')
-            
-            # Get latest completed chunk
-            completed = chunk_data.get('completed', [])
-            if completed:
-                info['chunk'] = str(max(completed))
+        # Extract chunk information
+        chunk_match = re.search(r'Chunk (\d+)/(\d+)', messages_str)
+        if chunk_match:
+            info['chunk'] = chunk_match.group(1)
+            info['total_chunks'] = chunk_match.group(2)
         
         return info
 
@@ -2486,9 +2472,7 @@ class UnifiedClient:
         
         # Extract chapter info for better logging
         chapter_info = self._extract_chapter_info(progress_manager, chapter_key)
-        
-        # Extract chapter info for better logging
-        chapter_info = self._extract_chapter_info(messages)
+
         context_str = context or 'unknown'
         if chapter_info['chapter']:
             context_str = f"Chapter {chapter_info['chapter']}"
