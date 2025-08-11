@@ -3915,17 +3915,25 @@ class BatchTranslationProcessor:
             return False, actual_num
             
 # =====================================================
-# GLOSSARY MANAGER - IMPROVED VERSION
+# GLOSSARY MANAGER - TRUE CSV FORMAT WITH FUZZY MATCHING
 # =====================================================
+import re
+import os
+import json
+import time
+import shutil
+from bs4 import BeautifulSoup
+from difflib import SequenceMatcher
+
 class GlossaryManager:
-    """Unified glossary management with fully configurable prompts"""
+    """Unified glossary management with true CSV format and fuzzy matching"""
     
     def __init__(self):
         self.pattern_manager = PatternManager()
     
     def save_glossary(self, output_dir, chapters, instructions, language="korean"):
-        """Targeted glossary generator with configurable prompts and honorific stripping"""
-        print("📑 Targeted Glossary Generator v5.0 (Fully Configurable)")
+        """Targeted glossary generator with true CSV format output"""
+        print("📑 Targeted Glossary Generator v5.0 (CSV Format)")
         print("📑 Extracting names and terms with configurable options")
         
         # Check for manual glossary first
@@ -3935,26 +3943,29 @@ class GlossaryManager:
             
             target_path = os.path.join(output_dir, "glossary.json")
             try:
-                shutil.copy2(manual_glossary_path, target_path)
-                print(f"📑 ✅ Manual glossary copied to: {target_path}")
-                print(f"📑 Skipping automatic glossary generation")
-                
+                # Read manual glossary
                 with open(manual_glossary_path, 'r', encoding='utf-8') as f:
-                    manual_data = json.load(f)
+                    content = f.read()
                 
-                simple_entries = {}
-                if isinstance(manual_data, list):
-                    for char in manual_data:
-                        original = char.get('original_name', '')
-                        translated = char.get('name', original)
-                        if original and translated:
-                            simple_entries[original] = translated
+                # Check if it's already CSV format
+                if content.strip().startswith('type,raw_name,translated_name'):
+                    # Already CSV, just copy
+                    with open(target_path, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    print(f"📑 ✅ Manual CSV glossary copied to: {target_path}")
+                else:
+                    # Convert to CSV format
+                    csv_content = self._convert_to_csv_format(json.loads(content))
+                    with open(target_path, 'w', encoding='utf-8') as f:
+                        f.write(csv_content)
+                    print(f"📑 ✅ Manual glossary converted to CSV and saved to: {target_path}")
                 
+                # Also save simple version
                 simple_path = os.path.join(output_dir, "glossary_simple.json")
                 with open(simple_path, 'w', encoding='utf-8') as f:
-                    json.dump(simple_entries, f, ensure_ascii=False, indent=2)
+                    f.write(csv_content if 'csv_content' in locals() else content)
                 
-                return simple_entries
+                return self._parse_csv_to_dict(csv_content if 'csv_content' in locals() else content)
                 
             except Exception as e:
                 print(f"⚠️ Could not copy manual glossary: {e}")
@@ -3970,7 +3981,8 @@ class GlossaryManager:
                     existing_path = os.path.join(glossary_folder_path, file)
                     try:
                         with open(existing_path, 'r', encoding='utf-8') as f:
-                            existing_glossary = json.load(f)
+                            existing_content = f.read()
+                        existing_glossary = existing_content
                         print(f"📑 Found existing glossary from manual extraction: {file}")
                         break
                     except Exception as e:
@@ -3982,9 +3994,11 @@ class GlossaryManager:
         max_titles = int(os.getenv("GLOSSARY_MAX_TITLES", "30"))
         batch_size = int(os.getenv("GLOSSARY_BATCH_SIZE", "50"))
         strip_honorifics = os.getenv("GLOSSARY_STRIP_HONORIFICS", "1") == "1"
+        fuzzy_threshold = float(os.getenv("GLOSSARY_FUZZY_THRESHOLD", "0.90"))
         
         print(f"📑 Settings: Min frequency: {min_frequency}, Max names: {max_names}, Max titles: {max_titles}")
         print(f"📑 Strip honorifics: {'✅ Yes' if strip_honorifics else '❌ No'}")
+        print(f"📑 Fuzzy matching threshold: {fuzzy_threshold}")
         
         # Get custom prompt from environment
         custom_prompt = os.getenv("AUTO_GLOSSARY_PROMPT", "").strip()
@@ -4000,11 +4014,96 @@ class GlossaryManager:
         if custom_prompt:
             return self._extract_with_custom_prompt(custom_prompt, all_text, language, 
                                                    min_frequency, max_names, max_titles, 
-                                                   existing_glossary, output_dir, strip_honorifics)
+                                                   existing_glossary, output_dir, 
+                                                   strip_honorifics, fuzzy_threshold)
         else:
             return self._extract_with_patterns(all_text, language, min_frequency, 
                                              max_names, max_titles, batch_size, 
-                                             existing_glossary, output_dir, strip_honorifics)
+                                             existing_glossary, output_dir, 
+                                             strip_honorifics, fuzzy_threshold)
+    
+    def _convert_to_csv_format(self, data):
+        """Convert various glossary formats to CSV string format"""
+        csv_lines = ["type,raw_name,translated_name"]
+        
+        if isinstance(data, str):
+            # Already CSV string
+            if data.strip().startswith('type,raw_name'):
+                return data
+            # Try to parse as JSON
+            try:
+                data = json.loads(data)
+            except:
+                return data
+        
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    if 'type' in item and 'raw_name' in item:
+                        # Already in correct format
+                        line = f"{item['type']},{item['raw_name']},{item.get('translated_name', item['raw_name'])}"
+                        if 'gender' in item and item['gender']:
+                            line += f",{item['gender']}"
+                        csv_lines.append(line)
+                    else:
+                        # Old format
+                        entry_type = 'character'
+                        raw_name = item.get('original_name', '')
+                        translated_name = item.get('name', raw_name)
+                        if raw_name and translated_name:
+                            csv_lines.append(f"{entry_type},{raw_name},{translated_name}")
+                            
+        elif isinstance(data, dict):
+            if 'entries' in data:
+                # Has metadata wrapper, extract entries
+                for original, translated in data['entries'].items():
+                    csv_lines.append(f"term,{original},{translated}")
+            else:
+                # Plain dictionary
+                for original, translated in data.items():
+                    csv_lines.append(f"term,{original},{translated}")
+        
+        return '\n'.join(csv_lines)
+    
+    def _parse_csv_to_dict(self, csv_content):
+        """Parse CSV content to dictionary for backward compatibility"""
+        result = {}
+        lines = csv_content.strip().split('\n')
+        
+        for line in lines[1:]:  # Skip header
+            if not line.strip():
+                continue
+            parts = [p.strip() for p in line.split(',')]
+            if len(parts) >= 3:
+                result[parts[1]] = parts[2]  # raw_name -> translated_name
+        
+        return result
+    
+    def _fuzzy_match(self, term1, term2, threshold=0.90):
+        """Check if two terms match using fuzzy matching"""
+        ratio = SequenceMatcher(None, term1.lower(), term2.lower()).ratio()
+        return ratio >= threshold
+    
+    def _find_fuzzy_matches(self, term, text, threshold=0.90):
+        """Find fuzzy matches of a term in text using efficient method"""
+        term_lower = term.lower()
+        text_lower = text.lower()
+        term_len = len(term)
+        matches_count = 0
+        
+        # Use exact matching first for efficiency
+        matches_count = text_lower.count(term_lower)
+        
+        # If exact matches are low and fuzzy threshold is below 1.0, do fuzzy matching
+        if matches_count == 0 and threshold < 1.0:
+            # For efficiency, only check every N characters
+            step = max(1, term_len // 2)
+            for i in range(0, len(text) - term_len + 1, step):
+                window = text_lower[i:i + term_len]
+                if self._fuzzy_match(term_lower, window, threshold):
+                    matches_count += 1
+        
+        return matches_count
     
     def _strip_honorific(self, term, language_hint='unknown'):
         """Strip honorific from a term if present"""
@@ -4032,8 +4131,9 @@ class GlossaryManager:
     
     def _extract_with_custom_prompt(self, custom_prompt, all_text, language, 
                                    min_frequency, max_names, max_titles, 
-                                   existing_glossary, output_dir, strip_honorifics=True):
-        """Extract glossary using custom AI prompt with configurable options"""
+                                   existing_glossary, output_dir, 
+                                   strip_honorifics=True, fuzzy_threshold=0.90):
+        """Extract glossary using custom AI prompt with true CSV format output"""
         print("📑 Using custom automatic glossary prompt")
         
         try:
@@ -4047,7 +4147,8 @@ class GlossaryManager:
                 print(f"📑 No API key found, falling back to pattern-based extraction")
                 return self._extract_with_patterns(all_text, language, min_frequency, 
                                                  max_names, max_titles, 50, 
-                                                 existing_glossary, output_dir, strip_honorifics)
+                                                 existing_glossary, output_dir, 
+                                                 strip_honorifics, fuzzy_threshold)
             else:
                 print(f"📑 Using AI-assisted extraction with custom prompt")
                 
@@ -4064,9 +4165,26 @@ class GlossaryManager:
                 prompt = prompt.replace('{max_names}', str(max_names))
                 prompt = prompt.replace('{max_titles}', str(max_titles))
                 
+                # Add CSV format instruction
+                enhanced_prompt = f"""{prompt}
+
+Return the results in EXACT CSV format with this header:
+type,raw_name,translated_name
+
+For example:
+character,김상현,Kim Sang-hyu
+character,갈편제,Gale Hardest  
+character,디히릿 아데,Dihirit Ade
+
+Only include terms that actually appear in the text.
+Do not use quotes around values unless they contain commas.
+
+Text to analyze:
+{text_sample}"""
+                
                 messages = [
-                    {"role": "system", "content": "You are a glossary extraction assistant. Extract names and terms as requested."},
-                    {"role": "user", "content": f"{prompt}\n\nText sample:\n{text_sample}"}
+                    {"role": "system", "content": "You are a glossary extraction assistant. Return ONLY CSV format, no JSON, no other formatting."},
+                    {"role": "user", "content": enhanced_prompt}
                 ]
                 
                 try:
@@ -4083,137 +4201,168 @@ class GlossaryManager:
                     print(f"📑 [DEBUG] Got response: {len(response_text)} characters")
                     print(f"📑 [DEBUG] Response preview: {response_text[:200]}...")
                     
-                    ai_extracted_terms = {}
+                    # Clean up response - remove markdown code blocks if present
+                    if '```' in response_text:
+                        parts = response_text.split('```')
+                        for part in parts:
+                            if 'csv' in part[:10].lower():
+                                response_text = part[part.find('\n')+1:]
+                                break
+                            elif part.strip() and ('type,raw_name' in part or 'character,' in part or 'term,' in part):
+                                response_text = part
+                                break
                     
-                    # Parse AI response
-                    try:
-                        # Clean up response - remove markdown code blocks if present
-                        if '```json' in response_text:
-                            response_text = response_text.split('```json')[1].split('```')[0]
-                        elif '```' in response_text:
-                            response_text = response_text.split('```')[1].split('```')[0]
+                    # Build CSV content with verification
+                    csv_lines = []
+                    header_found = False
+                    
+                    lines = response_text.strip().split('\n')
+                    
+                    for line in lines:
+                        line = line.strip()
+                        if not line:
+                            continue
                         
-                        ai_data = json.loads(response_text)
-                        if isinstance(ai_data, dict):
-                            ai_extracted_terms = ai_data
-                        elif isinstance(ai_data, list):
-                            for item in ai_data:
-                                if isinstance(item, dict) and 'original' in item:
-                                    original = item['original']
-                                    translation = item.get('translation', original)
-                                    
-                                    # Strip honorifics if enabled
-                                    if strip_honorifics:
-                                        original = self._strip_honorific(original, language)
-                                    
-                                    ai_extracted_terms[original] = translation
-                    except:
-                        # Try to parse as simple format
-                        lines = response_text.strip().split('\n')
-                        for line in lines:
-                            if '->' in line or '→' in line or ':' in line:
-                                parts = re.split(r'->|→|:', line, 1)
-                                if len(parts) == 2:
-                                    original = parts[0].strip().strip('"\'')
-                                    translation = parts[1].strip().strip('"\'')
-                                    
-                                    # Strip honorifics if enabled
-                                    if strip_honorifics:
-                                        original = self._strip_honorific(original, language)
-                                    
-                                    if original and translation:
-                                        ai_extracted_terms[original] = translation
-                    
-                    print(f"📑 AI extracted {len(ai_extracted_terms)} initial terms")
-                    
-                    # Show what was extracted
-                    if ai_extracted_terms:
-                        print(f"📑 Sample extracted (first 5):")
-                        for i, (k, v) in enumerate(list(ai_extracted_terms.items())[:5]):
-                            print(f"   {i+1}. '{k}' -> '{v}'")
-                    
-                    # Verify frequency threshold
-                    verified_terms = {}
-                    for original, translation in ai_extracted_terms.items():
-                        # Count occurrences (with and without honorifics)
-                        count = all_text.count(original)
+                        # Check for header
+                        if 'type' in line.lower() and 'raw_name' in line.lower():
+                            if not header_found:
+                                csv_lines.append("type,raw_name,translated_name")
+                                header_found = True
+                            continue
                         
-                        # Also check with common honorifics if we stripped them
-                        if strip_honorifics and language in self.pattern_manager.CJK_HONORIFICS:
-                            for honorific in self.pattern_manager.CJK_HONORIFICS[language][:3]:  # Check top 3 honorifics
-                                count += all_text.count(original + honorific)
+                        # Parse CSV line
+                        parts = [p.strip() for p in line.split(',')]
                         
-                        if count >= min_frequency:
-                            verified_terms[original] = translation
-                    
-                    print(f"📑 Verified {len(verified_terms)} terms meet frequency threshold")
-                    
-                    # Merge with existing glossary
-                    if existing_glossary and isinstance(existing_glossary, list):
-                        print("📑 Merging with existing manual glossary...")
-                        merged_count = 0
-                        
-                        for char in existing_glossary:
-                            original = char.get('original_name', '')
-                            translated = char.get('name', original)
+                        if len(parts) >= 3:
+                            entry_type = parts[0].lower()
+                            raw_name = parts[1].strip('"\'')
+                            translated_name = parts[2].strip('"\'')
                             
-                            # Strip honorifics from existing entries if enabled
+                            if not raw_name or not translated_name:
+                                continue
+                            
+                            # Strip honorifics if enabled
+                            original_raw = raw_name
                             if strip_honorifics:
-                                original = self._strip_honorific(original, language)
+                                raw_name = self._strip_honorific(raw_name, language)
                             
-                            if original and translated and original not in verified_terms:
-                                verified_terms[original] = translated
-                                merged_count += 1
-                        
-                        print(f"📑 Added {merged_count} entries from existing glossary")
+                            # Verify frequency using fuzzy matching
+                            count = self._find_fuzzy_matches(raw_name, all_text, fuzzy_threshold)
+                            
+                            # Also check with honorifics if stripped
+                            if strip_honorifics and count < min_frequency:
+                                count += self._find_fuzzy_matches(original_raw, all_text, fuzzy_threshold)
+                                
+                                # Check with common honorifics
+                                if language in self.pattern_manager.CJK_HONORIFICS:
+                                    for honorific in self.pattern_manager.CJK_HONORIFICS[language][:3]:
+                                        count += self._find_fuzzy_matches(raw_name + honorific, all_text, fuzzy_threshold)
+                                        if count >= min_frequency:
+                                            break
+                            
+                            if count >= min_frequency:
+                                csv_line = f"{entry_type},{raw_name},{translated_name}"
+                                # Add optional fields if present
+                                if len(parts) > 3 and parts[3]:
+                                    csv_line += f",{parts[3]}"
+                                csv_lines.append(csv_line)
                     
-                    # Create glossary data
-                    glossary_data = {
-                        "metadata": {
-                            "language": language,
-                            "extraction_method": "ai_custom_prompt",
-                            "total_entries": len(verified_terms),
-                            "min_frequency": min_frequency,
-                            "strip_honorifics": strip_honorifics,
-                            "generation_date": time.strftime("%Y-%m-%d %H:%M:%S"),
-                            "merged_with_manual": existing_glossary is not None
-                        },
-                        "entries": verified_terms
-                    }
+                    # Ensure header exists
+                    if not header_found:
+                        csv_lines.insert(0, "type,raw_name,translated_name")
                     
-                    # Save glossary
+                    print(f"📑 AI extracted and verified {len(csv_lines) - 1} terms")
+                    
+                    # Merge with existing glossary if present
+                    if existing_glossary:
+                        csv_lines = self._merge_csv_entries(csv_lines, existing_glossary, strip_honorifics, language)
+                    
+                    # Create final CSV content
+                    csv_content = '\n'.join(csv_lines)
+                    
+                    # Save glossary as CSV (with .json extension for compatibility)
                     glossary_path = os.path.join(output_dir, "glossary.json")
                     with open(glossary_path, 'w', encoding='utf-8') as f:
-                        json.dump(glossary_data, f, ensure_ascii=False, indent=2)
+                        f.write(csv_content)
                     
                     print(f"\n📑 ✅ AI-ASSISTED GLOSSARY SAVED!")
                     print(f"📑 File: {glossary_path}")
-                    print(f"📑 Total entries: {len(verified_terms)}")
+                    print(f"📑 Total entries: {len(csv_lines) - 1}")  # Exclude header
                     
-                    # Save simple version
+                    # Save simple version (same format)
                     simple_glossary_path = os.path.join(output_dir, "glossary_simple.json")
                     with open(simple_glossary_path, 'w', encoding='utf-8') as f:
-                        json.dump(verified_terms, f, ensure_ascii=False, indent=2)
+                        f.write(csv_content)
                     
-                    return verified_terms
+                    return self._parse_csv_to_dict(csv_content)
                     
                 except Exception as e:
                     print(f"⚠️ AI extraction failed: {e}")
+                    import traceback
+                    traceback.print_exc()
                     print("📑 Falling back to pattern-based extraction")
                     return self._extract_with_patterns(all_text, language, min_frequency, 
                                                      max_names, max_titles, 50, 
-                                                     existing_glossary, output_dir, strip_honorifics)
+                                                     existing_glossary, output_dir, 
+                                                     strip_honorifics, fuzzy_threshold)
                     
         except Exception as e:
             print(f"⚠️ Custom prompt processing failed: {e}")
+            import traceback
+            traceback.print_exc()
             return self._extract_with_patterns(all_text, language, min_frequency, 
                                              max_names, max_titles, 50, 
-                                             existing_glossary, output_dir, strip_honorifics)
+                                             existing_glossary, output_dir, 
+                                             strip_honorifics, fuzzy_threshold)
+    
+    def _merge_csv_entries(self, new_csv_lines, existing_glossary, strip_honorifics, language):
+        """Merge CSV entries with existing glossary"""
+        # Parse existing glossary
+        existing_lines = []
+        existing_names = set()
+        
+        if isinstance(existing_glossary, str):
+            # Already CSV format
+            for line in existing_glossary.strip().split('\n'):
+                if 'type,raw_name' in line.lower():
+                    continue  # Skip header
+                parts = [p.strip() for p in line.split(',')]
+                if len(parts) >= 2:
+                    raw_name = parts[1]
+                    if strip_honorifics:
+                        raw_name = self._strip_honorific(raw_name, language)
+                        parts[1] = raw_name
+                    if raw_name not in existing_names:
+                        existing_lines.append(','.join(parts))
+                        existing_names.add(raw_name)
+        
+        # Get new names
+        new_names = set()
+        final_lines = []
+        
+        for line in new_csv_lines:
+            if 'type,raw_name' in line.lower():
+                final_lines.append(line)  # Keep header
+                continue
+            parts = [p.strip() for p in line.split(',')]
+            if len(parts) >= 2:
+                new_names.add(parts[1])
+                final_lines.append(line)
+        
+        # Add non-duplicate existing entries
+        for line in existing_lines:
+            parts = [p.strip() for p in line.split(',')]
+            if len(parts) >= 2 and parts[1] not in new_names:
+                final_lines.append(line)
+        
+        print(f"📑 Merged {len(final_lines) - len(new_csv_lines)} entries from existing glossary")
+        return final_lines
     
     def _extract_with_patterns(self, all_text, language, min_frequency, 
                                max_names, max_titles, batch_size, 
-                               existing_glossary, output_dir, strip_honorifics=True):
-        """Extract glossary using pattern matching with honorific stripping option"""
+                               existing_glossary, output_dir, 
+                               strip_honorifics=True, fuzzy_threshold=0.90):
+        """Extract glossary using pattern matching with true CSV format output"""
         print("📑 Using pattern-based extraction")
         
         def is_valid_name(name, language_hint='unknown'):
@@ -4259,81 +4408,25 @@ class GlossaryManager:
             return True
         
         def detect_language_hint(text_sample):
-            """Quick language detection for validation purposes with enhanced debugging"""
-            # Only analyze first 1000 characters for performance
+            """Quick language detection for validation purposes"""
             sample = text_sample[:1000]
             sample_length = len(sample)
             
-            # Count characters by script type
             korean_chars = sum(1 for char in sample if 0xAC00 <= ord(char) <= 0xD7AF)
             japanese_kana = sum(1 for char in sample if (0x3040 <= ord(char) <= 0x309F) or (0x30A0 <= ord(char) <= 0x30FF))
             chinese_chars = sum(1 for char in sample if 0x4E00 <= ord(char) <= 0x9FFF)
             latin_chars = sum(1 for char in sample if 0x0041 <= ord(char) <= 0x007A)
             
-            # Calculate total CJK characters
-            total_cjk = korean_chars + japanese_kana + chinese_chars
-            
-            # Calculate percentages
-            korean_pct = (korean_chars / sample_length * 100) if sample_length > 0 else 0
-            japanese_pct = (japanese_kana / sample_length * 100) if sample_length > 0 else 0
-            chinese_pct = (chinese_chars / sample_length * 100) if sample_length > 0 else 0
-            latin_pct = (latin_chars / sample_length * 100) if sample_length > 0 else 0
-            
-            # Print detailed debugging information
-            print(f"\n🔍 LANGUAGE DETECTION DEBUG:")
-            print(f"   📊 Sample analyzed: {sample_length} characters")
-            print(f"   📈 Character counts:")
-            print(f"      • Korean (Hangul): {korean_chars} chars ({korean_pct:.1f}%)")
-            print(f"      • Japanese (Kana): {japanese_kana} chars ({japanese_pct:.1f}%)")
-            print(f"      • Chinese (Hanzi): {chinese_chars} chars ({chinese_pct:.1f}%)")
-            print(f"      • Latin/English:   {latin_chars} chars ({latin_pct:.1f}%)")
-            print(f"      • Total CJK:       {total_cjk} chars ({(total_cjk/sample_length*100):.1f}%)")
-            
-            # Show decision thresholds
-            print(f"   ⚖️ Decision thresholds:")
-            print(f"      • Korean threshold: 50 chars (current: {korean_chars})")
-            print(f"      • Japanese threshold: 20 chars (current: {japanese_kana})")
-            print(f"      • Chinese threshold: 50 chars + Japanese < 10 (current: {chinese_chars}, JP: {japanese_kana})")
-            print(f"      • English threshold: 100 chars (current: {latin_chars})")
-            
-            # Apply detection logic with detailed reasoning
             if korean_chars > 50:
-                print(f"   ✅ DETECTED: Korean (Korean chars {korean_chars} > 50)")
-                result = 'korean'
+                return 'korean'
             elif japanese_kana > 20:
-                print(f"   ✅ DETECTED: Japanese (Japanese kana {japanese_kana} > 20)")
-                result = 'japanese'
+                return 'japanese'
             elif chinese_chars > 50 and japanese_kana < 10:
-                print(f"   ✅ DETECTED: Chinese (Chinese chars {chinese_chars} > 50 AND Japanese kana {japanese_kana} < 10)")
-                result = 'chinese'
+                return 'chinese'
             elif latin_chars > 100:
-                print(f"   ✅ DETECTED: English (Latin chars {latin_chars} > 100)")
-                result = 'english'
+                return 'english'
             else:
-                print(f"   ❓ DETECTED: Unknown (no thresholds met)")
-                result = 'unknown'
-            
-            # Show first few characters as examples
-            if sample:
-                # Get first 20 characters for preview
-                preview = sample[:20].replace('\n', '\\n').replace('\r', '\\r')
-                print(f"   📝 Sample text preview: '{preview}{'...' if len(sample) > 20 else ''}'")
-                
-                # Show some example characters by type
-                korean_examples = [c for c in sample[:50] if 0xAC00 <= ord(c) <= 0xD7AF][:5]
-                japanese_examples = [c for c in sample[:50] if (0x3040 <= ord(c) <= 0x309F) or (0x30A0 <= ord(c) <= 0x30FF)][:5]
-                chinese_examples = [c for c in sample[:50] if 0x4E00 <= ord(c) <= 0x9FFF][:5]
-                
-                if korean_examples:
-                    print(f"   🇰🇷 Korean examples: {''.join(korean_examples)}")
-                if japanese_examples:
-                    print(f"   🇯🇵 Japanese examples: {''.join(japanese_examples)}")
-                if chinese_examples:
-                    print(f"   🇨🇳 Chinese examples: {''.join(chinese_examples)}")
-            
-            print(f"   🎯 FINAL RESULT: {result.upper()}")
-            
-            return result
+                return 'unknown'
         
         language_hint = detect_language_hint(all_text)
         print(f"📑 Detected primary language: {language_hint}")
@@ -4354,42 +4447,14 @@ class GlossaryManager:
         for honorific in honorifics_to_use:
             self._extract_names_for_honorific(honorific, all_text, language_hint, 
                                             min_frequency, names_with_honorifics, 
-                                            standalone_names, is_valid_name)
+                                            standalone_names, is_valid_name, fuzzy_threshold)
         
-        # Also look for titles with honorifics
-        if language_hint == 'korean':
-            korean_titles = [
-                '사장', '회장', '부장', '과장', '대리', '팀장', '실장', '본부장',
-                '선생', '교수', '박사', '의사', '변호사', '검사', '판사',
-                '대통령', '총리', '장관', '시장', '지사', '의원',
-                '왕', '여왕', '왕자', '공주', '황제', '황후',
-                '장군', '대장', '원수', '제독', '함장',
-                '어머니', '아버지', '할머니', '할아버지',
-                '사모', '선배', '후배', '동료'
-            ]
-            
-            for title in korean_titles:
-                for honorific in ['님']:
-                    full_title = title + honorific
-                    count = len(re.findall(re.escape(full_title) + r'(?=\s|[,.\!?]|$)', all_text))
-                    
-                    if count >= min_frequency:
-                        names_with_honorifics[full_title] = count
-        
-        print(f"📑 Found {len(standalone_names)} unique names with honorifics")
-        print(f"[DEBUG] Sample text (first 500 chars): {all_text[:500]}")
-        print(f"[DEBUG] Text length: {len(all_text)}")
-        print(f"[DEBUG] Honorifics being used: {honorifics_to_use[:5]}")
-        print(f"📑 Detected primary language: {language_hint}")
-        
-        # Process extracted terms - NEW SECTION for honorific stripping
+        # Process extracted terms
         final_terms = {}
         
         for term, count in names_with_honorifics.items():
-            # Strip honorifics if enabled
             if strip_honorifics:
                 clean_term = self._strip_honorific(term, language_hint)
-                # Combine counts for same base name
                 if clean_term in final_terms:
                     final_terms[clean_term] = final_terms[clean_term] + count
                 else:
@@ -4415,13 +4480,12 @@ class GlossaryManager:
                 if title in names_with_honorifics:
                     continue
                     
-                count = len(re.findall(re.escape(title) + r'(?=\s|[,.\!?、。，]|$)', all_text, re.IGNORECASE if 'english' in pattern else 0))
+                count = self._find_fuzzy_matches(title, all_text, fuzzy_threshold)
                 
                 if count >= min_frequency:
                     if re.match(r'[A-Za-z]', title):
                         title = title.title()
                     
-                    # Strip honorifics from titles if enabled
                     if strip_honorifics:
                         title = self._strip_honorific(title, language_hint)
                     
@@ -4442,17 +4506,6 @@ class GlossaryManager:
         
         print(f"📑 Total terms to translate: {len(all_terms)}")
         
-        # Sample output
-        if sorted_names:
-            print("\n📑 Sample names found:")
-            for name, count in sorted_names[:5]:
-                print(f"   • {name} ({count}x)")
-        
-        if sorted_titles:
-            print("\n📑 Sample titles found:")
-            for title, count in sorted_titles[:5]:
-                print(f"   • {title} ({count}x)")
-        
         # Translate terms
         if os.getenv("DISABLE_GLOSSARY_TRANSLATION", "0") == "1":
             print("📑 Translation disabled - keeping original terms")
@@ -4461,67 +4514,39 @@ class GlossaryManager:
             print(f"📑 Translating {len(all_terms)} terms...")
             translations = self._translate_terms_batch(all_terms, language_hint, batch_size, output_dir)
         
-        # Build final glossary
-        glossary_entries = {}
+        # Build CSV lines
+        csv_lines = ["type,raw_name,translated_name"]
         
         for name, _ in sorted_names:
             if name in translations:
-                glossary_entries[name] = translations[name]
+                csv_lines.append(f"character,{name},{translations[name]}")
         
         for title, _ in sorted_titles:
             if title in translations:
-                glossary_entries[title] = translations[title]
+                csv_lines.append(f"term,{title},{translations[title]}")
         
         # Merge with existing glossary
-        if existing_glossary and isinstance(existing_glossary, list):
-            print("📑 Merging with existing manual glossary...")
-            merged_count = 0
-            
-            for char in existing_glossary:
-                original = char.get('original_name', '')
-                translated = char.get('name', original)
-                
-                # Strip honorifics from existing entries if enabled
-                if strip_honorifics:
-                    original = self._strip_honorific(original, language_hint)
-                
-                if original and translated and original not in glossary_entries:
-                    glossary_entries[original] = translated
-                    merged_count += 1
-            
-            print(f"📑 Added {merged_count} entries from existing glossary")
+        if existing_glossary:
+            csv_lines = self._merge_csv_entries(csv_lines, existing_glossary, strip_honorifics, language_hint)
         
-        # Save glossary
-        glossary_data = {
-            "metadata": {
-                "language": language_hint,
-                "extraction_method": "pattern_based",
-                "names_count": len(sorted_names),
-                "titles_count": len(sorted_titles),
-                "min_frequency": min_frequency,
-                "strip_honorifics": strip_honorifics,
-                "generation_date": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "merged_with_manual": existing_glossary is not None
-            },
-            "entries": glossary_entries
-        }
+        # Create CSV content
+        csv_content = '\n'.join(csv_lines)
         
+        # Save glossary as CSV (with .json extension for compatibility)
         glossary_path = os.path.join(output_dir, "glossary.json")
         with open(glossary_path, 'w', encoding='utf-8') as f:
-            json.dump(glossary_data, f, ensure_ascii=False, indent=2)
+            f.write(csv_content)
         
         print(f"\n📑 ✅ TARGETED GLOSSARY SAVED!")
         print(f"📑 File: {glossary_path}")
-        print(f"📑 Names: {len(sorted_names)}, Titles: {len(sorted_titles)}")
-        if existing_glossary:
-            print(f"📑 Total entries (including manual): {len(glossary_entries)}")
+        print(f"📑 Total entries: {len(csv_lines) - 1}")  # Exclude header
         
         # Save simple version
         simple_glossary_path = os.path.join(output_dir, "glossary_simple.json")
         with open(simple_glossary_path, 'w', encoding='utf-8') as f:
-            json.dump(glossary_entries, f, ensure_ascii=False, indent=2)
+            f.write(csv_content)
         
-        return glossary_entries
+        return self._parse_csv_to_dict(csv_content)
     
     def _translate_terms_batch(self, term_list, profile_name, batch_size=50, output_dir=None):
         """Use fully configurable prompts for translation"""
@@ -4551,7 +4576,6 @@ class GlossaryManager:
             translation_prompt_template = os.getenv("GLOSSARY_TRANSLATION_PROMPT", "")
             
             if not translation_prompt_template:
-                # Use default prompt if not provided
                 translation_prompt_template = """You are translating {language} character names and important terms to English.
 For character names, provide English transliterations or keep as romanized.
 Keep honorifics/suffixes only if they are integral to the name.
@@ -4590,7 +4614,13 @@ Provide translations in the same numbered format."""
                     max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "4096"))
                     response, _ = client.send(messages, temperature=temperature, max_tokens=max_tokens)
                     
-                    batch_translations = self._parse_translation_response(response, batch)
+                    # Handle response properly
+                    if hasattr(response, 'content'):
+                        response_text = response.content
+                    else:
+                        response_text = str(response)
+                    
+                    batch_translations = self._parse_translation_response(response_text, batch)
                     all_translations.update(batch_translations)
                     
                     print(f"📑 Batch {batch_num} completed: {len(batch_translations)} translations")
@@ -4620,8 +4650,8 @@ Provide translations in the same numbered format."""
     
     def _extract_names_for_honorific(self, honorific, all_text, language_hint, 
                                     min_frequency, names_with_honorifics, 
-                                    standalone_names, is_valid_name):
-        """Extract names for a specific honorific"""
+                                    standalone_names, is_valid_name, fuzzy_threshold=0.90):
+        """Extract names for a specific honorific with fuzzy matching"""
         if language_hint == 'korean' and not honorific.startswith('-'):
             pattern = r'([\uac00-\ud7af]{2,4})(?=' + re.escape(honorific) + r'(?:\s|[,.\!?]|$))'
             
@@ -4631,7 +4661,8 @@ Provide translations in the same numbered format."""
                 if is_valid_name(potential_name, 'korean'):
                     full_form = potential_name + honorific
                     
-                    count = len(re.findall(re.escape(full_form) + r'(?=\s|[,.\!?]|$)', all_text))
+                    # Use fuzzy matching for counting
+                    count = self._find_fuzzy_matches(full_form, all_text, fuzzy_threshold)
                     
                     if count >= min_frequency:
                         context_patterns = [
@@ -4658,7 +4689,7 @@ Provide translations in the same numbered format."""
                 
                 if is_valid_name(potential_name, 'japanese'):
                     full_form = potential_name + honorific
-                    count = len(re.findall(re.escape(full_form) + r'(?=\s|[、。！？]|$)', all_text))
+                    count = self._find_fuzzy_matches(full_form, all_text, fuzzy_threshold)
                     
                     if count >= min_frequency:
                         names_with_honorifics[full_form] = count
@@ -4672,7 +4703,7 @@ Provide translations in the same numbered format."""
                 
                 if is_valid_name(potential_name, 'chinese'):
                     full_form = potential_name + honorific
-                    count = len(re.findall(re.escape(full_form) + r'(?=\s|[，。！？]|$)', all_text))
+                    count = self._find_fuzzy_matches(full_form, all_text, fuzzy_threshold)
                     
                     if count >= min_frequency:
                         names_with_honorifics[full_form] = count
@@ -4693,34 +4724,7 @@ Provide translations in the same numbered format."""
                 
                 if is_valid_name(potential_name, 'english'):
                     full_form = potential_name + honorific
-                    if is_space_separated:
-                        count = len(re.findall(re.escape(full_form) + r'(?=\s|[,.\!?]|$)', all_text))
-                    else:
-                        count = len(re.findall(re.escape(full_form) + r'\b', all_text))
-                    
-                    if count >= min_frequency:
-                        names_with_honorifics[full_form] = count
-                        standalone_names[potential_name] = count
-            
-            korean_family_names = r'(?:Kim|Lee|Park|Choi|Jung|Jeong|Kang|Cho|Jo|Yoon|Yun|Jang|Chang|Lim|Im|Han|Oh|Seo|Shin|Kwon|Hwang|Ahn|An|Song|Hong|Yoo|Yu|Ko|Go|Moon|Mun|Yang|Bae|Baek|Paek|Nam|Noh|No|Roh|Ha|Heo|Hur|Koo|Ku|Gu|Min|Sim|Shim)'
-            
-            if is_space_separated:
-                pattern_korean = r'\b(' + korean_family_names + r'(?:\s+[A-Z][a-z]+(?:-[A-Z][a-z]+)?)?|[A-Z][a-z]+(?:-[A-Z][a-z]+)+)' + re.escape(honorific) + r'(?=\s|[,.\!?]|$)'
-            else:
-                pattern_korean = r'\b(' + korean_family_names + r'(?:\s+[A-Z][a-z]+(?:-[A-Z][a-z]+)?)?|[A-Z][a-z]+(?:-[A-Z][a-z]+)+)' + re.escape(honorific) + r'\b'
-            
-            matches = re.finditer(pattern_korean, all_text, re.IGNORECASE)
-            
-            for match in matches:
-                potential_name = match.group(1)
-                potential_name = potential_name.strip()
-                
-                if 2 <= len(potential_name) <= 30:
-                    full_form = potential_name + honorific
-                    if is_space_separated:
-                        count = len(re.findall(re.escape(full_form) + r'(?=\s|[,.\!?]|$)', all_text, re.IGNORECASE))
-                    else:
-                        count = len(re.findall(re.escape(full_form) + r'\b', all_text, re.IGNORECASE))
+                    count = self._find_fuzzy_matches(full_form, all_text, fuzzy_threshold)
                     
                     if count >= min_frequency:
                         names_with_honorifics[full_form] = count
@@ -4729,7 +4733,14 @@ Provide translations in the same numbered format."""
     def _parse_translation_response(self, response, original_terms):
         """Parse translation response - handles numbered format"""
         translations = {}
-        lines = response.strip().split('\n')
+        
+        # Handle UnifiedResponse object
+        if hasattr(response, 'content'):
+            response_text = response.content
+        else:
+            response_text = str(response)
+        
+        lines = response_text.strip().split('\n')
         
         for line in lines:
             line = line.strip()
