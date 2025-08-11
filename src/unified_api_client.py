@@ -1950,12 +1950,11 @@ class UnifiedClient:
         with self._file_lock:
             self._active_files.discard(filepath)
 
-    def _extract_chapter_info(self, progress_manager, chapter_key) -> dict:
-        """Extract chapter and chunk information from progress tracking
+    def _extract_chapter_info(self, messages) -> dict:
+        """Extract chapter and chunk information from messages and progress file
         
         Args:
-            progress_manager: ProgressManager instance with progress data
-            chapter_key: Content hash or chapter key to look up
+            messages: The messages to search for chapter/chunk info
         
         Returns:
             dict with 'chapter', 'chunk', 'total_chunks'
@@ -1966,25 +1965,66 @@ class UnifiedClient:
             'total_chunks': None
         }
         
-        if not progress_manager or not chapter_key:
-            return info
+        messages_str = str(messages)
         
-        prog = progress_manager.prog
+        # First extract chapter number from messages
+        chapter_match = re.search(r'Chapter\s+(\d+)', messages_str, re.IGNORECASE)
+        if not chapter_match:
+            # Try Section pattern for text files
+            chapter_match = re.search(r'Section\s+(\d+)', messages_str, re.IGNORECASE)
         
-        # Get chapter info
-        if chapter_key in prog.get("chapters", {}):
-            chapter_info = prog["chapters"][chapter_key]
-            info['chapter'] = str(chapter_info.get('actual_num', 0))
-        
-        # Get chunk info
-        if chapter_key in prog.get("chapter_chunks", {}):
-            chunk_data = prog["chapter_chunks"][chapter_key]
-            info['total_chunks'] = chunk_data.get('total')
+        if chapter_match:
+            chapter_num = int(chapter_match.group(1))
+            info['chapter'] = str(chapter_num)
             
-            # Get latest completed chunk
-            completed = chunk_data.get('completed', [])
-            if completed:
-                info['chunk'] = str(max(completed))
+            # Now try to get more accurate info from progress file
+            # Look for translation_progress.json in common locations
+            possible_paths = [
+                'translation_progress.json',
+                os.path.join('Payloads', 'translation_progress.json'),
+                os.path.join(os.getcwd(), 'Payloads', 'translation_progress.json')
+            ]
+            
+            # Check environment variable for output directory
+            output_dir = os.getenv('OUTPUT_DIRECTORY', '')
+            if output_dir:
+                possible_paths.insert(0, os.path.join(output_dir, 'translation_progress.json'))
+            
+            progress_file = None
+            for path in possible_paths:
+                if os.path.exists(path):
+                    progress_file = path
+                    break
+            
+            if progress_file:
+                try:
+                    with open(progress_file, 'r', encoding='utf-8') as f:
+                        prog = json.load(f)
+                    
+                    # Look through chapters for matching actual_num
+                    for chapter_key, chapter_info in prog.get("chapters", {}).items():
+                        if chapter_info.get('actual_num') == chapter_num:
+                            # Found it! Get chunk info if available
+                            if chapter_key in prog.get("chapter_chunks", {}):
+                                chunk_data = prog["chapter_chunks"][chapter_key]
+                                info['total_chunks'] = chunk_data.get('total')
+                                
+                                # Get current/latest chunk
+                                completed = chunk_data.get('completed', [])
+                                if completed:
+                                    info['chunk'] = str(max(completed) + 1)  # Next chunk to process
+                                else:
+                                    info['chunk'] = '1'  # First chunk
+                            break
+                except:
+                    pass  # Fallback to regex parsing
+        
+        # If we didn't get chunk info from progress file, try regex
+        if not info['chunk']:
+            chunk_match = re.search(r'Chunk\s+(\d+)/(\d+)', messages_str)
+            if chunk_match:
+                info['chunk'] = chunk_match.group(1)
+                info['total_chunks'] = chunk_match.group(2)
         
         return info
 
