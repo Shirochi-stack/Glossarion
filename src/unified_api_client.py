@@ -196,7 +196,6 @@ except ImportError:
 
 from functools import lru_cache
 from datetime import datetime, timedelta
-import threading
  
 
 @dataclass
@@ -1643,7 +1642,12 @@ class UnifiedClient:
         return thread_dir
 
     def _get_request_hash(self, messages) -> str:
-        """Generate a unique hash for request deduplication"""
+        """Generate a unique hash for request deduplication - THREAD-SAFE VERSION"""
+        
+        # Get thread-specific identifier to prevent cross-thread cache collisions
+        thread_id = threading.current_thread().ident
+        thread_name = threading.current_thread().name
+        
         # Create a normalized representation
         normalized_messages = []
         
@@ -1672,51 +1676,44 @@ class UnifiedClient:
             
             normalized_messages.append(normalized_msg)
         
-        # Include model and temperature in hash
+        # CRITICAL FIX: Include thread_id to prevent cross-thread cache collisions
         hash_data = {
+            'thread_id': thread_id,  # THIS PREVENTS CROSS-THREAD CONTAMINATION
+            'thread_name': thread_name,  # Additional context for debugging
             'messages': normalized_messages,
             'model': self.model,
             'temperature': getattr(self, 'temperature', 0.3),
             'max_tokens': getattr(self, 'max_tokens', 8192)
         }
         
+        # Debug logging if needed
+        if os.getenv("DEBUG_HASH", "0") == "1":
+            print(f"[HASH] Thread: {thread_name} (ID: {thread_id})")
+            print(f"[HASH] Model: {self.model}")
+            content_preview = str(normalized_messages)[:100] if normalized_messages else "empty"
+            print(f"[HASH] Content preview: {content_preview}...")
+        
         # Create stable JSON representation
         hash_str = json.dumps(hash_data, sort_keys=True, ensure_ascii=False)
         
         # Use SHA256 for better distribution
-        return hashlib.sha256(hash_str.encode()).hexdigest()
-
-    def _check_duplicate_request(self, request_hash: str, context: str) -> bool:
-        """
-        Enhanced duplicate detection that properly handles parallel requests.
-        Returns True only if this exact request is actively being processed.
-        """
+        final_hash = hashlib.sha256(hash_str.encode()).hexdigest()
         
-        # Only check for duplicates in specific contexts
-        if context not in ['translation', 'glossary', 'image_translation']:
-            return False
+        if os.getenv("DEBUG_HASH", "0") == "1":
+            print(f"[HASH] Generated: {final_hash[:16]}...")
         
-        thread_name = threading.current_thread().name
-        
-        # This method is now deprecated in favor of the active_requests tracking
-        # We keep it for backward compatibility but it just returns False
-        # The real duplicate detection happens in the send() method using _active_requests
-        return False
-
-    def _debug_active_requests(self):
-        """Debug method to show current active requests"""
-        with self._active_requests_lock:
-            active_count = len(self._active_requests)
-            if active_count > 0:
-                logger.debug(f"Active requests: {active_count}")
-                for hash_key in list(self._active_requests.keys())[:5]:  # Show first 5
-                    logger.debug(f"  - {hash_key[:8]}...")
+        return final_hash
 
     def _get_request_hash_with_context(self, messages, context=None) -> str:
         """
-        Generate a unique hash that includes context for better deduplication.
-        This ensures that the same content in different contexts gets different hashes.
+        Generate a unique hash that includes context AND thread info for better deduplication.
+        This ensures that the same content in different contexts/threads gets different hashes.
         """
+        
+        # Get thread-specific identifier
+        thread_id = threading.current_thread().ident
+        thread_name = threading.current_thread().name
+        
         # Create normalized representation
         normalized_messages = []
         
@@ -1747,20 +1744,59 @@ class UnifiedClient:
             
             normalized_messages.append(normalized_msg)
         
-        # Include context in hash to differentiate same content in different contexts
+        # Include context AND thread info in hash to differentiate same content
         hash_data = {
+            'thread_id': thread_id,  # THREAD ISOLATION
+            'thread_name': thread_name,  # Additional thread context
+            'context': context,  # Include context (e.g., 'translation', 'glossary', etc.)
             'messages': normalized_messages,
             'model': self.model,
-            'context': context,  # Include context
             'temperature': getattr(self, 'temperature', 0.3),
             'max_tokens': getattr(self, 'max_tokens', 8192)
         }
+        
+        # Debug logging if needed
+        if os.getenv("DEBUG_HASH", "0") == "1":
+            print(f"[HASH_CONTEXT] Thread: {thread_name} (ID: {thread_id})")
+            print(f"[HASH_CONTEXT] Context: {context}")
+            print(f"[HASH_CONTEXT] Model: {self.model}")
         
         # Create stable JSON representation
         hash_str = json.dumps(hash_data, sort_keys=True, ensure_ascii=False)
         
         # Use SHA256 for better distribution
-        return hashlib.sha256(hash_str.encode()).hexdigest()
+        final_hash = hashlib.sha256(hash_str.encode()).hexdigest()
+        
+        if os.getenv("DEBUG_HASH", "0") == "1":
+            print(f"[HASH_CONTEXT] Generated: {final_hash[:16]}...")
+        
+        return final_hash
+
+    def _check_duplicate_request(self, request_hash: str, context: str) -> bool:
+        """
+        Enhanced duplicate detection that properly handles parallel requests.
+        Returns True only if this exact request is actively being processed.
+        """
+        
+        # Only check for duplicates in specific contexts
+        if context not in ['translation', 'glossary', 'image_translation']:
+            return False
+        
+        thread_name = threading.current_thread().name
+        
+        # This method is now deprecated in favor of the active_requests tracking
+        # We keep it for backward compatibility but it just returns False
+        # The real duplicate detection happens in the send() method using _active_requests
+        return False
+
+    def _debug_active_requests(self):
+        """Debug method to show current active requests"""
+        with self._active_requests_lock:
+            active_count = len(self._active_requests)
+            if active_count > 0:
+                logger.debug(f"Active requests: {active_count}")
+                for hash_key in list(self._active_requests.keys())[:5]:  # Show first 5
+                    logger.debug(f"  - {hash_key[:8]}...")
 
     def _ensure_thread_safety_init(self):
         """
