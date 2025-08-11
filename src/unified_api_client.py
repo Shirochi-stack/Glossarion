@@ -478,7 +478,7 @@ class UnifiedClient:
         # Thread-safe request deduplication with caching
         self._request_cache = {}  # {request_hash: (content, finish_reason, timestamp)}
         self._request_cache_lock = RLock()
-        self._cache_expiry_seconds = 0  # 5 minutes
+        self._cache_expiry_seconds = 0  # Cache disabled
         
         # Active request tracking to prevent duplicate processing
         self._active_requests = {}  # {request_hash: threading.Event}
@@ -677,6 +677,11 @@ class UnifiedClient:
             self._thread_local.mistral_client = None
             self._thread_local.cohere_client = None
             self._thread_local.client_type = None
+            
+            # THREAD-LOCAL CACHE
+            self._thread_local.request_cache = {}  # Each thread gets its own cache!
+            self._thread_local.cache_hits = 0
+            self._thread_local.cache_misses = 0
         
         return self._thread_local
     
@@ -2475,16 +2480,22 @@ class UnifiedClient:
         
         # Only check for duplicates in specific contexts
         if context in ['translation', 'glossary', 'image_translation']:
-            # Step 1: Try to get from cache first (atomic check)
-            with self._request_cache_lock:
-                if request_hash in self._request_cache:
-                    content, finish_reason, timestamp = self._request_cache[request_hash]
-                    if time.time() - timestamp < self._cache_expiry_seconds:
-                        logger.info(f"[{thread_name}] Cache HIT for {context_str}, returning cached response")
-                        return content, finish_reason
-                    else:
-                        # Expired, remove it
-                        del self._request_cache[request_hash]
+            # Get thread-local storage
+            tls = self._get_thread_local_client()
+            
+            # Ensure thread has a cache
+            if not hasattr(tls, 'request_cache'):
+                tls.request_cache = {}
+            
+            # Step 1: Try to get from THREAD-LOCAL cache
+            if request_hash in tls.request_cache:  # Changed from self._request_cache
+                content, finish_reason, timestamp = tls.request_cache[request_hash]
+                if time.time() - timestamp < self._cache_expiry_seconds:
+                    logger.info(f"[{thread_name}] Thread-local cache HIT for {context_str}")
+                    return content, finish_reason
+                else:
+                    # Expired, remove it
+                    del tls.request_cache[request_hash]
             
             # Step 2: Check if another thread is processing this request (atomic check-and-set)
             processing_by_other = False
@@ -3489,17 +3500,23 @@ class UnifiedClient:
         # === IMPROVED IMAGE DEDUPLICATION WITH PROPER SYNCHRONIZATION ===
         
         # Only check for duplicates in specific contexts
-        if context in ['image_translation', 'glossary']:
-            # Step 1: Try to get from cache first (atomic check)
-            with self._request_cache_lock:
-                if request_hash in self._request_cache:
-                    content, finish_reason, timestamp = self._request_cache[request_hash]
-                    if time.time() - timestamp < self._cache_expiry_seconds:
-                        logger.info(f"[{thread_name}] Cache HIT for {context_str}, returning cached image response")
-                        return content, finish_reason
-                    else:
-                        # Expired, remove it
-                        del self._request_cache[request_hash]
+        if context in ['translation', 'glossary', 'image_translation']:
+            # Get thread-local storage
+            tls = self._get_thread_local_client()
+            
+            # Ensure thread has a cache
+            if not hasattr(tls, 'request_cache'):
+                tls.request_cache = {}
+            
+            # Step 1: Try to get from THREAD-LOCAL cache
+            if request_hash in tls.request_cache:  # Changed from self._request_cache
+                content, finish_reason, timestamp = tls.request_cache[request_hash]
+                if time.time() - timestamp < self._cache_expiry_seconds:
+                    logger.info(f"[{thread_name}] Thread-local cache HIT for {context_str}")
+                    return content, finish_reason
+                else:
+                    # Expired, remove it
+                    del tls.request_cache[request_hash]
             
             # Step 2: Check if another thread is processing this image (atomic check-and-set)
             processing_by_other = False
