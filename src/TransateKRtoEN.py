@@ -4165,22 +4165,31 @@ class GlossaryManager:
                 prompt = prompt.replace('{max_names}', str(max_names))
                 prompt = prompt.replace('{max_titles}', str(max_titles))
                 
-                # Add CSV format instruction
-                enhanced_prompt = f"""{prompt}
+                # Get the format instructions from environment variable
+                format_instructions = os.getenv("GLOSSARY_FORMAT_INSTRUCTIONS", "")
+                
+                # If no format instructions are provided, use a default
+                if not format_instructions:
+                    format_instructions = """
+    Return the results in EXACT CSV format with this header:
+    type,raw_name,translated_name
 
-Return the results in EXACT CSV format with this header:
-type,raw_name,translated_name
+    For example:
+    character,김상현,Kim Sang-hyu
+    character,갈편제,Gale Hardest  
+    character,디히릿 아데,Dihirit Ade
 
-For example:
-character,김상현,Kim Sang-hyu
-character,갈편제,Gale Hardest  
-character,디히릿 아데,Dihirit Ade
+    Only include terms that actually appear in the text.
+    Do not use quotes around values unless they contain commas.
 
-Only include terms that actually appear in the text.
-Do not use quotes around values unless they contain commas.
-
-Text to analyze:
-{text_sample}"""
+    Text to analyze:
+    {text_sample}"""
+                
+                # Replace placeholders in format instructions
+                format_instructions = format_instructions.replace('{text_sample}', text_sample)
+                
+                # Combine the user's prompt with format instructions
+                enhanced_prompt = f"{prompt}\n\n{format_instructions}"
                 
                 messages = [
                     {"role": "system", "content": "You are a glossary extraction assistant. Return ONLY CSV format, no JSON, no other formatting."},
