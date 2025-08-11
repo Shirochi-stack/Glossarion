@@ -1950,27 +1950,41 @@ class UnifiedClient:
         with self._file_lock:
             self._active_files.discard(filepath)
 
-    def _extract_chapter_info(self, messages) -> dict:
-        """Extract chapter and chunk information from messages"""
+    def _extract_chapter_info(self, progress_manager, chapter_key) -> dict:
+        """Extract chapter and chunk information from progress tracking
+        
+        Args:
+            progress_manager: ProgressManager instance with progress data
+            chapter_key: Content hash or chapter key to look up
+        
+        Returns:
+            dict with 'chapter', 'chunk', 'total_chunks'
+        """
         info = {
             'chapter': None,
             'chunk': None,
-            'total_chunks': None, 
-            'chapter_key': chapter_key
+            'total_chunks': None
         }
         
-        messages_str = str(messages)
+        if not progress_manager or not chapter_key:
+            return info
         
-        # Extract chapter number
-        chapter_match = re.search(r'Chapter (\d+)', messages_str)
-        if chapter_match:
-            info['chapter'] = chapter_match.group(1)
+        prog = progress_manager.prog
         
-        # Extract chunk information
-        chunk_match = re.search(r'Chunk (\d+)/(\d+)', messages_str)
-        if chunk_match:
-            info['chunk'] = chunk_match.group(1)
-            info['total_chunks'] = chunk_match.group(2)
+        # Get chapter info
+        if chapter_key in prog.get("chapters", {}):
+            chapter_info = prog["chapters"][chapter_key]
+            info['chapter'] = str(chapter_info.get('actual_num', 0))
+        
+        # Get chunk info
+        if chapter_key in prog.get("chapter_chunks", {}):
+            chunk_data = prog["chapter_chunks"][chapter_key]
+            info['total_chunks'] = chunk_data.get('total')
+            
+            # Get latest completed chunk
+            completed = chunk_data.get('completed', [])
+            if completed:
+                info['chunk'] = str(max(completed))
         
         return info
 
@@ -2462,8 +2476,7 @@ class UnifiedClient:
         logger.debug("✅ GUI retry features supported: truncation detection, timeout handling, duplicate detection")
  
     def send(self, messages, temperature=None, max_tokens=None, 
-             max_completion_tokens=None, context=None,
-             progress_manager=None, chapter_key=None) -> Tuple[str, Optional[str]]:
+             max_completion_tokens=None, context=None) -> Tuple[str, Optional[str]]:
         """Thread-safe send with proper key management and deduplication for batch translation"""
         thread_name = threading.current_thread().name
         
@@ -2471,8 +2484,7 @@ class UnifiedClient:
         request_hash = self._get_request_hash(messages)
         
         # Extract chapter info for better logging
-        chapter_info = self._extract_chapter_info(progress_manager, chapter_key)
-
+        chapter_info = self._extract_chapter_info(messages)
         context_str = context or 'unknown'
         if chapter_info['chapter']:
             context_str = f"Chapter {chapter_info['chapter']}"
@@ -3462,11 +3474,10 @@ class UnifiedClient:
                   temperature: Optional[float] = None, 
                   max_tokens: Optional[int] = None,
                   max_completion_tokens: Optional[int] = None,
-                  context: str = 'image_translation',
-                  progress_manager=None,
-                  chapter_key=None) -> Tuple[str, str]:
+                  context: str = 'image_translation') -> Tuple[str, str]:
         """Thread-safe image send with proper key management and deduplication for batch translation"""
         thread_name = threading.current_thread().name
+
         # Generate request hash for duplicate detection with better image hashing
         image_size = len(image_data) if isinstance(image_data, (bytes, str)) else 0
         
@@ -3485,8 +3496,8 @@ class UnifiedClient:
         messages_hash = self._get_request_hash(messages)
         request_hash = f"{messages_hash}_img_{image_size}_{image_hash}"
         
-        # Extract any chapter/context info from progress
-        chapter_info = self._extract_chapter_info(progress_manager, chapter_key)
+        # Extract any chapter/context info from messages
+        chapter_info = self._extract_chapter_info(messages)
         context_str = context or 'image_translation'
         
         # Try to get image filename if available
