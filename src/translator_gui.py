@@ -4662,7 +4662,7 @@ Recent translations to summarize:
         
         # Set default append prompt if not already set
         if not hasattr(self, 'append_glossary_prompt') or not self.append_glossary_prompt:
-            self.append_glossary_prompt = "\n- Follow this reference glossary (USE but DON\'T OUTPUT):\n"
+            self.append_glossary_prompt = "You must follow this reference glossary (USE but DON\'T OUTPUT):\n"
         
         self.append_prompt_text.insert('1.0', self.append_glossary_prompt)
         self.append_prompt_text.edit_reset()
@@ -4673,7 +4673,7 @@ Recent translations to summarize:
         def reset_append_prompt():
             if messagebox.askyesno("Reset Prompt", "Reset to default glossary append format?"):
                 self.append_prompt_text.delete('1.0', tk.END)
-                self.append_prompt_text.insert('1.0', "\n- Follow this reference glossary (USE but DON\'T OUTPUT):\n")
+                self.append_prompt_text.insert('1.0', "You must follow this reference glossary (USE but DON\'T OUTPUT):\n")
         
         tb.Button(append_prompt_controls, text="Reset to Default", command=reset_append_prompt, 
                  bootstyle="warning").pack(side=tk.LEFT, padx=5)
