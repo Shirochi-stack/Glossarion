@@ -4601,6 +4601,11 @@ class UnifiedClient:
     
     def _apply_pure_reinforcement(self, messages):
         """Apply PURE frequency-based reinforcement pattern"""
+        
+        # DISABLE in batch mode
+        if os.getenv('BATCH_TRANSLATION', '0') == '1':
+            return messages
+        
         # Skip if not enough messages
         if self.conversation_message_count < 4:
             return messages
@@ -4625,14 +4630,10 @@ class UnifiedClient:
                     self.pattern_counts[pattern_key] = self.pattern_counts.get(pattern_key, 0) + 1
                     count = self.pattern_counts[pattern_key]
                 
-                # Apply reinforcement if pattern occurs frequently
+                # Just track patterns, NO PROMPT INJECTION
                 if count >= 3:
-                    logger.info(f"Applying reinforcement for pattern: {pattern_key}")
-                    # Modifying messages parameter is safe (it's local to this call)
-                    for msg in messages:
-                        if msg.get('role') == 'system':
-                            msg['content'] += "\n\n[PATTERN REINFORCEMENT ACTIVE]"
-                            break
+                    logger.info(f"Pattern {pattern_key} detected (count: {count})")
+                    # NO [PATTERN REINFORCEMENT ACTIVE] - KEEP IT GONE
         
         return messages
     
