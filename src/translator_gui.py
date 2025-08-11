@@ -1,3 +1,4 @@
+#translator_gui.py
 if __name__ == '__main__':
     import multiprocessing
     multiprocessing.freeze_support()
@@ -1214,6 +1215,21 @@ Terms to translate:
 {terms_list}
 
 Provide translations in the same numbered format.""")
+        self.glossary_format_instructions = self.config.get('glossary_format_instructions', 
+            """
+        Return the results in EXACT CSV format with this header:
+        type,raw_name,translated_name
+
+        For example:
+        character,김상현,Kim Sang-hyu
+        character,갈편제,Gale Hardest  
+        character,디히릿 아데,Dihirit Ade
+
+        Only include terms that actually appear in the text.
+        Do not use quotes around values unless they contain commas.
+
+        Text to analyze:
+        {text_sample}""")  
         
         # Initialize custom API endpoint variables
         self.openai_base_url_var = tk.StringVar(value=self.config.get('openai_base_url', ''))
@@ -4149,6 +4165,7 @@ Recent translations to summarize:
                 self.config['glossary_max_names'] = int(self.glossary_max_names_var.get())
                 self.config['glossary_max_titles'] = int(self.glossary_max_titles_var.get())
                 self.config['glossary_batch_size'] = int(self.glossary_batch_size_var.get())
+                self.config['glossary_format_instructions'] = getattr(self, 'glossary_format_instructions', '')
                 
                 # Honorifics and other settings
                 if hasattr(self, 'strip_honorifics_var'):
@@ -4181,6 +4198,7 @@ Recent translations to summarize:
                 os.environ['GLOSSARY_STRIP_HONORIFICS'] = '1' if self.strip_honorifics_var.get() else '0'
                 os.environ['GLOSSARY_FUZZY_THRESHOLD'] = str(self.fuzzy_threshold_var.get())
                 os.environ['GLOSSARY_TRANSLATION_PROMPT'] = getattr(self, 'glossary_translation_prompt', '')
+                os.environ['GLOSSARY_FORMAT_INSTRUCTIONS'] = getattr(self, 'glossary_format_instructions', '')
                 
                 # Set custom entry types and fields as environment variables
                 os.environ['GLOSSARY_CUSTOM_ENTRY_TYPES'] = json.dumps(self.custom_entry_types)
@@ -4596,6 +4614,10 @@ Recent translations to summarize:
             
             if hasattr(self, 'translation_prompt_text'):
                 self.glossary_translation_prompt = self.translation_prompt_text.get('1.0', tk.END).strip()
+
+            if hasattr(self, 'format_instructions_text'):
+                self.glossary_format_instructions = self.format_instructions_text.get('1.0', tk.END).strip()
+                
         except Exception as e:
             print(f"Error updating glossary prompts: {e}")
             
@@ -4685,7 +4707,7 @@ Recent translations to summarize:
         tk.Label(extraction_grid, text="Translation batch:").grid(row=1, column=2, sticky=tk.W, padx=(0, 5), pady=(5, 0))
         tb.Entry(extraction_grid, textvariable=self.glossary_batch_size_var, width=10).grid(row=1, column=3, sticky=tk.W, pady=(5, 0))
         
-        # Row 3 - NEW: Honorifics handling
+        # Row 3 - Honorifics handling
         tk.Label(extraction_grid, text="Strip honorifics:").grid(row=2, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
         
         # Initialize the variable if not exists
@@ -4744,7 +4766,70 @@ Recent translations to summarize:
         tb.Button(auto_prompt_controls, text="Reset to Default", command=reset_auto_prompt, 
                  bootstyle="warning").pack(side=tk.LEFT, padx=5)
         
-        # Tab 3: Translation Prompt - NEW
+        # Tab 3: Format Instructions - NEW TAB
+        format_tab = tk.Frame(notebook)
+        notebook.add(format_tab, text="Format Instructions")
+        
+        # Format instructions section
+        format_prompt_frame = tk.LabelFrame(format_tab, text="Output Format Instructions", padx=10, pady=10)
+        format_prompt_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        tk.Label(format_prompt_frame, text="These instructions are added to your extraction prompt to specify the output format:",
+                font=('TkDefaultFont', 10)).pack(anchor=tk.W, pady=(0, 5))
+        
+        tk.Label(format_prompt_frame, text="Available placeholders: {text_sample}",
+                font=('TkDefaultFont', 9), fg='blue').pack(anchor=tk.W, pady=(0, 5))
+        
+        # Initialize format instructions variable and text widget
+        if not hasattr(self, 'glossary_format_instructions'):
+            self.glossary_format_instructions = """
+    Return the results in EXACT CSV format with this header:
+    type,raw_name,translated_name
+
+    For example:
+    character,김상현,Kim Sang-hyu
+    character,갈편제,Gale Hardest  
+    character,디히릿 아데,Dihirit Ade
+
+    Only include terms that actually appear in the text.
+    Do not use quotes around values unless they contain commas.
+
+    Text to analyze:
+    {text_sample}"""
+        
+        self.format_instructions_text = self.ui.setup_scrollable_text(
+            format_prompt_frame, height=12, wrap=tk.WORD
+        )
+        self.format_instructions_text.pack(fill=tk.BOTH, expand=True)
+        self.format_instructions_text.insert('1.0', self.glossary_format_instructions)
+        self.format_instructions_text.edit_reset()
+        
+        format_prompt_controls = tk.Frame(format_tab)
+        format_prompt_controls.pack(fill=tk.X, padx=10, pady=(0, 10))
+        
+        def reset_format_instructions():
+            if messagebox.askyesno("Reset Prompt", "Reset format instructions to default?"):
+                default_format_instructions = """
+    Return the results in EXACT CSV format with this header:
+    type,raw_name,translated_name
+
+    For example:
+    character,김상현,Kim Sang-hyu
+    character,갈편제,Gale Hardest  
+    character,디히릿 아데,Dihirit Ade
+
+    Only include terms that actually appear in the text.
+    Do not use quotes around values unless they contain commas.
+
+    Text to analyze:
+    {text_sample}"""
+                self.format_instructions_text.delete('1.0', tk.END)
+                self.format_instructions_text.insert('1.0', default_format_instructions)
+        
+        tb.Button(format_prompt_controls, text="Reset to Default", command=reset_format_instructions, 
+                 bootstyle="warning").pack(side=tk.LEFT, padx=5)
+        
+        # Tab 4: Translation Prompt (moved from Tab 3)
         translation_prompt_tab = tk.Frame(notebook)
         notebook.add(translation_prompt_tab, text="Translation Prompt")
         
@@ -4808,9 +4893,14 @@ Recent translations to summarize:
                         widget.config(state=state)
                 if self.auto_prompt_text.winfo_exists():
                     self.auto_prompt_text.config(state=state)
+                if hasattr(self, 'format_instructions_text') and self.format_instructions_text.winfo_exists():
+                    self.format_instructions_text.config(state=state)
                 if hasattr(self, 'translation_prompt_text') and self.translation_prompt_text.winfo_exists():
                     self.translation_prompt_text.config(state=state)
                 for widget in auto_prompt_controls.winfo_children():
+                    if isinstance(widget, (tb.Button, ttk.Button)) and widget.winfo_exists():
+                        widget.config(state=state)
+                for widget in format_prompt_controls.winfo_children():
                     if isinstance(widget, (tb.Button, ttk.Button)) and widget.winfo_exists():
                         widget.config(state=state)
                 for widget in trans_prompt_controls.winfo_children():
@@ -7281,6 +7371,7 @@ Recent translations to summarize:
             'AUTO_GLOSSARY_PROMPT': self.auto_glossary_prompt if hasattr(self, 'auto_glossary_prompt') else '',
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') else '',
             'GLOSSARY_TRANSLATION_PROMPT': self.glossary_translation_prompt if hasattr(self, 'glossary_translation_prompt') else '',
+            'GLOSSARY_FORMAT_INSTRUCTIONS': self.glossary_format_instructions if hasattr(self, 'glossary_format_instructions') else '',
             'ENABLE_IMAGE_TRANSLATION': "1" if self.enable_image_translation_var.get() else "0",
             'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var.get() else "0",
             'WEBNOVEL_MIN_HEIGHT': self.webnovel_min_height_var.get(),
@@ -8237,6 +8328,8 @@ Important rules:
                     'GLOSSARY_CUSTOM_FIELDS': json.dumps(getattr(self, 'custom_glossary_fields', [])),
                     'GLOSSARY_FUZZY_THRESHOLD': str(self.config.get('glossary_fuzzy_threshold', 0.90)),
                     'MANUAL_GLOSSARY': self.manual_glossary_path if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path else '',
+                    'GLOSSARY_FORMAT_INSTRUCTIONS': self.glossary_format_instructions if hasattr(self, 'glossary_format_instructions') else '',
+
                 }
                 
                 # Add project ID for Vertex AI
@@ -13811,7 +13904,14 @@ Important rules:
                     self.config['glossary_fuzzy_threshold'] = fuzzy_val
                 else:
                     self.config['glossary_fuzzy_threshold'] = 0.90  # default
-                
+                    
+             # Add after saving translation_prompt_text:
+            if hasattr(self, 'format_instructions_text'):
+                try:
+                    self.config['glossary_format_instructions'] = self.format_instructions_text.get('1.0', tk.END).strip()
+                except:
+                    pass 
+                    
             # Save all other settings
             self.config['api_key'] = self.api_key_entry.get()
             self.config['REMOVE_AI_ARTIFACTS'] = self.REMOVE_AI_ARTIFACTS_var.get()
