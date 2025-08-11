@@ -3915,19 +3915,20 @@ class BatchTranslationProcessor:
             return False, actual_num
             
 # =====================================================
-# GLOSSARY MANAGER
+# GLOSSARY MANAGER - IMPROVED VERSION
 # =====================================================
 class GlossaryManager:
-    """Unified glossary management"""
+    """Unified glossary management with fully configurable prompts"""
     
     def __init__(self):
         self.pattern_manager = PatternManager()
     
     def save_glossary(self, output_dir, chapters, instructions, language="korean"):
-        """Targeted glossary generator - Focuses on titles and CJK names with honorifics"""
-        print("📑 Targeted Glossary Generator v4.0 (Enhanced)")
-        print("📑 Extracting complete names with honorifics and titles")
+        """Targeted glossary generator with configurable prompts and honorific stripping"""
+        print("📑 Targeted Glossary Generator v5.0 (Fully Configurable)")
+        print("📑 Extracting names and terms with configurable options")
         
+        # Check for manual glossary first
         manual_glossary_path = os.getenv("MANUAL_GLOSSARY")
         if manual_glossary_path and os.path.exists(manual_glossary_path):
             print(f"📑 Manual glossary detected: {os.path.basename(manual_glossary_path)}")
@@ -3959,6 +3960,7 @@ class GlossaryManager:
                 print(f"⚠️ Could not copy manual glossary: {e}")
                 print(f"📑 Proceeding with automatic generation...")
         
+        # Check for existing glossary from manual extraction
         glossary_folder_path = os.path.join(output_dir, "Glossary")
         existing_glossary = None
         
@@ -3974,13 +3976,17 @@ class GlossaryManager:
                     except Exception as e:
                         print(f"⚠️ Could not load existing glossary: {e}")
         
+        # Get configuration from environment variables
         min_frequency = int(os.getenv("GLOSSARY_MIN_FREQUENCY", "2"))
         max_names = int(os.getenv("GLOSSARY_MAX_NAMES", "50"))
         max_titles = int(os.getenv("GLOSSARY_MAX_TITLES", "30"))
         batch_size = int(os.getenv("GLOSSARY_BATCH_SIZE", "50"))
+        strip_honorifics = os.getenv("GLOSSARY_STRIP_HONORIFICS", "1") == "1"
         
         print(f"📑 Settings: Min frequency: {min_frequency}, Max names: {max_names}, Max titles: {max_titles}")
+        print(f"📑 Strip honorifics: {'✅ Yes' if strip_honorifics else '❌ No'}")
         
+        # Get custom prompt from environment
         custom_prompt = os.getenv("AUTO_GLOSSARY_PROMPT", "").strip()
         
         def clean_html(html_text):
@@ -3994,16 +4000,40 @@ class GlossaryManager:
         if custom_prompt:
             return self._extract_with_custom_prompt(custom_prompt, all_text, language, 
                                                    min_frequency, max_names, max_titles, 
-                                                   existing_glossary, output_dir)
+                                                   existing_glossary, output_dir, strip_honorifics)
         else:
             return self._extract_with_patterns(all_text, language, min_frequency, 
                                              max_names, max_titles, batch_size, 
-                                             existing_glossary, output_dir)
+                                             existing_glossary, output_dir, strip_honorifics)
+    
+    def _strip_honorific(self, term, language_hint='unknown'):
+        """Strip honorific from a term if present"""
+        if not term:
+            return term
+            
+        # Get honorifics for the detected language
+        honorifics_to_check = []
+        if language_hint in self.pattern_manager.CJK_HONORIFICS:
+            honorifics_to_check.extend(self.pattern_manager.CJK_HONORIFICS[language_hint])
+        honorifics_to_check.extend(self.pattern_manager.CJK_HONORIFICS.get('english', []))
+        
+        # Check and remove honorifics
+        for honorific in honorifics_to_check:
+            if honorific.startswith('-') or honorific.startswith(' '):
+                # English-style suffix
+                if term.endswith(honorific):
+                    return term[:-len(honorific)].strip()
+            else:
+                # CJK-style suffix (no separator)
+                if term.endswith(honorific):
+                    return term[:-len(honorific)]
+        
+        return term
     
     def _extract_with_custom_prompt(self, custom_prompt, all_text, language, 
                                    min_frequency, max_names, max_titles, 
-                                   existing_glossary, output_dir):
-        """Extract glossary using custom AI prompt"""
+                                   existing_glossary, output_dir, strip_honorifics=True):
+        """Extract glossary using custom AI prompt with configurable options"""
         print("📑 Using custom automatic glossary prompt")
         
         try:
@@ -4017,18 +4047,18 @@ class GlossaryManager:
                 print(f"📑 No API key found, falling back to pattern-based extraction")
                 return self._extract_with_patterns(all_text, language, min_frequency, 
                                                  max_names, max_titles, 50, 
-                                                 existing_glossary, output_dir)
+                                                 existing_glossary, output_dir, strip_honorifics)
             else:
                 print(f"📑 Using AI-assisted extraction with custom prompt")
                 
                 from unified_api_client import UnifiedClient
                 client = UnifiedClient(model=MODEL, api_key=API_KEY, output_dir=output_dir)
-                # Reset cleanup state when starting new translation
                 if hasattr(client, 'reset_cleanup_state'):
                     client.reset_cleanup_state()            
                 
                 text_sample = all_text[:50000] if len(all_text) > 50000 else all_text
                 
+                # Replace placeholders in prompt
                 prompt = custom_prompt.replace('{language}', language)
                 prompt = prompt.replace('{min_frequency}', str(min_frequency))
                 prompt = prompt.replace('{max_names}', str(max_names))
@@ -4044,37 +4074,81 @@ class GlossaryManager:
                     max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "4096"))
                     response, _ = client.send(messages, temperature=temperature, max_tokens=max_tokens)
                     
+                    # Get the actual text from the response
+                    if hasattr(response, 'content'):
+                        response_text = response.content
+                    else:
+                        response_text = str(response)
+                    
+                    print(f"📑 [DEBUG] Got response: {len(response_text)} characters")
+                    print(f"📑 [DEBUG] Response preview: {response_text[:200]}...")
+                    
                     ai_extracted_terms = {}
                     
+                    # Parse AI response
                     try:
-                        ai_data = json.loads(response)
+                        # Clean up response - remove markdown code blocks if present
+                        if '```json' in response_text:
+                            response_text = response_text.split('```json')[1].split('```')[0]
+                        elif '```' in response_text:
+                            response_text = response_text.split('```')[1].split('```')[0]
+                        
+                        ai_data = json.loads(response_text)
                         if isinstance(ai_data, dict):
                             ai_extracted_terms = ai_data
                         elif isinstance(ai_data, list):
                             for item in ai_data:
                                 if isinstance(item, dict) and 'original' in item:
-                                    ai_extracted_terms[item['original']] = item.get('translation', item['original'])
+                                    original = item['original']
+                                    translation = item.get('translation', original)
+                                    
+                                    # Strip honorifics if enabled
+                                    if strip_honorifics:
+                                        original = self._strip_honorific(original, language)
+                                    
+                                    ai_extracted_terms[original] = translation
                     except:
-                        lines = response.strip().split('\n')
+                        # Try to parse as simple format
+                        lines = response_text.strip().split('\n')
                         for line in lines:
                             if '->' in line or '→' in line or ':' in line:
                                 parts = re.split(r'->|→|:', line, 1)
                                 if len(parts) == 2:
-                                    original = parts[0].strip()
-                                    translation = parts[1].strip()
+                                    original = parts[0].strip().strip('"\'')
+                                    translation = parts[1].strip().strip('"\'')
+                                    
+                                    # Strip honorifics if enabled
+                                    if strip_honorifics:
+                                        original = self._strip_honorific(original, language)
+                                    
                                     if original and translation:
                                         ai_extracted_terms[original] = translation
                     
                     print(f"📑 AI extracted {len(ai_extracted_terms)} initial terms")
                     
+                    # Show what was extracted
+                    if ai_extracted_terms:
+                        print(f"📑 Sample extracted (first 5):")
+                        for i, (k, v) in enumerate(list(ai_extracted_terms.items())[:5]):
+                            print(f"   {i+1}. '{k}' -> '{v}'")
+                    
+                    # Verify frequency threshold
                     verified_terms = {}
                     for original, translation in ai_extracted_terms.items():
+                        # Count occurrences (with and without honorifics)
                         count = all_text.count(original)
+                        
+                        # Also check with common honorifics if we stripped them
+                        if strip_honorifics and language in self.pattern_manager.CJK_HONORIFICS:
+                            for honorific in self.pattern_manager.CJK_HONORIFICS[language][:3]:  # Check top 3 honorifics
+                                count += all_text.count(original + honorific)
+                        
                         if count >= min_frequency:
                             verified_terms[original] = translation
                     
                     print(f"📑 Verified {len(verified_terms)} terms meet frequency threshold")
                     
+                    # Merge with existing glossary
                     if existing_glossary and isinstance(existing_glossary, list):
                         print("📑 Merging with existing manual glossary...")
                         merged_count = 0
@@ -4083,24 +4157,31 @@ class GlossaryManager:
                             original = char.get('original_name', '')
                             translated = char.get('name', original)
                             
+                            # Strip honorifics from existing entries if enabled
+                            if strip_honorifics:
+                                original = self._strip_honorific(original, language)
+                            
                             if original and translated and original not in verified_terms:
                                 verified_terms[original] = translated
                                 merged_count += 1
                         
                         print(f"📑 Added {merged_count} entries from existing glossary")
                     
+                    # Create glossary data
                     glossary_data = {
                         "metadata": {
                             "language": language,
                             "extraction_method": "ai_custom_prompt",
                             "total_entries": len(verified_terms),
                             "min_frequency": min_frequency,
+                            "strip_honorifics": strip_honorifics,
                             "generation_date": time.strftime("%Y-%m-%d %H:%M:%S"),
                             "merged_with_manual": existing_glossary is not None
                         },
                         "entries": verified_terms
                     }
                     
+                    # Save glossary
                     glossary_path = os.path.join(output_dir, "glossary.json")
                     with open(glossary_path, 'w', encoding='utf-8') as f:
                         json.dump(glossary_data, f, ensure_ascii=False, indent=2)
@@ -4109,6 +4190,7 @@ class GlossaryManager:
                     print(f"📑 File: {glossary_path}")
                     print(f"📑 Total entries: {len(verified_terms)}")
                     
+                    # Save simple version
                     simple_glossary_path = os.path.join(output_dir, "glossary_simple.json")
                     with open(simple_glossary_path, 'w', encoding='utf-8') as f:
                         json.dump(verified_terms, f, ensure_ascii=False, indent=2)
@@ -4120,18 +4202,18 @@ class GlossaryManager:
                     print("📑 Falling back to pattern-based extraction")
                     return self._extract_with_patterns(all_text, language, min_frequency, 
                                                      max_names, max_titles, 50, 
-                                                     existing_glossary, output_dir)
+                                                     existing_glossary, output_dir, strip_honorifics)
                     
         except Exception as e:
             print(f"⚠️ Custom prompt processing failed: {e}")
             return self._extract_with_patterns(all_text, language, min_frequency, 
                                              max_names, max_titles, 50, 
-                                             existing_glossary, output_dir)
+                                             existing_glossary, output_dir, strip_honorifics)
     
     def _extract_with_patterns(self, all_text, language, min_frequency, 
                                max_names, max_titles, batch_size, 
-                               existing_glossary, output_dir):
-        """Extract glossary using pattern matching"""
+                               existing_glossary, output_dir, strip_honorifics=True):
+        """Extract glossary using pattern matching with honorific stripping option"""
         print("📑 Using pattern-based extraction")
         
         def is_valid_name(name, language_hint='unknown'):
@@ -4259,7 +4341,7 @@ class GlossaryManager:
         honorifics_to_use = []
         if language_hint in self.pattern_manager.CJK_HONORIFICS:
             honorifics_to_use.extend(self.pattern_manager.CJK_HONORIFICS[language_hint])
-        honorifics_to_use.extend(self.pattern_manager.CJK_HONORIFICS['english'])
+        honorifics_to_use.extend(self.pattern_manager.CJK_HONORIFICS.get('english', []))
         
         print(f"📑 Using {len(honorifics_to_use)} honorifics for {language_hint}")
         
@@ -4298,6 +4380,22 @@ class GlossaryManager:
         print(f"[DEBUG] Sample text (first 500 chars): {all_text[:500]}")
         print(f"[DEBUG] Text length: {len(all_text)}")
         print(f"[DEBUG] Honorifics being used: {honorifics_to_use[:5]}")
+        print(f"📑 Detected primary language: {language_hint}")
+        
+        # Process extracted terms - NEW SECTION for honorific stripping
+        final_terms = {}
+        
+        for term, count in names_with_honorifics.items():
+            # Strip honorifics if enabled
+            if strip_honorifics:
+                clean_term = self._strip_honorific(term, language_hint)
+                # Combine counts for same base name
+                if clean_term in final_terms:
+                    final_terms[clean_term] = final_terms[clean_term] + count
+                else:
+                    final_terms[clean_term] = count
+            else:
+                final_terms[term] = count
         
         # Find titles
         print("📑 Scanning for titles...")
@@ -4306,7 +4404,7 @@ class GlossaryManager:
         title_patterns_to_use = []
         if language_hint in self.pattern_manager.TITLE_PATTERNS:
             title_patterns_to_use.extend(self.pattern_manager.TITLE_PATTERNS[language_hint])
-        title_patterns_to_use.extend(self.pattern_manager.TITLE_PATTERNS['english'])
+        title_patterns_to_use.extend(self.pattern_manager.TITLE_PATTERNS.get('english', []))
         
         for pattern in title_patterns_to_use:
             matches = re.finditer(pattern, all_text, re.IGNORECASE if 'english' in pattern else 0)
@@ -4323,24 +4421,28 @@ class GlossaryManager:
                     if re.match(r'[A-Za-z]', title):
                         title = title.title()
                     
+                    # Strip honorifics from titles if enabled
+                    if strip_honorifics:
+                        title = self._strip_honorific(title, language_hint)
+                    
                     if title not in found_titles:
                         found_titles[title] = count
         
         print(f"📑 Found {len(found_titles)} unique titles")
         
-        sorted_names = sorted(names_with_honorifics.items(), key=lambda x: x[1], reverse=True)[:max_names]
+        # Combine and sort
+        sorted_names = sorted(final_terms.items(), key=lambda x: x[1], reverse=True)[:max_names]
         sorted_titles = sorted(found_titles.items(), key=lambda x: x[1], reverse=True)[:max_titles]
         
         all_terms = []
-        
         for name, count in sorted_names:
             all_terms.append(name)
-            
         for title, count in sorted_titles:
             all_terms.append(title)
         
         print(f"📑 Total terms to translate: {len(all_terms)}")
         
+        # Sample output
         if sorted_names:
             print("\n📑 Sample names found:")
             for name, count in sorted_names[:5]:
@@ -4351,6 +4453,7 @@ class GlossaryManager:
             for title, count in sorted_titles[:5]:
                 print(f"   • {title} ({count}x)")
         
+        # Translate terms
         if os.getenv("DISABLE_GLOSSARY_TRANSLATION", "0") == "1":
             print("📑 Translation disabled - keeping original terms")
             translations = {term: term for term in all_terms}
@@ -4358,6 +4461,7 @@ class GlossaryManager:
             print(f"📑 Translating {len(all_terms)} terms...")
             translations = self._translate_terms_batch(all_terms, language_hint, batch_size, output_dir)
         
+        # Build final glossary
         glossary_entries = {}
         
         for name, _ in sorted_names:
@@ -4368,6 +4472,7 @@ class GlossaryManager:
             if title in translations:
                 glossary_entries[title] = translations[title]
         
+        # Merge with existing glossary
         if existing_glossary and isinstance(existing_glossary, list):
             print("📑 Merging with existing manual glossary...")
             merged_count = 0
@@ -4376,12 +4481,17 @@ class GlossaryManager:
                 original = char.get('original_name', '')
                 translated = char.get('name', original)
                 
+                # Strip honorifics from existing entries if enabled
+                if strip_honorifics:
+                    original = self._strip_honorific(original, language_hint)
+                
                 if original and translated and original not in glossary_entries:
                     glossary_entries[original] = translated
                     merged_count += 1
             
             print(f"📑 Added {merged_count} entries from existing glossary")
         
+        # Save glossary
         glossary_data = {
             "metadata": {
                 "language": language_hint,
@@ -4389,6 +4499,7 @@ class GlossaryManager:
                 "names_count": len(sorted_names),
                 "titles_count": len(sorted_titles),
                 "min_frequency": min_frequency,
+                "strip_honorifics": strip_honorifics,
                 "generation_date": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "merged_with_manual": existing_glossary is not None
             },
@@ -4405,11 +4516,107 @@ class GlossaryManager:
         if existing_glossary:
             print(f"📑 Total entries (including manual): {len(glossary_entries)}")
         
+        # Save simple version
         simple_glossary_path = os.path.join(output_dir, "glossary_simple.json")
         with open(simple_glossary_path, 'w', encoding='utf-8') as f:
             json.dump(glossary_entries, f, ensure_ascii=False, indent=2)
         
         return glossary_entries
+    
+    def _translate_terms_batch(self, term_list, profile_name, batch_size=50, output_dir=None):
+        """Use fully configurable prompts for translation"""
+        if not term_list or os.getenv("DISABLE_GLOSSARY_TRANSLATION", "0") == "1":
+            print(f"📑 Glossary translation disabled or no terms to translate")
+            return {term: term for term in term_list}
+        
+        try:
+            MODEL = os.getenv("MODEL", "gemini-1.5-flash")
+            API_KEY = (os.getenv("API_KEY") or 
+                       os.getenv("OPENAI_API_KEY") or 
+                       os.getenv("OPENAI_OR_Gemini_API_KEY") or
+                       os.getenv("GEMINI_API_KEY"))
+            
+            if not API_KEY:
+                print(f"📑 No API key found, skipping translation")
+                return {term: term for term in term_list}
+            
+            print(f"📑 Translating {len(term_list)} {profile_name} terms to English using batch size {batch_size}...")
+            
+            from unified_api_client import UnifiedClient
+            client = UnifiedClient(model=MODEL, api_key=API_KEY, output_dir=output_dir)
+            if hasattr(client, 'reset_cleanup_state'):
+                client.reset_cleanup_state()
+            
+            # Get custom translation prompt from environment
+            translation_prompt_template = os.getenv("GLOSSARY_TRANSLATION_PROMPT", "")
+            
+            if not translation_prompt_template:
+                # Use default prompt if not provided
+                translation_prompt_template = """You are translating {language} character names and important terms to English.
+For character names, provide English transliterations or keep as romanized.
+Keep honorifics/suffixes only if they are integral to the name.
+Respond with the same numbered format.
+
+Terms to translate:
+{terms_list}
+
+Provide translations in the same numbered format."""
+            
+            all_translations = {}
+            
+            for i in range(0, len(term_list), batch_size):
+                batch = term_list[i:i + batch_size]
+                batch_num = (i // batch_size) + 1
+                total_batches = (len(term_list) + batch_size - 1) // batch_size
+                
+                print(f"📑 Processing batch {batch_num}/{total_batches} ({len(batch)} terms)...")
+                
+                # Format terms list
+                terms_text = ""
+                for idx, term in enumerate(batch, 1):
+                    terms_text += f"{idx}. {term}\n"
+                
+                # Replace placeholders in prompt
+                prompt = translation_prompt_template.replace('{language}', profile_name)
+                prompt = prompt.replace('{terms_list}', terms_text.strip())
+                prompt = prompt.replace('{batch_size}', str(len(batch)))
+                
+                messages = [
+                    {"role": "user", "content": prompt}
+                ]
+                
+                try:
+                    temperature = float(os.getenv("TEMPERATURE", "0.3"))
+                    max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "4096"))
+                    response, _ = client.send(messages, temperature=temperature, max_tokens=max_tokens)
+                    
+                    batch_translations = self._parse_translation_response(response, batch)
+                    all_translations.update(batch_translations)
+                    
+                    print(f"📑 Batch {batch_num} completed: {len(batch_translations)} translations")
+                    
+                    if i + batch_size < len(term_list):
+                        time.sleep(0.5)
+                        
+                except Exception as e:
+                    print(f"⚠️ Translation failed for batch {batch_num}: {e}")
+                    for term in batch:
+                        all_translations[term] = term
+            
+            # Ensure all terms have translations
+            for term in term_list:
+                if term not in all_translations:
+                    all_translations[term] = term
+            
+            translated_count = sum(1 for term, translation in all_translations.items() 
+                                 if translation != term and translation.strip())
+            
+            print(f"📑 Successfully translated {translated_count}/{len(term_list)} terms")
+            return all_translations
+            
+        except Exception as e:
+            print(f"⚠️ Glossary translation failed: {e}")
+            return {term: term for term in term_list}
     
     def _extract_names_for_honorific(self, honorific, all_text, language_hint, 
                                     min_frequency, names_with_honorifics, 
@@ -4518,94 +4725,6 @@ class GlossaryManager:
                     if count >= min_frequency:
                         names_with_honorifics[full_form] = count
                         standalone_names[potential_name] = count
-    
-    def _translate_terms_batch(self, term_list, profile_name, batch_size=50, output_dir=None):
-        """Use GUI-controlled batch size for translation"""
-        if not term_list or os.getenv("DISABLE_GLOSSARY_TRANSLATION", "0") == "1":
-            print(f"📑 Glossary translation disabled or no terms to translate")
-            return {term: term for term in term_list}
-        
-        try:
-            MODEL = os.getenv("MODEL", "gemini-1.5-flash")
-            API_KEY = (os.getenv("API_KEY") or 
-                       os.getenv("OPENAI_API_KEY") or 
-                       os.getenv("OPENAI_OR_Gemini_API_KEY") or
-                       os.getenv("GEMINI_API_KEY"))
-            
-            if not API_KEY:
-                print(f"📑 No API key found, skipping translation")
-                return {term: term for term in term_list}
-            
-            print(f"📑 Translating {len(term_list)} {profile_name} terms to English using batch size {batch_size}...")
-            
-            from unified_api_client import UnifiedClient
-            client = UnifiedClient(model=MODEL, api_key=API_KEY, output_dir=output_dir)
-            # Reset cleanup state when starting new translation
-            if hasattr(client, 'reset_cleanup_state'):
-                client.reset_cleanup_state()
-            
-            all_translations = {}
-            
-            for i in range(0, len(term_list), batch_size):
-                batch = term_list[i:i + batch_size]
-                batch_num = (i // batch_size) + 1
-                total_batches = (len(term_list) + batch_size - 1) // batch_size
-                
-                print(f"📑 Processing batch {batch_num}/{total_batches} ({len(batch)} terms)...")
-                
-                terms_text = ""
-                for idx, term in enumerate(batch, 1):
-                    terms_text += f"{idx}. {term}\n"
-                
-                system_prompt = (
-                    f"You are translating {profile_name} character names and important terms to English. "
-                    "For character names, provide English transliterations or keep as romanized. "
-                    "Retain honorifics/suffixes in romaji. "
-                    "Keep the same number format in your response."
-                )
-                
-                user_prompt = (
-                    f"Translate these {profile_name} character names and terms to English:\n\n"
-                    f"{terms_text}\n"
-                    "Respond with the same numbered format. For names, provide transliteration or keep romanized."
-                )
-                
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ]
-                
-                try:
-                    temperature = float(os.getenv("TEMPERATURE", "0.3"))
-                    max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "4096"))
-                    response, _ = client.send(messages, temperature=temperature, max_tokens=max_tokens)
-                    
-                    batch_translations = self._parse_translation_response(response, batch)
-                    all_translations.update(batch_translations)
-                    
-                    print(f"📑 Batch {batch_num} completed: {len(batch_translations)} translations")
-                    
-                    if i + batch_size < len(term_list):
-                        time.sleep(0.5)
-                        
-                except Exception as e:
-                    print(f"⚠️ Translation failed for batch {batch_num}: {e}")
-                    for term in batch:
-                        all_translations[term] = term
-            
-            for term in term_list:
-                if term not in all_translations:
-                    all_translations[term] = term
-            
-            translated_count = sum(1 for term, translation in all_translations.items() 
-                                 if translation != term and translation.strip())
-            
-            print(f"📑 Successfully translated {translated_count}/{len(term_list)} terms")
-            return all_translations
-            
-        except Exception as e:
-            print(f"⚠️ Glossary translation failed: {e}")
-            return {term: term for term in term_list}
     
     def _parse_translation_response(self, response, original_terms):
         """Parse translation response - handles numbered format"""
