@@ -508,7 +508,145 @@ class MultiAPIKeyDialog:
         
         # Handle window close
         self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
-    
+ 
+    def _create_key_list_section(self, parent):
+        """Create the key list section with inline editing and rearrangement controls"""
+        list_frame = tk.LabelFrame(parent, text="API Keys", padx=15, pady=15)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Add primary key indicator frame at the top
+        primary_frame = tk.Frame(list_frame, bg='#FF8C00', relief=tk.RAISED, bd=2)
+        primary_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        self.primary_key_label = tk.Label(primary_frame, 
+                                          text="⭐ PRIMARY KEY: Position #1 will be used first in rotation ⭐",
+                                          bg='#FF8C00', fg='white', 
+                                          font=('TkDefaultFont', 11, 'bold'),
+                                          pady=5)
+        self.primary_key_label.pack(fill=tk.X)
+        
+        # Main container with treeview and controls
+        main_container = tk.Frame(list_frame)
+        main_container.pack(fill=tk.BOTH, expand=True)
+        
+        # Left side: Move buttons
+        move_frame = tk.Frame(main_container)
+        move_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 5))
+        
+        tk.Label(move_frame, text="Reorder", font=('TkDefaultFont', 9, 'bold')).pack(pady=(0, 5))
+        
+        # Move to top button
+        tb.Button(move_frame, text="⬆⬆", width=3, 
+                 command=lambda: self._move_key('top'),
+                 bootstyle="secondary-outline").pack(pady=2)
+        
+        # Move up button
+        tb.Button(move_frame, text="⬆", width=3,
+                 command=lambda: self._move_key('up'),
+                 bootstyle="secondary-outline").pack(pady=2)
+        
+        # Move down button
+        tb.Button(move_frame, text="⬇", width=3,
+                 command=lambda: self._move_key('down'),
+                 bootstyle="secondary-outline").pack(pady=2)
+        
+        # Move to bottom button
+        tb.Button(move_frame, text="⬇⬇", width=3,
+                 command=lambda: self._move_key('bottom'),
+                 bootstyle="secondary-outline").pack(pady=2)
+        
+        # Spacer
+        tk.Frame(move_frame).pack(pady=10)
+        
+        # Position label
+        self.position_label = tk.Label(move_frame, text="", font=('TkDefaultFont', 9), fg='gray')
+        self.position_label.pack()
+        
+        # Right side: Treeview with scrollbar
+        tree_frame = tk.Frame(main_container)
+        tree_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Scrollbar
+        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Treeview
+        columns = ('Position', 'Model', 'Cooldown', 'Status', 'Success', 'Errors', 'Last Used')
+        self.tree = ttk.Treeview(tree_frame, columns=columns, show='tree headings',
+                                yscrollcommand=scrollbar.set, height=10)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        scrollbar.config(command=self.tree.yview)
+        
+        # Configure columns with better widths and anchoring
+        self.tree.heading('#0', text='API Key', anchor='w')
+        self.tree.column('#0', width=150, minwidth=120, anchor='w')
+        
+        self.tree.heading('Position', text='#', anchor='center')
+        self.tree.column('Position', width=50, minwidth=40, anchor='center')
+        
+        self.tree.heading('Model', text='Model', anchor='w')
+        self.tree.column('Model', width=150, minwidth=100, anchor='w')
+        
+        self.tree.heading('Cooldown', text='Cooldown', anchor='center')
+        self.tree.column('Cooldown', width=80, minwidth=60, anchor='center')
+        
+        self.tree.heading('Status', text='Status', anchor='center')
+        self.tree.column('Status', width=120, minwidth=80, anchor='center')
+        
+        self.tree.heading('Success', text='✓', anchor='center')
+        self.tree.column('Success', width=40, minwidth=30, anchor='center')
+        
+        self.tree.heading('Errors', text='✗', anchor='center')
+        self.tree.column('Errors', width=40, minwidth=30, anchor='center')
+        
+        self.tree.heading('Last Used', text='Last Used', anchor='center')
+        self.tree.column('Last Used', width=80, minwidth=60, anchor='center')
+        
+        # Configure tree style for better appearance
+        style = ttk.Style()
+        style.configure("Treeview.Heading", font=('TkDefaultFont', 11, 'bold'))
+        
+        # Bind events for inline editing
+        self.tree.bind('<Button-1>', self._on_click)
+        self.tree.bind('<Button-3>', self._show_context_menu)
+        self.tree.bind('<<TreeviewSelect>>', self._on_selection_change)
+        
+        # Enable drag and drop
+        self.tree.bind('<Button-1>', self._on_drag_start, add='+')
+        self.tree.bind('<B1-Motion>', self._on_drag_motion)
+        self.tree.bind('<ButtonRelease-1>', self._on_drag_release)
+        
+        # Track editing state
+        self.edit_widget = None
+        
+        # Track drag state
+        self.drag_start_item = None
+        self.drag_start_y = None
+        
+        # Action buttons
+        action_frame = tk.Frame(list_frame)
+        action_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        tb.Button(action_frame, text="Test Selected", command=self._test_selected,
+                 bootstyle="warning").pack(side=tk.LEFT, padx=(0, 5))
+        
+        tb.Button(action_frame, text="Test All", command=self._test_all,
+                 bootstyle="warning").pack(side=tk.LEFT, padx=5)
+        
+        tb.Button(action_frame, text="Enable Selected", command=self._enable_selected,
+                 bootstyle="success").pack(side=tk.LEFT, padx=5)
+        
+        tb.Button(action_frame, text="Disable Selected", command=self._disable_selected,
+                 bootstyle="danger").pack(side=tk.LEFT, padx=5)
+        
+        tb.Button(action_frame, text="Remove Selected", command=self._remove_selected,
+                 bootstyle="danger").pack(side=tk.LEFT, padx=5)
+        
+        # Stats label
+        self.stats_label = tk.Label(action_frame, text="", font=('TkDefaultFont', 11), fg='gray')
+        self.stats_label.pack(side=tk.RIGHT)
+ 
     def _create_add_key_section(self, parent):
         """Create the add key section"""
         add_frame = tk.LabelFrame(parent, text="Add New API Key", padx=15, pady=15)
@@ -556,82 +694,216 @@ class MultiAPIKeyDialog:
                  bootstyle="info-outline").grid(row=1, column=3, columnspan=2, 
                                                sticky=tk.W, padx=(20, 0), pady=5)
     
-    def _create_key_list_section(self, parent):
-        """Create the key list section with inline editing"""
-        list_frame = tk.LabelFrame(parent, text="API Keys", padx=15, pady=15)
-        list_frame.pack(fill=tk.BOTH, expand=True)
+    def _move_key(self, direction):
+        """Move selected key in the specified direction"""
+        selected = self.tree.selection()
+        if not selected or len(selected) != 1:
+            return
         
-        # Treeview with scrollbar
-        tree_frame = tk.Frame(list_frame)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
+        item = selected[0]
+        index = self.tree.index(item)
         
-        # Scrollbar
-        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        if index >= len(self.key_pool.keys):
+            return
         
-        # Treeview
-        columns = ('Model', 'Cooldown', 'Status', 'Success', 'Errors', 'Last Used')
-        self.tree = ttk.Treeview(tree_frame, columns=columns, show='tree headings',
-                                yscrollcommand=scrollbar.set, height=10)
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        new_index = index
         
-        scrollbar.config(command=self.tree.yview)
+        if direction == 'up' and index > 0:
+            new_index = index - 1
+        elif direction == 'down' and index < len(self.key_pool.keys) - 1:
+            new_index = index + 1
+        elif direction == 'top':
+            new_index = 0
+        elif direction == 'bottom':
+            new_index = len(self.key_pool.keys) - 1
         
-        # Configure columns with better widths and anchoring
-        self.tree.heading('#0', text='API Key', anchor='w')
-        self.tree.column('#0', width=200, minwidth=150, anchor='w')
+        if new_index != index:
+            # Swap keys in the pool
+            with self.key_pool.lock:
+                self.key_pool.keys[index], self.key_pool.keys[new_index] = \
+                    self.key_pool.keys[new_index], self.key_pool.keys[index]
+            
+            # Refresh display
+            self._refresh_key_list()
+            
+            # Reselect the moved item
+            items = self.tree.get_children()
+            if new_index < len(items):
+                self.tree.selection_set(items[new_index])
+                self.tree.focus(items[new_index])
+                self.tree.see(items[new_index])
+            
+            # Show status
+            self._show_status(f"Moved key to position {new_index + 1}")
+            
+    def _on_selection_change(self, event):
+        """Update position label when selection changes"""
+        selected = self.tree.selection()
+        if selected:
+            index = self.tree.index(selected[0])
+            total = len(self.key_pool.keys)
+            self.position_label.config(text=f"#{index + 1}/{total}")
+        else:
+            self.position_label.config(text="")
+
+    def _on_drag_start(self, event):
+        """Start drag operation"""
+        # Check if we clicked on an item
+        item = self.tree.identify_row(event.y)
+        if item:
+            self.drag_start_item = item
+            self.drag_start_y = event.y
+            # Select the item being dragged
+            self.tree.selection_set(item)
+            # Set cursor
+            self.tree.config(cursor="hand2")
+
+    def _on_drag_motion(self, event):
+        """Handle drag motion"""
+        if not self.drag_start_item:
+            return
         
-        self.tree.heading('Model', text='Model', anchor='w')
-        self.tree.column('Model', width=180, minwidth=120, anchor='w')
+        # Get the item under the cursor
+        target_item = self.tree.identify_row(event.y)
         
-        self.tree.heading('Cooldown', text='Cooldown', anchor='center')
-        self.tree.column('Cooldown', width=80, minwidth=60, anchor='center')
+        if target_item and target_item != self.drag_start_item:
+            # Visual feedback - change cursor
+            self.tree.config(cursor="sb_v_double_arrow")
+
+    def _on_drag_release(self, event):
+        """Complete drag operation"""
+        if not self.drag_start_item:
+            return
         
-        self.tree.heading('Status', text='Status', anchor='center')
-        self.tree.column('Status', width=150, minwidth=100, anchor='center')
+        # Reset cursor
+        self.tree.config(cursor="")
         
-        self.tree.heading('Success', text='✓', anchor='center')
-        self.tree.column('Success', width=50, minwidth=40, anchor='center')
+        # Get the target item
+        target_item = self.tree.identify_row(event.y)
         
-        self.tree.heading('Errors', text='✗', anchor='center')
-        self.tree.column('Errors', width=50, minwidth=40, anchor='center')
+        if target_item and target_item != self.drag_start_item:
+            # Get indices
+            source_index = self.tree.index(self.drag_start_item)
+            target_index = self.tree.index(target_item)
+            
+            # Reorder the keys in the pool
+            with self.key_pool.lock:
+                # Remove from source position
+                key = self.key_pool.keys.pop(source_index)
+                # Insert at target position
+                self.key_pool.keys.insert(target_index, key)
+            
+            # Refresh display
+            self._refresh_key_list()
+            
+            # Reselect the moved item
+            items = self.tree.get_children()
+            if target_index < len(items):
+                self.tree.selection_set(items[target_index])
+                self.tree.focus(items[target_index])
+                self.tree.see(items[target_index])
+            
+            # Show status
+            self._show_status(f"Moved key from position {source_index + 1} to {target_index + 1}")
         
-        self.tree.heading('Last Used', text='Last Used', anchor='center')
-        self.tree.column('Last Used', width=90, minwidth=70, anchor='center')
+        # Reset drag state
+        self.drag_start_item = None
+        self.drag_start_y = None
+
+    def _refresh_key_list(self):
+        """Refresh the key list display preserving test results and highlighting key #1"""
+        # Clear tree
+        for item in self.tree.get_children():
+            self.tree.delete(item)
         
-        # Configure tree style for better appearance
-        style = ttk.Style()
-        style.configure("Treeview.Heading", font=('TkDefaultFont', 11, 'bold'))
+        # Update primary key label if it exists
+        if hasattr(self, 'primary_key_label'):
+            keys = self.key_pool.get_all_keys()
+            if keys:
+                first_key = keys[0]
+                masked = first_key.api_key[:8] + "..." + first_key.api_key[-4:] if len(first_key.api_key) > 12 else first_key.api_key
+                self.primary_key_label.config(text=f"⭐ PRIMARY KEY: {first_key.model} ({masked}) ⭐")
         
-        # Bind events for inline editing
-        self.tree.bind('<Button-1>', self._on_click)
-        self.tree.bind('<Button-3>', self._show_context_menu)
+        # Add keys
+        keys = self.key_pool.get_all_keys()
+        for i, key in enumerate(keys):
+            # Mask API key for display
+            masked_key = key.api_key[:8] + "..." + key.api_key[-4:] if len(key.api_key) > 12 else key.api_key
+            
+            # Position indicator
+            position = f"#{i+1}"
+            if i == 0:
+                position = "⭐ #1"
+            
+            # Determine status based on test results and current state
+            if key.last_test_result is None and hasattr(key, '_testing'):
+                status = "⏳ Testing..."
+                tags = ('testing',)
+            elif not key.enabled:
+                status = "Disabled"
+                tags = ('disabled',)
+            elif key.last_test_result == 'passed':
+                status = "✅ Passed"
+                tags = ('passed',)
+            elif key.last_test_result == 'failed':
+                status = "❌ Failed"
+                tags = ('failed',)
+            elif key.last_test_result == 'rate_limited':
+                status = "⚠️ Rate Limited"
+                tags = ('ratelimited',)
+            elif key.last_test_result == 'error':
+                status = "❌ Error"
+                if key.last_test_message:
+                    status += f": {key.last_test_message[:20]}..."
+                tags = ('error',)
+            elif key.is_cooling_down and key.last_error_time:
+                remaining = int(key.cooldown - (time.time() - key.last_error_time))
+                if remaining > 0:
+                    status = f"Cooling ({remaining}s)"
+                    tags = ('cooling',)
+                else:
+                    key.is_cooling_down = False
+                    status = "Active"
+                    tags = ('active',)
+            else:
+                status = "Active"
+                tags = ('active',)
+            
+            # Last used
+            last_used = ""
+            if key.last_used_time:
+                time_diff = time.time() - key.last_used_time
+                if time_diff < 60:
+                    last_used = "Just now"
+                elif time_diff < 3600:
+                    last_used = f"{int(time_diff/60)}m ago"
+                elif time_diff < 86400:
+                    last_used = datetime.fromtimestamp(key.last_used_time).strftime("%H:%M")
+                else:
+                    last_used = datetime.fromtimestamp(key.last_used_time).strftime("%m/%d")
+            
+            # Insert into tree with position column
+            self.tree.insert('', 'end', 
+                           text=masked_key,
+                           values=(position, key.model, f"{key.cooldown}s", status, 
+                                 key.success_count, key.error_count, last_used),
+                           tags=tags)
         
-        # Track editing state
-        self.edit_widget = None
+        # Configure tags (these may or may not work depending on ttkbootstrap theme)
+        self.tree.tag_configure('active', foreground='green')
+        self.tree.tag_configure('cooling', foreground='orange')
+        self.tree.tag_configure('disabled', foreground='gray')
+        self.tree.tag_configure('testing', foreground='blue')
+        self.tree.tag_configure('passed', foreground='dark green')
+        self.tree.tag_configure('failed', foreground='red')
+        self.tree.tag_configure('ratelimited', foreground='orange')
+        self.tree.tag_configure('error', foreground='dark red')
         
-        # Action buttons
-        action_frame = tk.Frame(list_frame)
-        action_frame.pack(fill=tk.X, pady=(10, 0))
-        
-        tb.Button(action_frame, text="Test Selected", command=self._test_selected,
-                 bootstyle="warning").pack(side=tk.LEFT, padx=(0, 5))
-        
-        tb.Button(action_frame, text="Test All", command=self._test_all,
-                 bootstyle="warning").pack(side=tk.LEFT, padx=5)
-        
-        tb.Button(action_frame, text="Enable Selected", command=self._enable_selected,
-                 bootstyle="success").pack(side=tk.LEFT, padx=5)
-        
-        tb.Button(action_frame, text="Disable Selected", command=self._disable_selected,
-                 bootstyle="danger").pack(side=tk.LEFT, padx=5)
-        
-        tb.Button(action_frame, text="Remove Selected", command=self._remove_selected,
-                 bootstyle="danger").pack(side=tk.LEFT, padx=5)
-        
-        # Stats label
-        self.stats_label = tk.Label(action_frame, text="", font=('TkDefaultFont', 11), fg='gray')
-        self.stats_label.pack(side=tk.RIGHT)
+        # Update stats
+        active_count = sum(1 for k in keys if k.enabled and not k.is_cooling_down)
+        total_count = len(keys)
+        passed_count = sum(1 for k in keys if k.last_test_result == 'passed')
+        self.stats_label.config(text=f"Keys: {active_count} active / {total_count} total | {passed_count} passed tests")
 
     def _on_click(self, event):
         """Handle click on tree item for inline editing"""
@@ -742,7 +1014,7 @@ class MultiAPIKeyDialog:
         return "break"
 
     def _show_context_menu(self, event):
-        """Show simplified context menu for tree items"""
+        """Show context menu with reorder options"""
         # Select item under cursor
         item = self.tree.identify_row(event.y)
         if item:
@@ -750,6 +1022,16 @@ class MultiAPIKeyDialog:
             
             # Create context menu
             menu = tk.Menu(self.dialog, tearoff=0)
+            
+            # Reorder submenu
+            reorder_menu = tk.Menu(menu, tearoff=0)
+            reorder_menu.add_command(label="Move to Top", command=lambda: self._move_key('top'))
+            reorder_menu.add_command(label="Move Up", command=lambda: self._move_key('up'))
+            reorder_menu.add_command(label="Move Down", command=lambda: self._move_key('down'))
+            reorder_menu.add_command(label="Move to Bottom", command=lambda: self._move_key('bottom'))
+            menu.add_cascade(label="Reorder", menu=reorder_menu)
+            
+            menu.add_separator()
             menu.add_command(label="Test", command=self._test_selected)
             menu.add_command(label="Enable", command=self._enable_selected)
             menu.add_command(label="Disable", command=self._disable_selected)
@@ -758,6 +1040,28 @@ class MultiAPIKeyDialog:
             
             # Show menu
             menu.post(event.x_root, event.y_root)
+
+    # Additional helper method to swap keys programmatically
+    def swap_keys(self, index1: int, index2: int):
+        """Swap two keys by their indices"""
+        with self.key_pool.lock:
+            if 0 <= index1 < len(self.key_pool.keys) and 0 <= index2 < len(self.key_pool.keys):
+                self.key_pool.keys[index1], self.key_pool.keys[index2] = \
+                    self.key_pool.keys[index2], self.key_pool.keys[index1]
+                self._refresh_key_list()
+                return True
+        return False
+
+    # Method to move a key to a specific position
+    def move_key_to_position(self, from_index: int, to_index: int):
+        """Move a key from one position to another"""
+        with self.key_pool.lock:
+            if 0 <= from_index < len(self.key_pool.keys) and 0 <= to_index < len(self.key_pool.keys):
+                key = self.key_pool.keys.pop(from_index)
+                self.key_pool.keys.insert(to_index, key)
+                self._refresh_key_list()
+                return True
+        return False
     
     def _create_button_bar(self, parent):
         """Create the bottom button bar"""
@@ -1156,8 +1460,8 @@ class MultiAPIKeyDialog:
         self.tree.tag_configure('active', foreground='green')
         self.tree.tag_configure('cooling', foreground='orange')
         self.tree.tag_configure('disabled', foreground='gray')
-        self.tree.tag_configure('testing', foreground='blue', font=('TkDefaultFont', 14))
-        self.tree.tag_configure('passed', foreground='dark green', font=('TkDefaultFont', 14))
+        self.tree.tag_configure('testing', foreground='blue', font=('TkDefaultFont', 11))
+        self.tree.tag_configure('passed', foreground='dark green', font=('TkDefaultFont', 11))
         self.tree.tag_configure('failed', foreground='red')
         self.tree.tag_configure('ratelimited', foreground='orange')
         self.tree.tag_configure('error', foreground='dark red')
