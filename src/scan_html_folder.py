@@ -652,7 +652,85 @@ def detect_translation_artifacts(text):
             })
     
     return artifacts_found
-
+    
+def detect_glossary_leakage(text, threshold=2):
+    """
+    Detect if translated text contains raw glossary entries.
+    
+    Args:
+        text: The translated text to check
+        threshold: Minimum number of glossary-like patterns to flag as leakage
+    
+    Returns:
+        tuple: (has_leakage, details)
+    """
+    import re
+    
+    issues_found = []
+    
+    # Check for CSV-style glossary headers
+    csv_header_pattern = re.compile(
+        r'type\s*,\s*raw_name\s*,\s*translated_name\s*,\s*gender\s*,\s*description',
+        re.IGNORECASE
+    )
+    if csv_header_pattern.search(text):
+        issues_found.append({
+            'type': 'csv_header',
+            'severity': 'critical',
+            'description': 'Found CSV glossary header in translation'
+        })
+    
+    # Check for multiple structured entries
+    entry_patterns = [
+        # JSON-like entries
+        (r'\{\s*"type"\s*:\s*"[^"]+"\s*,\s*"raw_name"\s*:\s*"[^"]+"\s*,', 'json_entry'),
+        # CSV-like entries with Korean/Chinese characters
+        (r'(?:character|term)\s*,\s*[가-힣\u4e00-\u9fff]+\s*,\s*[A-Za-z\s]+\s*,', 'csv_entry'),
+        # Tab-separated entries
+        (r'(?:character|term)\t[가-힣\u4e00-\u9fff]+\t[A-Za-z\s]+\t', 'tsv_entry'),
+    ]
+    
+    for pattern_str, pattern_type in entry_patterns:
+        pattern = re.compile(pattern_str, re.IGNORECASE)
+        matches = pattern.findall(text)
+        if len(matches) >= threshold:
+            issues_found.append({
+                'type': pattern_type,
+                'severity': 'high',
+                'count': len(matches),
+                'examples': matches[:3],
+                'description': f'Found {len(matches)} {pattern_type} glossary entries'
+            })
+    
+    # Check for repeated glossary field names
+    field_names = ['type', 'raw_name', 'translated_name', 'gender', 'description']
+    field_count = sum(1 for field in field_names if text.lower().count(field) >= 3)
+    if field_count >= 3:
+        issues_found.append({
+            'type': 'repeated_field_names',
+            'severity': 'medium',
+            'description': f'Found {field_count} repeated glossary field names'
+        })
+    
+    # Check for specific character/term patterns
+    char_term_pattern = re.compile(
+        r'(?:^|\n)\s*(?:character|term)\s*[,:\t]\s*[^\n]+(?:Male|Female|A\s+historical|Former\s+mayor|Character\s+from)',
+        re.IGNORECASE | re.MULTILINE
+    )
+    char_matches = char_term_pattern.findall(text)
+    if len(char_matches) >= 2:
+        issues_found.append({
+            'type': 'character_definitions',
+            'severity': 'high',
+            'count': len(char_matches),
+            'examples': char_matches[:2],
+            'description': f'Found {len(char_matches)} character/term definitions'
+        })
+    
+    has_leakage = len(issues_found) > 0
+    
+    return has_leakage, issues_found    
+    
 def extract_semantic_fingerprint(text):
     """Extract semantic fingerprint and signature from text - CACHED VERSION"""
     # For cache efficiency with long texts
