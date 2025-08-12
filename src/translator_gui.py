@@ -1203,7 +1203,7 @@ Focus on:
 Return as JSON: {"term": "translation", ...}""")
         
         self.append_glossary_prompt = self.config.get('append_glossary_prompt', 
-           '\n- Follow this reference glossary (USE but DON\'T OUTPUT):\n')
+           '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n')
         
         self.glossary_translation_prompt = self.config.get('glossary_translation_prompt', 
             """You are translating {language} character names and important terms to English.
@@ -1781,7 +1781,7 @@ Recent translations to summarize:
         self.auto_glossary_prompt = self.config.get('auto_glossary_prompt', self.default_auto_glossary_prompt)
         self.rolling_summary_system_prompt = self.config.get('rolling_summary_system_prompt', self.default_rolling_summary_system_prompt)
         self.rolling_summary_user_prompt = self.config.get('rolling_summary_user_prompt', self.default_rolling_summary_user_prompt)
-        self.append_glossary_prompt = self.config.get('append_glossary_prompt', "\n- Follow this reference glossary (USE but DON\'T OUTPUT):\n")
+        self.append_glossary_prompt = self.config.get('append_glossary_prompt', "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
         self.translation_chunk_prompt = self.config.get('translation_chunk_prompt', self.default_translation_chunk_prompt)
         self.image_chunk_prompt = self.config.get('image_chunk_prompt', self.default_image_chunk_prompt)
         
@@ -4542,14 +4542,14 @@ Recent translations to summarize:
         if not hasattr(self, 'manual_glossary_prompt') or not self.manual_glossary_prompt:
             self.manual_glossary_prompt = """Extract character names and important terms from the following text.
 
-    Output format:
-    {fields}
+Output format:
+{fields}
 
-    Rules:
-    - Output ONLY CSV lines in the exact format shown above
-    - No headers, no extra text, no JSON
-    - One entry per line
-    - Leave gender empty for terms (just end with comma)
+Rules:
+- Output ONLY CSV lines in the exact format shown above
+- No headers, no extra text, no JSON
+- One entry per line
+- Leave gender empty for terms (just end with comma)
     """
         
         self.manual_prompt_text.insert('1.0', self.manual_glossary_prompt)
@@ -4662,7 +4662,7 @@ Recent translations to summarize:
         
         # Set default append prompt if not already set
         if not hasattr(self, 'append_glossary_prompt') or not self.append_glossary_prompt:
-            self.append_glossary_prompt = "You must follow this reference glossary (USE but DON\'T OUTPUT):\n"
+            self.append_glossary_prompt = "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n"
         
         self.append_prompt_text.insert('1.0', self.append_glossary_prompt)
         self.append_prompt_text.edit_reset()
@@ -4673,7 +4673,7 @@ Recent translations to summarize:
         def reset_append_prompt():
             if messagebox.askyesno("Reset Prompt", "Reset to default glossary append format?"):
                 self.append_prompt_text.delete('1.0', tk.END)
-                self.append_prompt_text.insert('1.0', "You must follow this reference glossary (USE but DON\'T OUTPUT):\n")
+                self.append_prompt_text.insert('1.0', "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
         
         tb.Button(append_prompt_controls, text="Reset to Default", command=reset_append_prompt, 
                  bootstyle="warning").pack(side=tk.LEFT, padx=5)
@@ -4737,7 +4737,7 @@ Recent translations to summarize:
         notebook.add(extraction_prompt_tab, text="Extraction Prompt")
         
         # Auto prompt section
-        auto_prompt_frame = tk.LabelFrame(extraction_prompt_tab, text="Extraction Prompt Template", padx=10, pady=10)
+        auto_prompt_frame = tk.LabelFrame(extraction_prompt_tab, text="Extraction Template (System Prompt)", padx=10, pady=10)
         auto_prompt_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
         tk.Label(auto_prompt_frame, text="Available placeholders: {language}, {min_frequency}, {max_names}, {max_titles}",
@@ -4771,7 +4771,7 @@ Recent translations to summarize:
         notebook.add(format_tab, text="Format Instructions")
         
         # Format instructions section
-        format_prompt_frame = tk.LabelFrame(format_tab, text="Output Format Instructions", padx=10, pady=10)
+        format_prompt_frame = tk.LabelFrame(format_tab, text="Output Format Instructions (User Prompt)", padx=10, pady=10)
         format_prompt_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
         tk.Label(format_prompt_frame, text="These instructions are added to your extraction prompt to specify the output format:",
@@ -4834,7 +4834,7 @@ Recent translations to summarize:
         notebook.add(translation_prompt_tab, text="Translation Prompt")
         
         # Translation prompt section
-        trans_prompt_frame = tk.LabelFrame(translation_prompt_tab, text="Glossary Translation Prompt Template", padx=10, pady=10)
+        trans_prompt_frame = tk.LabelFrame(translation_prompt_tab, text="Glossary Translation Template (User Prompt)", padx=10, pady=10)
         trans_prompt_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
         tk.Label(trans_prompt_frame, text="This prompt is used to translate extracted terms to English:",
@@ -6793,7 +6793,7 @@ Recent translations to summarize:
                     os.environ['DEFER_GLOSSARY_APPEND'] = '1'
                     # Store the append prompt for later use
                     glossary_prompt = self.config.get('append_glossary_prompt', 
-                        "\n- Follow this reference glossary (USE but DON\'T OUTPUT):\n")
+                        "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
                     os.environ['GLOSSARY_APPEND_PROMPT'] = glossary_prompt
                 else:
                     # Original behavior - append manual glossary immediately
@@ -6853,7 +6853,7 @@ Recent translations to summarize:
                                 
                                 # Get custom glossary prompt or use default
                                 glossary_prompt = self.config.get('append_glossary_prompt', 
-                                    "\n- Follow this reference glossary (USE but DON\'T OUTPUT):\n")
+                                    "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
                                 
                                 system_prompt += f"{glossary_prompt}\n{glossary_block}"
                                 
@@ -8322,7 +8322,7 @@ Important rules:
                     'APPEND_GLOSSARY': "1" if self.append_glossary_var.get() else "0",
                     'GLOSSARY_STRIP_HONORIFICS': '1' if hasattr(self, 'strip_honorifics_var') and self.strip_honorifics_var.get() else '1',
                     'AUTO_GLOSSARY_PROMPT': getattr(self, 'auto_glossary_prompt', ''),
-                    'APPEND_GLOSSARY_PROMPT': getattr(self, 'append_glossary_prompt', '\n- Follow this reference glossary (USE but DON\'T OUTPUT):\n'),
+                    'APPEND_GLOSSARY_PROMPT': getattr(self, 'append_glossary_prompt', '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n'),
                     'GLOSSARY_TRANSLATION_PROMPT': getattr(self, 'glossary_translation_prompt', ''),
                     'GLOSSARY_CUSTOM_ENTRY_TYPES': json.dumps(getattr(self, 'custom_entry_types', {})),
                     'GLOSSARY_CUSTOM_FIELDS': json.dumps(getattr(self, 'custom_glossary_fields', [])),
@@ -9552,6 +9552,7 @@ Important rules:
             check_encoding_var = tk.BooleanVar(value=qa_settings.get('check_encoding_issues', False))
             check_repetition_var = tk.BooleanVar(value=qa_settings.get('check_repetition', True))
             check_artifacts_var = tk.BooleanVar(value=qa_settings.get('check_translation_artifacts', True))
+            check_glossary_var = tk.BooleanVar(value=qa_settings.get('check_glossary_leakage', True))
             
             tb.Checkbutton(
                 detection_section,
@@ -9571,6 +9572,12 @@ Important rules:
                 detection_section,
                 text="Check for translation artifacts (MTL notes, watermarks)",
                 variable=check_artifacts_var,
+                bootstyle="primary"
+            ).pack(anchor=tk.W, pady=2)
+            tb.Checkbutton(
+                detection_section,
+                text="Check for glossary leakage (raw glossary entries in translation)",
+                variable=check_glossary_var,
                 bootstyle="primary"
             ).pack(anchor=tk.W, pady=2)
             
@@ -10188,6 +10195,7 @@ Important rules:
                     qa_settings['check_encoding_issues'] = check_encoding_var.get()
                     qa_settings['check_repetition'] = check_repetition_var.get()
                     qa_settings['check_translation_artifacts'] = check_artifacts_var.get()
+                    qa_settings['check_glossary_leakage'] = check_glossary_var.get()
                     qa_settings['min_file_length'] = min_length_var.get()
                     qa_settings['report_format'] = format_var.get()
                     qa_settings['auto_save_report'] = auto_save_var.get()
@@ -10250,6 +10258,7 @@ Important rules:
                     check_encoding_var.set(False)
                     check_repetition_var.set(True)
                     check_artifacts_var.set(True)
+                    check_glossary_var.set(True)
                     min_length_var.set(0)
                     format_var.set('detailed')
                     auto_save_var.set(True)
