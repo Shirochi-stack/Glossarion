@@ -4783,19 +4783,19 @@ Rules:
         # Initialize format instructions variable and text widget
         if not hasattr(self, 'glossary_format_instructions'):
             self.glossary_format_instructions = """
-    Return the results in EXACT CSV format with this header:
-    type,raw_name,translated_name
+Return the results in EXACT CSV format with this header:
+type,raw_name,translated_name
 
-    For example:
-    character,김상현,Kim Sang-hyu
-    character,갈편제,Gale Hardest  
-    character,디히릿 아데,Dihirit Ade
+For example:
+character,김상현,Kim Sang-hyu
+character,갈편제,Gale Hardest  
+character,디히릿 아데,Dihirit Ade
 
-    Only include terms that actually appear in the text.
-    Do not use quotes around values unless they contain commas.
+Only include terms that actually appear in the text.
+Do not use quotes around values unless they contain commas.
 
-    Text to analyze:
-    {text_sample}"""
+Text to analyze:
+{text_sample}"""
         
         self.format_instructions_text = self.ui.setup_scrollable_text(
             format_prompt_frame, height=12, wrap=tk.WORD
@@ -4810,19 +4810,19 @@ Rules:
         def reset_format_instructions():
             if messagebox.askyesno("Reset Prompt", "Reset format instructions to default?"):
                 default_format_instructions = """
-    Return the results in EXACT CSV format with this header:
-    type,raw_name,translated_name
+Return the results in EXACT CSV format with this header:
+type,raw_name,translated_name
 
-    For example:
-    character,김상현,Kim Sang-hyu
-    character,갈편제,Gale Hardest  
-    character,디히릿 아데,Dihirit Ade
+For example:
+character,김상현,Kim Sang-hyu
+character,갈편제,Gale Hardest  
+character,디히릿 아데,Dihirit Ade
 
-    Only include terms that actually appear in the text.
-    Do not use quotes around values unless they contain commas.
+Only include terms that actually appear in the text.
+Do not use quotes around values unless they contain commas.
 
-    Text to analyze:
-    {text_sample}"""
+Text to analyze:
+{text_sample}"""
                 self.format_instructions_text.delete('1.0', tk.END)
                 self.format_instructions_text.insert('1.0', default_format_instructions)
         
