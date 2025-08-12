@@ -413,6 +413,14 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
             for field in custom_fields:
                 row.append(entry.get(field, ''))
             
+            # Remove trailing empty values to avoid unnecessary commas
+            while row and row[-1] == '':
+                row.pop()
+            
+            # Ensure minimum required fields (type, raw_name, translated_name)
+            while len(row) < 3:
+                row.append('')
+            
             # Write row
             writer.writerow(row)
 
