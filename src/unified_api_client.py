@@ -3515,7 +3515,7 @@ class UnifiedClient:
         
         print(f"[MAIN KEY RETRY] Starting retry with main key")
         print(f"[MAIN KEY RETRY] Current failing model: {self.model}")
-        print(f"[MAIN KEY RETRY] Fallback model: {fallback_model}")
+        print(f"[MAIN KEY RETRY] Fallback model if main key retry fails: {fallback_model}")
         
         try:
             # Create a new temporary UnifiedClient instance with the fallback key
@@ -4650,7 +4650,7 @@ class UnifiedClient:
         
         print(f"[MAIN KEY IMAGE RETRY] Starting image retry with main key")
         print(f"[MAIN KEY IMAGE RETRY] Current failing model: {self.model}")
-        print(f"[MAIN KEY IMAGE RETRY] Fallback model: {fallback_model}")
+        print(f"[MAIN KEY RETRY] Fallback model if main key retry fails: {fallback_model}")
         
         try:
             # Create a new temporary UnifiedClient instance with the fallback key
