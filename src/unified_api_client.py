@@ -6363,51 +6363,51 @@ class UnifiedClient:
                     "。", "！", "？", ":", ";", "]", "}",
                     "…", "—", "–", "*", "/", ">", "~", "%"
                 ]
-            
-            # Check if ends with incomplete sentence (no proper punctuation)
-            if last_char not in valid_endings:
-                # Look at the last few characters for better context
-                last_segment = content_stripped[-50:] if len(content_stripped) > 50 else content_stripped
                 
-                # Check for common false positive patterns
-                false_positive_patterns = [
-                    # Lists or enumerations often don't end with punctuation
-                    r'\n\s*[-•*]\s*[^.!?]+$',  # Bullet points
-                    r'\n\s*\d+\)\s*[^.!?]+$',   # Numbered lists
-                    r'\n\s*[a-z]\)\s*[^.!?]+$', # Letter lists
-                    # Code or technical content
-                    r'```[^`]*$',                # Inside code block
-                    r'\$[^$]+$',                 # Math expressions
-                    # Single words or short phrases (likely labels/headers)
-                    r'^\w+$',                    # Single word
-                    r'^[\w\s]{1,15}$',          # Very short content
-                ]
-                
-                import re
-                is_false_positive = any(re.search(pattern, last_segment) for pattern in false_positive_patterns)
-                
-                if not is_false_positive:
-                    # Additional check: is the last word incomplete?
-                    words = content_stripped.split()
-                    if words and len(words) > 3:  # Only check if we have enough content
-                        last_word = words[-1]
-                        # Check for common incomplete patterns
-                        # But exclude common abbreviations
-                        common_abbreviations = {'etc', 'vs', 'eg', 'ie', 'vol', 'no', 'pg', 'ch', 'pt'}
-                        if (len(last_word) > 2 and 
-                            last_word[-1].isalpha() and 
-                            last_word.lower() not in common_abbreviations and
-                            not last_word.isupper()):  # Exclude acronyms
-                            
-                            # Final check: does it look like mid-sentence?
-                            # Look for sentence starters before the last segment
-                            preceding_text = ' '.join(words[-10:-1]) if len(words) > 10 else ' '.join(words[:-1])
-                            sentence_starters = ['the', 'a', 'an', 'and', 'but', 'or', 'so', 'because', 'when', 'if', 'that']
-                            
-                            # Check if we're likely mid-sentence
-                            if any(starter in preceding_text.lower().split() for starter in sentence_starters):
-                                print(f"Possible silent truncation detected: incomplete sentence ending")
-                                return True
+                # Check if ends with incomplete sentence (no proper punctuation)
+                if last_char not in valid_endings:
+                    # Look at the last few characters for better context
+                    last_segment = content_stripped[-50:] if len(content_stripped) > 50 else content_stripped
+                    
+                    # Check for common false positive patterns
+                    false_positive_patterns = [
+                        # Lists or enumerations often don't end with punctuation
+                        r'\n\s*[-•*]\s*[^.!?]+$',  # Bullet points
+                        r'\n\s*\d+\)\s*[^.!?]+$',   # Numbered lists
+                        r'\n\s*[a-z]\)\s*[^.!?]+$', # Letter lists
+                        # Code or technical content
+                        r'```[^`]*$',                # Inside code block
+                        r'\$[^$]+$',                 # Math expressions
+                        # Single words or short phrases (likely labels/headers)
+                        r'^\w+$',                    # Single word
+                        r'^[\w\s]{1,15}$',          # Very short content
+                    ]
+                    
+                    import re
+                    is_false_positive = any(re.search(pattern, last_segment) for pattern in false_positive_patterns)
+                    
+                    if not is_false_positive:
+                        # Additional check: is the last word incomplete?
+                        words = content_stripped.split()
+                        if words and len(words) > 3:  # Only check if we have enough content
+                            last_word = words[-1]
+                            # Check for common incomplete patterns
+                            # But exclude common abbreviations
+                            common_abbreviations = {'etc', 'vs', 'eg', 'ie', 'vol', 'no', 'pg', 'ch', 'pt'}
+                            if (len(last_word) > 2 and 
+                                last_word[-1].isalpha() and 
+                                last_word.lower() not in common_abbreviations and
+                                not last_word.isupper()):  # Exclude acronyms
+                                
+                                # Final check: does it look like mid-sentence?
+                                # Look for sentence starters before the last segment
+                                preceding_text = ' '.join(words[-10:-1]) if len(words) > 10 else ' '.join(words[:-1])
+                                sentence_starters = ['the', 'a', 'an', 'and', 'but', 'or', 'so', 'because', 'when', 'if', 'that']
+                                
+                                # Check if we're likely mid-sentence
+                                if any(starter in preceding_text.lower().split() for starter in sentence_starters):
+                                    print(f"Possible silent truncation detected: incomplete sentence ending")
+                                    return True
         
         # Pattern 2: Check for significantly short responses (with improved thresholds)
         if context == 'translation':
