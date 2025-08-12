@@ -178,11 +178,20 @@ KOREAN_SEPARATOR_CHARS = {
 # Translation artifacts patterns
 TRANSLATION_ARTIFACTS = {
     'machine_translation': re.compile(r'(MTL note|TN:|Translator:|T/N:|TL note:|Translator\'s note:)', re.IGNORECASE),
-    'encoding_issues': re.compile(r'[�□◇]{2,}'),  # Replacement characters
+    'encoding_issues': re.compile(r'[�□◇]{2,}'),
     'repeated_watermarks': re.compile(r'(\[[\w\s]+\.(?:com|net|org)\])\s*\1{2,}', re.IGNORECASE),
     'chapter_continuation': re.compile(r'(to be continued|continued from|continuation of|cont\.)', re.IGNORECASE),
     'split_indicators': re.compile(r'(part \d+|section \d+|\(\d+/\d+\))', re.IGNORECASE),
-    'api_response_unavailable': re.compile(r'\[AI RESPONSE UNAVAILABLE\]|\[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED\]|\[IMAGE TRANSLATION FAILED\]', re.IGNORECASE)
+    'api_response_unavailable': re.compile(r'\[AI RESPONSE UNAVAILABLE\]|\[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED\]|\[IMAGE TRANSLATION FAILED\]', re.IGNORECASE),
+    
+    'glossary_leakage_csv': re.compile(
+        r'(?:type|raw_name|translated_name|gender|description)\s*,\s*(?:type|raw_name|translated_name|gender|description)',
+        re.IGNORECASE
+    ),
+    'glossary_leakage_json': re.compile(
+        r'"(?:type|raw_name|translated_name|gender|description)"\s*:\s*"[^"]+"\s*,?\s*"(?:type|raw_name|translated_name|gender|description)"',
+        re.IGNORECASE
+    )
 }
 # Cache configuration - will be updated by configure_qa_cache()
 _cache_config = {
@@ -3106,7 +3115,30 @@ def process_html_file_batch(args):
         
         # Initialize issues list
         issues = []
-        
+
+         # Check for glossary leakage
+        check_glossary = qa_settings.get('check_glossary_leakage', True)
+        if check_glossary and not is_quick_scan:
+            has_glossary_leak, glossary_issues = detect_glossary_leakage(raw_text)
+            
+            if has_glossary_leak:
+                # Add to translation artifacts
+                for glossary_issue in glossary_issues:
+                    artifacts.append({
+                        'type': f"glossary_{glossary_issue['type']}",
+                        'count': glossary_issue.get('count', 1),
+                        'examples': glossary_issue.get('examples', []),
+                        'severity': glossary_issue.get('severity', 'medium')
+                    })
+                
+                # Add to issues list for reporting
+                critical_glossary = any(g['severity'] == 'critical' for g in glossary_issues)
+                if critical_glossary:
+                    issues.append(f"CRITICAL_glossary_leakage_detected")
+                else:
+                    total_glossary_items = sum(g.get('count', 1) for g in glossary_issues)
+                    issues.append(f"glossary_leakage_{total_glossary_items}_entries_found")
+                    
         # HTML tag check
         check_missing_html_tag = qa_settings.get('check_missing_html_tag', True)
         if check_missing_html_tag and filename.lower().endswith('.html'):
@@ -3229,6 +3261,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'check_encoding_issues': False,
             'check_repetition': True,
             'check_translation_artifacts': True,
+            'check_glossary_leakage': True,
             'min_file_length': 0,
             'report_format': 'detailed',
             'auto_save_report': True,
@@ -3521,6 +3554,13 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     issues.append(f"chapter_continuation_{artifact['count']}_found")
                 elif artifact['type'] == 'split_indicators':
                     issues.append(f"split_indicators_{artifact['count']}_found")
+                elif 'glossary_' in artifact['type']:
+                    severity = artifact.get('severity', 'medium')
+                    if severity == 'critical':
+                        issues.append(f"CRITICAL_{artifact['type']}_{artifact['count']}_found")
+                    else:
+                        issues.append(f"{artifact['type']}_{artifact['count']}_found")
+                
         
         result['issues'] = issues
         result['score'] = len(issues)
