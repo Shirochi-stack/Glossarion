@@ -1206,7 +1206,8 @@ Return as JSON: {"term": "translation", ...}""")
            '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n')
         
         self.glossary_translation_prompt = self.config.get('glossary_translation_prompt', 
-            """You are translating {language} character names and important terms to English.
+            """
+You are translating {language} character names and important terms to English.
 For character names, provide English transliterations or keep as romanized.
 Keep honorifics/suffixes only if they are integral to the name.
 Respond with the same numbered format.
@@ -4845,15 +4846,16 @@ Text to analyze:
         
         # Initialize translation prompt variable and text widget
         if not hasattr(self, 'glossary_translation_prompt'):
-            self.glossary_translation_prompt = """You are translating {language} character names and important terms to English.
-    For character names, provide English transliterations or keep as romanized.
-    Keep honorifics/suffixes only if they are integral to the name.
-    Respond with the same numbered format.
+            self.glossary_translation_prompt = """
+You are translating {language} character names and important terms to English.
+For character names, provide English transliterations or keep as romanized.
+Keep honorifics/suffixes only if they are integral to the name.
+Respond with the same numbered format.
 
-    Terms to translate:
-    {terms_list}
+Terms to translate:
+{terms_list}
 
-    Provide translations in the same numbered format."""
+Provide translations in the same numbered format."""
         
         self.translation_prompt_text = self.ui.setup_scrollable_text(
             trans_prompt_frame, height=12, wrap=tk.WORD
@@ -4867,15 +4869,16 @@ Text to analyze:
         
         def reset_trans_prompt():
             if messagebox.askyesno("Reset Prompt", "Reset translation prompt to default?"):
-                default_trans_prompt = """You are translating {language} character names and important terms to English.
-    For character names, provide English transliterations or keep as romanized.
-    Keep honorifics/suffixes only if they are integral to the name.
-    Respond with the same numbered format.
+                default_trans_prompt = """
+You are translating {language} character names and important terms to English.
+For character names, provide English transliterations or keep as romanized.
+Keep honorifics/suffixes only if they are integral to the name.
+Respond with the same numbered format.
 
-    Terms to translate:
-    {terms_list}
+Terms to translate:
+{terms_list}
 
-    Provide translations in the same numbered format."""
+Provide translations in the same numbered format."""
                 self.translation_prompt_text.delete('1.0', tk.END)
                 self.translation_prompt_text.insert('1.0', default_trans_prompt)
         
