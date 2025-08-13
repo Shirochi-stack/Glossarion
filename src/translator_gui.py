@@ -1173,6 +1173,8 @@ class TranslatorGUI:
         self.glossary_max_names_var = tk.StringVar(value=str(self.config.get('glossary_max_names', 50)))
         self.glossary_max_titles_var = tk.StringVar(value=str(self.config.get('glossary_max_titles', 30)))
         self.glossary_batch_size_var = tk.StringVar(value=str(self.config.get('glossary_batch_size', 50)))
+        self.glossary_max_text_size_var = tk.IntVar(value=self.config.get('glossary_max_text_size', 50000))
+
         
         # NEW: Additional glossary settings
         self.strip_honorifics_var = tk.BooleanVar(value=self.config.get('strip_honorifics', True))
@@ -4167,6 +4169,8 @@ Recent translations to summarize:
                 self.config['glossary_max_titles'] = int(self.glossary_max_titles_var.get())
                 self.config['glossary_batch_size'] = int(self.glossary_batch_size_var.get())
                 self.config['glossary_format_instructions'] = getattr(self, 'glossary_format_instructions', '')
+                self.config['glossary_max_text_size'] = self.glossary_max_text_size_var.get()
+
                 
                 # Honorifics and other settings
                 if hasattr(self, 'strip_honorifics_var'):
@@ -4708,9 +4712,18 @@ Rules:
         tk.Label(extraction_grid, text="Translation batch:").grid(row=1, column=2, sticky=tk.W, padx=(0, 5), pady=(5, 0))
         tb.Entry(extraction_grid, textvariable=self.glossary_batch_size_var, width=10).grid(row=1, column=3, sticky=tk.W, pady=(5, 0))
         
-        # Row 3 - Honorifics handling
-        tk.Label(extraction_grid, text="Strip honorifics:").grid(row=2, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
-        
+        # Row 3 - Max text size
+        tk.Label(extraction_grid, text="Max text size:").grid(row=3, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        tb.Entry(extraction_grid, textvariable=self.glossary_max_text_size_var, width=10).grid(row=3, column=1, sticky=tk.W, padx=(0, 20), pady=(5, 0))
+
+        tk.Label(extraction_grid, text="(0 = analyze entire text)").grid(row=3, column=2, columnspan=2, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+
+        # Move honorifics to Row 4 (was Row 2)
+        tk.Label(extraction_grid, text="Strip honorifics:").grid(row=4, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        tb.Checkbutton(extraction_grid, text="Remove honorifics from extracted names", 
+                      variable=self.strip_honorifics_var,
+                      bootstyle="round-toggle").grid(row=4, column=1, columnspan=3, sticky=tk.W, pady=(5, 0))
+                
         # Initialize the variable if not exists
         if not hasattr(self, 'strip_honorifics_var'):
             self.strip_honorifics_var = tk.BooleanVar(value=True)
@@ -4728,6 +4741,7 @@ Rules:
             "• Min frequency: How many times a name must appear (lower = more terms)",
             "• Max names/titles: Limits to prevent huge glossaries",
             "• Translation batch: Terms per API call (larger = faster but may reduce quality)",
+            "• Max text size: Characters to analyze (0 = entire text, 50000 = first 50k chars)",
             "• Strip honorifics: Extract clean names without suffixes (e.g., '김' instead of '김님')"
         ]
         for txt in help_texts:
@@ -7394,6 +7408,7 @@ Provide translations in the same numbered format."""
             'GEMINI_OPENAI_ENDPOINT': self.gemini_openai_endpoint_var.get() if self.gemini_openai_endpoint_var.get() else '',
             "ATTACH_CSS_TO_CHAPTERS": "1" if self.attach_css_to_chapters_var.get() else "0",
             'GLOSSARY_FUZZY_THRESHOLD': str(self.config.get('glossary_fuzzy_threshold', 0.90)),
+            'GLOSSARY_MAX_TEXT_SIZE': self.glossary_max_text_size_var.get(),
 
             # Extraction settings
             "EXTRACTION_MODE": extraction_mode,
@@ -13984,6 +13999,8 @@ Important rules:
             # Save extraction worker settings
             self.config['enable_parallel_extraction'] = self.enable_parallel_extraction_var.get()
             self.config['extraction_workers'] = self.extraction_workers_var.get()
+            self.config['glossary_max_text_size'] = self.glossary_max_text_size_var.get()
+
 
             # NEW: Save strip honorifics setting
             self.config['strip_honorifics'] = self.strip_honorifics_var.get()
