@@ -3927,6 +3927,29 @@ class GlossaryManager:
     def save_glossary(self, output_dir, chapters, instructions, language="korean"):
         """Targeted glossary generator with true CSV format output"""
         print("📑 Targeted Glossary Generator v5.0 (CSV Format)")
+        
+        # Check if glossary already exists
+        glossary_path = os.path.join(output_dir, "glossary.json")
+        if os.path.exists(glossary_path):
+            print(f"📑 ✅ Glossary already exists at: {glossary_path}")
+            try:
+                with open(glossary_path, 'r', encoding='utf-8') as f:
+                    existing_content = f.read()
+                
+                # Parse and return existing glossary
+                if existing_content.strip().startswith('type,raw_name'):
+                    # CSV format
+                    return self._parse_csv_to_dict(existing_content)
+                else:
+                    # Try as JSON
+                    try:
+                        return json.loads(existing_content)
+                    except:
+                        return self._parse_csv_to_dict(existing_content)
+            except Exception as e:
+                print(f"⚠️ Could not read existing glossary: {e}")
+                print(f"📑 Regenerating glossary...")
+        
         print("📑 Extracting names and terms with configurable options")
         
         # Check for manual glossary first
