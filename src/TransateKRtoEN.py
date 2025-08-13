@@ -4326,7 +4326,10 @@ Text to analyze:
                     # Merge with existing glossary if present
                     if existing_glossary:
                         csv_lines = self._merge_csv_entries(csv_lines, existing_glossary, strip_honorifics, language)
-                    
+
+                    # Fuzzy matching 
+                    csv_lines = self._deduplicate_glossary_with_fuzzy(csv_lines, fuzzy_threshold)
+                                
                     # Create final CSV content
                     csv_content = '\n'.join(csv_lines)
                     
@@ -4338,11 +4341,6 @@ Text to analyze:
                     print(f"\n📑 ✅ AI-ASSISTED GLOSSARY SAVED!")
                     print(f"📑 File: {glossary_path}")
                     print(f"📑 Total entries: {len(csv_lines) - 1}")  # Exclude header
-                    
-                    # Save simple version (same format)
-                    simple_glossary_path = os.path.join(output_dir, "glossary_simple.json")
-                    with open(simple_glossary_path, 'w', encoding='utf-8') as f:
-                        f.write(csv_content)
                     
                     return self._parse_csv_to_dict(csv_content)
                     
@@ -4364,7 +4362,53 @@ Text to analyze:
                                              max_names, max_titles, 50, 
                                              existing_glossary, output_dir, 
                                              strip_honorifics, fuzzy_threshold)
-    
+ 
+    def _deduplicate_glossary_with_fuzzy(self, csv_lines, fuzzy_threshold):
+        """Apply fuzzy matching to remove duplicate entries from the glossary"""
+        from difflib import SequenceMatcher
+        
+        print(f"📑 Applying fuzzy deduplication (threshold: {fuzzy_threshold})...")
+        
+        header_line = csv_lines[0]  # Keep header
+        entry_lines = csv_lines[1:]  # Data lines
+        
+        deduplicated = [header_line]
+        seen_entries = []  # List of (type, raw_name, translated_name)
+        removed_count = 0
+        
+        for line in entry_lines:
+            if not line.strip():
+                continue
+                
+            parts = [p.strip() for p in line.split(',')]
+            if len(parts) < 3:
+                continue
+                
+            entry_type = parts[0]
+            raw_name = parts[1]
+            translated_name = parts[2]
+            
+            # Check against all seen entries for fuzzy matches
+            is_duplicate = False
+            for seen_type, seen_raw, seen_trans in seen_entries:
+                # Check if raw names are fuzzy matches
+                raw_similarity = SequenceMatcher(None, raw_name.lower(), seen_raw.lower()).ratio()
+                
+                if raw_similarity >= fuzzy_threshold:
+                    print(f"📑   Removing duplicate: '{raw_name}' ~= '{seen_raw}' (similarity: {raw_similarity:.2%})")
+                    removed_count += 1
+                    is_duplicate = True
+                    break
+            
+            if not is_duplicate:
+                seen_entries.append((entry_type, raw_name, translated_name))
+                deduplicated.append(line)
+        
+        print(f"📑 ✅ Removed {removed_count} fuzzy duplicates from glossary")
+        print(f"📑 Final glossary size: {len(deduplicated) - 1} unique entries")
+        
+        return deduplicated
+ 
     def _merge_csv_entries(self, new_csv_lines, existing_glossary, strip_honorifics, language):
         """Merge CSV entries with existing glossary"""
         # Parse existing glossary
@@ -4578,7 +4622,10 @@ Text to analyze:
         # Merge with existing glossary
         if existing_glossary:
             csv_lines = self._merge_csv_entries(csv_lines, existing_glossary, strip_honorifics, language_hint)
-        
+         
+        # Fuzzy matching 
+        csv_lines = self._deduplicate_glossary_with_fuzzy(csv_lines, fuzzy_threshold)
+
         # Create CSV content
         csv_content = '\n'.join(csv_lines)
         
@@ -4590,11 +4637,6 @@ Text to analyze:
         print(f"\n📑 ✅ TARGETED GLOSSARY SAVED!")
         print(f"📑 File: {glossary_path}")
         print(f"📑 Total entries: {len(csv_lines) - 1}")  # Exclude header
-        
-        # Save simple version
-        simple_glossary_path = os.path.join(output_dir, "glossary_simple.json")
-        with open(simple_glossary_path, 'w', encoding='utf-8') as f:
-            f.write(csv_content)
         
         return self._parse_csv_to_dict(csv_content)
     
