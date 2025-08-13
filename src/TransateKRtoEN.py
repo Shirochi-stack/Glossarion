@@ -4172,8 +4172,9 @@ class GlossaryManager:
                 from unified_api_client import UnifiedClient
                 client = UnifiedClient(model=MODEL, api_key=API_KEY, output_dir=output_dir)
                 if hasattr(client, 'reset_cleanup_state'):
-                    client.reset_cleanup_state()            
-                
+                    client.reset_cleanup_state()  
+                    
+                max_text_size = int(os.getenv("GLOSSARY_MAX_TEXT_SIZE", "50000"))
                 text_sample = all_text[:max_text_size] if len(all_text) > max_text_size and max_text_size > 0 else all_text
                 
                 # Replace placeholders in prompt
