@@ -476,13 +476,13 @@ class UnifiedClient:
         # ===== ENHANCED THREAD SAFETY STRUCTURES =====
         
         # Thread-safe request deduplication with caching
-        self._request_cache = {}  # {request_hash: (content, finish_reason, timestamp)}
-        self._request_cache_lock = RLock()
-        self._cache_expiry_seconds = 300  # 5 minutes
+        #self._request_cache = {}  # {request_hash: (content, finish_reason, timestamp)}
+        #self._request_cache_lock = RLock()
+        #self._cache_expiry_seconds = 300  # 5 minutes
         
         # Active request tracking to prevent duplicate processing
-        self._active_requests = {}  # {request_hash: threading.Event}
-        self._active_requests_lock = RLock()
+        #self._active_requests = {}  # {request_hash: threading.Event}
+        #self._active_requests_lock = RLock()
         
         # Thread-local storage for client instances
         self._thread_local = threading.local()
@@ -1899,18 +1899,18 @@ class UnifiedClient:
         Call this during __init__ or before parallel processing.
         """
         # Request deduplication structures
-        if not hasattr(self, '_request_cache'):
-            self._request_cache = {}
-        if not hasattr(self, '_request_cache_lock'):
-            self._request_cache_lock = RLock()
-        if not hasattr(self, '_cache_expiry_seconds'):
-            self._cache_expiry_seconds = 300  # 5 minutes
+        #if not hasattr(self, '_request_cache'):
+        #    self._request_cache = {}
+        #if not hasattr(self, '_request_cache_lock'):
+        #    self._request_cache_lock = RLock()
+        #if not hasattr(self, '_cache_expiry_seconds'):
+        #    self._cache_expiry_seconds = 300  # 5 minutes
         
         # Active request tracking
-        if not hasattr(self, '_active_requests'):
-            self._active_requests = {}  # {request_hash: threading.Event}
-        if not hasattr(self, '_active_requests_lock'):
-            self._active_requests_lock = RLock()
+        #if not hasattr(self, '_active_requests'):
+        #    self._active_requests = {}  # {request_hash: threading.Event}
+        #if not hasattr(self, '_active_requests_lock'):
+        #    self._active_requests_lock = RLock()
         
         # Thread-local storage
         if not hasattr(self, '_thread_local'):
@@ -2905,14 +2905,14 @@ class UnifiedClient:
                 content, finish_reason = successful_response
                 
                 # Cache the successful response
-                with self._request_cache_lock:
-                    self._request_cache[request_hash] = (content, finish_reason, time.time())
+              #  with self._request_cache_lock:
+              #      self._request_cache[request_hash] = (content, finish_reason, time.time())
                     
-                    # Cleanup old cache entries if too many
-                    if len(self._request_cache) > 1000:
-                        sorted_items = sorted(self._request_cache.items(), key=lambda x: x[1][2])
-                        for key, _ in sorted_items[:100]:
-                            del self._request_cache[key]
+              #      # Cleanup old cache entries if too many
+              #      if len(self._request_cache) > 1000:
+              #          sorted_items = sorted(self._request_cache.items(), key=lambda x: x[1][2])
+              #          for key, _ in sorted_items[:100]:
+              #              del self._request_cache[key]
                 
                 logger.info(f"[{thread_name}] Cached successful response for {context_str}")
                 
@@ -3986,14 +3986,14 @@ class UnifiedClient:
                 content, finish_reason = successful_response
                 
                 # Cache the successful response
-                with self._request_cache_lock:
-                    self._request_cache[request_hash] = (content, finish_reason, time.time())
+              #  with self._request_cache_lock:
+              #      self._request_cache[request_hash] = (content, finish_reason, time.time())
                     
                     # Cleanup old cache entries if too many
-                    if len(self._request_cache) > 1000:
-                        sorted_items = sorted(self._request_cache.items(), key=lambda x: x[1][2])
-                        for key, _ in sorted_items[:100]:
-                            del self._request_cache[key]
+              #      if len(self._request_cache) > 1000:
+              #          sorted_items = sorted(self._request_cache.items(), key=lambda x: x[1][2])
+              #          for key, _ in sorted_items[:100]:
+              #              del self._request_cache[key]
                 
                 logger.info(f"[{thread_name}] Cached successful image response for {context_str}")
                 
