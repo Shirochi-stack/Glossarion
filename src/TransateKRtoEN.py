@@ -4112,10 +4112,18 @@ class GlossaryManager:
         matches_count = text_lower.count(term_lower)
         
         # If exact matches are low and fuzzy threshold is below 1.0, do fuzzy matching
-        if threshold < 1.0:  # Always do fuzzy matching if threshold is below 1.0
+        if matches_count == 0 and threshold < 1.0:
+            print(f"📑 [DEBUG]     Starting fuzzy matching for '{term}' (text size: {len(text):,} chars)...")
             # For efficiency, only check every N characters
             step = max(1, term_len // 2)
+            total_windows = (len(text) - term_len + 1) // step
+            
             for i in range(0, len(text) - term_len + 1, step):
+                # Show progress for long texts
+                if total_windows > 1000 and (i // step) % 1000 == 0:
+                    progress = (i // step) / total_windows * 100
+                    print(f"📑 [DEBUG]       Fuzzy match progress: {progress:.1f}%")
+                
                 window = text_lower[i:i + term_len]
                 if self._fuzzy_match(term_lower, window, threshold):
                     matches_count += 1
@@ -4163,7 +4171,7 @@ class GlossaryManager:
             if not API_KEY:
                 print(f"📑 No API key found, falling back to pattern-based extraction")
                 return self._extract_with_patterns(all_text, language, min_frequency, 
-                                                 max_names, max_titles, 50, 
+                                                 max_names, max_titles, batch_size,
                                                  existing_glossary, output_dir, 
                                                  strip_honorifics, fuzzy_threshold)
             else:
@@ -4242,13 +4250,19 @@ Text to analyze:
                     # Build CSV content with verification
                     csv_lines = []
                     header_found = False
-                    
+
                     lines = response_text.strip().split('\n')
-                    
-                    for line in lines:
+
+                    print(f"📑 [DEBUG] Verifying {len(lines)} extracted terms against text...")
+
+                    for line_num, line in enumerate(lines, 1):
                         line = line.strip()
                         if not line:
                             continue
+                        
+                        # Show progress every 10 terms
+                        if line_num % 10 == 0:
+                            print(f"📑 [DEBUG] Processing term {line_num}/{len(lines)}...")
                         
                         # Check for header
                         if 'type' in line.lower() and 'raw_name' in line.lower():
@@ -4273,26 +4287,35 @@ Text to analyze:
                             if strip_honorifics:
                                 raw_name = self._strip_honorific(raw_name, language)
                             
+                            print(f"📑 [DEBUG] Verifying '{raw_name}' frequency (fuzzy threshold: {fuzzy_threshold})...")
+                            
                             # Verify frequency using fuzzy matching
                             count = self._find_fuzzy_matches(raw_name, all_text, fuzzy_threshold)
                             
                             # Also check with honorifics if stripped
                             if strip_honorifics and count < min_frequency:
+                                print(f"📑 [DEBUG]   - Checking with original form '{original_raw}'...")
                                 count += self._find_fuzzy_matches(original_raw, all_text, fuzzy_threshold)
                                 
                                 # Check with common honorifics
                                 if language in self.pattern_manager.CJK_HONORIFICS:
                                     for honorific in self.pattern_manager.CJK_HONORIFICS[language][:3]:
+                                        print(f"📑 [DEBUG]   - Checking with honorific '{raw_name + honorific}'...")
                                         count += self._find_fuzzy_matches(raw_name + honorific, all_text, fuzzy_threshold)
                                         if count >= min_frequency:
                                             break
                             
                             if count >= min_frequency:
+                                print(f"📑 [DEBUG]   ✓ '{raw_name}' appears {count} times (minimum: {min_frequency})")
                                 csv_line = f"{entry_type},{raw_name},{translated_name}"
                                 # Add optional fields if present
                                 if len(parts) > 3 and parts[3]:
                                     csv_line += f",{parts[3]}"
                                 csv_lines.append(csv_line)
+                            else:
+                                print(f"📑 [DEBUG]   ✗ '{raw_name}' only appears {count} times (minimum: {min_frequency}) - skipped")
+
+                    print(f"📑 [DEBUG] Verification complete! {len(csv_lines) - 1} terms passed frequency check")
                     
                     # Ensure header exists
                     if not header_found:
