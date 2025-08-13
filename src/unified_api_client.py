@@ -4789,8 +4789,8 @@ class UnifiedClient:
         """Apply PURE frequency-based reinforcement pattern"""
         
         # DISABLE in batch mode
-        if os.getenv('BATCH_TRANSLATION', '0') == '1':
-            return messages
+        #if os.getenv('BATCH_TRANSLATION', '0') == '1':
+        #    return messages
         
         # Skip if not enough messages
         if self.conversation_message_count < 4:
