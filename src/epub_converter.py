@@ -264,6 +264,37 @@ class ContentProcessor:
         - <magic>Teleport</magic> → [magic: Teleport]
         - <anythingcustom>Content</anythingcustom> → [anythingcustom: Content]
         """
+        
+            # Pattern: <tagname, anything> ... </tagname,>
+        def fix_comma_tag(match):
+            tag_name = match.group(1)  # e.g., "reply"
+            attributes = match.group(2) or ''  # e.g., ' rachel=""'
+            content = match.group(3) or ''  # content between tags
+            
+            # Try to extract meaningful info from the attributes part
+            attr_text = attributes.strip()
+            if attr_text:
+                # Remove quotes and equals signs to get cleaner text
+                attr_text = re.sub(r'[="\']+', ' ', attr_text).strip()
+            
+            # Build replacement
+            if content and attr_text:
+                return f'[{tag_name}: {attr_text} - {content}]'
+            elif content:
+                return f'[{tag_name}: {content}]'
+            elif attr_text:
+                return f'[{tag_name}: {attr_text}]'
+            else:
+                return ''  # Empty tag, remove it
+        
+        # Fix opening and closing tags with commas
+        html_content = re.sub(
+            r'<([a-zA-Z][\w\-]*),([^>]*)>(.*?)</\1,\s*>',
+            fix_comma_tag,
+            html_content,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        
         # Fix common entity issues first
         html_content = html_content.replace('&&', '&amp;&amp;')
         html_content = html_content.replace('& ', '&amp; ')
@@ -380,7 +411,7 @@ class ContentProcessor:
         # Convert ALL non-standard tags to bracketed format
         # This regex finds any tag that looks like <something>content</something>
         def convert_custom_tag(match):
-            tag_name = match.group(1).lower()
+            tag_name = match.group(1)
             attributes = match.group(2) or ''
             content = match.group(3) or ''
             
@@ -419,7 +450,7 @@ class ContentProcessor:
         
         # Handle self-closing custom tags
         def convert_self_closing(match):
-            tag_name = match.group(1).lower()
+            tag_name = match.group(1)
             attributes = match.group(2) or ''
             
             # If it's a valid HTML tag, leave it alone
@@ -455,11 +486,11 @@ class ContentProcessor:
         # First pass: find and mark tags that have closing tags
         tags_with_closing = set()
         for match in re.finditer(r'</([a-zA-Z][\w\-]*)>', html_content, re.IGNORECASE):
-            tags_with_closing.add(match.group(1).lower())
+            tags_with_closing.add(match.group(1))
         
         # Second pass: convert self-closing and standalone tags
         def convert_if_no_closing(match):
-            tag_name = match.group(1).lower()
+            tag_name = match.group(1)
             # Only convert if this tag doesn't have a closing tag elsewhere
             # or if it's explicitly self-closing (ends with />)
             if tag_name not in tags_with_closing or match.group(0).rstrip('>').endswith('/'):
@@ -470,7 +501,7 @@ class ContentProcessor:
         
         # Clean up any remaining unmatched closing tags for custom elements
         def remove_unmatched_closing(match):
-            tag_name = match.group(1).lower()
+            tag_name = match.group(1)
             if tag_name not in valid_html_tags:
                 return ''  # Remove unmatched custom closing tags
             return match.group(0)
@@ -529,8 +560,28 @@ class ContentProcessor:
     @staticmethod
     def clean_chapter_content(html_content: str) -> str:
         """Clean and prepare chapter content for XHTML conversion - PRESERVES UNICODE"""
-        # First, remove any [tag] patterns that might have been created
-        #html_content = re.sub(r'\[(title|skill|ability|spell|detect|status|class|level|stat|buff|debuff|item|quest)[^\]]*?\]', '', html_content)
+        
+        # FIX COMMA TAGS IMMEDIATELY - BEFORE BeautifulSoup converts to lowercase
+        # This must happen FIRST before any other processing
+        
+        # Handle tags like <Reply, Rachel=""> -> [Reply: Rachel]
+        def fix_comma_tag_early(match):
+            tag_part = match.group(1)  # 'Reply'
+            attr_part = match.group(2)  # ' Rachel=""'
+            
+            # Extract the attribute name (before the =)
+            attr_match = re.match(r'\s*(\w+)', attr_part)
+            if attr_match:
+                attr_name = attr_match.group(1)  # 'Rachel'
+                return f'[{tag_part}: {attr_name}]'
+            
+            return f'[{tag_part}]'
+        
+        # Fix opening tags with commas - PRESERVES ORIGINAL CASE
+        html_content = re.sub(r'<([^,>/]+),([^>]*)>', fix_comma_tag_early, html_content)
+        
+        # Remove closing tags with commas
+        html_content = re.sub(r'</([^,>]+),\s*>', '', html_content)
         
         # Fix any smart quotes that might be in the content
         # Using Unicode escape sequences to avoid parsing issues
@@ -1071,7 +1122,8 @@ class XHTMLConverter:
     
     @staticmethod
     def validate(content: str) -> str:
-        """Validate and fix XHTML content - PRESERVES UNICODE"""
+        """Validate and fix XHTML content - WITH DEBUGGING"""
+        import re
         # Ensure XML declaration
         if not content.strip().startswith('<?xml'):
             content = '<?xml version="1.0" encoding="utf-8"?>\n' + content
@@ -1103,14 +1155,49 @@ class XHTMLConverter:
         # Clean for XML
         content = XMLValidator.clean_for_xml(content)
         
-        # DO NOT convert Unicode to character references
-        # Keep "同期 (dōki)" as readable text
-        
         # Try to parse for validation
         try:
             ET.fromstring(content.encode('utf-8'))
         except ET.ParseError as e:
             log(f"[WARNING] XHTML validation failed: {e}")
+            
+            # DEBUG: Show what's at the error location
+            import re
+            match = re.search(r'line (\d+), column (\d+)', str(e))
+            if match:
+                line_num = int(match.group(1))
+                col_num = int(match.group(2))
+                
+                lines = content.split('\n')
+                log(f"[DEBUG] Error at line {line_num}, column {col_num}")
+                log(f"[DEBUG] Total lines in content: {len(lines)}")
+                
+                if line_num <= len(lines):
+                    problem_line = lines[line_num - 1]
+                    log(f"[DEBUG] Full problem line: {problem_line!r}")
+                    
+                    # Show the problem area
+                    if col_num <= len(problem_line):
+                        # Show 40 characters before and after
+                        start = max(0, col_num - 40)
+                        end = min(len(problem_line), col_num + 40)
+                        
+                        log(f"[DEBUG] Context around error: {problem_line[start:end]!r}")
+                        log(f"[DEBUG] Character at column {col_num}: {problem_line[col_num-1]!r} (U+{ord(problem_line[col_num-1]):04X})")
+                        
+                        # Show 5 characters before and after with hex
+                        for i in range(max(0, col_num-5), min(len(problem_line), col_num+5)):
+                            char = problem_line[i]
+                            marker = " <-- ERROR" if i == col_num-1 else ""
+                            log(f"[DEBUG] Col {i+1}: {char!r} (U+{ord(char):04X}){marker}")
+                    else:
+                        log(f"[DEBUG] Column {col_num} is beyond line length {len(problem_line)}")
+                else:
+                    log(f"[DEBUG] Line {line_num} doesn't exist (only {len(lines)} lines)")
+                    # Show last few lines
+                    for i in range(max(0, len(lines)-3), len(lines)):
+                        log(f"[DEBUG] Line {i+1}: {lines[i][:100]!r}...")
+            
             # Try to recover
             content = XHTMLConverter._attempt_recovery(content, e)
         
@@ -1472,6 +1559,8 @@ class EPUBCompiler:
         except Exception as e:
             self.log(f"❌ EPUB compilation failed: {e}")
             raise
+
+
 
     def _fix_encoding_issues(self, content: str) -> str:
         """Convert smart quotes and other Unicode punctuation to ASCII."""
