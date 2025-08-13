@@ -317,6 +317,11 @@ class ContentProcessor:
         html_content = re.sub(r'<[^>]*?="""[^>]*?>', '', html_content)
         html_content = re.sub(r'<[^>]*?="{3,}[^>]*?>', '', html_content)
         
+        # Fix tags with extra < characters
+        html_content = re.sub(r'<([a-zA-Z][\w\-]*)<+', r'<\1', html_content)  # <p< becomes <p
+        html_content = re.sub(r'</([a-zA-Z][\w\-]*)<+>', r'</\1>', html_content)  # </p<> becomes </p>
+        html_content = re.sub(r'<([a-zA-Z][\w\-]*)<\s+', r'<\1 ', html_content)  # <p< body= becomes <p body=
+        
         # Define valid EPUB 3.3 XHTML tags
         # Based on:
         # - EPUB 3.3 spec: https://www.w3.org/TR/epub-33/
@@ -1026,7 +1031,7 @@ class XHTMLConverter:
         xhtml_parts = [
             xml_declaration,
             doctype,
-            '<html xmlns="http://www.w3.org/1999/xhtml">',
+            '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">',
             '<head>',
             '<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />',
             f'<title>{title}</title>'
@@ -2132,11 +2137,14 @@ class EPUBCompiler:
                     ordered_files.append((chapter_order, output_file))
                     self.log(f"  Mapped: {output_file} -> {original_name} (order: {chapter_order})")
                 else:
-                    # Try without extension variations (sometimes .xhtml vs .html)
+                    # Try fuzzy matching
                     found = False
                     for opf_name, order in opf_order.items():
-                        # Compare without extensions
-                        if os.path.splitext(original_name)[0] == os.path.splitext(opf_name)[0]:
+                        opf_base = os.path.splitext(opf_name)[0]  # e.g., "76261-h-0"
+                        
+                        # Check if the OPF base name appears in our filename
+                        # This matches "76261-h-0" in "5266498218463370876_76261-h-0.html"
+                        if opf_base in original_name:
                             ordered_files.append((order, output_file))
                             self.log(f"  Mapped (fuzzy): {output_file} -> {opf_name} (order: {order})")
                             found = True
