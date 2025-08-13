@@ -253,8 +253,18 @@ class ContentProcessor:
     
     @staticmethod
     def fix_malformed_tags(html_content: str) -> str:
-        """Fix various types of malformed tags - ENHANCED WITH BEAUTIFULSOUP"""
-        # Fix common entity issues
+        """Fix various types of malformed tags - CONVERTS all non-standard tags to preserve content
+        
+        This method is genre-agnostic and converts ANY non-standard HTML tags to bracketed format.
+        This ensures we preserve all content regardless of the novel type or custom markup used.
+        
+        Examples:
+        - <skill>Fireball</skill> → [skill: Fireball]
+        - <cultivation>Golden Core</cultivation> → [cultivation: Golden Core]  
+        - <magic>Teleport</magic> → [magic: Teleport]
+        - <anythingcustom>Content</anythingcustom> → [anythingcustom: Content]
+        """
+        # Fix common entity issues first
         html_content = html_content.replace('&&', '&amp;&amp;')
         html_content = html_content.replace('& ', '&amp; ')
         html_content = html_content.replace(' & ', ' &amp; ')
@@ -276,23 +286,205 @@ class ContentProcessor:
         html_content = re.sub(r'<[^>]*?="""[^>]*?>', '', html_content)
         html_content = re.sub(r'<[^>]*?="{3,}[^>]*?>', '', html_content)
         
-        # Fix skill/ability/spell tags - just remove them
-        game_tags = r'skill|ability|spell|detect|status|class|level|stat|buff|debuff|item|quest'
-        html_content = re.sub(rf'<({game_tags})\b[^>]*?>', '', html_content, flags=re.IGNORECASE)
-        html_content = re.sub(rf'</({game_tags})>', '', html_content, flags=re.IGNORECASE)
+        # Define valid EPUB 3.3 XHTML tags
+        # Based on:
+        # - EPUB 3.3 spec: https://www.w3.org/TR/epub-33/
+        # - EPUB Content Documents 3.3: https://www.w3.org/TR/epub-33/#sec-xhtml
+        # - HTML5 elements allowed in XHTML syntax
+        # 
+        # EPUB 3.3 uses XHTML5 (XML serialization of HTML5).
+        # This list includes ALL tags that are technically valid in EPUB 3.3,
+        # regardless of reader support. If it's valid XHTML5, we keep it!
+        valid_html_tags = {
+            # Document structure
+            'html', 'head', 'body', 'title', 'meta', 'link', 'base',
+            
+            # Content sectioning
+            'section', 'nav', 'article', 'aside', 'header', 'footer', 
+            'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'address',
+            'hgroup',  # Removed from HTML5 Living Standard but still valid XHTML5
+            'main',  # Main content area
+            
+            # Text content blocks
+            'p', 'hr', 'pre', 'blockquote', 'ol', 'ul', 'li', 
+            'dl', 'dt', 'dd', 'figure', 'figcaption', 'div',
+            
+            # Inline text semantics
+            'a', 'em', 'strong', 'small', 's', 'cite', 'q', 'dfn', 'abbr',
+            'data', 'time', 'code', 'var', 'samp', 'kbd', 'sub', 'sup',
+            'i', 'b', 'u', 'mark', 'bdi', 'bdo',
+            'span', 'br', 'wbr',
+            
+            # Ruby annotations (important for Asian languages)
+            'ruby', 'rt', 'rp',  # Standard HTML5 ruby
+            'rb', 'rtc',  # Extended ruby support
+            
+            # Edits
+            'ins', 'del',
+            
+            # Embedded content - ALL valid in EPUB 3.3
+            'img', 'iframe', 'embed', 'object', 'param',
+            'video', 'audio', 'source', 'track',
+            'picture',  # Responsive images
+            'svg',  # SVG support
+            'math',  # MathML support
+            'canvas',  # Valid even if scripting is disabled
+            'map', 'area',  # Image maps
+            
+            # Tabular data
+            'table', 'caption', 'colgroup', 'col', 'tbody', 'thead', 'tfoot',
+            'tr', 'td', 'th',
+            
+            # Forms - ALL technically valid in EPUB 3.3
+            'form', 'label', 'input', 'button', 'select', 'datalist', 'optgroup',
+            'option', 'textarea', 'output', 'progress', 'meter', 'fieldset', 
+            'legend', 'keygen',  # Deprecated but still valid XHTML
+            
+            # Interactive elements - valid in EPUB 3.3
+            'details', 'summary', 'dialog',
+            'menu',  # Valid in XHTML5 even if removed from HTML Living Standard
+            
+            # Scripting - valid in EPUB 3.3 (reader support varies)
+            'script', 'noscript', 'template',
+            
+            # Document metadata
+            'style',  # For embedded CSS
+            
+            # Obsolete but still valid in XHTML5/EPUB for compatibility
+            'acronym',  # Use 'abbr' in new content but valid if present
+            'center',  # Use CSS instead but valid
+            'font',    # Use CSS instead but valid
+            'big',     # Use CSS instead but valid
+            'strike', 's',  # Use <del> or CSS but valid
+            'tt',      # Use <code> or CSS but valid
+            'basefont',  # Obsolete but won't break EPUB
+            'dir',  # Obsolete but valid XHTML
+            
+            # These are NOT valid in any modern HTML/XHTML:
+            # 'applet' - use <object> instead
+            # 'bgsound' - IE only, never standard
+            # 'blink' - Never standard
+            # 'frame', 'frameset', 'noframes' - Not allowed in EPUB
+            # 'isindex' - Obsolete
+            # 'listing', 'plaintext', 'xmp' - Obsolete
+            # 'marquee' - Never standard
+            # 'multicol' - Never standard
+            # 'nextid' - Obsolete
+            # 'nobr' - Never standard
+            # 'noembed' - Never standard
+            # 'spacer' - Never standard
+            # 'menuitem' - Removed from spec
+            # 'slot' - Web Components, not in EPUB
+        }
         
-        # Don't convert title tags to [title] format - that's causing the display issue
-        # Just remove broken title tags
-        html_content = re.sub(r'<title\s*=\s*""\s*[^>]*?>', '', html_content)
+        # Convert ALL non-standard tags to bracketed format
+        # This regex finds any tag that looks like <something>content</something>
+        def convert_custom_tag(match):
+            tag_name = match.group(1).lower()
+            attributes = match.group(2) or ''
+            content = match.group(3) or ''
+            
+            # If it's a valid HTML tag, leave it alone
+            if tag_name in valid_html_tags:
+                return match.group(0)
+            
+            # For custom tags, convert to bracketed format
+            content = content.strip()
+            
+            # Try to extract meaningful attributes like name, value, type, etc.
+            attr_text = ''
+            if attributes:
+                # Look for common meaningful attributes
+                name_match = re.search(r'(?:name|value|type|id)\s*=\s*["\']([^"\']+)["\']', attributes, re.IGNORECASE)
+                if name_match:
+                    attr_text = name_match.group(1).strip()
+            
+            # Build the bracketed version
+            if attr_text and not content:
+                # Attribute but no content: [tag: attribute_value]
+                return f'[{tag_name}: {attr_text}]'
+            elif content and not attr_text:
+                # Content but no meaningful attribute: [tag: content]
+                return f'[{tag_name}: {content}]'
+            elif attr_text and content:
+                # Both attribute and content: [tag: attribute_value - content]
+                return f'[{tag_name}: {attr_text} - {content}]'
+            else:
+                # Empty tag, remove it
+                return ''
         
-        # Fix attributes without quotes
+        # Pattern to match ANY tag with content
+        pattern = r'<([a-zA-Z][\w\-]*)((?:\s+[^>]*)?)>(.*?)</\1>'
+        html_content = re.sub(pattern, convert_custom_tag, html_content, flags=re.IGNORECASE | re.DOTALL)
+        
+        # Handle self-closing custom tags
+        def convert_self_closing(match):
+            tag_name = match.group(1).lower()
+            attributes = match.group(2) or ''
+            
+            # If it's a valid HTML tag, leave it alone
+            if tag_name in valid_html_tags:
+                return match.group(0)
+            
+            # Extract meaningful content from attributes
+            content_parts = []
+            
+            # Look for various attribute patterns that might contain content
+            patterns = [
+                r'(?:name|value|content|text|title|label)\s*=\s*["\']([^"\']+)["\']',
+                r'(?:type|class|id)\s*=\s*["\']([^"\']+)["\']',
+                # Also handle bare attributes like <skill="Fireball">
+                r'^=\s*["\']([^"\']+)["\']'
+            ]
+            
+            for attr_pattern in patterns:
+                attr_matches = re.findall(attr_pattern, attributes, re.IGNORECASE)
+                content_parts.extend(attr_matches)
+            
+            if content_parts:
+                # Join all found content
+                content = ' - '.join(content_parts)
+                return f'[{tag_name}: {content}]'
+            else:
+                # No meaningful content found, remove the tag
+                return ''
+        
+        # Pattern for self-closing tags or tags without closing tag
+        self_closing_pattern = r'<([a-zA-Z][\w\-]*)((?:\s+[^>]*)?)\s*/?>'
+        
+        # First pass: find and mark tags that have closing tags
+        tags_with_closing = set()
+        for match in re.finditer(r'</([a-zA-Z][\w\-]*)>', html_content, re.IGNORECASE):
+            tags_with_closing.add(match.group(1).lower())
+        
+        # Second pass: convert self-closing and standalone tags
+        def convert_if_no_closing(match):
+            tag_name = match.group(1).lower()
+            # Only convert if this tag doesn't have a closing tag elsewhere
+            # or if it's explicitly self-closing (ends with />)
+            if tag_name not in tags_with_closing or match.group(0).rstrip('>').endswith('/'):
+                return convert_self_closing(match)
+            return match.group(0)
+        
+        html_content = re.sub(self_closing_pattern, convert_if_no_closing, html_content, flags=re.IGNORECASE)
+        
+        # Clean up any remaining unmatched closing tags for custom elements
+        def remove_unmatched_closing(match):
+            tag_name = match.group(1).lower()
+            if tag_name not in valid_html_tags:
+                return ''  # Remove unmatched custom closing tags
+            return match.group(0)
+        
+        html_content = re.sub(r'</([a-zA-Z][\w\-]*)>', remove_unmatched_closing, html_content, flags=re.IGNORECASE)
+        
+        # Fix attributes without quotes (for remaining valid HTML tags)
         html_content = re.sub(r'<(\w+)\s+(\w+)=([^\s"\'>]+)(\s|>)', r'<\1 \2="\3"\4', html_content)
         
         # Fix unclosed tags at end
         if html_content.rstrip().endswith('<'):
             html_content = html_content.rstrip()[:-1]
         
-        # NEW: Fix mismatched tags using BeautifulSoup
+        # Final cleanup with BeautifulSoup
         try:
             soup = BeautifulSoup(html_content, 'html.parser', from_encoding='utf-8')
             
@@ -302,9 +494,12 @@ class ContentProcessor:
                 for nested_p in nested_ps:
                     nested_p.unwrap()
             
-            # Remove empty tags that might cause issues
+            # Remove empty tags that might cause issues (but only standard HTML tags)
             for tag in soup.find_all():
-                if not tag.get_text(strip=True) and not tag.find_all() and tag.name not in ['br', 'hr', 'img', 'meta', 'link']:
+                if (not tag.get_text(strip=True) and 
+                    not tag.find_all() and 
+                    tag.name in valid_html_tags and
+                    tag.name not in ['br', 'hr', 'img', 'meta', 'link', 'input', 'area', 'col']):
                     tag.decompose()
             
             html_content = str(soup)
@@ -335,7 +530,7 @@ class ContentProcessor:
     def clean_chapter_content(html_content: str) -> str:
         """Clean and prepare chapter content for XHTML conversion - PRESERVES UNICODE"""
         # First, remove any [tag] patterns that might have been created
-        html_content = re.sub(r'\[(title|skill|ability|spell|detect|status|class|level|stat|buff|debuff|item|quest)[^\]]*?\]', '', html_content)
+        #html_content = re.sub(r'\[(title|skill|ability|spell|detect|status|class|level|stat|buff|debuff|item|quest)[^\]]*?\]', '', html_content)
         
         # Fix any smart quotes that might be in the content
         # Using Unicode escape sequences to avoid parsing issues
@@ -386,7 +581,7 @@ class TitleExtractor:
     @staticmethod
     def extract_from_html(html_content: str, chapter_num: Optional[int] = None, 
                          filename: Optional[str] = None) -> Tuple[str, float]:
-        """Extract title from HTML content with confidence score"""
+        """Extract title from HTML content with confidence score - KEEP ALL HEADERS INCLUDING NUMBERS"""
         try:
             # Decode entities first - PRESERVES UNICODE
             html_content = HTMLEntityDecoder.decode(html_content)
@@ -394,51 +589,90 @@ class TitleExtractor:
             soup = BeautifulSoup(html_content, 'html.parser', from_encoding='utf-8')
             candidates = []
             
-            # Strategy 1: <title> tag
+            # Strategy 1: <title> tag (highest confidence)
             title_tag = soup.find('title')
             if title_tag and title_tag.string:
                 title_text = HTMLEntityDecoder.decode(title_tag.string.strip())
-                if title_text and len(title_text) > 1 and title_text.lower() not in ['untitled', 'chapter']:
+                if title_text and len(title_text) > 0 and title_text.lower() not in ['untitled', 'chapter', 'document']:
                     candidates.append((title_text, 0.95, "title_tag"))
             
-            # Strategy 2-5: Various heading tags
-            strategies = [
-                ('h1', 0.9, 300),
-                ('h2', 0.8, 250),
-                ('h3', 0.7, 200),
-            ]
+            # Strategy 2: h1 tags (very high confidence)
+            h1_tags = soup.find_all('h1')
+            for i, h1 in enumerate(h1_tags[:3]):  # Check first 3 h1 tags
+                text = HTMLEntityDecoder.decode(h1.get_text(strip=True))
+                if text and len(text) < 300:
+                    # First h1 gets highest confidence
+                    confidence = 0.9 if i == 0 else 0.85
+                    candidates.append((text, confidence, f"h1_tag_{i+1}"))
             
-            for tag_name, confidence, max_len in strategies:
-                for tag in soup.find_all(tag_name):
-                    text = HTMLEntityDecoder.decode(tag.get_text(strip=True))
-                    if text and len(text) < max_len:
-                        candidates.append((text, confidence, f"{tag_name}_tag"))
+            # Strategy 3: h2 tags (high confidence)
+            h2_tags = soup.find_all('h2')
+            for i, h2 in enumerate(h2_tags[:3]):  # Check first 3 h2 tags
+                text = HTMLEntityDecoder.decode(h2.get_text(strip=True))
+                if text and len(text) < 250:
+                    # First h2 gets highest confidence among h2s
+                    confidence = 0.8 if i == 0 else 0.75
+                    candidates.append((text, confidence, f"h2_tag_{i+1}"))
             
-            # Strategy 6: Bold text in first elements
+            # Strategy 4: h3 tags (moderate confidence)
+            h3_tags = soup.find_all('h3')
+            for i, h3 in enumerate(h3_tags[:3]):  # Check first 3 h3 tags
+                text = HTMLEntityDecoder.decode(h3.get_text(strip=True))
+                if text and len(text) < 200:
+                    confidence = 0.7 if i == 0 else 0.65
+                    candidates.append((text, confidence, f"h3_tag_{i+1}"))
+            
+            # Strategy 5: Bold text in first elements (lower confidence)
             first_elements = soup.find_all(['p', 'div'])[:5]
             for elem in first_elements:
-                for bold in elem.find_all(['b', 'strong']):
+                for bold in elem.find_all(['b', 'strong'])[:2]:  # Limit to first 2 bold items
                     bold_text = HTMLEntityDecoder.decode(bold.get_text(strip=True))
-                    if bold_text and 3 <= len(bold_text) <= 150:
+                    if bold_text and 2 <= len(bold_text) <= 150:
                         candidates.append((bold_text, 0.6, "bold_text"))
             
-            # Strategy 7: Patterns in first paragraph
+            # Strategy 6: Center-aligned text (common for chapter titles)
+            center_elements = soup.find_all(['center', 'div', 'p'], 
+                                           attrs={'align': 'center'}) or \
+                             soup.find_all(['div', 'p'], 
+                                         style=lambda x: x and 'text-align' in x and 'center' in x)
+            
+            for center in center_elements[:3]:  # Check first 3 centered elements
+                text = HTMLEntityDecoder.decode(center.get_text(strip=True))
+                if text and 2 <= len(text) <= 200:
+                    candidates.append((text, 0.65, "centered_text"))
+            
+            # Strategy 7: All-caps text (common for titles in older books)
+            for elem in soup.find_all(['h1', 'h2', 'h3', 'p', 'div'])[:10]:
+                text = elem.get_text(strip=True)
+                # Check if text is mostly uppercase
+                if text and len(text) > 2 and text.isupper():
+                    decoded_text = HTMLEntityDecoder.decode(text)
+                    # Keep it as-is (don't convert to title case automatically)
+                    candidates.append((decoded_text, 0.55, "all_caps_text"))
+            
+            # Strategy 8: Patterns in first paragraph
             first_p = soup.find('p')
             if first_p:
                 p_text = HTMLEntityDecoder.decode(first_p.get_text(strip=True))
-                # Using Unicode escape sequences for various dash types
+                
+                # Look for "Chapter X: Title" patterns
                 chapter_pattern = re.match(
-                    r'^(Chapter\s+\d+\s*[:\-\u2013\u2014\u2015\u2012\u2e3a\u2e3b\u301c\u3030\ufe58\ufe63\uff0d\u2010\u2011\u2043\s]*)\s*(.{3,100})(?:\.|$|Chapter)',
+                    r'^(Chapter\s+[\dIVXLCDM]+\s*[:\-\u2013\u2014]\s*)(.{2,100})(?:\.|$)',
                     p_text, re.IGNORECASE
                 )
                 if chapter_pattern:
+                    # Extract just the title part after "Chapter X:"
                     title_part = chapter_pattern.group(2).strip()
-                    if title_part and len(title_part) >= 3:
-                        candidates.append((title_part, 0.8, "paragraph_pattern"))
-                elif len(p_text) <= 100:
+                    if title_part:
+                        candidates.append((title_part, 0.8, "paragraph_pattern_title"))
+                    # Also add the full "Chapter X: Title" as a lower confidence option
+                    full_title = chapter_pattern.group(0).strip().rstrip('.')
+                    candidates.append((full_title, 0.75, "paragraph_pattern_full"))
+                elif len(p_text) <= 100 and len(p_text) > 2:
+                    # Short first paragraph might be the title
                     candidates.append((p_text, 0.4, "paragraph_standalone"))
             
-            # Strategy 8: Filename
+            # Strategy 9: Filename
             if filename:
                 filename_match = re.search(r'response_\d+_(.+?)\.html', filename)
                 if filename_match:
@@ -450,16 +684,26 @@ class TitleExtractor:
             if candidates:
                 unique_candidates = {}
                 for title, confidence, source in candidates:
+                    # Clean the title but keep roman numerals and short titles
                     title = TitleExtractor.clean_title(title)
-                    if title and len(title) > 2 and TitleExtractor.is_valid_title(title):
+                    
+                    # Don't reject short titles (like "III", "IX") - they're valid!
+                    if title and len(title) > 0:
+                        # Don't apply is_valid_title check too strictly
+                        # Roman numerals and chapter numbers are valid titles
                         if title not in unique_candidates or unique_candidates[title][1] < confidence:
                             unique_candidates[title] = (title, confidence, source)
                 
                 if unique_candidates:
                     sorted_candidates = sorted(unique_candidates.values(), key=lambda x: x[1], reverse=True)
-                    return sorted_candidates[0][0], sorted_candidates[0][1]
+                    best_title, best_confidence, best_source = sorted_candidates[0]
+                    
+                    # Log what we found for debugging
+                    log(f"[DEBUG] Best title candidate: '{best_title}' (confidence: {best_confidence:.2f}, source: {best_source})")
+                    
+                    return best_title, best_confidence
             
-            # Fallback
+            # Fallback - only use generic chapter number if we really found nothing
             if chapter_num:
                 return f"Chapter {chapter_num}", 0.1
             return "Untitled Chapter", 0.0
@@ -472,12 +716,12 @@ class TitleExtractor:
     
     @staticmethod
     def clean_title(title: str) -> str:
-        """Clean and normalize extracted title - PRESERVES UNICODE"""
+        """Clean and normalize extracted title - PRESERVE SHORT TITLES LIKE ROMAN NUMERALS"""
         if not title:
             return ""
         
         # Remove any [tag] patterns first
-        title = re.sub(r'\[(title|skill|ability|spell|detect|status|class|level|stat|buff|debuff|item|quest)[^\]]*?\]', '', title)
+        #title = re.sub(r'\[(title|skill|ability|spell|detect|status|class|level|stat|buff|debuff|item|quest)[^\]]*?\]', '', title)
         
         # Decode entities - PRESERVES UNICODE
         title = HTMLEntityDecoder.decode(title)
@@ -489,19 +733,17 @@ class TitleExtractor:
         title = re.sub(r'[\xa0\u2000-\u200a\u202f\u205f\u3000]+', ' ', title)
         title = re.sub(r'\s+', ' ', title).strip()
         
-        # Remove leading/trailing punctuation
-        # Using Unicode escape sequences for special characters
-        # Brackets placed differently to avoid escaping issues
-        title = re.sub(r'^[][(){}\s\-\u2013\u2014\u2015\u2012\u2e3a\u2e3b\u301c\u3030\ufe58\ufe63\uff0d\u2010\u2011\u2043:;,.|/\\]+', '', title).strip()
+        # Remove leading/trailing punctuation EXCEPT for roman numeral dots
+        # Don't strip trailing dots from roman numerals like "III." or "IX."
+        if not re.match(r'^[IVXLCDM]+\.?$', title, re.IGNORECASE):
+            title = re.sub(r'^[][(){}\s\-\u2013\u2014:;,.|/\\]+', '', title).strip()
+            title = re.sub(r'[][(){}\s\-\u2013\u2014:;,.|/\\]+$', '', title).strip()
         
         # Remove quotes if they wrap the entire title
         quote_pairs = [
             ('"', '"'), ("'", "'"),
             ('\u201c', '\u201d'), ('\u2018', '\u2019'),  # Smart quotes
             ('«', '»'), ('‹', '›'),  # Guillemets
-            ('「', '」'), ('『', '』'),  # Japanese quotes
-            ('《', '》'), ('〈', '〉'),  # Chinese quotes
-            ('【', '】'), ('〖', '〗'),  # Asian brackets
         ]
         
         for open_q, close_q in quote_pairs:
@@ -530,22 +772,25 @@ class TitleExtractor:
     
     @staticmethod
     def is_valid_title(title: str) -> bool:
-        """Check if extracted title is valid"""
-        if not title or len(title) < 2:
+        """Check if extracted title is valid - ACCEPT SHORT TITLES LIKE ROMAN NUMERALS"""
+        if not title:
             return False
         
-        # Check invalid patterns
+        # Accept any non-empty title after cleaning
+        # Don't reject roman numerals or short titles
+        
+        # Only reject truly invalid patterns
         invalid_patterns = [
-            r'^\d+$',  # Just numbers
-            r'^[^\w\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]+$',  # Just punctuation
-            r'^(untitled)$',  # Just "untitled"
+            r'^untitled$',  # Just "untitled"
+            r'^chapter$',   # Just "chapter" without a number
+            r'^document$',  # Just "document"
         ]
         
         for pattern in invalid_patterns:
             if re.match(pattern, title.lower().strip()):
                 return False
         
-        # Skip filler phrases
+        # Skip obvious filler phrases
         filler_phrases = [
             'click here', 'read more', 'continue reading', 'next chapter',
             'previous chapter', 'table of contents', 'back to top'
@@ -555,6 +800,7 @@ class TitleExtractor:
         if any(phrase in title_lower for phrase in filler_phrases):
             return False
         
+        # Accept everything else, including roman numerals and short titles
         return True
 
 
@@ -601,47 +847,114 @@ class XHTMLConverter:
     
     @staticmethod
     def _extract_body_content(soup) -> str:
-        """Extract body content from BeautifulSoup object"""
-        if soup.body:
-            # Remove any [tag] text that might have been created by malformed tag fixing
-            for text in soup.body.find_all(text=True):
-                if re.match(r'^\[(title|skill|ability|spell|detect|status|class|level|stat|buff|debuff|item|quest)\]', str(text)):
-                    text.replace_with('')
-            
-            # Fix img tags in body
-            for img in soup.body.find_all('img'):
-                if not img.get('alt'):
-                    img['alt'] = ''
-                if not img.get('src'):
-                    img.decompose()
-            
-            # Get body HTML
-            body_parts = []
-            for child in soup.body.children:
-                child_str = str(child)
-                # Remove any remaining [tag] patterns
-                child_str = re.sub(r'\[(title|skill|ability|spell|detect|status|class|level|stat|buff|debuff|item|quest)[^\]]*?\]', '', child_str)
+        """Extract body content from BeautifulSoup object while preserving element order
+        
+        IMPORTANT: This method preserves ALL bracketed content like [Skill: Fireball] 
+        as these are often part of the story in light novels, not HTML artifacts.
+        """
+        try:
+            if soup.body:
+                # Fix img tags to ensure XHTML compliance (do this before extracting content)
+                for img in soup.body.find_all('img'):
+                    # Ensure alt attribute exists (required for XHTML)
+                    if not img.get('alt'):
+                        img['alt'] = ''
+                    # Remove images with no source
+                    if not img.get('src'):
+                        img.decompose()
+                        continue
+                    # Fix relative image paths if needed
+                    src = img.get('src', '')
+                    if src and not src.startswith(('http://', 'https://', '/', 'images/')):
+                        # If it's just a filename, prepend images/
+                        if '/' not in src:
+                            img['src'] = f'images/{src}'
+                
+                # Fix other self-closing tags that might cause issues
+                for br_tag in soup.body.find_all('br'):
+                    if br_tag.string:
+                        # Some broken HTML has content in br tags - preserve it
+                        new_text = soup.new_string(str(br_tag.string))
+                        br_tag.replace_with(new_text)
+                
+                # CRITICAL: Use decode_contents() to preserve exact element order
+                # This method returns the inner HTML without the wrapping body tag
+                if hasattr(soup.body, 'decode_contents'):
+                    body_html = soup.body.decode_contents()
+                else:
+                    # Fallback for older BeautifulSoup versions
+                    # Get children as a list first to preserve order
+                    children = list(soup.body.children)
+                    body_parts = []
+                    for child in children:
+                        if hasattr(child, 'prettify'):
+                            # It's a tag - convert to string without prettifying (which can reorder attributes)
+                            child_str = str(child)
+                        else:
+                            # It's a text node or comment
+                            child_str = str(child)
+                        body_parts.append(child_str)
+                    body_html = ''.join(body_parts)
+                
+                # Post-process the extracted HTML
+                # Fix self-closing tags for XHTML compliance
+                body_html = ContentProcessor.fix_self_closing_tags(body_html)
+                
+                # NOTE: We do NOT remove bracketed content like [Skill: xxx] or [Status: xxx]
+                # These are intentionally converted from game tags and are part of the story!
+                # The fix_malformed_tags() method converts <skill>Fireball</skill> to [Skill: Fireball]
+                # to preserve story content while ensuring XHTML compliance.
+                
+                # Final cleanup: ensure no double-escaping of entities
+                # Sometimes BeautifulSoup double-escapes things like &amp;amp;
+                body_html = re.sub(r'&amp;(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);', r'&\1;', body_html)
+                
+                return body_html
+                
+            else:
+                # No body tag found - extract all content
+                # Remove script and style tags first
+                for tag in soup(['script', 'style']):
+                    tag.decompose()
+                
+                # Fix img tags
+                for img in soup.find_all('img'):
+                    if not img.get('alt'):
+                        img['alt'] = ''
+                    if not img.get('src'):
+                        img.decompose()
+                        continue
+                    src = img.get('src', '')
+                    if src and not src.startswith(('http://', 'https://', '/', 'images/')):
+                        if '/' not in src:
+                            img['src'] = f'images/{src}'
+                
+                # Get all content
+                if hasattr(soup, 'decode_contents'):
+                    content = soup.decode_contents()
+                else:
+                    # Convert to string without prettifying
+                    content = str(soup)
+                
                 # Fix self-closing tags
-                child_str = ContentProcessor.fix_self_closing_tags(child_str)
-                body_parts.append(child_str)
+                content = ContentProcessor.fix_self_closing_tags(content)
+                
+                # Fix double-escaped entities
+                content = re.sub(r'&amp;(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);', r'&\1;', content)
+                
+                return content
+                
+        except Exception as e:
+            # Log the error but don't crash
+            log(f"[WARNING] Error extracting body content: {e}")
             
-            return '\n'.join(body_parts)
-        else:
-            # No body tag - get all content
-            for tag in soup(['script', 'style']):
-                tag.decompose()
-            
-            # Fix img tags
-            for img in soup.find_all('img'):
-                if not img.get('alt'):
-                    img['alt'] = ''
-                if not img.get('src'):
-                    img.decompose()
-            
-            content = str(soup)
-            # Remove any [tag] patterns
-            content = re.sub(r'\[(title|skill|ability|spell|detect|status|class|level|stat|buff|debuff|item|quest)[^\]]*?\]', '', content)
-            return ContentProcessor.fix_self_closing_tags(content)
+            # Last resort: just convert to string and clean up
+            try:
+                content = str(soup)
+                content = ContentProcessor.fix_self_closing_tags(content)
+                return content
+            except:
+                return "<p>Error extracting content</p>"
     
     @staticmethod
     def _build_xhtml(title: str, body_content: str, css_links: Optional[List[str]] = None) -> str:
@@ -1318,175 +1631,503 @@ class EPUBCompiler:
             self.log("⚠️  No resource directories found (CSS/images/fonts)")
 
     def _analyze_chapters(self) -> Dict[int, Tuple[str, float, str]]:
-            """Analyze chapter files and extract titles"""
-            self.log("\n📖 Extracting translated titles from chapter files...")
-            
-            chapter_info = {}
-            
-            # Check if we have standard files
-            if self._has_standard_files():
-                # Original logic for standard files
-                html_files = [f for f in os.listdir(self.output_dir) 
-                             if f.startswith("response_") and f.endswith(".html")]
-            else:
-                # Progressive logic for non-standard files
-                html_extensions = ('.html', '.htm', '.xhtml')
-                all_html = [f for f in os.listdir(self.output_dir) 
-                           if f.lower().endswith(html_extensions)]
-                
-                # Filter out obvious non-chapter files
-                exclude_patterns = [
-                    'index', 'toc', 'contents', 'cover', 'title',
-                    'copyright', 'about', 'nav', 'style', 'template',
-                    'metadata', 'acknowledgments', 'dedication'
-                ]
-                
-                html_files = [f for f in all_html 
-                             if not any(exclude in f.lower() for exclude in exclude_patterns)]
-            
-            if not html_files:
-                self.log("⚠️ No translated chapter files found!")
-                return chapter_info
-            
-            self.log(f"📖 Analyzing {len(html_files)} translated chapter files for titles...")
-            
-            # Sort files using the same logic as _find_html_files
-            if self._has_standard_files():
-                # Check if files have the -h- pattern
-                if any('-h-' in f for f in html_files):
-                    # Use the robust sort key for -h- pattern files
-                    sorted_files = sorted(html_files, key=self.get_robust_sort_key)
-                else:
-                    # Use numeric sorting for standard response_ files without -h-
-                    def extract_number(filename):
-                        match = re.match(r'response_(\d+)_', filename)
-                        if match:
-                            return int(match.group(1))
-                        return 0
-                    
-                    sorted_files = sorted(html_files, key=extract_number)
-            else:
-                # Progressive sorting for non-standard files
-                sorted_files = sorted(html_files, key=self.get_robust_sort_key)
-            
-            for idx, filename in enumerate(sorted_files):
-                file_path = os.path.join(self.output_dir, filename)
-                
-                try:
-                    # FIXED: Extract chapter number using the unified extraction method
-                    # This now properly checks for -h- pattern FIRST
-                    chapter_num = self._extract_chapter_number(filename, idx)
-                    
-                    # Read content
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        html_content = f.read()
-
-                    # Extract title
-                    title, confidence = TitleExtractor.extract_from_html(
-                        html_content, chapter_num, filename
-                    )
-                    
-                    chapter_info[chapter_num] = (title, confidence, filename)
-                    
-                    # Log with confidence indicator
-                    indicator = "✅" if confidence > 0.7 else "🟡" if confidence > 0.4 else "🔴"
-                    self.log(f"  {indicator} Chapter {chapter_num}: '{title}' (confidence: {confidence:.2f})")
-                    
-                except Exception as e:
-                    self.log(f"❌ Error processing {filename}: {e}")
-                    # Use fallback chapter number
-                    fallback_num = self._extract_chapter_number(filename, idx)
-                    chapter_info[fallback_num] = (f"Chapter {fallback_num}", 0.0, filename)
-            
-            if chapter_info:
-                confident = sum(1 for _, (_, conf, _) in chapter_info.items() if conf > 0.5)
-                self.log(f"📊 Title extraction summary: {confident}/{len(chapter_info)} with high confidence")
-            
+        """Analyze chapter files and extract titles using OPF order when available"""
+        self.log("\n📖 Extracting translated titles from chapter files...")
+        
+        chapter_info = {}
+        
+        # Get files in the correct order (OPF-based or pattern-based)
+        sorted_files = self._find_html_files()
+        
+        if not sorted_files:
+            self.log("⚠️ No translated chapter files found!")
             return chapter_info
+        
+        self.log(f"📖 Analyzing {len(sorted_files)} translated chapter files for titles...")
+        
+        # Check if lxml is available for more stable parsing
+        use_lxml = False
+        lxml_html = None
+        try:
+            from lxml import etree, html as lxml_html
+            use_lxml = True
+            self.log("✅ Using lxml for stable title extraction (with BeautifulSoup fallback)")
+        except ImportError:
+            self.log("⚠️ lxml not available, using BeautifulSoup for title extraction")
+        
+        # Process files in order - chapter number is ALWAYS based on position
+        for idx, filename in enumerate(sorted_files):
+            file_path = os.path.join(self.output_dir, filename)
+            
+            try:
+                # Chapter number is simply the position in our sorted list
+                chapter_num = idx + 1  # 1-based numbering
+                
+                # Read content
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    raw_html_content = f.read()
+                
+                # Pre-process: Fix encoding issues first (smart quotes, etc.)
+                html_content = self._fix_encoding_issues(raw_html_content)
+                
+                # Pre-process: Decode HTML entities while preserving Unicode
+                html_content = HTMLEntityDecoder.decode(html_content)
+                
+                title = None
+                confidence = 0.0
+                extraction_method = "unknown"
+                
+                # Try lxml first if available (better structure preservation)
+                if use_lxml and lxml_html:
+                    try:
+                        # Use lxml's HTML parser with recovery mode for better handling of malformed HTML
+                        parser = lxml_html.HTMLParser(
+                            encoding='utf-8', 
+                            recover=True,
+                            no_network=True,
+                            remove_comments=True,
+                            remove_pis=True,
+                            remove_blank_text=True
+                        )
+                        
+                        # Parse the document
+                        doc = lxml_html.document_fromstring(html_content.encode('utf-8'), parser=parser)
+                        
+                        candidates = []
+                        
+                        # Strategy 1: <title> tag (highest confidence)
+                        title_elements = doc.xpath('//title')
+                        if title_elements:
+                            for title_elem in title_elements:
+                                title_text = title_elem.text_content() if title_elem.text_content() else ''
+                                title_text = title_text.strip()
+                                # Accept any non-empty title
+                                if title_text and title_text.lower() not in ['untitled', 'chapter', 'document']:
+                                    candidates.append((title_text, 0.95, "lxml_title_tag"))
+                                    break
+                        
+                        # Strategy 2: h1 tags (very high confidence) - take ALL h1s
+                        h1_elements = doc.xpath('//h1')
+                        for i, h1 in enumerate(h1_elements[:3]):  # First 3 h1s
+                            h1_text = h1.text_content() if h1.text_content() else ''
+                            h1_text = h1_text.strip()
+                            if h1_text and len(h1_text) < 300:
+                                # First h1 gets highest confidence
+                                confidence = 0.9 if i == 0 else 0.85
+                                candidates.append((h1_text, confidence, f"lxml_h1_tag_{i+1}"))
+                        
+                        # Strategy 3: h2 tags (high confidence) - take ALL h2s including roman numerals
+                        h2_elements = doc.xpath('//h2')
+                        for i, h2 in enumerate(h2_elements[:3]):  # First 3 h2s
+                            h2_text = h2.text_content() if h2.text_content() else ''
+                            h2_text = h2_text.strip()
+                            if h2_text and len(h2_text) < 250:
+                                # First h2 gets highest confidence
+                                confidence = 0.8 if i == 0 else 0.75
+                                candidates.append((h2_text, confidence, f"lxml_h2_tag_{i+1}"))
+                        
+                        # Strategy 4: h3 tags (moderate confidence)
+                        h3_elements = doc.xpath('//h3')
+                        for i, h3 in enumerate(h3_elements[:3]):  # First 3 h3s
+                            h3_text = h3.text_content() if h3.text_content() else ''
+                            h3_text = h3_text.strip()
+                            if h3_text and len(h3_text) < 200:
+                                confidence = 0.7 if i == 0 else 0.65
+                                candidates.append((h3_text, confidence, f"lxml_h3_tag_{i+1}"))
+                        
+                        # Strategy 5: Bold/strong text in first paragraphs
+                        first_paras = doc.xpath('//p[position()<=5]')
+                        for para in first_paras:
+                            bold_elements = para.xpath('.//b | .//strong')
+                            for bold in bold_elements[:2]:
+                                bold_text = bold.text_content() if bold.text_content() else ''
+                                bold_text = bold_text.strip()
+                                # Accept short bold text (might be roman numerals)
+                                if bold_text and len(bold_text) <= 150:
+                                    candidates.append((bold_text, 0.6, "lxml_bold_text"))
+                        
+                        # Strategy 6: Center-aligned text (common for titles)
+                        center_elements = doc.xpath('//*[@align="center"] | //*[contains(@style, "text-align") and contains(@style, "center")]')
+                        for center in center_elements[:3]:
+                            center_text = center.text_content() if center.text_content() else ''
+                            center_text = center_text.strip()
+                            if center_text and len(center_text) <= 200:
+                                candidates.append((center_text, 0.65, "lxml_centered_text"))
+                        
+                        # Strategy 7: All-caps text (common in older books)
+                        for elem in doc.xpath('//h1 | //h2 | //h3 | //p | //div')[:10]:
+                            elem_text = elem.text_content() if elem.text_content() else ''
+                            elem_text = elem_text.strip()
+                            if elem_text and elem_text.isupper():
+                                # Keep as-is (don't auto-convert to title case)
+                                candidates.append((elem_text, 0.55, "lxml_all_caps"))
+                        
+                        # Strategy 8: Pattern matching in first paragraph
+                        first_p_elements = doc.xpath('//p[1]')
+                        if first_p_elements:
+                            first_p = first_p_elements[0]
+                            p_text = first_p.text_content() if first_p.text_content() else ''
+                            p_text = p_text.strip()
+                            
+                            # Look for "Chapter X: Title" patterns
+                            chapter_pattern = re.match(
+                                r'^(Chapter\s+[\dIVXLCDM]+\s*[:\-–—]\s*)(.{2,100})(?:\.|$)',
+                                p_text, re.IGNORECASE
+                            )
+                            if chapter_pattern:
+                                # Get the title part after "Chapter X:"
+                                title_part = chapter_pattern.group(2).strip()
+                                if title_part:
+                                    candidates.append((title_part, 0.8, "lxml_paragraph_pattern_title"))
+                                # Also include full pattern as option
+                                full_title = chapter_pattern.group(0).strip().rstrip('.')
+                                candidates.append((full_title, 0.75, "lxml_paragraph_pattern_full"))
+                            elif len(p_text) <= 100:
+                                # Short first paragraph might be title
+                                candidates.append((p_text, 0.4, "lxml_paragraph_standalone"))
+                        
+                        # Evaluate and select best candidate
+                        if candidates:
+                            unique_candidates = {}
+                            for cand_title, cand_confidence, cand_source in candidates:
+                                # Clean the title
+                                cand_title = TitleExtractor.clean_title(cand_title)
+                                
+                                # Validate the title (now accepts short titles like roman numerals)
+                                if cand_title and TitleExtractor.is_valid_title(cand_title):
+                                    # Keep the highest confidence version of each unique title
+                                    if cand_title not in unique_candidates or unique_candidates[cand_title][1] < cand_confidence:
+                                        unique_candidates[cand_title] = (cand_title, cand_confidence, cand_source)
+                            
+                            if unique_candidates:
+                                # Sort by confidence and get the best one
+                                sorted_candidates = sorted(unique_candidates.values(), key=lambda x: x[1], reverse=True)
+                                title, confidence, extraction_method = sorted_candidates[0]
+                                
+                                # Debug log
+                                self.log(f"[DEBUG] lxml extracted: '{title}' (confidence: {confidence:.2f}, method: {extraction_method})")
+                        
+                    except Exception as lxml_error:
+                        self.log(f"[DEBUG] lxml extraction failed for {filename}: {lxml_error}")
+                
+                # If lxml didn't work or didn't find a good title, try BeautifulSoup
+                if not title or confidence < 0.5:
+                    try:
+                        # Use BeautifulSoup as fallback (better entity handling for malformed HTML)
+                        bs_title, bs_confidence = TitleExtractor.extract_from_html(
+                            html_content, chapter_num, filename
+                        )
+                        
+                        # Use BeautifulSoup result if it's better
+                        if bs_confidence > confidence:
+                            title = bs_title
+                            confidence = bs_confidence
+                            extraction_method = "beautifulsoup"
+                        
+                    except Exception as bs_error:
+                        self.log(f"[DEBUG] BeautifulSoup extraction also failed for {filename}: {bs_error}")
+                
+                # Clean and validate the title one more time
+                if title:
+                    title = TitleExtractor.clean_title(title)
+                    if not TitleExtractor.is_valid_title(title):
+                        title = None
+                        confidence = 0.0
+                
+                # Fallback title extraction for non-standard files
+                if not title and not filename.startswith('response_'):
+                    # Try enhanced extraction methods for web-scraped content
+                    fallback_title = self._fallback_title_extraction(html_content, filename, chapter_num)
+                    if fallback_title:
+                        title = fallback_title
+                        confidence = 0.3
+                        extraction_method = "fallback_extraction"
+                
+                # Final fallback - use chapter number
+                if not title:
+                    title = f"Chapter {chapter_num}"
+                    confidence = 0.1
+                    extraction_method = "fallback_number"
+                
+                # Store the result with position-based chapter number
+                chapter_info[chapter_num] = (title, confidence, filename)
+                
+                # Log with confidence indicator and method
+                indicator = "✅" if confidence > 0.7 else "🟡" if confidence > 0.4 else "🔴"
+                self.log(f"  {indicator} Chapter {chapter_num}: '{title}' (confidence: {confidence:.2f}, method: {extraction_method})")
+                
+            except Exception as e:
+                self.log(f"❌ Error processing {filename}: {e}")
+                import traceback
+                self.log(f"[DEBUG] Traceback: {traceback.format_exc()}")
+                
+                # Use fallback chapter number based on position
+                fallback_num = idx + 1
+                chapter_info[fallback_num] = (f"Chapter {fallback_num}", 0.0, filename)
+        
+        # Summary statistics
+        if chapter_info:
+            confident = sum(1 for _, (_, conf, _) in chapter_info.items() if conf > 0.5)
+            medium = sum(1 for _, (_, conf, _) in chapter_info.items() if 0.3 < conf <= 0.5)
+            low = sum(1 for _, (_, conf, _) in chapter_info.items() if conf <= 0.3)
+            
+            self.log(f"\n📊 Title extraction summary:")
+            self.log(f"   • High confidence (>0.5): {confident} chapters")
+            self.log(f"   • Medium confidence (0.3-0.5): {medium} chapters")
+            self.log(f"   • Low confidence (≤0.3): {low} chapters")
+            self.log(f"   • Total: {len(chapter_info)} chapters")
+        
+        return chapter_info
+
+
+    def _get_chapter_order_from_opf(self) -> Dict[str, int]:
+        """Get chapter order from content.opf or source EPUB
+        Returns dict mapping original_filename -> chapter_number
+        """
+        # First, try to find content.opf in the current directory
+        opf_path = os.path.join(self.output_dir, "content.opf")
+        
+        if os.path.exists(opf_path):
+            self.log("✅ Found content.opf - using for chapter ordering")
+            return self._parse_opf_file(opf_path)
+        
+        # If not found, try to extract from source EPUB
+        source_epub = os.getenv('EPUB_PATH')
+        if source_epub and os.path.exists(source_epub):
+            self.log(f"📚 Extracting chapter order from source EPUB: {source_epub}")
+            return self._extract_order_from_epub(source_epub)
+        
+        # Fallback to translation_progress.json if available
+        progress_file = os.path.join(self.output_dir, "translation_progress.json")
+        if os.path.exists(progress_file):
+            self.log("📄 Using translation_progress.json for chapter order")
+            return self._get_order_from_progress_file(progress_file)
+        
+        return None
+
+    def _parse_opf_file(self, opf_path: str) -> Dict[str, int]:
+        """Parse content.opf to get chapter order from spine
+        Returns dict mapping original_filename -> chapter_number
+        """
+        try:
+            tree = ET.parse(opf_path)
+            root = tree.getroot()
+            
+            # Handle namespaces
+            ns = {'opf': 'http://www.idpf.org/2007/opf'}
+            if root.tag.startswith('{'):
+                # Extract default namespace
+                default_ns = root.tag[1:root.tag.index('}')]
+                ns = {'opf': default_ns}
+            
+            # Get manifest to map IDs to files
+            manifest = {}
+            for item in root.findall('.//opf:manifest/opf:item', ns):
+                item_id = item.get('id')
+                href = item.get('href')
+                media_type = item.get('media-type', '')
+                
+                # Only include HTML/XHTML files
+                if item_id and href and ('html' in media_type.lower() or href.endswith(('.html', '.xhtml', '.htm'))):
+                    # Get just the filename without path
+                    filename = os.path.basename(href)
+                    manifest[item_id] = filename
+            
+            # Get spine order
+            filename_to_order = {}
+            chapter_num = 0  # Start from 0 for array indexing
+            
+            spine = root.find('.//opf:spine', ns)
+            if spine is not None:
+                for itemref in spine.findall('opf:itemref', ns):
+                    idref = itemref.get('idref')
+                    if idref and idref in manifest:
+                        filename = manifest[idref]
+                        # Skip navigation documents
+                        if not any(skip in filename.lower() for skip in ['nav', 'toc', 'contents', 'cover']):
+                            filename_to_order[filename] = chapter_num
+                            self.log(f"  Chapter {chapter_num}: {filename}")
+                            chapter_num += 1
+            
+            return filename_to_order
+            
+        except Exception as e:
+            self.log(f"⚠️ Error parsing content.opf: {e}")
+            import traceback
+            self.log(traceback.format_exc())
+            return None
+
+    def _extract_order_from_epub(self, epub_path: str) -> List[Tuple[int, str]]:
+        """Extract chapter order from source EPUB file"""
+        try:
+            import zipfile
+            
+            with zipfile.ZipFile(epub_path, 'r') as zf:
+                # Find content.opf (might be in different locations)
+                opf_file = None
+                for name in zf.namelist():
+                    if name.endswith('content.opf'):
+                        opf_file = name
+                        break
+                
+                if not opf_file:
+                    # Try META-INF/container.xml to find content.opf
+                    try:
+                        container = zf.read('META-INF/container.xml')
+                        # Parse container.xml to find content.opf location
+                        container_tree = ET.fromstring(container)
+                        rootfile = container_tree.find('.//{urn:oasis:names:tc:opendocument:xmlns:container}rootfile')
+                        if rootfile is not None:
+                            opf_file = rootfile.get('full-path')
+                    except:
+                        pass
+                
+                if opf_file:
+                    opf_content = zf.read(opf_file)
+                    # Save temporarily and parse
+                    temp_opf = os.path.join(self.output_dir, "temp_content.opf")
+                    with open(temp_opf, 'wb') as f:
+                        f.write(opf_content)
+                    
+                    result = self._parse_opf_file(temp_opf)
+                    
+                    # Clean up temp file
+                    if os.path.exists(temp_opf):
+                        os.remove(temp_opf)
+                        
+                    return result
+                    
+        except Exception as e:
+            self.log(f"⚠️ Error extracting from EPUB: {e}")
+            return None
 
     def _find_html_files(self) -> List[str]:
-            """Find HTML files with ROBUST sorting for ANY pattern"""
-            self.log(f"\n[DEBUG] Scanning directory: {self.output_dir}")
+        """Find HTML files using OPF-based ordering when available"""
+        self.log(f"\n[DEBUG] Scanning directory: {self.output_dir}")
+        
+        # Get all HTML files in directory
+        all_files = os.listdir(self.output_dir)
+        html_extensions = ('.html', '.htm', '.xhtml')
+        html_files = [f for f in all_files if f.lower().endswith(html_extensions)]
+        
+        if not html_files:
+            self.log("[ERROR] No HTML files found!")
+            return []
+        
+        # Try to get authoritative order from OPF/EPUB
+        opf_order = self._get_chapter_order_from_opf()
+        
+        if opf_order:
+            self.log("✅ Using authoritative chapter order from OPF/EPUB")
             
-            all_files = os.listdir(self.output_dir)
-            
-            # Get ALL HTML files, not just response_ ones
-            html_extensions = ('.html', '.htm', '.xhtml')
-            html_files = [f for f in all_files if f.lower().endswith(html_extensions)]
-            
-            # Filter out common non-chapter files
-            exclude_patterns = [
-                'index', 'toc', 'contents', 'cover', 'title',
-                'copyright', 'about', 'nav', 'style', 'template'
-            ]
-            
-            # First, try to find response_ files (your current pattern)
-            response_files = [f for f in html_files if f.startswith('response_')]
-            
-            # If we have response_ files, use those
-            if response_files:
-                html_files = response_files
-                self.log(f"[DEBUG] Found {len(response_files)} response_ files")
-            else:
-                # Otherwise, filter out obvious non-chapter files
-                html_files = [f for f in html_files 
-                             if not any(exclude in f.lower() for exclude in exclude_patterns)]
-                self.log(f"[DEBUG] Found {len(html_files)} HTML files (no response_ prefix)")
-            
-            if not html_files:
-                self.log("[ERROR] No HTML files found!")
-                return []
-            
-            # Sort files
-            if response_files:
-                # FIXED: Check if files have -h- pattern
-                if any('-h-' in f for f in response_files):
-                    # Use special sorting for -h- pattern
-                    def extract_h_number(filename):
-                        match = re.search(r'-h-(\d+)', filename)
-                        if match:
-                            return int(match.group(1))
-                        return 999999  # Put non-matching files at end
-                    
-                    html_files.sort(key=extract_h_number)
+            # Create mapping: remove "response_" prefix from output files to match OPF
+            output_to_original = {}
+            for output_file in html_files:
+                # Strip "response_" prefix if present
+                if output_file.startswith('response_'):
+                    original_name = output_file[len('response_'):]
+                    output_to_original[output_file] = original_name
                 else:
-                    # Use numeric sorting for standard response_ files
-                    def extract_number(filename):
-                        match = re.match(r'response_(\d+)_', filename)
-                        if match:
-                            return int(match.group(1))
-                        return 0
+                    output_to_original[output_file] = output_file
+            
+            # Now sort the output files based on OPF order
+            ordered_files = []
+            unmapped_files = []
+            
+            for output_file in html_files:
+                original_name = output_to_original[output_file]
+                
+                # Check if this original name is in our OPF order
+                if original_name in opf_order:
+                    chapter_order = opf_order[original_name]
+                    ordered_files.append((chapter_order, output_file))
+                    self.log(f"  Mapped: {output_file} -> {original_name} (order: {chapter_order})")
+                else:
+                    # Try without extension variations (sometimes .xhtml vs .html)
+                    found = False
+                    for opf_name, order in opf_order.items():
+                        # Compare without extensions
+                        if os.path.splitext(original_name)[0] == os.path.splitext(opf_name)[0]:
+                            ordered_files.append((order, output_file))
+                            self.log(f"  Mapped (fuzzy): {output_file} -> {opf_name} (order: {order})")
+                            found = True
+                            break
                     
-                    html_files.sort(key=extract_number)
+                    if not found:
+                        unmapped_files.append(output_file)
+                        self.log(f"  ⚠️ Could not map: {output_file} (original: {original_name})")
+            
+            if ordered_files:
+                # Sort by chapter order and extract just the filenames
+                ordered_files.sort(key=lambda x: x[0])
+                final_order = [f for _, f in ordered_files]
+                
+                # Append any unmapped files at the end
+                if unmapped_files:
+                    self.log(f"⚠️ Adding {len(unmapped_files)} unmapped files at the end")
+                    final_order.extend(sorted(unmapped_files))
+                
+                self.log(f"✅ Successfully ordered {len(final_order)} chapters using OPF")
+                
+                # Debug: Show final order
+                self.log("\n[DEBUG] Final chapter order:")
+                for i, f in enumerate(final_order[:10]):
+                    self.log(f"  {i+1}. {f}")
+                if len(final_order) > 10:
+                    self.log(f"  ... and {len(final_order)-10} more")
+                
+                return final_order
             else:
-                # Progressive sorting for non-standard files
-                html_files.sort(key=self.get_robust_sort_key)
+                self.log("⚠️ Could not map any files using OPF order, falling back to pattern matching")
+        
+        # Fallback to original pattern matching logic
+        self.log("⚠️ No OPF/EPUB found or mapping failed, using filename pattern matching")
+        
+        # First, try to find response_ files
+        response_files = [f for f in html_files if f.startswith('response_')]
+        
+        if response_files:
+            html_files = response_files
+            self.log(f"[DEBUG] Found {len(response_files)} response_ files")
             
-            # Debug output
-            self.log(f"\n[DEBUG] Sorted {len(html_files)} files:")
-            for i, f in enumerate(html_files[:10]):
-                self.log(f"  {i+1}. {f}")
-            if len(html_files) > 10:
-                self.log(f"  ... and {len(html_files)-10} more")
-            
-            return html_files
+            # Check if files have -h- pattern
+            if any('-h-' in f for f in response_files):
+                # Use special sorting for -h- pattern
+                def extract_h_number(filename):
+                    match = re.search(r'-h-(\d+)', filename)
+                    if match:
+                        return int(match.group(1))
+                    return 999999
+                
+                html_files.sort(key=extract_h_number)
+            else:
+                # Use numeric sorting for standard response_ files
+                def extract_number(filename):
+                    match = re.match(r'response_(\d+)_', filename)
+                    if match:
+                        return int(match.group(1))
+                    return 0
+                
+                html_files.sort(key=extract_number)
+        else:
+            # Progressive sorting for non-standard files
+            html_files.sort(key=self.get_robust_sort_key)
+        
+        return html_files
 
     def _process_chapters(self, book: epub.EpubBook, html_files: List[str],
                          chapter_titles_info: Dict[int, Tuple[str, float, str]],
                          css_items: List[epub.EpubItem], processed_images: Dict[str, str],
                          spine: List, toc: List, metadata: dict) -> int:
-        """Process chapters - NO FANCY PARSING"""
+        """Process chapters - uses position-based numbering to match _analyze_chapters"""
         chapters_added = 0
         
         self.log(f"\n📚 Processing {len(html_files)} chapters...")
         
-        # Check if we're dealing with standard files
-        is_standard = any(f.startswith('response_') for f in html_files)
-        
-        # Process in EXACT order - no parsing, no reordering
+        # Process in EXACT order - use position-based numbering
         for idx, filename in enumerate(html_files):
-            # FIXED: Always extract chapter number from filename, not from position
-            chapter_num = self._extract_chapter_number(filename, idx)
+            # FIXED: Use position-based numbering to match _analyze_chapters
+            chapter_num = idx + 1  # 1-based numbering, same as in _analyze_chapters
             
             try:
                 if self._process_single_chapter(
@@ -1497,19 +2138,24 @@ class EPUBCompiler:
             except Exception as e:
                 self.log(f"[ERROR] Chapter {chapter_num} failed: {e}")
                 
-                # Add placeholder
+                # Add placeholder with consistent numbering
                 try:
+                    # Try to get the title from chapter_titles_info
+                    title = f"Chapter {chapter_num}"
+                    if chapter_num in chapter_titles_info:
+                        title = chapter_titles_info[chapter_num][0]
+                    
                     chapter = epub.EpubHtml(
-                        title=f"Chapter {chapter_num}",
+                        title=title,
                         file_name=f"chapter_{chapter_num:03d}.xhtml",
                         lang=metadata.get("language", "en")
                     )
                     chapter.content = f"""<?xml version="1.0" encoding="utf-8"?>
     <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
     <html xmlns="http://www.w3.org/1999/xhtml">
-    <head><title>Chapter {chapter_num}</title></head>
+    <head><title>{ContentProcessor.safe_escape(title)}</title></head>
     <body>
-    <h1>Chapter {chapter_num}</h1>
+    <h1>{ContentProcessor.safe_escape(title)}</h1>
     <p>Error loading: {filename}</p>
     </body>
     </html>""".encode('utf-8')
@@ -1663,15 +2309,18 @@ class EPUBCompiler:
 
     def _get_chapter_title(self, num: int, filename: str, content: str,
                           chapter_titles_info: Dict[int, Tuple[str, float, str]]) -> str:
-        """Get chapter title with fallbacks"""
+        """Get chapter title with fallbacks - uses position-based numbering"""
         title = None
         confidence = 0.0
         
-        # Try pre-analyzed title
+        # Primary source: pre-analyzed title using position-based number
         if num in chapter_titles_info:
-            title, confidence, _ = chapter_titles_info[num]
+            title, confidence, stored_filename = chapter_titles_info[num]
+            # Verify this is the right file (optional safety check)
+            if stored_filename != filename:
+                self.log(f"[WARNING] Filename mismatch for chapter {num}: expected {stored_filename}, got {filename}")
         
-        # Re-extract if low confidence
+        # Re-extract if low confidence or missing
         if not title or confidence < 0.5:
             backup_title, backup_confidence = TitleExtractor.extract_from_html(content, num, filename)
             if backup_confidence > confidence:
@@ -1684,18 +2333,16 @@ class EPUBCompiler:
             if not TitleExtractor.is_valid_title(title):
                 title = None
         
-        # NEW FALLBACK LOGIC - only if TitleExtractor failed AND not standard file
+        # Fallback for non-standard files
         if not title and not filename.startswith('response_'):
             # Try enhanced extraction methods for web-scraped content
             title = self._fallback_title_extraction(content, filename, num)
         
-        # Final fallback
+        # Final fallback - use position-based chapter number
         if not title:
             title = f"Chapter {num}"
         
         return title
-
-    # Progressive helper methods - only used for non-standard files
 
     def get_robust_sort_key(self, filename):
         """Extract chapter/sequence number using multiple patterns"""
@@ -2001,7 +2648,7 @@ class EPUBCompiler:
         return {}
     
     def _create_book(self, metadata: dict) -> epub.EpubBook:
-        """Create and configure EPUB book"""
+        """Create and configure EPUB book with complete metadata"""
         book = epub.EpubBook()
         
         # Set identifier
@@ -2014,14 +2661,88 @@ class EPUBCompiler:
         # Set language
         book.set_language(metadata.get("language", "en"))
         
-        # Add original title if different
-        #if metadata.get('original_title') and metadata.get('original_title') != book_title:
-        #    book.add_metadata('DC', 'title', metadata['original_title'], {'type': 'original'})
+        # Add original title if different (as alternative title)
+        if metadata.get('original_title') and metadata.get('original_title') != book_title:
+            book.add_metadata('DC', 'title', metadata['original_title'], {'type': 'original'})
         
-        # Set author
+        # Set author/creator
         if metadata.get("creator"):
             book.add_author(metadata["creator"])
             self.log(f"[INFO] Set author: {metadata['creator']}")
+        
+        # ADD DESCRIPTION - This is what Calibre looks for
+        if metadata.get("description"):
+            # Clean the description of any HTML entities
+            description = HTMLEntityDecoder.decode(str(metadata["description"]))
+            book.add_metadata('DC', 'description', description)
+            self.log(f"[INFO] Set description: {description[:100]}..." if len(description) > 100 else f"[INFO] Set description: {description}")
+        
+        # Add publisher
+        if metadata.get("publisher"):
+            book.add_metadata('DC', 'publisher', metadata["publisher"])
+            self.log(f"[INFO] Set publisher: {metadata['publisher']}")
+        
+        # Add publication date
+        if metadata.get("date"):
+            book.add_metadata('DC', 'date', metadata["date"])
+            self.log(f"[INFO] Set date: {metadata['date']}")
+        
+        # Add rights/copyright
+        if metadata.get("rights"):
+            book.add_metadata('DC', 'rights', metadata["rights"])
+            self.log(f"[INFO] Set rights: {metadata['rights']}")
+        
+        # Add subject/genre/tags
+        if metadata.get("subject"):
+            if isinstance(metadata["subject"], list):
+                for subject in metadata["subject"]:
+                    book.add_metadata('DC', 'subject', subject)
+                    self.log(f"[INFO] Added subject: {subject}")
+            else:
+                book.add_metadata('DC', 'subject', metadata["subject"])
+                self.log(f"[INFO] Set subject: {metadata['subject']}")
+        
+        # Add series information if available
+        if metadata.get("series"):
+            # Calibre uses a custom metadata field for series
+            book.add_metadata('calibre', 'series', metadata["series"])
+            self.log(f"[INFO] Set series: {metadata['series']}")
+            
+            # Add series index if available
+            if metadata.get("series_index"):
+                book.add_metadata('calibre', 'series_index', str(metadata["series_index"]))
+                self.log(f"[INFO] Set series index: {metadata['series_index']}")
+        
+        # Add custom metadata for translator info
+        if metadata.get("translator"):
+            book.add_metadata('DC', 'contributor', metadata["translator"], {'role': 'translator'})
+            self.log(f"[INFO] Set translator: {metadata['translator']}")
+        
+        # Add source information
+        if metadata.get("source"):
+            book.add_metadata('DC', 'source', metadata["source"])
+            self.log(f"[INFO] Set source: {metadata['source']}")
+        
+        # Add any ISBN if available
+        if metadata.get("isbn"):
+            book.add_metadata('DC', 'identifier', f"ISBN:{metadata['isbn']}", {'scheme': 'ISBN'})
+            self.log(f"[INFO] Set ISBN: {metadata['isbn']}")
+        
+        # Add coverage (geographic/temporal scope) if available
+        if metadata.get("coverage"):
+            book.add_metadata('DC', 'coverage', metadata["coverage"])
+            self.log(f"[INFO] Set coverage: {metadata['coverage']}")
+        
+        # Add any custom metadata that might be in the JSON
+        # This handles any additional fields that might be present
+        custom_metadata_fields = [
+            'contributor', 'format', 'relation', 'type'
+        ]
+        
+        for field in custom_metadata_fields:
+            if metadata.get(field):
+                book.add_metadata('DC', field, metadata[field])
+                self.log(f"[INFO] Set {field}: {metadata[field]}")
         
         return book
     
