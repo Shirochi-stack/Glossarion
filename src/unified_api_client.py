@@ -1219,16 +1219,16 @@ class UnifiedClient:
             return cached_result
         
         # Check if another thread is processing this request
-        with self._active_requests_lock:
-            if request_hash in self._active_requests:
+        #with self._active_requests_lock:
+        #    if request_hash in self._active_requests:
                 # Another thread is processing, get the event
-                event = self._active_requests[request_hash]
-                print(f"[{thread_name}] Waiting for another thread to complete request {request_hash[:8]}")
-            else:
-                # We're the first, create an event for others to wait on
-                event = threading.Event()
-                self._active_requests[request_hash] = event
-                return None  # We should process this request
+        #        event = self._active_requests[request_hash]
+        #        print(f"[{thread_name}] Waiting for another thread to complete request {request_hash[:8]}")
+        #    else:
+        #        # We're the first, create an event for others to wait on
+        #        event = threading.Event()
+        #        self._active_requests[request_hash] = event
+        #        return None  # We should process this request
         
         # Wait for the other thread to complete (outside the lock)
         if event.wait(timeout=300):  # 5 minute timeout
@@ -1886,12 +1886,13 @@ class UnifiedClient:
 
     def _debug_active_requests(self):
         """Debug method to show current active requests"""
-        with self._active_requests_lock:
-            active_count = len(self._active_requests)
-            if active_count > 0:
-                logger.debug(f"Active requests: {active_count}")
-                for hash_key in list(self._active_requests.keys())[:5]:  # Show first 5
-                    logger.debug(f"  - {hash_key[:8]}...")
+        #with self._active_requests_lock:
+        #    active_count = len(self._active_requests)
+        #    if active_count > 0:
+        #        logger.debug(f"Active requests: {active_count}")
+        #        for hash_key in list(self._active_requests.keys())[:5]:  # Show first 5
+        #            logger.debug(f"  - {hash_key[:8]}...")
+        pass
 
     def _ensure_thread_safety_init(self):
         """
@@ -1948,19 +1949,19 @@ class UnifiedClient:
                 logger.debug(f"Cleaned up {len(expired_keys)} expired cache entries")
         
         # Clean up stuck active requests (older than 5 minutes)
-        with self._active_requests_lock:
-            stuck_timeout = 300  # 5 minutes
-            stuck_requests = []
-            
-            for request_hash, event in list(self._active_requests.items()):
+        #with self._active_requests_lock:
+        #    stuck_timeout = 300  # 5 minutes
+        #    stuck_requests = []
+        #    
+        #    for request_hash, event in list(self._active_requests.items()):
                 # Note: We can't easily track creation time of events,
                 # so we rely on the cleanup timer approach in the main send() method
                 # This is just a safety cleanup for any that got stuck
-                if not event.is_set():
+        #        if not event.is_set():
                     # Check if any thread is waiting on this event
                     # If no waiters after timeout, remove it
                     # This is a simplified check - in production you might track timestamps
-                    pass
+        #            pass
 
     def _get_thread_status(self) -> dict:
         """
@@ -2000,10 +2001,10 @@ class UnifiedClient:
             self._api_key_pool.release_thread_assignment(thread_id)
         
         # Clear any pending active requests for this client
-        with self._active_requests_lock:
+        #with self._active_requests_lock:
             # Set all events to release waiting threads
-            for event in self._active_requests.values():
-                event.set()
+        #    for event in self._active_requests.values():
+        #        event.set()
             # Note: We don't clear the dict here as other threads might still be using it
         
         # Clear thread-local storage
@@ -2649,17 +2650,17 @@ class UnifiedClient:
             processing_by_other = False
             event_to_wait = None
             
-            with self._active_requests_lock:
-                if request_hash in self._active_requests:
-                    # Another thread is processing
-                    event_to_wait = self._active_requests[request_hash]
-                    processing_by_other = True
-                    logger.info(f"[{thread_name}] Request {request_hash[:8]} is being processed by another thread")
-                else:
-                    # We're the first, create an event for others
-                    event = threading.Event()
-                    self._active_requests[request_hash] = event
-                    logger.debug(f"[{thread_name}] Taking ownership of request {request_hash[:8]}")
+            #with self._active_requests_lock:
+            #    if request_hash in self._active_requests:
+            #        # Another thread is processing
+            #        event_to_wait = self._active_requests[request_hash]
+            #        processing_by_other = True
+            #        logger.info(f"[{thread_name}] Request {request_hash[:8]} is being processed by another thread")
+            #    else:
+            #        # We're the first, create an event for others
+            #        event = threading.Event()
+            #        self._active_requests[request_hash] = event
+            #        logger.debug(f"[{thread_name}] Taking ownership of request {request_hash[:8]}")
             
             # Step 3: If another thread is processing, wait for it
             if processing_by_other and event_to_wait:
@@ -2917,14 +2918,14 @@ class UnifiedClient:
                 logger.info(f"[{thread_name}] Cached successful response for {context_str}")
                 
                 # Signal waiting threads BEFORE cleanup
-                with self._active_requests_lock:
-                    if request_hash in self._active_requests:
-                        event = self._active_requests[request_hash]
-                        event.set()  # Wake up waiting threads
-                        logger.debug(f"[{thread_name}] Signaled completion of {request_hash[:8]}")
-                        
-                        # Schedule cleanup after a delay to ensure waiters get the result
-                        threading.Timer(5.0, self._cleanup_active_request, args=[request_hash]).start()
+                #with self._active_requests_lock:
+                #    if request_hash in self._active_requests:
+                #        event = self._active_requests[request_hash]
+                #        event.set()  # Wake up waiting threads
+                #        logger.debug(f"[{thread_name}] Signaled completion of {request_hash[:8]}")
+                #        
+                #        # Schedule cleanup after a delay to ensure waiters get the result
+                #        threading.Timer(5.0, self._cleanup_active_request, args=[request_hash]).start()
             
             if successful_response:
                 return successful_response
@@ -2934,11 +2935,11 @@ class UnifiedClient:
                 print(f"[{thread_name}] Exhausted {max_retries} retries, last reason: {retry_reason}")
                 
                 # Clean up on failure too
-                with self._active_requests_lock:
-                    if request_hash in self._active_requests:
-                        event = self._active_requests.pop(request_hash, None)
-                        if event:
-                            event.set()  # Signal failure to waiters
+                #with self._active_requests_lock:
+                #    if request_hash in self._active_requests:
+                 #       event = self._active_requests.pop(request_hash, None)
+                 #       if event:
+                 #           event.set()  # Signal failure to waiters
                 
                 raise last_error
             else:
@@ -2946,11 +2947,11 @@ class UnifiedClient:
                 
         except Exception as e:
             # Clean up on any exception
-            with self._active_requests_lock:
-                if request_hash in self._active_requests:
-                    event = self._active_requests.pop(request_hash, None)
-                    if event:
-                        event.set()  # Signal error to waiters
+            #with self._active_requests_lock:
+            #    if request_hash in self._active_requests:
+            #        event = self._active_requests.pop(request_hash, None)
+            #        if event:
+            #            event.set()  # Signal error to waiters
             raise
 
     def _send_internal(self, messages, temperature=None, max_tokens=None, 
@@ -3701,17 +3702,17 @@ class UnifiedClient:
             processing_by_other = False
             event_to_wait = None
             
-            with self._active_requests_lock:
-                if request_hash in self._active_requests:
+            #with self._active_requests_lock:
+             #   if request_hash in self._active_requests:
                     # Another thread is processing this image
-                    event_to_wait = self._active_requests[request_hash]
-                    processing_by_other = True
-                    logger.info(f"[{thread_name}] Image request {request_hash[:8]} is being processed by another thread")
-                else:
-                    # We're the first, create an event for others
-                    event = threading.Event()
-                    self._active_requests[request_hash] = event
-                    logger.debug(f"[{thread_name}] Taking ownership of image request {request_hash[:8]}")
+             #       event_to_wait = self._active_requests[request_hash]
+             #       processing_by_other = True
+             #       logger.info(f"[{thread_name}] Image request {request_hash[:8]} is being processed by another thread")
+             #   else:
+              #      # We're the first, create an event for others
+               #     event = threading.Event()
+               #     self._active_requests[request_hash] = event
+                #    logger.debug(f"[{thread_name}] Taking ownership of image request {request_hash[:8]}")
             
             # Step 3: If another thread is processing, wait for it
             if processing_by_other and event_to_wait:
@@ -3998,14 +3999,14 @@ class UnifiedClient:
                 logger.info(f"[{thread_name}] Cached successful image response for {context_str}")
                 
                 # Signal waiting threads BEFORE cleanup
-                with self._active_requests_lock:
-                    if request_hash in self._active_requests:
-                        event = self._active_requests[request_hash]
-                        event.set()  # Wake up waiting threads
-                        logger.debug(f"[{thread_name}] Signaled completion of image {request_hash[:8]}")
+               # with self._active_requests_lock:
+               #     if request_hash in self._active_requests:
+               #         event = self._active_requests[request_hash]
+               #         event.set()  # Wake up waiting threads
+               #         logger.debug(f"[{thread_name}] Signaled completion of image {request_hash[:8]}")
                         
                         # Schedule cleanup after delay to ensure waiters get the result
-                        threading.Timer(5.0, self._cleanup_active_request, args=[request_hash]).start()
+               #         threading.Timer(5.0, self._cleanup_active_request, args=[request_hash]).start()
             
             if successful_response:
                 return successful_response
@@ -4015,11 +4016,11 @@ class UnifiedClient:
                 print(f"[{thread_name}] Exhausted {max_retries} image retries, last reason: {retry_reason}")
                 
                 # Clean up on failure too
-                with self._active_requests_lock:
-                    if request_hash in self._active_requests:
-                        event = self._active_requests.pop(request_hash, None)
-                        if event:
-                            event.set()  # Signal failure to waiters
+                #with self._active_requests_lock:
+                #    if request_hash in self._active_requests:
+                #        event = self._active_requests.pop(request_hash, None)
+                #        if event:
+                #            event.set()  # Signal failure to waiters
                 
                 raise last_error
             else:
@@ -4027,11 +4028,11 @@ class UnifiedClient:
                 
         except Exception as e:
             # Clean up on any exception
-            with self._active_requests_lock:
-                if request_hash in self._active_requests:
-                    event = self._active_requests.pop(request_hash, None)
-                    if event:
-                        event.set()  # Signal error to waiters
+            #with self._active_requests_lock:
+            #    if request_hash in self._active_requests:
+            #        event = self._active_requests.pop(request_hash, None)
+            #        if event:
+            #            event.set()  # Signal error to waiters
             raise
 
     def _send_image_internal(self, messages: List[Dict[str, Any]], image_data: Any,
