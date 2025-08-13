@@ -6219,7 +6219,7 @@ Provide translations in the same numbered format."""
                             
                             # Get user-configured worker count
                             if hasattr(self, 'config') and 'ai_hunter_config' in self.config:
-                                max_workers = self.config.get('ai_hunter_config', {}).get('ai_hunter_max_workers', 4)
+                                max_workers = self.config.get('ai_hunter_config', {}).get('extraction_workers', 4)
                             else:
                                 max_workers = 4  # Default value
                             
