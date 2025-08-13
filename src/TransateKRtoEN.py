@@ -3917,13 +3917,6 @@ class BatchTranslationProcessor:
 # =====================================================
 # GLOSSARY MANAGER - TRUE CSV FORMAT WITH FUZZY MATCHING
 # =====================================================
-import re
-import os
-import json
-import time
-import shutil
-from bs4 import BeautifulSoup
-from difflib import SequenceMatcher
 
 class GlossaryManager:
     """Unified glossary management with true CSV format and fuzzy matching"""
@@ -3995,6 +3988,7 @@ class GlossaryManager:
         batch_size = int(os.getenv("GLOSSARY_BATCH_SIZE", "50"))
         strip_honorifics = os.getenv("GLOSSARY_STRIP_HONORIFICS", "1") == "1"
         fuzzy_threshold = float(os.getenv("GLOSSARY_FUZZY_THRESHOLD", "0.90"))
+        max_text_size = int(os.getenv("GLOSSARY_MAX_TEXT_SIZE", "50000"))
         
         print(f"📑 Settings: Min frequency: {min_frequency}, Max names: {max_names}, Max titles: {max_titles}")
         print(f"📑 Strip honorifics: {'✅ Yes' if strip_honorifics else '❌ No'}")
@@ -4095,7 +4089,7 @@ class GlossaryManager:
         matches_count = text_lower.count(term_lower)
         
         # If exact matches are low and fuzzy threshold is below 1.0, do fuzzy matching
-        if matches_count == 0 and threshold < 1.0:
+        if threshold < 1.0:  # Always do fuzzy matching if threshold is below 1.0
             # For efficiency, only check every N characters
             step = max(1, term_len // 2)
             for i in range(0, len(text) - term_len + 1, step):
@@ -4157,7 +4151,7 @@ class GlossaryManager:
                 if hasattr(client, 'reset_cleanup_state'):
                     client.reset_cleanup_state()            
                 
-                text_sample = all_text[:50000] if len(all_text) > 50000 else all_text
+                text_sample = all_text[:max_text_size] if len(all_text) > max_text_size and max_text_size > 0 else all_text
                 
                 # Replace placeholders in prompt
                 prompt = custom_prompt.replace('{language}', language)
