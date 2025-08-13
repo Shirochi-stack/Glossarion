@@ -1173,7 +1173,7 @@ class TranslatorGUI:
         self.glossary_max_names_var = tk.StringVar(value=str(self.config.get('glossary_max_names', 50)))
         self.glossary_max_titles_var = tk.StringVar(value=str(self.config.get('glossary_max_titles', 30)))
         self.glossary_batch_size_var = tk.StringVar(value=str(self.config.get('glossary_batch_size', 50)))
-        self.glossary_max_text_size_var = tk.StringVar(value=str(self.config.get('glossary_max_text_size', 50000))
+        self.glossary_max_text_size_var = tk.StringVar(value=str(self.config.get('glossary_max_text_size', 50000)))
 
         
         # NEW: Additional glossary settings
