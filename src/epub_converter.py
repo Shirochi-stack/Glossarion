@@ -2993,8 +2993,34 @@ img {
         cover_file = None
         
         try:
-            if not os.path.isdir(self.images_dir):
+            # Debug: Check multiple possible image locations
+            possible_dirs = [
+                self.images_dir,  # Default: output_dir/images
+                os.path.join(self.base_dir, "images"),  # base_dir/images
+                os.path.join(self.output_dir, "images"),  # output_dir/images
+            ]
+            
+            images_found = False
+            actual_images_dir = None
+            
+            for test_dir in possible_dirs:
+                self.log(f"[DEBUG] Checking for images in: {test_dir}")
+                if os.path.isdir(test_dir):
+                    files = os.listdir(test_dir)
+                    if files:
+                        self.log(f"[DEBUG] Found {len(files)} files in {test_dir}")
+                        actual_images_dir = test_dir
+                        images_found = True
+                        break
+            
+            if not images_found:
+                self.log("[WARNING] No images directory found or directory is empty")
+                self.log(f"[DEBUG] Searched in: {possible_dirs}")
                 return processed_images, cover_file
+            
+            # Use the directory where images were found
+            self.images_dir = actual_images_dir
+            self.log(f"[INFO] Using images directory: {self.images_dir}")
             
             # Process all images
             for img in sorted(os.listdir(self.images_dir)):
@@ -3002,7 +3028,25 @@ img {
                 if not os.path.isfile(path):
                     continue
                 
+                # Check MIME type
                 ctype, _ = mimetypes.guess_type(path)
+                
+                # If MIME type detection fails, check extension
+                if not ctype:
+                    ext = os.path.splitext(img)[1].lower()
+                    if ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg']:
+                        # Manually set MIME type based on extension
+                        mime_map = {
+                            '.jpg': 'image/jpeg',
+                            '.jpeg': 'image/jpeg',
+                            '.png': 'image/png',
+                            '.gif': 'image/gif',
+                            '.bmp': 'image/bmp',
+                            '.webp': 'image/webp',
+                            '.svg': 'image/svg+xml'
+                        }
+                        ctype = mime_map.get(ext, 'image/jpeg')
+                
                 if ctype and ctype.startswith("image"):
                     safe_name = FileUtils.sanitize_filename(img, allow_unicode=False)
                     
@@ -3018,6 +3062,8 @@ img {
                     
                     processed_images[img] = safe_name
                     self.log(f"[DEBUG] Found image: {img} -> {safe_name}")
+                else:
+                    self.log(f"[DEBUG] Skipped non-image file: {img} (MIME: {ctype})")
             
             # Find cover (case-insensitive search)
             if processed_images:
@@ -3035,9 +3081,12 @@ img {
                     cover_file = next(iter(processed_images.values()))
                     self.log(f"[DEBUG] Using first image as cover: {cover_file}")
             
+            self.log(f"[INFO] Processed {len(processed_images)} images")
+            
         except Exception as e:
-            self.log(f"[WARNING] Error processing images: {e}")
-            # Return empty results instead of None
+            self.log(f"[ERROR] Error processing images: {e}")
+            import traceback
+            self.log(f"[DEBUG] Traceback: {traceback.format_exc()}")
         
         return processed_images, cover_file
     
@@ -3131,13 +3180,22 @@ img {
             soup = BeautifulSoup(xhtml_content, 'html.parser')
             changed = False
             
+            # Debug: Log what images we're looking for
+            self.log(f"[DEBUG] Processing chapter images. Available images: {list(processed_images.keys())}")
+            
             for img in soup.find_all('img'):
                 src = img.get('src', '')
                 if not src:
+                    self.log(f"[WARNING] Image tag with no src attribute found")
                     continue
                 
-                # Get the base filename
-                basename = os.path.basename(src.split('?')[0])
+                # Get the base filename - handle various path formats
+                # Remove query parameters first
+                clean_src = src.split('?')[0]
+                basename = os.path.basename(clean_src)
+                
+                # Debug: Log what we're looking for
+                self.log(f"[DEBUG] Looking for image: {basename} (from src: {src})")
                 
                 # Look up the safe name
                 if basename in processed_images:
@@ -3145,8 +3203,28 @@ img {
                     new_src = f"images/{safe_name}"
                     
                     if src != new_src:
+                        self.log(f"[DEBUG] Updating image src: {src} -> {new_src}")
                         img['src'] = new_src
                         changed = True
+                else:
+                    # Try without extension variations
+                    name_without_ext = os.path.splitext(basename)[0]
+                    found = False
+                    for original_name, safe_name in processed_images.items():
+                        if os.path.splitext(original_name)[0] == name_without_ext:
+                            new_src = f"images/{safe_name}"
+                            self.log(f"[DEBUG] Found image by name match: {src} -> {new_src}")
+                            img['src'] = new_src
+                            changed = True
+                            found = True
+                            break
+                    
+                    if not found:
+                        self.log(f"[WARNING] Image not found in processed_images: {basename}")
+                        # Still update the path to use images/ prefix if it doesn't have it
+                        if not src.startswith('images/'):
+                            img['src'] = f"images/{basename}"
+                            changed = True
                 
                 # Ensure alt attribute exists (required for XHTML)
                 if not img.get('alt'):
@@ -3154,27 +3232,8 @@ img {
                     changed = True
             
             if changed:
-                # Get just the body content
-                if soup.body:
-                    body_content = ''.join(str(child) for child in soup.body.children)
-                else:
-                    body_content = str(soup)
-                
-                # Get title
-                title = "Chapter"
-                if soup.title:
-                    title = soup.title.get_text()
-                
-                # Get CSS links
-                css_links = []
-                if soup.head:
-                    for link in soup.head.find_all('link', rel='stylesheet'):
-                        href = link.get('href', '')
-                        if href:
-                            css_links.append(href)
-                
-                # Rebuild with clean structure
-                return XHTMLConverter._build_xhtml(title, body_content, css_links)
+                # Return the modified content
+                return str(soup)
             
             return xhtml_content
             
