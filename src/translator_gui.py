@@ -1167,7 +1167,6 @@ class TranslatorGUI:
         self.progressive_encoding_var = tk.BooleanVar(value=self.config.get('progressive_encoding', True))
         self.save_compressed_images_var = tk.BooleanVar(value=self.config.get('save_compressed_images', False))
         # Glossary-related variables (existing)
-        self.enable_auto_glossary_var = tk.BooleanVar(value=self.config.get('enable_auto_glossary', False))
         self.append_glossary_var = tk.BooleanVar(value=self.config.get('append_glossary', False))
         self.glossary_min_frequency_var = tk.StringVar(value=str(self.config.get('glossary_min_frequency', 2)))
         self.glossary_max_names_var = tk.StringVar(value=str(self.config.get('glossary_max_names', 50)))
@@ -7618,6 +7617,7 @@ Provide translations in the same numbered format."""
             'GLOSSARY_MAX_TITLES': self.glossary_max_titles_var.get(),
             'GLOSSARY_BATCH_SIZE': self.glossary_batch_size_var.get(),
             'GLOSSARY_STRIP_HONORIFICS': "1" if self.strip_honorifics_var.get() else "0",
+            'ENABLE_AUTO_GLOSSARY': "1" if self.enable_auto_glossary_var.get() else "0",
             'AUTO_GLOSSARY_PROMPT': self.auto_glossary_prompt if hasattr(self, 'auto_glossary_prompt') else '',
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') else '',
             'GLOSSARY_TRANSLATION_PROMPT': self.glossary_translation_prompt if hasattr(self, 'glossary_translation_prompt') else '',
@@ -8576,7 +8576,6 @@ Important rules:
                     'GLOSSARY_MAX_TITLES': str(self.glossary_max_titles_var.get()),
                     'GLOSSARY_BATCH_SIZE': str(self.glossary_batch_size_var.get()),
                     'ENABLE_AUTO_GLOSSARY': "1" if self.enable_auto_glossary_var.get() else "0",
-                    'DISABLE_AUTO_GLOSSARY': "0" if self.enable_auto_glossary_var.get() else "1",  # Inverted!
                     'APPEND_GLOSSARY': "1" if self.append_glossary_var.get() else "0",
                     'GLOSSARY_STRIP_HONORIFICS': '1' if hasattr(self, 'strip_honorifics_var') and self.strip_honorifics_var.get() else '1',
                     'AUTO_GLOSSARY_PROMPT': getattr(self, 'auto_glossary_prompt', ''),
