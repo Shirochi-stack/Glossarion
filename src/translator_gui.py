@@ -1028,7 +1028,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.9.1"
+        __version__ = "3.9.3"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1908,7 +1908,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.9.1 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.9.3 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def create_file_section(self):
@@ -6149,7 +6149,232 @@ Provide translations in the same numbered format."""
         # Save preference
         self.config['force_safe_ratios'] = is_safe
         self.save_config()
-    
+ 
+    def _get_opf_file_order(self, file_list):
+        """
+        Sort files based on OPF spine order if available.
+        Uses STRICT OPF ordering - includes ALL files from spine without filtering.
+        This ensures notice files, copyright pages, etc. are processed in the correct order.
+        Returns sorted file list based on OPF, or original list if no OPF found.
+        """
+        try:
+            import xml.etree.ElementTree as ET
+            import zipfile
+            import re
+            
+            # First, check if we have content.opf in the current directory
+            opf_file = None
+            if file_list:
+                current_dir = os.path.dirname(file_list[0]) if file_list else os.getcwd()
+                possible_opf = os.path.join(current_dir, 'content.opf')
+                if os.path.exists(possible_opf):
+                    opf_file = possible_opf
+                    self.append_log(f"📋 Found content.opf in directory")
+            
+            # If no OPF, check if any of the files is an OPF
+            if not opf_file:
+                for file_path in file_list:
+                    if file_path.lower().endswith('.opf'):
+                        opf_file = file_path
+                        self.append_log(f"📋 Found OPF file: {os.path.basename(opf_file)}")
+                        break
+            
+            # If no OPF, try to extract from EPUB
+            if not opf_file:
+                epub_files = [f for f in file_list if f.lower().endswith('.epub')]
+                if epub_files:
+                    epub_path = epub_files[0]
+                    try:
+                        with zipfile.ZipFile(epub_path, 'r') as zf:
+                            for name in zf.namelist():
+                                if name.endswith('.opf'):
+                                    opf_content = zf.read(name)
+                                    temp_opf = os.path.join(os.path.dirname(epub_path), 'temp_content.opf')
+                                    with open(temp_opf, 'wb') as f:
+                                        f.write(opf_content)
+                                    opf_file = temp_opf
+                                    self.append_log(f"📋 Extracted OPF from EPUB: {os.path.basename(epub_path)}")
+                                    break
+                    except Exception as e:
+                        self.append_log(f"⚠️ Could not extract OPF from EPUB: {e}")
+            
+            if not opf_file:
+                self.append_log(f"ℹ️ No OPF file found, using default file order")
+                return file_list
+            
+            # Parse the OPF file
+            try:
+                tree = ET.parse(opf_file)
+                root = tree.getroot()
+                
+                # Handle namespaces
+                ns = {'opf': 'http://www.idpf.org/2007/opf'}
+                if root.tag.startswith('{'):
+                    default_ns = root.tag[1:root.tag.index('}')]
+                    ns = {'opf': default_ns}
+                
+                # Get manifest to map IDs to files
+                manifest = {}
+                for item in root.findall('.//opf:manifest/opf:item', ns):
+                    item_id = item.get('id')
+                    href = item.get('href')
+                    
+                    if item_id and href:
+                        filename = os.path.basename(href)
+                        manifest[item_id] = filename
+                        # Store multiple variations for matching
+                        name_without_ext = os.path.splitext(filename)[0]
+                        manifest[item_id + '_noext'] = name_without_ext
+                        # Also store with response_ prefix for matching
+                        manifest[item_id + '_response'] = f"response_{filename}"
+                        manifest[item_id + '_response_noext'] = f"response_{name_without_ext}"
+                
+                # Get spine order - include ALL files first for correct indexing
+                spine_order_full = []
+                spine = root.find('.//opf:spine', ns)
+                if spine is not None:
+                    for itemref in spine.findall('opf:itemref', ns):
+                        idref = itemref.get('idref')
+                        if idref and idref in manifest:
+                            spine_order_full.append(manifest[idref])
+                
+                # Now filter out cover and nav/toc files for processing
+                spine_order = []
+                for item in spine_order_full:
+                    # Skip navigation and cover files
+                    if not any(skip in item.lower() for skip in ['nav.', 'toc.', 'cover.']):
+                        spine_order.append(item)
+                
+                self.append_log(f"📋 Found {len(spine_order_full)} items in OPF spine ({len(spine_order)} after filtering)")
+                
+                # Count file types
+                notice_count = sum(1 for f in spine_order if 'notice' in f.lower())
+                chapter_count = sum(1 for f in spine_order if 'chapter' in f.lower() and 'notice' not in f.lower())
+                skipped_count = len(spine_order_full) - len(spine_order)
+                
+                if skipped_count > 0:
+                    self.append_log(f"   • Skipped files (cover/nav/toc): {skipped_count}")
+                if notice_count > 0:
+                    self.append_log(f"   • Notice/Copyright files: {notice_count}")
+                if chapter_count > 0:
+                    self.append_log(f"   • Chapter files: {chapter_count}")
+                
+                # Show first few spine entries
+                if spine_order:
+                    self.append_log(f"   📖 Spine order preview:")
+                    for i, entry in enumerate(spine_order[:5]):
+                        self.append_log(f"      [{i}]: {entry}")
+                    if len(spine_order) > 5:
+                        self.append_log(f"      ... and {len(spine_order) - 5} more")
+                
+                # Map input files to spine positions
+                ordered_files = []
+                unordered_files = []
+                
+                for file_path in file_list:
+                    basename = os.path.basename(file_path)
+                    basename_noext = os.path.splitext(basename)[0]
+                    
+                    # Try to find this file in the spine
+                    found_position = None
+                    matched_spine_file = None
+                    
+                    # Direct exact match
+                    if basename in spine_order:
+                        found_position = spine_order.index(basename)
+                        matched_spine_file = basename
+                    # Match without extension
+                    elif basename_noext in spine_order:
+                        found_position = spine_order.index(basename_noext)
+                        matched_spine_file = basename_noext
+                    else:
+                        # Try pattern matching for response_ files
+                        for idx, spine_item in enumerate(spine_order):
+                            spine_noext = os.path.splitext(spine_item)[0]
+                            
+                            # Check if this is a response_ file matching spine item
+                            if basename.startswith('response_'):
+                                # Remove response_ prefix and try to match
+                                clean_name = basename[9:]  # Remove 'response_'
+                                clean_noext = os.path.splitext(clean_name)[0]
+                                
+                                if clean_name == spine_item or clean_noext == spine_noext:
+                                    found_position = idx
+                                    matched_spine_file = spine_item
+                                    break
+                                
+                                # Try matching by chapter number
+                                spine_num = re.search(r'(\d+)', spine_item)
+                                file_num = re.search(r'(\d+)', clean_name)
+                                if spine_num and file_num and spine_num.group(1) == file_num.group(1):
+                                    # Check if both are notice or both are chapter files
+                                    both_notice = 'notice' in spine_item.lower() and 'notice' in clean_name.lower()
+                                    both_chapter = 'chapter' in spine_item.lower() and 'chapter' in clean_name.lower()
+                                    if both_notice or both_chapter:
+                                        found_position = idx
+                                        matched_spine_file = spine_item
+                                        break
+                            else:
+                                # For non-response files, check if spine item is contained
+                                if spine_noext in basename_noext:
+                                    found_position = idx
+                                    matched_spine_file = spine_item
+                                    break
+                                
+                                # Number-based matching
+                                spine_num = re.search(r'(\d+)', spine_item)
+                                file_num = re.search(r'(\d+)', basename)
+                                if spine_num and file_num and spine_num.group(1) == file_num.group(1):
+                                    # Check file type match
+                                    both_notice = 'notice' in spine_item.lower() and 'notice' in basename.lower()
+                                    both_chapter = 'chapter' in spine_item.lower() and 'chapter' in basename.lower()
+                                    if both_notice or both_chapter:
+                                        found_position = idx
+                                        matched_spine_file = spine_item
+                                        break
+                    
+                    if found_position is not None:
+                        ordered_files.append((found_position, file_path))
+                        self.append_log(f"  ✓ Matched: {basename} → spine[{found_position}]: {matched_spine_file}")
+                    else:
+                        unordered_files.append(file_path)
+                        self.append_log(f"  ⚠️ Not in spine: {basename}")
+                
+                # Sort by spine position
+                ordered_files.sort(key=lambda x: x[0])
+                final_order = [f for _, f in ordered_files]
+                
+                # Add unmapped files at the end
+                if unordered_files:
+                    self.append_log(f"📋 Adding {len(unordered_files)} unmapped files at the end")
+                    final_order.extend(sorted(unordered_files))
+                
+                # Clean up temp OPF if created
+                if opf_file and 'temp_content.opf' in opf_file and os.path.exists(opf_file):
+                    try:
+                        os.remove(opf_file)
+                    except:
+                        pass
+                
+                self.append_log(f"✅ Files sorted using STRICT OPF spine order")
+                self.append_log(f"   • Total files: {len(final_order)}")
+                self.append_log(f"   • Following exact spine sequence from OPF")
+                
+                return final_order if final_order else file_list
+                
+            except Exception as e:
+                self.append_log(f"⚠️ Error parsing OPF file: {e}")
+                if opf_file and 'temp_content.opf' in opf_file and os.path.exists(opf_file):
+                    try:
+                        os.remove(opf_file)
+                    except:
+                        pass
+                return file_list
+                
+        except Exception as e:
+            self.append_log(f"⚠️ Error in OPF sorting: {e}")
+            return file_list
+ 
     def run_translation_thread(self):
         """Start translation in a separate thread"""
         if hasattr(self, 'glossary_thread') and self.glossary_thread and self.glossary_thread.is_alive():
@@ -6267,10 +6492,10 @@ Provide translations in the same numbered format."""
                             os.environ['PARALLEL_PARSE'] = '1'
                             
                             # For very large files, enable aggressive optimization
-                            if file_count > 300:
-                                os.environ['SKIP_VALIDATION'] = '1'
-                                os.environ['LAZY_LOAD_CONTENT'] = '1'
-                                self.append_log("🚀 Enabled aggressive optimization for very large file")
+                            #if file_count > 300:
+                            #    os.environ['SKIP_VALIDATION'] = '1'
+                            #    os.environ['LAZY_LOAD_CONTENT'] = '1'
+                            #    self.append_log("🚀 Enabled aggressive optimization for very large file")
                             
                 except Exception as e:
                     # If we can't check, just continue
@@ -6325,6 +6550,13 @@ Provide translations in the same numbered format."""
                 if 'MANUAL_GLOSSARY' in os.environ:
                     del os.environ['MANUAL_GLOSSARY']
                 self.append_log(f"ℹ️ No glossary loaded")
+
+            # ========== NEW: APPLY OPF-BASED SORTING ==========
+            # Sort files based on OPF order if available
+            original_file_count = len(self.selected_files)
+            self.selected_files = self._get_opf_file_order(self.selected_files)
+            self.append_log(f"📚 Processing {original_file_count} files in reading order")
+            # ====================================================
 
             # Process each file
             total_files = len(self.selected_files)
@@ -7548,6 +7780,13 @@ Provide translations in the same numbered format."""
 
             # Create Glossary folder
             os.makedirs("Glossary", exist_ok=True)
+            
+            # ========== NEW: APPLY OPF-BASED SORTING ==========
+            # Sort files based on OPF order if available
+            original_file_count = len(self.selected_files)
+            self.selected_files = self._get_opf_file_order(self.selected_files)
+            self.append_log(f"📚 Processing {original_file_count} files in reading order for glossary extraction")
+            # ====================================================
             
             # Group files by type and folder
             image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
@@ -14131,7 +14370,7 @@ Important rules:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.9.1...")
+    print("🚀 Starting Glossarion v3.9.3...")
     
     # Initialize splash screen
     splash_manager = None
