@@ -5879,7 +5879,6 @@ def is_qa_failed_response(content):
     
     # 4. TIMEOUT AND NETWORK ERRORS
     timeout_markers = [
-        "timeout",
         "timed out",
         "request timeout",
         "connection timeout",
@@ -7221,55 +7220,98 @@ def main(log_callback=None, stop_callback=None):
                 continue
 
             elif is_image_only_chapter:
-                print(f"📸 Image-only chapter: {c.get('image_count', 0)} images, no meaningful text")
+                print(f"📸 Image-only chapter: {c.get('image_count', 0)} images")
                 
+                translated_html = c["body"]
+                image_translations = {}
+                
+                # Step 1: Process images if image translation is enabled
                 if image_translator and config.ENABLE_IMAGE_TRANSLATION:
                     print(f"🖼️ Translating {c.get('image_count', 0)} images...")
                     image_translator.set_current_chapter(chap_num)
                     
-                    # DEBUG
-                    print(f"🔍 DEBUG: Before process_chapter_images")
-                    print(f"   Original body length: {len(c['body'])}")
-                    
                     translated_html, image_translations = process_chapter_images(
                         c["body"], 
-                        actual_num,  # FIXED: Use actual_num instead of chap_num
+                        actual_num,
                         image_translator,
                         check_stop
                     )
                     
-                    # DEBUG
-                    print(f"🔍 DEBUG: After process_chapter_images")
-                    print(f"   Translated HTML length: {len(translated_html)}")
-                    print("   Has translation divs:", '<div class="image-translation">' in translated_html)
+                    if image_translations:
+                        print(f"✅ Translated {len(image_translations)} images")
+                
+                # Step 2: Check for headers/titles that need translation
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(c["body"], 'html.parser')
+                
+                # Look for headers
+                headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'title'])
+                
+                # If we have headers, we should translate them even in "image-only" chapters
+                if headers and any(h.get_text(strip=True) for h in headers):
+                    print(f"📝 Found headers to translate in image-only chapter")
                     
-                    if '<div class="image-translation">' in translated_html:
-                        print(f"✅ Successfully translated images")
-                        status = "completed"
+                    # Create a minimal HTML with just the headers for translation
+                    headers_html = ""
+                    for header in headers:
+                        if header.get_text(strip=True):
+                            headers_html += str(header) + "\n"
+                    
+                    if headers_html:
+                        print(f"📤 Translating chapter headers...")
+                        
+                        # Send just the headers for translation
+                        header_msgs = base_msg + [{"role": "user", "content": headers_html}]
+                        
+                        # Use the standard filename
+                        fname = FileUtilities.create_chapter_filename(c, actual_num)
+                        client.set_output_filename(fname)
+                        
+                        # Simple API call for headers
+                        header_result, _ = client.send(
+                            header_msgs,
+                            temperature=config.TEMP,
+                            max_tokens=config.MAX_OUTPUT_TOKENS
+            )
+                        
+                        if header_result:
+                            # Clean the result
+                            header_result = re.sub(r"^```(?:html)?\s*\n?", "", header_result, count=1, flags=re.MULTILINE)
+                            header_result = re.sub(r"\n?```\s*$", "", header_result, count=1, flags=re.MULTILINE)
+                            
+                            # Parse both the translated headers and the original body
+                            soup_headers = BeautifulSoup(header_result, 'html.parser')
+                            soup_body = BeautifulSoup(translated_html, 'html.parser')
+                            
+                            # Replace headers in the body with translated versions
+                            translated_headers = soup_headers.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'title'])
+                            original_headers = soup_body.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'title'])
+                            
+                            # Match and replace headers
+                            for orig, trans in zip(original_headers, translated_headers):
+                                if trans and trans.get_text(strip=True):
+                                    orig.string = trans.get_text(strip=True)
+                            
+                            translated_html = str(soup_body)
+                            print(f"✅ Headers translated successfully")
+                            status = "completed"
+                        else:
+                            print(f"⚠️ Failed to translate headers")
+                            status = "completed_image_only"
                     else:
-                        print(f"ℹ️ No text found in images")
                         status = "completed_image_only"
                 else:
-                    print(f"ℹ️ Image translation disabled - copying chapter as-is")
-                    translated_html = c["body"]
+                    print(f"ℹ️ No headers found to translate")
                     status = "completed_image_only"
                 
-                safe_title = make_safe_filename(c['title'], c['num'])
-                if isinstance(c['num'], float):
-                    fname = f"response_{c['num']:06.1f}_{safe_title}.html"
-                else:
-                    fname = f"response_{c['num']:03d}_{safe_title}.html"
-                
-                # DEBUG: Check what we're about to save
-                print(f"🔍 DEBUG: About to save to {fname}")
-                print(f"   Content length: {len(translated_html)}")
-                #print(f"   Content preview: {translated_html[:200]}...")
+                # Step 3: Save with correct filename
+                fname = FileUtilities.create_chapter_filename(c, actual_num)
                 
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
                     f.write(translated_html)
                 
                 print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved image-only chapter")
-                progress_manager.update(idx, chap_num, content_hash, fname, status=status)
+                progress_manager.update(idx, actual_num, content_hash, fname, status=status)
                 progress_manager.save()
                 chapters_completed += 1
                 continue
