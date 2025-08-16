@@ -58,8 +58,8 @@ class TranslationConfig:
         self.ENABLE_IMAGE_TRANSLATION = os.getenv("ENABLE_IMAGE_TRANSLATION", "1") == "1"
         self.TRANSLATE_BOOK_TITLE = os.getenv("TRANSLATE_BOOK_TITLE", "1") == "1"
         self.DISABLE_ZERO_DETECTION = os.getenv("DISABLE_ZERO_DETECTION", "0") == "1"
+        self.ENABLE_AUTO_GLOSSARY = os.getenv("ENABLE_AUTO_GLOSSARY", "0") == "1"
         self.COMPREHENSIVE_EXTRACTION = os.getenv("COMPREHENSIVE_EXTRACTION", "0") == "1"
-        self.DISABLE_AUTO_GLOSSARY = os.getenv("DISABLE_AUTO_GLOSSARY", "0") == "1"
         self.MANUAL_GLOSSARY = os.getenv("MANUAL_GLOSSARY")
         self.RETRY_TRUNCATED = os.getenv("RETRY_TRUNCATED", "0") == "1"
         self.RETRY_DUPLICATE_BODIES = os.getenv("RETRY_DUPLICATE_BODIES", "1") == "1"
@@ -3928,6 +3928,11 @@ class GlossaryManager:
         """Targeted glossary generator with true CSV format output"""
         print("📑 Targeted Glossary Generator v5.0 (CSV Format)")
         
+        # Check stop flag at start
+        if is_stop_requested():
+            print("📑 ❌ Glossary generation stopped by user")
+            return {}
+        
         # Check if glossary already exists
         glossary_path = os.path.join(output_dir, "glossary.json")
         if os.path.exists(glossary_path):
@@ -3951,6 +3956,11 @@ class GlossaryManager:
                 print(f"📑 Regenerating glossary...")
         
         print("📑 Extracting names and terms with configurable options")
+        
+        # Check stop flag before processing
+        if is_stop_requested():
+            print("📑 ❌ Glossary generation stopped by user")
+            return {}
         
         # Check for manual glossary first
         manual_glossary_path = os.getenv("MANUAL_GLOSSARY")
@@ -4024,6 +4034,11 @@ class GlossaryManager:
             """Remove HTML tags to get clean text"""
             soup = BeautifulSoup(html_text, 'html.parser')
             return soup.get_text()
+        
+        # Check stop before processing chapters
+        if is_stop_requested():
+            print("📑 ❌ Glossary generation stopped by user")
+            return {}
         
         all_text = ' '.join(clean_html(chapter["body"]) for chapter in chapters)
         print(f"📑 Processing {len(all_text):,} characters of text")
@@ -4102,7 +4117,7 @@ class GlossaryManager:
         return ratio >= threshold
     
     def _find_fuzzy_matches(self, term, text, threshold=0.90):
-        """Find fuzzy matches of a term in text using efficient method"""
+        """Find fuzzy matches of a term in text using efficient method with stop flag checks"""
         term_lower = term.lower()
         text_lower = text.lower()
         term_len = len(term)
@@ -4119,10 +4134,21 @@ class GlossaryManager:
             total_windows = (len(text) - term_len + 1) // step
             
             for i in range(0, len(text) - term_len + 1, step):
+                # Check stop flag frequently in long loops
+                if i > 0 and i % (step * 100) == 0:
+                    if is_stop_requested():
+                        print(f"📑 ❌ Fuzzy matching stopped by user at position {i}")
+                        return matches_count
+                
                 # Show progress for long texts
                 if total_windows > 1000 and (i // step) % 1000 == 0:
                     progress = (i // step) / total_windows * 100
                     print(f"📑 [DEBUG]       Fuzzy match progress: {progress:.1f}%")
+                    
+                    # Another stop check at progress updates
+                    if is_stop_requested():
+                        print(f"📑 ❌ Fuzzy matching stopped by user at {progress:.1f}%")
+                        return matches_count
                 
                 window = text_lower[i:i + term_len]
                 if self._fuzzy_match(term_lower, window, threshold):
@@ -4158,8 +4184,13 @@ class GlossaryManager:
                                    min_frequency, max_names, max_titles, 
                                    existing_glossary, output_dir, 
                                    strip_honorifics=True, fuzzy_threshold=0.90):
-        """Extract glossary using custom AI prompt with true CSV format output"""
+        """Extract glossary using custom AI prompt with true CSV format output and interrupt support"""
         print("📑 Using custom automatic glossary prompt")
+        
+        # Check stop flag
+        if is_stop_requested():
+            print("📑 ❌ Glossary extraction stopped by user")
+            return {}
         
         try:
             MODEL = os.getenv("MODEL", "gemini-1.5-flash")
@@ -4171,13 +4202,13 @@ class GlossaryManager:
             if not API_KEY:
                 print(f"📑 No API key found, falling back to pattern-based extraction")
                 return self._extract_with_patterns(all_text, language, min_frequency, 
-                                                 max_names, max_titles, batch_size,
+                                                 max_names, max_titles, 50,
                                                  existing_glossary, output_dir, 
                                                  strip_honorifics, fuzzy_threshold)
             else:
                 print(f"📑 Using AI-assisted extraction with custom prompt")
                 
-                from unified_api_client import UnifiedClient
+                from unified_api_client import UnifiedClient, UnifiedClientError
                 client = UnifiedClient(model=MODEL, api_key=API_KEY, output_dir=output_dir)
                 if hasattr(client, 'reset_cleanup_state'):
                     client.reset_cleanup_state()  
@@ -4197,19 +4228,19 @@ class GlossaryManager:
                 # If no format instructions are provided, use a default
                 if not format_instructions:
                     format_instructions = """
-Return the results in EXACT CSV format with this header:
-type,raw_name,translated_name
+    Return the results in EXACT CSV format with this header:
+    type,raw_name,translated_name
 
-For example:
-character,김상현,Kim Sang-hyu
-character,갈편제,Gale Hardest  
-character,디히릿 아데,Dihirit Ade
+    For example:
+    character,김상현,Kim Sang-hyu
+    character,갈편제,Gale Hardest  
+    character,디히릿 아데,Dihirit Ade
 
-Only include terms that actually appear in the text.
-Do not use quotes around values unless they contain commas.
+    Only include terms that actually appear in the text.
+    Do not use quotes around values unless they contain commas.
 
-Text to analyze:
-{text_sample}"""
+    Text to analyze:
+    {text_sample}"""
                 
                 # Replace placeholders in format instructions
                 format_instructions = format_instructions.replace('{text_sample}', text_sample)
@@ -4222,10 +4253,27 @@ Text to analyze:
                     {"role": "user", "content": enhanced_prompt}
                 ]
                 
+                # Check stop before API call
+                if is_stop_requested():
+                    print("📑 ❌ Glossary extraction stopped before API call")
+                    return {}
+                
                 try:
                     temperature = float(os.getenv("TEMPERATURE", "0.3"))
                     max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "4096"))
-                    response, _ = client.send(messages, temperature=temperature, max_tokens=max_tokens)
+                    
+                    # Use send_with_interrupt for interruptible API call
+                    chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "300"))  # 5 minute default
+                    print(f"📑 Sending AI extraction request (timeout: {chunk_timeout}s, interruptible)...")
+                    
+                    response = send_with_interrupt(
+                        messages=messages,
+                        client=client,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        stop_check_fn=is_stop_requested,
+                        chunk_timeout=chunk_timeout
+                    )
                     
                     # Get the actual text from the response
                     if hasattr(response, 'content'):
@@ -4256,6 +4304,11 @@ Text to analyze:
                     print(f"📑 [DEBUG] Verifying {len(lines)} extracted terms against text...")
 
                     for line_num, line in enumerate(lines, 1):
+                        # Check stop flag periodically during verification
+                        if line_num % 10 == 0 and is_stop_requested():
+                            print(f"📑 ❌ Glossary verification stopped at line {line_num}")
+                            return {}
+                        
                         line = line.strip()
                         if not line:
                             continue
@@ -4300,6 +4353,9 @@ Text to analyze:
                                 # Check with common honorifics
                                 if language in self.pattern_manager.CJK_HONORIFICS:
                                     for honorific in self.pattern_manager.CJK_HONORIFICS[language][:3]:
+                                        if is_stop_requested():
+                                            print(f"📑 ❌ Verification stopped during honorific checking")
+                                            return {}
                                         print(f"📑 [DEBUG]   - Checking with honorific '{raw_name + honorific}'...")
                                         count += self._find_fuzzy_matches(raw_name + honorific, all_text, fuzzy_threshold)
                                         if count >= min_frequency:
@@ -4323,6 +4379,11 @@ Text to analyze:
                     
                     print(f"📑 AI extracted and verified {len(csv_lines) - 1} terms")
                     
+                    # Check stop before merging
+                    if is_stop_requested():
+                        print("📑 ❌ Glossary generation stopped before merging")
+                        return {}
+                    
                     # Merge with existing glossary if present
                     if existing_glossary:
                         csv_lines = self._merge_csv_entries(csv_lines, existing_glossary, strip_honorifics, language)
@@ -4344,6 +4405,17 @@ Text to analyze:
                     
                     return self._parse_csv_to_dict(csv_content)
                     
+                except UnifiedClientError as e:
+                    if "stopped by user" in str(e).lower():
+                        print(f"📑 ❌ AI extraction interrupted by user")
+                        return {}
+                    else:
+                        print(f"⚠️ AI extraction failed: {e}")
+                        print("📑 Falling back to pattern-based extraction")
+                        return self._extract_with_patterns(all_text, language, min_frequency, 
+                                                         max_names, max_titles, 50, 
+                                                         existing_glossary, output_dir, 
+                                                         strip_honorifics, fuzzy_threshold)
                 except Exception as e:
                     print(f"⚠️ AI extraction failed: {e}")
                     import traceback
@@ -4362,12 +4434,17 @@ Text to analyze:
                                              max_names, max_titles, 50, 
                                              existing_glossary, output_dir, 
                                              strip_honorifics, fuzzy_threshold)
- 
+    
     def _deduplicate_glossary_with_fuzzy(self, csv_lines, fuzzy_threshold):
-        """Apply fuzzy matching to remove duplicate entries from the glossary"""
+        """Apply fuzzy matching to remove duplicate entries from the glossary with stop flag checks"""
         from difflib import SequenceMatcher
         
         print(f"📑 Applying fuzzy deduplication (threshold: {fuzzy_threshold})...")
+        
+        # Check stop flag at start
+        if is_stop_requested():
+            print(f"📑 ❌ Deduplication stopped by user")
+            return csv_lines
         
         header_line = csv_lines[0]  # Keep header
         entry_lines = csv_lines[1:]  # Data lines
@@ -4375,8 +4452,21 @@ Text to analyze:
         deduplicated = [header_line]
         seen_entries = []  # List of (type, raw_name, translated_name)
         removed_count = 0
+        total_entries = len(entry_lines)
         
-        for line in entry_lines:
+        for idx, line in enumerate(entry_lines):
+            # Check stop flag every 20 entries
+            if idx > 0 and idx % 20 == 0:
+                if is_stop_requested():
+                    print(f"📑 ❌ Deduplication stopped at entry {idx}/{total_entries}")
+                    # Return what we have so far
+                    return deduplicated
+            
+            # Show progress for large glossaries
+            if total_entries > 100 and idx % 50 == 0:
+                progress = (idx / total_entries) * 100
+                print(f"📑 Deduplication progress: {progress:.1f}% ({idx}/{total_entries})")
+            
             if not line.strip():
                 continue
                 
@@ -4391,6 +4481,12 @@ Text to analyze:
             # Check against all seen entries for fuzzy matches
             is_duplicate = False
             for seen_type, seen_raw, seen_trans in seen_entries:
+                # Check stop flag in inner loop for very large glossaries
+                if len(seen_entries) > 500 and len(seen_entries) % 100 == 0:
+                    if is_stop_requested():
+                        print(f"📑 ❌ Deduplication stopped during comparison")
+                        return deduplicated
+                
                 # Check if raw names are fuzzy matches
                 raw_similarity = SequenceMatcher(None, raw_name.lower(), seen_raw.lower()).ratio()
                 
@@ -4410,14 +4506,33 @@ Text to analyze:
         return deduplicated
  
     def _merge_csv_entries(self, new_csv_lines, existing_glossary, strip_honorifics, language):
-        """Merge CSV entries with existing glossary"""
+        """Merge CSV entries with existing glossary with stop flag checks"""
+        
+        # Check stop flag at start
+        if is_stop_requested():
+            print(f"📑 ❌ Glossary merge stopped by user")
+            return new_csv_lines
+        
         # Parse existing glossary
         existing_lines = []
         existing_names = set()
         
         if isinstance(existing_glossary, str):
             # Already CSV format
-            for line in existing_glossary.strip().split('\n'):
+            lines = existing_glossary.strip().split('\n')
+            total_lines = len(lines)
+            
+            for idx, line in enumerate(lines):
+                # Check stop flag every 50 lines
+                if idx > 0 and idx % 50 == 0:
+                    if is_stop_requested():
+                        print(f"📑 ❌ Merge stopped while processing existing glossary at line {idx}/{total_lines}")
+                        return new_csv_lines
+                    
+                    if total_lines > 200:
+                        progress = (idx / total_lines) * 100
+                        print(f"📑 Processing existing glossary: {progress:.1f}%")
+                
                 if 'type,raw_name' in line.lower():
                     continue  # Skip header
                 parts = [p.strip() for p in line.split(',')]
@@ -4430,11 +4545,22 @@ Text to analyze:
                         existing_lines.append(','.join(parts))
                         existing_names.add(raw_name)
         
+        # Check stop flag before processing new names
+        if is_stop_requested():
+            print(f"📑 ❌ Merge stopped before processing new entries")
+            return new_csv_lines
+        
         # Get new names
         new_names = set()
         final_lines = []
         
-        for line in new_csv_lines:
+        for idx, line in enumerate(new_csv_lines):
+            # Check stop flag every 50 lines
+            if idx > 0 and idx % 50 == 0:
+                if is_stop_requested():
+                    print(f"📑 ❌ Merge stopped while processing new entries at line {idx}")
+                    return final_lines if final_lines else new_csv_lines
+            
             if 'type,raw_name' in line.lower():
                 final_lines.append(line)  # Keep header
                 continue
@@ -4443,21 +4569,39 @@ Text to analyze:
                 new_names.add(parts[1])
                 final_lines.append(line)
         
+        # Check stop flag before adding existing entries
+        if is_stop_requested():
+            print(f"📑 ❌ Merge stopped before combining entries")
+            return final_lines
+        
         # Add non-duplicate existing entries
-        for line in existing_lines:
+        added_count = 0
+        for idx, line in enumerate(existing_lines):
+            # Check stop flag every 50 additions
+            if idx > 0 and idx % 50 == 0:
+                if is_stop_requested():
+                    print(f"📑 ❌ Merge stopped while adding existing entries ({added_count} added)")
+                    return final_lines
+            
             parts = [p.strip() for p in line.split(',')]
             if len(parts) >= 2 and parts[1] not in new_names:
                 final_lines.append(line)
+                added_count += 1
         
-        print(f"📑 Merged {len(final_lines) - len(new_csv_lines)} entries from existing glossary")
+        print(f"📑 Merged {added_count} entries from existing glossary")
         return final_lines
     
     def _extract_with_patterns(self, all_text, language, min_frequency, 
-                               max_names, max_titles, batch_size, 
-                               existing_glossary, output_dir, 
-                               strip_honorifics=True, fuzzy_threshold=0.90):
-        """Extract glossary using pattern matching with true CSV format output"""
+                              max_names, max_titles, batch_size, 
+                              existing_glossary, output_dir, 
+                              strip_honorifics=True, fuzzy_threshold=0.90):
+        """Extract glossary using pattern matching with true CSV format output and stop flag checks"""
         print("📑 Using pattern-based extraction")
+        
+        # Check stop flag at start
+        if is_stop_requested():
+            print("📑 ❌ Pattern-based extraction stopped by user")
+            return {}
         
         def is_valid_name(name, language_hint='unknown'):
             """Strict validation for proper names only"""
@@ -4504,7 +4648,6 @@ Text to analyze:
         def detect_language_hint(text_sample):
             """Quick language detection for validation purposes"""
             sample = text_sample[:1000]
-            sample_length = len(sample)
             
             korean_chars = sum(1 for char in sample if 0xAC00 <= ord(char) <= 0xD7AF)
             japanese_kana = sum(1 for char in sample if (0x3040 <= ord(char) <= 0x309F) or (0x30A0 <= ord(char) <= 0x30FF))
@@ -4525,6 +4668,11 @@ Text to analyze:
         language_hint = detect_language_hint(all_text)
         print(f"📑 Detected primary language: {language_hint}")
         
+        # Check stop flag after language detection
+        if is_stop_requested():
+            print("📑 ❌ Extraction stopped after language detection")
+            return {}
+        
         honorifics_to_use = []
         if language_hint in self.pattern_manager.CJK_HONORIFICS:
             honorifics_to_use.extend(self.pattern_manager.CJK_HONORIFICS[language_hint])
@@ -4538,15 +4686,38 @@ Text to analyze:
         print("📑 Scanning for names with honorifics...")
         
         # Extract names with honorifics
-        for honorific in honorifics_to_use:
+        total_honorifics = len(honorifics_to_use)
+        for idx, honorific in enumerate(honorifics_to_use):
+            # Check stop flag before each honorific
+            if is_stop_requested():
+                print(f"📑 ❌ Extraction stopped at honorific {idx}/{total_honorifics}")
+                return {}
+            
+            print(f"📑 Processing honorific {idx + 1}/{total_honorifics}: '{honorific}'")
+            
             self._extract_names_for_honorific(honorific, all_text, language_hint, 
                                             min_frequency, names_with_honorifics, 
                                             standalone_names, is_valid_name, fuzzy_threshold)
         
+        # Check stop flag before processing terms
+        if is_stop_requested():
+            print("📑 ❌ Extraction stopped before processing terms")
+            return {}
+        
         # Process extracted terms
         final_terms = {}
         
+        term_count = 0
+        total_terms = len(names_with_honorifics)
         for term, count in names_with_honorifics.items():
+            term_count += 1
+            
+            # Check stop flag every 20 terms
+            if term_count % 20 == 0:
+                if is_stop_requested():
+                    print(f"📑 ❌ Term processing stopped at {term_count}/{total_terms}")
+                    return {}
+            
             if strip_honorifics:
                 clean_term = self._strip_honorific(term, language_hint)
                 if clean_term in final_terms:
@@ -4555,6 +4726,11 @@ Text to analyze:
                     final_terms[clean_term] = count
             else:
                 final_terms[term] = count
+        
+        # Check stop flag before finding titles
+        if is_stop_requested():
+            print("📑 ❌ Extraction stopped before finding titles")
+            return {}
         
         # Find titles
         print("📑 Scanning for titles...")
@@ -4565,16 +4741,35 @@ Text to analyze:
             title_patterns_to_use.extend(self.pattern_manager.TITLE_PATTERNS[language_hint])
         title_patterns_to_use.extend(self.pattern_manager.TITLE_PATTERNS.get('english', []))
         
-        for pattern in title_patterns_to_use:
-            matches = re.finditer(pattern, all_text, re.IGNORECASE if 'english' in pattern else 0)
+        total_patterns = len(title_patterns_to_use)
+        for pattern_idx, pattern in enumerate(title_patterns_to_use):
+            # Check stop flag before each pattern
+            if is_stop_requested():
+                print(f"📑 ❌ Title extraction stopped at pattern {pattern_idx}/{total_patterns}")
+                return {}
             
-            for match in matches:
+            print(f"📑 Processing title pattern {pattern_idx + 1}/{total_patterns}")
+            
+            matches = list(re.finditer(pattern, all_text, re.IGNORECASE if 'english' in pattern else 0))
+            
+            for match_idx, match in enumerate(matches):
+                # Check stop flag every 50 matches
+                if match_idx > 0 and match_idx % 50 == 0:
+                    if is_stop_requested():
+                        print(f"📑 ❌ Title extraction stopped at match {match_idx}")
+                        return {}
+                
                 title = match.group(0)
                 
                 if title in names_with_honorifics:
                     continue
                     
                 count = self._find_fuzzy_matches(title, all_text, fuzzy_threshold)
+                
+                # Check if stopped during fuzzy matching
+                if is_stop_requested():
+                    print(f"📑 ❌ Title extraction stopped during fuzzy matching")
+                    return {}
                 
                 if count >= min_frequency:
                     if re.match(r'[A-Za-z]', title):
@@ -4588,6 +4783,11 @@ Text to analyze:
         
         print(f"📑 Found {len(found_titles)} unique titles")
         
+        # Check stop flag before sorting and translation
+        if is_stop_requested():
+            print("📑 ❌ Extraction stopped before sorting terms")
+            return {}
+        
         # Combine and sort
         sorted_names = sorted(final_terms.items(), key=lambda x: x[1], reverse=True)[:max_names]
         sorted_titles = sorted(found_titles.items(), key=lambda x: x[1], reverse=True)[:max_titles]
@@ -4600,6 +4800,11 @@ Text to analyze:
         
         print(f"📑 Total terms to translate: {len(all_terms)}")
         
+        # Check stop flag before translation
+        if is_stop_requested():
+            print("📑 ❌ Extraction stopped before translation")
+            return {}
+        
         # Translate terms
         if os.getenv("DISABLE_GLOSSARY_TRANSLATION", "0") == "1":
             print("📑 Translation disabled - keeping original terms")
@@ -4607,6 +4812,11 @@ Text to analyze:
         else:
             print(f"📑 Translating {len(all_terms)} terms...")
             translations = self._translate_terms_batch(all_terms, language_hint, batch_size, output_dir)
+        
+        # Check if translation was stopped
+        if is_stop_requested():
+            print("📑 ❌ Extraction stopped after translation")
+            return translations  # Return partial results
         
         # Build CSV lines
         csv_lines = ["type,raw_name,translated_name"]
@@ -4619,13 +4829,32 @@ Text to analyze:
             if title in translations:
                 csv_lines.append(f"term,{title},{translations[title]}")
         
+        # Check stop flag before merging
+        if is_stop_requested():
+            print("📑 ❌ Extraction stopped before merging with existing glossary")
+            # Still save what we have
+            csv_content = '\n'.join(csv_lines)
+            glossary_path = os.path.join(output_dir, "glossary.json")
+            with open(glossary_path, 'w', encoding='utf-8') as f:
+                f.write(csv_content)
+            return self._parse_csv_to_dict(csv_content)
+        
         # Merge with existing glossary
         if existing_glossary:
             csv_lines = self._merge_csv_entries(csv_lines, existing_glossary, strip_honorifics, language_hint)
-         
-        # Fuzzy matching 
+        
+        # Check stop flag before deduplication
+        if is_stop_requested():
+            print("📑 ❌ Extraction stopped before deduplication")
+            csv_content = '\n'.join(csv_lines)
+            glossary_path = os.path.join(output_dir, "glossary.json")
+            with open(glossary_path, 'w', encoding='utf-8') as f:
+                f.write(csv_content)
+            return self._parse_csv_to_dict(csv_content)
+        
+        # Fuzzy matching deduplication
         csv_lines = self._deduplicate_glossary_with_fuzzy(csv_lines, fuzzy_threshold)
-
+        
         # Create CSV content
         csv_content = '\n'.join(csv_lines)
         
@@ -4641,9 +4870,14 @@ Text to analyze:
         return self._parse_csv_to_dict(csv_content)
     
     def _translate_terms_batch(self, term_list, profile_name, batch_size=50, output_dir=None):
-        """Use fully configurable prompts for translation"""
+        """Use fully configurable prompts for translation with interrupt support"""
         if not term_list or os.getenv("DISABLE_GLOSSARY_TRANSLATION", "0") == "1":
             print(f"📑 Glossary translation disabled or no terms to translate")
+            return {term: term for term in term_list}
+        
+        # Check stop flag
+        if is_stop_requested():
+            print("📑 ❌ Glossary translation stopped by user")
             return {term: term for term in term_list}
         
         try:
@@ -4659,7 +4893,7 @@ Text to analyze:
             
             print(f"📑 Translating {len(term_list)} {profile_name} terms to English using batch size {batch_size}...")
             
-            from unified_api_client import UnifiedClient
+            from unified_api_client import UnifiedClient, UnifiedClientError
             client = UnifiedClient(model=MODEL, api_key=API_KEY, output_dir=output_dir)
             if hasattr(client, 'reset_cleanup_state'):
                 client.reset_cleanup_state()
@@ -4669,18 +4903,28 @@ Text to analyze:
             
             if not translation_prompt_template:
                 translation_prompt_template = """You are translating {language} character names and important terms to English.
-For character names, provide English transliterations or keep as romanized.
-Keep honorifics/suffixes only if they are integral to the name.
-Respond with the same numbered format.
+    For character names, provide English transliterations or keep as romanized.
+    Keep honorifics/suffixes only if they are integral to the name.
+    Respond with the same numbered format.
 
-Terms to translate:
-{terms_list}
+    Terms to translate:
+    {terms_list}
 
-Provide translations in the same numbered format."""
+    Provide translations in the same numbered format."""
             
             all_translations = {}
+            chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "300"))  # 5 minute default
             
             for i in range(0, len(term_list), batch_size):
+                # Check stop flag before each batch
+                if is_stop_requested():
+                    print(f"📑 ❌ Translation stopped at batch {(i // batch_size) + 1}")
+                    # Return partial translations
+                    for term in term_list:
+                        if term not in all_translations:
+                            all_translations[term] = term
+                    return all_translations
+                
                 batch = term_list[i:i + batch_size]
                 batch_num = (i // batch_size) + 1
                 total_batches = (len(term_list) + batch_size - 1) // batch_size
@@ -4704,7 +4948,18 @@ Provide translations in the same numbered format."""
                 try:
                     temperature = float(os.getenv("TEMPERATURE", "0.3"))
                     max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "4096"))
-                    response, _ = client.send(messages, temperature=temperature, max_tokens=max_tokens)
+                    
+                    # Use send_with_interrupt for interruptible API call
+                    print(f"📑 Sending translation request for batch {batch_num} (interruptible)...")
+                    
+                    response = send_with_interrupt(
+                        messages=messages,
+                        client=client,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        stop_check_fn=is_stop_requested,
+                        chunk_timeout=chunk_timeout
+                    )
                     
                     # Handle response properly
                     if hasattr(response, 'content'):
@@ -4717,9 +4972,30 @@ Provide translations in the same numbered format."""
                     
                     print(f"📑 Batch {batch_num} completed: {len(batch_translations)} translations")
                     
+                    # Small delay between batches to avoid rate limiting
                     if i + batch_size < len(term_list):
+                        # Check stop before sleep
+                        if is_stop_requested():
+                            print(f"📑 ❌ Translation stopped after batch {batch_num}")
+                            # Fill in missing translations
+                            for term in term_list:
+                                if term not in all_translations:
+                                    all_translations[term] = term
+                            return all_translations
                         time.sleep(0.5)
                         
+                except UnifiedClientError as e:
+                    if "stopped by user" in str(e).lower():
+                        print(f"📑 ❌ Translation interrupted by user at batch {batch_num}")
+                        # Fill in remaining terms with originals
+                        for term in term_list:
+                            if term not in all_translations:
+                                all_translations[term] = term
+                        return all_translations
+                    else:
+                        print(f"⚠️ Translation failed for batch {batch_num}: {e}")
+                        for term in batch:
+                            all_translations[term] = term
                 except Exception as e:
                     print(f"⚠️ Translation failed for batch {batch_num}: {e}")
                     for term in batch:
@@ -4739,22 +5015,48 @@ Provide translations in the same numbered format."""
         except Exception as e:
             print(f"⚠️ Glossary translation failed: {e}")
             return {term: term for term in term_list}
+
     
     def _extract_names_for_honorific(self, honorific, all_text, language_hint, 
                                     min_frequency, names_with_honorifics, 
                                     standalone_names, is_valid_name, fuzzy_threshold=0.90):
-        """Extract names for a specific honorific with fuzzy matching"""
+        """Extract names for a specific honorific with fuzzy matching and stop flag checks"""
+        
+        # Check stop flag at start
+        if is_stop_requested():
+            print(f"📑 ❌ Name extraction for '{honorific}' stopped by user")
+            return
+        
         if language_hint == 'korean' and not honorific.startswith('-'):
             pattern = r'([\uac00-\ud7af]{2,4})(?=' + re.escape(honorific) + r'(?:\s|[,.\!?]|$))'
             
-            for match in re.finditer(pattern, all_text):
+            matches = list(re.finditer(pattern, all_text))
+            total_matches = len(matches)
+            
+            for idx, match in enumerate(matches):
+                # Check stop flag every 50 matches
+                if idx > 0 and idx % 50 == 0:
+                    if is_stop_requested():
+                        print(f"📑 ❌ Korean name extraction stopped at {idx}/{total_matches}")
+                        return
+                    
+                    # Show progress for large sets
+                    if total_matches > 500:
+                        progress = (idx / total_matches) * 100
+                        print(f"📑 Processing Korean names: {progress:.1f}% ({idx}/{total_matches})")
+                
                 potential_name = match.group(1)
                 
                 if is_valid_name(potential_name, 'korean'):
                     full_form = potential_name + honorific
                     
-                    # Use fuzzy matching for counting
+                    # Use fuzzy matching for counting with stop check
                     count = self._find_fuzzy_matches(full_form, all_text, fuzzy_threshold)
+                    
+                    # Check if stopped during fuzzy matching
+                    if is_stop_requested():
+                        print(f"📑 ❌ Name extraction stopped during fuzzy matching")
+                        return
                     
                     if count >= min_frequency:
                         context_patterns = [
@@ -4776,31 +5078,65 @@ Provide translations in the same numbered format."""
         elif language_hint == 'japanese' and not honorific.startswith('-'):
             pattern = r'([\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]{2,5})(?=' + re.escape(honorific) + r'(?:\s|[、。！？]|$))'
             
-            for match in re.finditer(pattern, all_text):
+            matches = list(re.finditer(pattern, all_text))
+            total_matches = len(matches)
+            
+            for idx, match in enumerate(matches):
+                # Check stop flag every 50 matches
+                if idx > 0 and idx % 50 == 0:
+                    if is_stop_requested():
+                        print(f"📑 ❌ Japanese name extraction stopped at {idx}/{total_matches}")
+                        return
+                    
+                    if total_matches > 500:
+                        progress = (idx / total_matches) * 100
+                        print(f"📑 Processing Japanese names: {progress:.1f}% ({idx}/{total_matches})")
+                
                 potential_name = match.group(1)
                 
                 if is_valid_name(potential_name, 'japanese'):
                     full_form = potential_name + honorific
                     count = self._find_fuzzy_matches(full_form, all_text, fuzzy_threshold)
                     
+                    if is_stop_requested():
+                        print(f"📑 ❌ Name extraction stopped during fuzzy matching")
+                        return
+                    
                     if count >= min_frequency:
                         names_with_honorifics[full_form] = count
                         standalone_names[potential_name] = count
-                        
+                            
         elif language_hint == 'chinese' and not honorific.startswith('-'):
             pattern = r'([\u4e00-\u9fff]{2,4})(?=' + re.escape(honorific) + r'(?:\s|[，。！？]|$))'
             
-            for match in re.finditer(pattern, all_text):
+            matches = list(re.finditer(pattern, all_text))
+            total_matches = len(matches)
+            
+            for idx, match in enumerate(matches):
+                # Check stop flag every 50 matches
+                if idx > 0 and idx % 50 == 0:
+                    if is_stop_requested():
+                        print(f"📑 ❌ Chinese name extraction stopped at {idx}/{total_matches}")
+                        return
+                    
+                    if total_matches > 500:
+                        progress = (idx / total_matches) * 100
+                        print(f"📑 Processing Chinese names: {progress:.1f}% ({idx}/{total_matches})")
+                
                 potential_name = match.group(1)
                 
                 if is_valid_name(potential_name, 'chinese'):
                     full_form = potential_name + honorific
                     count = self._find_fuzzy_matches(full_form, all_text, fuzzy_threshold)
                     
+                    if is_stop_requested():
+                        print(f"📑 ❌ Name extraction stopped during fuzzy matching")
+                        return
+                    
                     if count >= min_frequency:
                         names_with_honorifics[full_form] = count
                         standalone_names[potential_name] = count
-                        
+                            
         elif honorific.startswith('-') or honorific.startswith(' '):
             is_space_separated = honorific.startswith(' ')
             
@@ -4809,14 +5145,29 @@ Provide translations in the same numbered format."""
             else:
                 pattern_english = r'\b([A-Z][a-zA-Z]+)' + re.escape(honorific) + r'\b'
             
-            matches = re.finditer(pattern_english, all_text)
+            matches = list(re.finditer(pattern_english, all_text))
+            total_matches = len(matches)
             
-            for match in matches:
+            for idx, match in enumerate(matches):
+                # Check stop flag every 50 matches
+                if idx > 0 and idx % 50 == 0:
+                    if is_stop_requested():
+                        print(f"📑 ❌ English name extraction stopped at {idx}/{total_matches}")
+                        return
+                    
+                    if total_matches > 500:
+                        progress = (idx / total_matches) * 100
+                        print(f"📑 Processing English names: {progress:.1f}% ({idx}/{total_matches})")
+                
                 potential_name = match.group(1)
                 
                 if is_valid_name(potential_name, 'english'):
                     full_form = potential_name + honorific
                     count = self._find_fuzzy_matches(full_form, all_text, fuzzy_threshold)
+                    
+                    if is_stop_requested():
+                        print(f"📑 ❌ Name extraction stopped during fuzzy matching")
+                        return
                     
                     if count >= min_frequency:
                         names_with_honorifics[full_form] = count
@@ -6514,6 +6865,10 @@ def main(log_callback=None, stop_callback=None):
     print("\n" + "="*50)
     print("📑 GLOSSARY GENERATION PHASE")
     print("="*50)
+    
+    print(f"📑 DEBUG: ENABLE_AUTO_GLOSSARY = '{os.getenv('ENABLE_AUTO_GLOSSARY', 'NOT SET')}'")
+    print(f"📑 DEBUG: MANUAL_GLOSSARY = '{config.MANUAL_GLOSSARY}'")
+    print(f"📑 DEBUG: Manual glossary exists? {os.path.isfile(config.MANUAL_GLOSSARY) if config.MANUAL_GLOSSARY else False}")
 
     if config.MANUAL_GLOSSARY and os.path.isfile(config.MANUAL_GLOSSARY):
         target_path = os.path.join(out, "glossary.json")
@@ -6522,7 +6877,7 @@ def main(log_callback=None, stop_callback=None):
             print("📑 Using manual glossary from:", config.MANUAL_GLOSSARY)
         else:
             print("📑 Using existing glossary:", config.MANUAL_GLOSSARY)
-    elif not config.DISABLE_AUTO_GLOSSARY:
+    elif os.getenv("ENABLE_AUTO_GLOSSARY", "0") == "1":
         print("📑 Starting automatic glossary generation...")
         
         try:
