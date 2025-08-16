@@ -3941,20 +3941,31 @@ class GlossaryManager:
                 with open(glossary_path, 'r', encoding='utf-8') as f:
                     existing_content = f.read()
                 
-                # Parse and return existing glossary
-                if existing_content.strip().startswith('type,raw_name'):
-                    # CSV format
-                    return self._parse_csv_to_dict(existing_content)
-                else:
-                    # Try as JSON
-                    try:
-                        return json.loads(existing_content)
-                    except:
+                # IT'S A CSV FILE! Don't try to parse as JSON
+                if existing_content.strip():
+                    # Check if it looks like CSV
+                    if 'type,raw_name' in existing_content or ',' in existing_content.split('\n')[0]:
+                        # It's CSV format
                         return self._parse_csv_to_dict(existing_content)
+                    else:
+                        # Maybe it's old JSON format, try to parse
+                        try:
+                            import json
+                            data = json.loads(existing_content)
+                            # Convert old JSON to new CSV format
+                            csv_content = self._convert_to_csv_format(data)
+                            # Save as CSV for next time
+                            with open(glossary_path, 'w', encoding='utf-8') as f:
+                                f.write(csv_content)
+                            return self._parse_csv_to_dict(csv_content)
+                        except:
+                            # Not JSON either, treat as CSV
+                            return self._parse_csv_to_dict(existing_content)
             except Exception as e:
                 print(f"⚠️ Could not read existing glossary: {e}")
                 print(f"📑 Regenerating glossary...")
         
+        # Rest of the method continues as before...
         print("📑 Extracting names and terms with configurable options")
         
         # Check stop flag before processing
@@ -4184,7 +4195,7 @@ class GlossaryManager:
                                    min_frequency, max_names, max_titles, 
                                    existing_glossary, output_dir, 
                                    strip_honorifics=True, fuzzy_threshold=0.90):
-        """Extract glossary using custom AI prompt with true CSV format output and interrupt support"""
+        """Extract glossary using custom AI prompt with PROPER CSV handling"""
         print("📑 Using custom automatic glossary prompt")
         
         # Check stop flag
@@ -4263,7 +4274,7 @@ class GlossaryManager:
                     max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "4096"))
                     
                     # Use send_with_interrupt for interruptible API call
-                    chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "300"))  # 5 minute default
+                    chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "900"))  # 15 minute default for glossary
                     print(f"📑 Sending AI extraction request (timeout: {chunk_timeout}s, interruptible)...")
                     
                     response = send_with_interrupt(
@@ -4281,10 +4292,28 @@ class GlossaryManager:
                     else:
                         response_text = str(response)
                     
-                    print(f"📑 [DEBUG] Got response: {len(response_text)} characters")
-                    print(f"📑 [DEBUG] Response preview: {response_text[:200]}...")
+                    # CRITICAL FIX: Remove string representation artifacts
+                    response_text = response_text.strip()
                     
-                    # Clean up response - remove markdown code blocks if present
+                    # Remove outer quotes and parentheses if they wrap the entire response
+                    if response_text.startswith('("') and response_text.endswith('")'):
+                        response_text = response_text[2:-2]
+                    elif response_text.startswith('"') and response_text.endswith('"'):
+                        response_text = response_text[1:-1]
+                    elif response_text.startswith('(') and response_text.endswith(')'):
+                        response_text = response_text[1:-1]
+                    
+                    # Unescape the string if it was escaped
+                    response_text = response_text.replace('\\n', '\n')
+                    response_text = response_text.replace('\\r', '')
+                    response_text = response_text.replace('\\t', '\t')
+                    response_text = response_text.replace('\\"', '"')
+                    response_text = response_text.replace("\\'", "'")
+                    response_text = response_text.replace('\\\\', '\\')
+                    
+                    print(f"📑 [DEBUG] Got cleaned response: {len(response_text)} characters")
+                    
+                    # Clean up markdown code blocks if present
                     if '```' in response_text:
                         parts = response_text.split('```')
                         for part in parts:
@@ -4295,89 +4324,106 @@ class GlossaryManager:
                                 response_text = part
                                 break
                     
-                    # Build CSV content with verification
+                    # Normalize line endings and split properly
+                    response_text = response_text.replace('\r\n', '\n').replace('\r', '\n')
+                    lines = [line.strip() for line in response_text.strip().split('\n') if line.strip()]
+                    
+                    print(f"📑 [DEBUG] Parsed {len(lines)} non-empty lines from response")
+                    if lines:
+                        print(f"📑 [DEBUG] First 3 lines:")
+                        for i, line in enumerate(lines[:3]):
+                            print(f"📑 [DEBUG]   Line {i+1}: {line[:100]}")
+                    
+                    # Build CSV content WITHOUT verification for now (to debug)
+                    # Skip frequency checking if GLOSSARY_SKIP_FREQUENCY_CHECK is set
+                    skip_frequency_check = os.getenv("GLOSSARY_SKIP_FREQUENCY_CHECK", "0") == "1"
+                    
                     csv_lines = []
                     header_found = False
-
-                    lines = response_text.strip().split('\n')
-
-                    print(f"📑 [DEBUG] Verifying {len(lines)} extracted terms against text...")
+                    
+                    print(f"📑 [DEBUG] Processing {len(lines)} extracted terms...")
+                    if skip_frequency_check:
+                        print(f"📑 [DEBUG] Frequency checking DISABLED - keeping all terms")
 
                     for line_num, line in enumerate(lines, 1):
-                        # Check stop flag periodically during verification
+                        # Check stop flag periodically
                         if line_num % 10 == 0 and is_stop_requested():
-                            print(f"📑 ❌ Glossary verification stopped at line {line_num}")
+                            print(f"📑 ❌ Glossary processing stopped at line {line_num}")
                             return {}
                         
-                        line = line.strip()
-                        if not line:
-                            continue
-                        
-                        # Show progress every 10 terms
-                        if line_num % 10 == 0:
-                            print(f"📑 [DEBUG] Processing term {line_num}/{len(lines)}...")
-                        
                         # Check for header
-                        if 'type' in line.lower() and 'raw_name' in line.lower():
-                            if not header_found:
-                                csv_lines.append("type,raw_name,translated_name")
-                                header_found = True
+                        if not header_found and 'type' in line.lower() and 'raw_name' in line.lower():
+                            csv_lines.append("type,raw_name,translated_name")
+                            header_found = True
+                            print(f"📑 [DEBUG] Found header at line {line_num}")
                             continue
                         
                         # Parse CSV line
-                        parts = [p.strip() for p in line.split(',')]
+                        parts = [p.strip().strip('"\'') for p in line.split(',')]
                         
                         if len(parts) >= 3:
                             entry_type = parts[0].lower()
-                            raw_name = parts[1].strip('"\'')
-                            translated_name = parts[2].strip('"\'')
+                            raw_name = parts[1]
+                            translated_name = parts[2]
                             
                             if not raw_name or not translated_name:
+                                print(f"📑 [DEBUG] Skipping line {line_num}: empty name")
                                 continue
                             
-                            # Strip honorifics if enabled
-                            original_raw = raw_name
-                            if strip_honorifics:
-                                raw_name = self._strip_honorific(raw_name, language)
-                            
-                            print(f"📑 [DEBUG] Verifying '{raw_name}' frequency (fuzzy threshold: {fuzzy_threshold})...")
-                            
-                            # Verify frequency using fuzzy matching
-                            count = self._find_fuzzy_matches(raw_name, all_text, fuzzy_threshold)
-                            
-                            # Also check with honorifics if stripped
-                            if strip_honorifics and count < min_frequency:
-                                print(f"📑 [DEBUG]   - Checking with original form '{original_raw}'...")
-                                count += self._find_fuzzy_matches(original_raw, all_text, fuzzy_threshold)
-                                
-                                # Check with common honorifics
-                                if language in self.pattern_manager.CJK_HONORIFICS:
-                                    for honorific in self.pattern_manager.CJK_HONORIFICS[language][:3]:
-                                        if is_stop_requested():
-                                            print(f"📑 ❌ Verification stopped during honorific checking")
-                                            return {}
-                                        print(f"📑 [DEBUG]   - Checking with honorific '{raw_name + honorific}'...")
-                                        count += self._find_fuzzy_matches(raw_name + honorific, all_text, fuzzy_threshold)
-                                        if count >= min_frequency:
-                                            break
-                            
-                            if count >= min_frequency:
-                                print(f"📑 [DEBUG]   ✓ '{raw_name}' appears {count} times (minimum: {min_frequency})")
+                            if skip_frequency_check:
+                                # Skip all frequency checking
                                 csv_line = f"{entry_type},{raw_name},{translated_name}"
-                                # Add optional fields if present
                                 if len(parts) > 3 and parts[3]:
                                     csv_line += f",{parts[3]}"
                                 csv_lines.append(csv_line)
+                                if line_num <= 10:
+                                    print(f"📑 [DEBUG]   Added (no check): {entry_type},{raw_name},{translated_name}")
                             else:
-                                print(f"📑 [DEBUG]   ✗ '{raw_name}' only appears {count} times (minimum: {min_frequency}) - skipped")
+                                # Original frequency checking code
+                                original_raw = raw_name
+                                if strip_honorifics:
+                                    raw_name = self._strip_honorific(raw_name, language)
+                                
+                                # Show progress every 10 terms
+                                if line_num % 10 == 0:
+                                    print(f"📑 [DEBUG] Verifying term {line_num}/{len(lines)}...")
+                                
+                                # Verify frequency using fuzzy matching
+                                count = self._find_fuzzy_matches(raw_name, all_text, fuzzy_threshold)
+                                
+                                # Also check with honorifics if stripped
+                                if strip_honorifics and count < min_frequency:
+                                    count += self._find_fuzzy_matches(original_raw, all_text, fuzzy_threshold)
+                                    
+                                    # Check with common honorifics
+                                    if language in self.pattern_manager.CJK_HONORIFICS:
+                                        for honorific in self.pattern_manager.CJK_HONORIFICS[language][:3]:
+                                            if is_stop_requested():
+                                                print(f"📑 ❌ Verification stopped during honorific checking")
+                                                return {}
+                                            count += self._find_fuzzy_matches(raw_name + honorific, all_text, fuzzy_threshold)
+                                            if count >= min_frequency:
+                                                break
+                                
+                                if count >= min_frequency:
+                                    csv_line = f"{entry_type},{raw_name},{translated_name}"
+                                    if len(parts) > 3 and parts[3]:
+                                        csv_line += f",{parts[3]}"
+                                    csv_lines.append(csv_line)
+                                    if line_num <= 10:
+                                        print(f"📑 [DEBUG]   ✓ Added: {entry_type},{raw_name},{translated_name} (count: {count})")
+                                else:
+                                    if line_num <= 10:
+                                        print(f"📑 [DEBUG]   ✗ Skipped: {raw_name} (count: {count} < {min_frequency})")
+                        else:
+                            print(f"📑 [DEBUG] Line {line_num} has {len(parts)} parts (need 3+): {line[:50]}")
 
-                    print(f"📑 [DEBUG] Verification complete! {len(csv_lines) - 1} terms passed frequency check")
-                    
                     # Ensure header exists
                     if not header_found:
                         csv_lines.insert(0, "type,raw_name,translated_name")
+                        print(f"📑 [DEBUG] Added default header")
                     
-                    print(f"📑 AI extracted and verified {len(csv_lines) - 1} terms")
+                    print(f"📑 AI extracted {len(csv_lines) - 1} valid terms (header excluded)")
                     
                     # Check stop before merging
                     if is_stop_requested():
@@ -4388,8 +4434,9 @@ class GlossaryManager:
                     if existing_glossary:
                         csv_lines = self._merge_csv_entries(csv_lines, existing_glossary, strip_honorifics, language)
 
-                    # Fuzzy matching 
-                    csv_lines = self._deduplicate_glossary_with_fuzzy(csv_lines, fuzzy_threshold)
+                    # Fuzzy matching deduplication
+                    if not skip_frequency_check:  # Only dedupe if we're checking frequencies
+                        csv_lines = self._deduplicate_glossary_with_fuzzy(csv_lines, fuzzy_threshold)
                                 
                     # Create final CSV content
                     csv_content = '\n'.join(csv_lines)
@@ -4402,6 +4449,12 @@ class GlossaryManager:
                     print(f"\n📑 ✅ AI-ASSISTED GLOSSARY SAVED!")
                     print(f"📑 File: {glossary_path}")
                     print(f"📑 Total entries: {len(csv_lines) - 1}")  # Exclude header
+                    
+                    # Show first few entries for debugging
+                    if len(csv_lines) > 1:
+                        print(f"📑 First few entries:")
+                        for line in csv_lines[1:min(6, len(csv_lines))]:
+                            print(f"📑   {line}")
                     
                     return self._parse_csv_to_dict(csv_content)
                     
