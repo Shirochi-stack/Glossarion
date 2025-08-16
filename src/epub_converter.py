@@ -2751,6 +2751,12 @@ class EPUBCompiler:
         # Set identifier
         book.set_identifier(metadata.get("identifier", f"translated-{os.path.basename(self.base_dir)}"))
         
+        # Fix encoding issues in titles before using them
+        if metadata.get('title'):
+            metadata['title'] = self._fix_encoding_issues(metadata['title'])
+        if metadata.get('original_title'):
+            metadata['original_title'] = self._fix_encoding_issues(metadata['original_title'])
+        
         # Determine title
         book_title = self._determine_book_title(metadata)
         book.set_title(book_title)
@@ -2758,9 +2764,14 @@ class EPUBCompiler:
         # Set language
         book.set_language(metadata.get("language", "en"))
         
-        # Add original title if different (as alternative title)
+        # Store original title as alternative metadata (not as another dc:title)
+        # This prevents EPUB readers from getting confused about which title to display
         if metadata.get('original_title') and metadata.get('original_title') != book_title:
-            book.add_metadata('DC', 'title', metadata['original_title'], {'type': 'original'})
+            # Use 'alternative' field instead of 'title' to avoid display issues
+            book.add_metadata('DC', 'alternative', metadata['original_title'])
+            # Also store in a custom field for reference
+            book.add_metadata('calibre', 'original_title', metadata['original_title'])
+            self.log(f"[INFO] Stored original title as alternative: {metadata['original_title']}")
         
         # Set author/creator
         if metadata.get("creator"):
