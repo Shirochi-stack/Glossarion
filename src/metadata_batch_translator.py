@@ -1411,17 +1411,15 @@ def enhance_epub_compiler(compiler_instance):
     return compiler_instance
     
 def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log_callback=None) -> Tuple[Dict[int, str], Dict[int, str]]:
-    """Extract source headers AND current titles from HTML files
+    """Extract source headers AND current titles from HTML files using STRICT OPF ordering
     
     Returns:
         Tuple of (source_headers, current_titles) where:
-        - source_headers: Maps chapter numbers to original language titles from source EPUB
-        - current_titles: Maps chapter numbers to current titles in HTML files
+        - source_headers: Maps output chapter numbers to original language titles from source EPUB (in OPF order)
+        - current_titles: Maps output chapter numbers to current titles in HTML files
     """
     from bs4 import BeautifulSoup
-    import json
-    import os
-    import zipfile
+    import xml.etree.ElementTree as ET
     
     def log(message):
         if log_callback:
@@ -1431,43 +1429,42 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
     
     log("📖 Extracting headers and mapping to output files...")
     
-    # Step 1: Get ALL HTML files and sort them
-    all_html_files = sorted([f for f in os.listdir(html_dir) if f.endswith('.html')])
-    log(f"📁 Found {len(all_html_files)} HTML files in {html_dir}")
+    # Step 1: Get ALL HTML files and sort them (EXCLUDING cover.html)
+    all_html_files = sorted([f for f in os.listdir(html_dir) 
+                             if f.endswith('.html') 
+                             and f.lower() != 'cover.html'])
+    log(f"📁 Found {len(all_html_files)} HTML files in {html_dir} (excluding cover.html)")
     
     # Step 2: Load translation_progress.json to understand the chapter mapping
     progress_file = os.path.join(html_dir, 'translation_progress.json')
     progress_data = {}
     chapter_to_file_map = {}
     has_chapter_zero = False
-    uses_zero_based = False  # Track if the novel uses 0-based numbering
+    uses_zero_based = False
     
     if os.path.exists(progress_file):
         try:
             with open(progress_file, 'r', encoding='utf-8') as f:
                 progress_data = json.load(f)
             
-            # Check if novel uses 0-based numbering
             uses_zero_based = progress_data.get('uses_zero_based', False)
-            
-            # Scan ALL entries in progress.json - using hash keys
             all_chapters = progress_data.get('chapters', {})
+            
             log(f"📊 Scanning {len(all_chapters)} entries in translation_progress.json")
             log(f"📊 Novel uses {'0-based' if uses_zero_based else '1-based'} numbering")
             
-            # First pass: check if we have chapter 0
+            # Check if we have chapter 0
             for chapter_hash, chapter_info in all_chapters.items():
-                if isinstance(chapter_info, dict):  # Make sure it's a valid chapter entry
+                if isinstance(chapter_info, dict):
                     actual_num = chapter_info.get('actual_num')
                     if actual_num == 0:
                         has_chapter_zero = True
                         log("  ✓ Found Chapter 0 in translation_progress.json")
                         break
             
-            # Second pass: build complete mapping
+            # Build complete mapping (excluding cover.html)
             for chapter_hash, chapter_info in all_chapters.items():
-                if isinstance(chapter_info, dict):  # Make sure it's a valid chapter entry
-                    # Check if either has 'completed' status OR just has output_file (for compatibility)
+                if isinstance(chapter_info, dict):
                     has_output = chapter_info.get('output_file')
                     is_completed = chapter_info.get('status') == 'completed' or has_output
                     
@@ -1475,17 +1472,15 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                         actual_num = chapter_info.get('actual_num')
                         output_file = os.path.basename(chapter_info['output_file'])
                         
-                        # Important: Check for None explicitly to include chapter 0
+                        # Skip cover.html
+                        if output_file.lower() == 'cover.html':
+                            continue
+                        
                         if actual_num is not None and output_file in all_html_files:
                             chapter_to_file_map[actual_num] = output_file
-                        elif actual_num is None:
-                            log(f"  ⚠️ Skipping entry {chapter_hash[:8]}...: missing actual_num")
-                        elif output_file not in all_html_files:
-                            log(f"  ⚠️ Skipping chapter {actual_num}: file '{output_file}' not found in directory")
                             
-            log(f"📊 Found {len(chapter_to_file_map)} chapter mappings in translation_progress.json")
+            log(f"📊 Found {len(chapter_to_file_map)} chapter mappings in translation_progress.json (excluding cover)")
             
-            # Show chapter number range
             if chapter_to_file_map:
                 min_ch = min(chapter_to_file_map.keys())
                 max_ch = max(chapter_to_file_map.keys())
@@ -1497,7 +1492,6 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
     # Step 3: Extract current titles from HTML files
     current_titles = {}
     
-    # If we have a mapping from progress.json, use it
     if chapter_to_file_map:
         for chapter_num, html_file in chapter_to_file_map.items():
             try:
@@ -1507,10 +1501,7 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                 
                 soup = BeautifulSoup(content, 'html.parser')
                 
-                # Get title from the HTML
                 current_title = None
-                
-                # Try h1, h2, h3, title in order
                 for tag_name in ['h1', 'h2', 'h3', 'title']:
                     tag = soup.find(tag_name)
                     if tag:
@@ -1526,14 +1517,12 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                     'title': current_title,
                     'filename': html_file
                 }
-                log(f"  Ch.{chapter_num} ({html_file}): {current_title}")
                     
             except Exception as e:
                 log(f"⚠️ Error reading {html_file}: {e}")
     else:
-        # No translation_progress.json mapping - use file order
+        # No mapping - use file order (excluding cover.html)
         log("⚠️ No translation_progress.json mapping found, using file order")
-        # Start from 0 if we detected chapter 0, otherwise from 1
         start_num = 0 if has_chapter_zero else 1
         
         for idx, html_file in enumerate(all_html_files):
@@ -1545,7 +1534,6 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                 
                 soup = BeautifulSoup(content, 'html.parser')
                 
-                # Get title
                 current_title = None
                 for tag_name in ['h1', 'h2', 'h3', 'title']:
                     tag = soup.find(tag_name)
@@ -1562,14 +1550,13 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                     'title': current_title,
                     'filename': html_file
                 }
-                log(f"  Ch.{chapter_num} ({html_file}): {current_title}")
                     
             except Exception as e:
                 log(f"⚠️ Error reading {html_file}: {e}")
     
     log(f"📊 Found {len(current_titles)} current titles in HTML files")
     
-    # Step 4: Extract headers from source EPUB
+    # Step 4: Extract headers from source EPUB using STRICT OPF ordering
     source_headers = {}
     
     if not os.path.exists(epub_path):
@@ -1578,15 +1565,96 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
     
     try:
         with zipfile.ZipFile(epub_path, 'r') as zf:
-            # Get all content files
-            epub_html_files = sorted([f for f in zf.namelist() 
-                                     if f.endswith(('.html', '.xhtml', '.htm')) 
-                                     and not f.startswith('__MACOSX')
-                                     and not any(skip in f.lower() for skip in ['nav.', 'toc.', 'contents.', 'copyright.', 'cover.'])])
+            # Find and parse OPF file
+            opf_content = None
+            opf_path = None
             
-            log(f"📚 Found {len(epub_html_files)} content files in source EPUB")
+            for name in zf.namelist():
+                if name.endswith('.opf'):
+                    opf_path = name
+                    opf_content = zf.read(name)
+                    log(f"📋 Found OPF file: {name}")
+                    break
             
-            # FIRST: Extract ALL titles from source EPUB files
+            if not opf_content:
+                try:
+                    container = zf.read('META-INF/container.xml')
+                    tree = ET.fromstring(container)
+                    rootfile = tree.find('.//{urn:oasis:names:tc:opendocument:xmlns:container}rootfile')
+                    if rootfile is not None:
+                        opf_path = rootfile.get('full-path')
+                        if opf_path:
+                            opf_content = zf.read(opf_path)
+                            log(f"📋 Found OPF via container.xml: {opf_path}")
+                except:
+                    pass
+            
+            # Parse OPF to get spine order
+            spine_order = []
+            if opf_content:
+                try:
+                    root = ET.fromstring(opf_content)
+                    
+                    ns = {'opf': 'http://www.idpf.org/2007/opf'}
+                    if root.tag.startswith('{'):
+                        default_ns = root.tag[1:root.tag.index('}')]
+                        ns = {'opf': default_ns}
+                    
+                    # Get manifest to map IDs to files
+                    manifest = {}
+                    opf_dir = os.path.dirname(opf_path) if opf_path else ''
+                    
+                    for item in root.findall('.//opf:manifest/opf:item', ns):
+                        item_id = item.get('id')
+                        href = item.get('href')
+                        media_type = item.get('media-type', '')
+                        
+                        if item_id and href and ('html' in media_type.lower() or href.endswith(('.html', '.xhtml', '.htm'))):
+                            if opf_dir:
+                                full_path = os.path.join(opf_dir, href).replace('\\', '/')
+                            else:
+                                full_path = href
+                            manifest[item_id] = full_path
+                    
+                    # Get spine order - include ALL files except navigation and cover
+                    spine = root.find('.//opf:spine', ns)
+                    if spine is not None:
+                        for itemref in spine.findall('opf:itemref', ns):
+                            idref = itemref.get('idref')
+                            if idref and idref in manifest:
+                                file_path = manifest[idref]
+                                # Skip navigation, toc, and cover files
+                                if not any(skip in file_path.lower() for skip in ['nav.', 'toc.', 'cover.']):
+                                    spine_order.append(file_path)
+                    
+                    log(f"📋 Found {len(spine_order)} content files in OPF spine order (excluding nav/toc/cover)")
+                    
+                    # Show breakdown
+                    notice_count = sum(1 for f in spine_order if 'notice' in f.lower())
+                    chapter_count = sum(1 for f in spine_order if 'chapter' in f.lower() and 'notice' not in f.lower())
+                    if notice_count > 0:
+                        log(f"   • Notice/Copyright files: {notice_count}")
+                    if chapter_count > 0:
+                        log(f"   • Chapter files: {chapter_count}")
+                    
+                except Exception as e:
+                    log(f"⚠️ Error parsing OPF: {e}")
+                    spine_order = []
+            
+            # Use spine order if available, otherwise alphabetical (excluding cover)
+            if spine_order:
+                epub_html_files = spine_order
+                log("✅ Using STRICT OPF spine order for source headers")
+            else:
+                epub_html_files = sorted([f for f in zf.namelist() 
+                                         if f.endswith(('.html', '.xhtml', '.htm')) 
+                                         and not f.startswith('__MACOSX')
+                                         and not any(skip in f.lower() for skip in ['nav.', 'toc.', 'cover.'])])
+                log("⚠️ No OPF spine found, using alphabetical order (excluding nav/toc/cover)")
+            
+            log(f"📚 Processing {len(epub_html_files)} content files from source EPUB")
+            
+            # Extract ALL titles from source EPUB files (in OPF order)
             source_titles_by_index = {}
             
             for idx, content_file in enumerate(epub_html_files):
@@ -1598,9 +1666,7 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                     
                     soup = BeautifulSoup(html_content, 'html.parser')
                     
-                    # Extract title
                     title = None
-                    
                     for tag_name in ['h1', 'h2', 'h3', 'title']:
                         tag = soup.find(tag_name)
                         if tag:
@@ -1609,7 +1675,6 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                                 title = text
                                 break
                     
-                    # If no title found, check first paragraph
                     if not title:
                         p = soup.find('p')
                         if p:
@@ -1619,7 +1684,8 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                     
                     if title:
                         source_titles_by_index[idx] = title
-                        log(f"  Extracted from source idx {idx}: {title}")
+                        if idx < 5:
+                            log(f"  Source[{idx}] ({os.path.basename(content_file)}): {title}")
                     
                 except Exception as e:
                     log(f"  ⚠️ Error reading source chapter {idx}: {e}")
@@ -1627,78 +1693,79 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
             
             log(f"📚 Extracted {len(source_titles_by_index)} titles from source EPUB")
             
-            # SECOND: Try to build mapping using content_hashes
+            # NOW THE KEY FIX: Map source to output using OPF spine positions
+            # The chapter_idx in content_hashes should match the OPF spine position
             source_to_output = {}
             
+            # First try to use content_hashes if available
             if progress_data and 'content_hashes' in progress_data:
                 content_hashes = progress_data.get('content_hashes', {})
                 chapters_data = progress_data.get('chapters', {})
                 
-                log(f"  Building mapping from {len(content_hashes)} content hash entries...")
+                log(f"  Checking {len(content_hashes)} content hash entries...")
+                
+                # The issue: chapter_idx might not match OPF order if files were processed alphabetically
+                # We need to correct this by matching actual_num directly
                 
                 for chapter_hash, hash_info in content_hashes.items():
                     if not isinstance(hash_info, dict):
                         continue
                     
-                    # Get chapter_idx from content_hashes section
-                    chapter_idx = hash_info.get('chapter_idx')
                     actual_num = hash_info.get('actual_num')
                     
-                    # Check if this chapter is completed in the chapters section
+                    # Check if this chapter is completed
                     chapter_info = chapters_data.get(chapter_hash, {})
                     has_output = chapter_info.get('output_file')
                     is_completed = chapter_info.get('status') == 'completed' or has_output
                     
-                    if is_completed and chapter_idx is not None and actual_num is not None:
-                        source_to_output[chapter_idx] = actual_num
-            
-            log(f"  Mapping from content_hashes: {len(source_to_output)} chapters mapped")
-            
-            # THIRD: Fill in any missing mappings with direct mapping
-            # This ensures we don't lose chapters like 64
-            expected_chapters = set(current_titles.keys())
-            mapped_chapters = set(source_to_output.values())
-            missing_chapters = expected_chapters - mapped_chapters
-            
-            if missing_chapters:
-                log(f"⚠️ Missing mappings for chapters: {sorted(missing_chapters)}")
-                log(f"  Will attempt direct index mapping for missing chapters")
-                
-                # For missing chapters, try direct index mapping
-                for missing_ch in sorted(missing_chapters):
-                    # Try to find source index for this chapter
-                    # First, check if the chapter number matches a source index
-                    if has_chapter_zero or uses_zero_based:
-                        # For 0-based: chapter N maps to source index N
-                        source_idx = missing_ch
-                    else:
-                        # For 1-based: chapter N maps to source index N-1
-                        source_idx = missing_ch - 1
+                    # Skip if output file is cover.html
+                    if has_output:
+                        output_file = os.path.basename(chapter_info['output_file'])
+                        if output_file.lower() == 'cover.html':
+                            continue
                     
-                    # Check if this source index exists and isn't already mapped
-                    if source_idx in source_titles_by_index and source_idx not in source_to_output:
-                        source_to_output[source_idx] = missing_ch
-                        log(f"    Mapped missing chapter: source idx {source_idx} → chapter {missing_ch}")
+                    if is_completed and actual_num is not None:
+                        # Map OPF spine index to actual_num
+                        # The actual_num is what we need to match
+                        # Find the spine index that corresponds to this chapter number
+                        
+                        # If OPF has notice files (0-13) and chapters (14+)
+                        # And actual_num is 0-based, then:
+                        # actual_num 0 = spine index 0 (first notice file)
+                        # actual_num 14 = spine index 14 (first chapter file)
+                        
+                        # Direct mapping: actual_num IS the spine index
+                        source_to_output[actual_num] = actual_num
             
-            # FOURTH: Apply the mapping to create source_headers
-            for source_idx, output_num in source_to_output.items():
-                if source_idx in source_titles_by_index:
-                    source_headers[output_num] = source_titles_by_index[source_idx]
-                    log(f"  Final mapping: Source Ch.{source_idx} → Output Ch.{output_num}: {source_titles_by_index[source_idx]}")
+            log(f"  Direct mapping: {len(source_to_output)} chapters mapped")
+            
+            # Apply the mapping to create source_headers
+            for spine_idx, output_num in source_to_output.items():
+                if spine_idx in source_titles_by_index and output_num in current_titles:
+                    source_headers[output_num] = source_titles_by_index[spine_idx]
+                    if len(source_headers) <= 5:
+                        log(f"  Mapped: Spine[{spine_idx}] → Output Ch.{output_num}: {source_titles_by_index[spine_idx][:50]}...")
+            
+            # If we still have missing mappings, use direct index mapping
+            missing_chapters = set(current_titles.keys()) - set(source_headers.keys())
+            if missing_chapters:
+                log(f"⚠️ Missing mappings for chapters: {sorted(missing_chapters)[:10]}...")
+                
+                for missing_ch in sorted(missing_chapters):
+                    # Direct mapping: chapter number = spine index
+                    if missing_ch in source_titles_by_index:
+                        source_headers[missing_ch] = source_titles_by_index[missing_ch]
+                        if len(missing_chapters) <= 10:
+                            log(f"    Direct mapped: Ch.{missing_ch} → {source_titles_by_index[missing_ch][:50]}...")
             
             log(f"📊 Final result: {len(source_headers)} source headers mapped to output chapters")
             
-            # Debug: Show what we have vs what we expect
-            missing_final = []
-            for chapter_num in current_titles:
-                if chapter_num not in source_headers:
-                    missing_final.append(chapter_num)
-            
-            if missing_final:
-                log(f"❌ Still missing source headers for chapters: {sorted(missing_final)}")
-                # Try to debug why
-                for m in missing_final[:3]:  # Show first 3
-                    log(f"  Chapter {m}: current title = {current_titles[m]['title']}")
+            # Debug output
+            if source_headers:
+                log(f"📋 Sample mappings:")
+                for ch_num in sorted(list(source_headers.keys()))[:5]:
+                    current = current_titles.get(ch_num, {})
+                    log(f"   Ch.{ch_num}: {source_headers[ch_num][:40]}... → {current.get('title', 'N/A')[:40]}...")
         
     except Exception as e:
         log(f"❌ Error extracting source headers: {e}")
