@@ -1028,7 +1028,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.9.3"
+        __version__ = "3.9.4"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1907,7 +1907,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.9.3 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.9.4 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def create_file_section(self):
@@ -3037,16 +3037,8 @@ Recent translations to summarize:
 
     def _force_retranslation_epub_or_text(self, file_path, parent_dialog=None, tab_frame=None):
         """
-        Shared logic for force retranslation of EPUB/text files
-        Can be used standalone or embedded in a tab
-        
-        Args:
-            file_path: Path to the EPUB/text file
-            parent_dialog: If provided, won't create its own dialog
-            tab_frame: If provided, will render into this frame instead of creating dialog
-        
-        Returns:
-            dict: Contains all the UI elements and data for external access
+        Shared logic for force retranslation of EPUB/text files with OPF verification
+        Shows ALL chapters from OPF, not just tracked ones
         """
         
         epub_base = os.path.splitext(os.path.basename(file_path))[0]
@@ -3058,20 +3050,98 @@ Recent translations to summarize:
             return None
         
         progress_file = os.path.join(output_dir, "translation_progress.json")
-        if not os.path.exists(progress_file):
+        
+        # Load progress if it exists (but don't require it)
+        prog = {}
+        if os.path.exists(progress_file):
+            with open(progress_file, 'r', encoding='utf-8') as f:
+                prog = json.load(f)
+        
+        # ============= LOAD OPF FOR COMPLETE CHAPTER LIST =============
+        opf_spine = []
+        filename_to_opf_num = {}
+        opf_verified_chapters = set()
+        uses_zero_based = False
+        
+        # Find and load OPF
+        opf_path = os.path.join(output_dir, 'content.opf')
+        if not os.path.exists(opf_path):
+            for file in os.listdir(output_dir):
+                if file.endswith('.opf'):
+                    opf_path = os.path.join(output_dir, file)
+                    break
+        
+        if not os.path.exists(opf_path):
             if not parent_dialog:
-                messagebox.showinfo("Info", "No progress tracking found.")
+                messagebox.showinfo("Error", "No OPF file found. Cannot determine chapter structure.")
             return None
         
-        with open(progress_file, 'r', encoding='utf-8') as f:
-            prog = json.load(f)
-        
-        if not prog.get("chapters"):
-            if not parent_dialog:
-                messagebox.showinfo("Info", "No chapters found in progress tracking.")
+        # Parse OPF
+        try:
+            from bs4 import BeautifulSoup
+            with open(opf_path, 'r', encoding='utf-8') as f:
+                opf_content = f.read()
+            
+            soup = BeautifulSoup(opf_content, 'xml')
+            
+            # Get manifest
+            manifest_items = {}
+            manifest = soup.find('manifest')
+            if manifest:
+                for item in manifest.find_all('item'):
+                    item_id = item.get('id')
+                    href = item.get('href')
+                    media_type = item.get('media-type', '')
+                    
+                    if item_id and href and ('html' in media_type or href.endswith(('.html', '.xhtml', '.htm'))):
+                        manifest_items[item_id] = {
+                            'href': href,
+                            'filename': os.path.basename(href)
+                        }
+            
+            # Get spine order - ALL chapters
+            spine = soup.find('spine')
+            if spine:
+                # Check for 0-based numbering
+                for itemref in spine.find_all('itemref'):
+                    idref = itemref.get('idref')
+                    if idref and idref in manifest_items:
+                        filename = manifest_items[idref]['filename']
+                        if any(skip in filename.lower() for skip in ['nav', 'toc', 'cover']):
+                            continue
+                        
+                        import re
+                        if re.search(r'0{3,4}', filename) or 'notice_0000' in filename:
+                            uses_zero_based = True
+                            break
+                
+                # Build spine list
+                chapter_index = 0 if uses_zero_based else 1
+                
+                for itemref in spine.find_all('itemref'):
+                    idref = itemref.get('idref')
+                    if idref and idref in manifest_items:
+                        filename = manifest_items[idref]['filename']
+                        
+                        # Skip nav/toc/cover
+                        if any(skip in filename.lower() for skip in ['nav', 'toc', 'cover']):
+                            continue
+                        
+                        opf_spine.append({
+                            'filename': filename,
+                            'chapter_num': chapter_index,
+                            'href': manifest_items[idref]['href']
+                        })
+                        filename_to_opf_num[filename] = chapter_index
+                        opf_verified_chapters.add(chapter_index)
+                        chapter_index += 1
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to parse OPF: {e}")
             return None
+        # ============= END OPF LOADING =============
         
-        # If no parent dialog or tab frame, create standalone dialog
+        # Create dialog/container
         if not parent_dialog and not tab_frame:
             dialog = self.wm.create_simple_dialog(
                 self.master,
@@ -3084,66 +3154,86 @@ Recent translations to summarize:
             container = tab_frame or parent_dialog
             dialog = parent_dialog
         
-        # Process chapter data (same logic as before)
-        files_to_entries = {}
-        for chapter_key, chapter_info in prog.get("chapters", {}).items():
-            output_file = chapter_info.get("output_file", "")
-            if output_file:
-                if output_file not in files_to_entries:
-                    files_to_entries[output_file] = []
-                files_to_entries[output_file].append((chapter_key, chapter_info))
-        
-        # Build display info
+        # ============= BUILD COMPLETE CHAPTER LIST FROM OPF =============
         chapter_display_info = []
-        for output_file, entries in files_to_entries.items():
-            chapter_key, chapter_info = entries[0]
+        
+        # Process data from progress tracker
+        tracked_chapters = {}
+        for chapter_key, chapter_info in prog.get("chapters", {}).items():
+            actual_num = chapter_info.get("actual_num")
+            if actual_num is not None:
+                tracked_chapters[actual_num] = chapter_info
+        
+        # Create entry for EVERY OPF chapter
+        for spine_item in opf_spine:
+            chapter_num = spine_item['chapter_num']
+            original_filename = spine_item['filename']
             
-            # Extract chapter number
-            from TransateKRtoEN import extract_chapter_number_from_filename
-            chapter_num, _ = extract_chapter_number_from_filename(output_file)
+            # Check if this chapter is tracked
+            chapter_info = tracked_chapters.get(chapter_num, {})
             
-            # Override with stored values if available
-            if 'actual_num' in chapter_info and chapter_info['actual_num'] is not None:
-                chapter_num = chapter_info['actual_num']
-            elif 'chapter_num' in chapter_info and chapter_info['chapter_num'] is not None:
-                chapter_num = chapter_info['chapter_num']
+            # Determine status
+            status = "never_tracked"
+            output_file = None
             
-            status = chapter_info.get("status", "unknown")
-            if status == "completed_empty":
-                status = "completed"
-            
-            # Check file existence
-            if status == "completed":
-                output_path = os.path.join(output_dir, output_file)
-                if not os.path.exists(output_path):
-                    status = "file_missing"
+            if chapter_info:
+                status = chapter_info.get("status", "unknown")
+                output_file = chapter_info.get("output_file")
+                
+                # Verify file exists
+                if output_file and status == "completed":
+                    output_path = os.path.join(output_dir, output_file)
+                    if not os.path.exists(output_path):
+                        status = "file_missing"
+                    elif os.path.getsize(output_path) < 100:
+                        status = "file_empty"
+            else:
+                # Not in tracker - check if output file exists anyway
+                # Try common patterns
+                possible_files = [
+                    f"response_chapter{chapter_num:04d}.html",
+                    f"response_chapter{chapter_num:03d}.html",
+                    f"response_chapter{chapter_num}.html",
+                    f"response_chapternotice_{chapter_num:04d}.html",
+                    f"response_{os.path.splitext(original_filename)[0]}.html"
+                ]
+                
+                for pf in possible_files:
+                    check_path = os.path.join(output_dir, pf)
+                    if os.path.exists(check_path) and os.path.getsize(check_path) > 100:
+                        output_file = pf
+                        status = "completed_untracked"
+                        break
             
             chapter_display_info.append({
-                'key': chapter_key,
                 'num': chapter_num,
-                'info': chapter_info,
-                'output_file': output_file,
+                'original_filename': original_filename,
+                'output_file': output_file or f"[No output]",
                 'status': status,
-                'duplicate_count': len(entries),
-                'entries': entries
+                'info': chapter_info,
+                'from_opf': True
             })
         
         # Sort by chapter number
-        chapter_display_info.sort(key=lambda x: x['num'] if x['num'] is not None else 999999)
+        chapter_display_info.sort(key=lambda x: x['num'])
         
-        # Create UI elements
-        if not tab_frame:
-            tk.Label(container, text="Select chapters to retranslate (scroll horizontally if needed):", 
-                    font=('Arial', 12)).pack(pady=10)
-        else:
-            tk.Label(container, text="Select chapters to retranslate:", 
-                    font=('Arial', 11)).pack(pady=5)
+        # Create UI
+        title_text = f"ALL Chapters from OPF ({len(opf_spine)} total, {'0-based' if uses_zero_based else '1-based'})"
+        
+        tk.Label(container, text=title_text, font=('Arial', 12 if not tab_frame else 11)).pack(pady=10 if not tab_frame else 5)
+        
+        # Stats
+        completed = sum(1 for c in chapter_display_info if c['status'] in ['completed', 'completed_untracked'])
+        missing = sum(1 for c in chapter_display_info if c['status'] in ['file_missing', 'file_empty', 'never_tracked'])
+        
+        stats_text = f"Completed: {completed} | Missing/Never Tracked: {missing}"
+        tk.Label(container, text=stats_text, font=('Arial', 10)).pack(pady=5)
         
         # Main frame for listbox
         main_frame = tk.Frame(container)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10 if not tab_frame else 5, pady=5)
         
-        # Create scrollbars and listbox
+        # Scrollbars and listbox
         h_scrollbar = ttk.Scrollbar(main_frame, orient=tk.HORIZONTAL)
         h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
         
@@ -3162,12 +3252,15 @@ Recent translations to summarize:
         v_scrollbar.config(command=listbox.yview)
         h_scrollbar.config(command=listbox.xview)
         
-        # Populate listbox
+        # Populate listbox with ALL chapters
         status_icons = {
             'completed': '✅',
+            'completed_untracked': '✅',
             'failed': '❌',
-            'qa_failed': '❌',
-            'file_missing': '⚠️',
+            'qa_failed': '⚠️',
+            'file_missing': '🗑️',
+            'file_empty': '📄',
+            'never_tracked': '🆕',
             'in_progress': '🔄',
             'unknown': '❓'
         }
@@ -3179,22 +3272,28 @@ Recent translations to summarize:
             icon = status_icons.get(status, '❓')
             
             # Format display
-            if isinstance(chapter_num, float) and chapter_num.is_integer():
-                display = f"Chapter {int(chapter_num):03d} | {icon} {status} | {output_file}"
-            elif isinstance(chapter_num, float):
-                display = f"Chapter {chapter_num:06.1f} | {icon} {status} | {output_file}"
-            else:
-                display = f"Chapter {chapter_num:03d} | {icon} {status} | {output_file}"
+            chapter_str = f"Chapter {chapter_num:03d}"
             
-            if info['duplicate_count'] > 1:
-                display += f" | ({info['duplicate_count']} entries)"
+            # Status description
+            status_desc = {
+                'completed': 'completed',
+                'completed_untracked': 'completed (untracked)',
+                'never_tracked': 'NEVER TRACKED',
+                'file_missing': 'FILE MISSING',
+                'file_empty': 'FILE EMPTY',
+            }.get(status, status)
+            
+            display = f"{chapter_str} | {icon} {status_desc} | {output_file}"
             
             listbox.insert(tk.END, display)
+            
+            # Color code missing chapters
+            if status in ['never_tracked', 'file_missing', 'file_empty']:
+                listbox.itemconfig(tk.END, fg='red')
         
-        # Selection count label
-        selection_count_label = tk.Label(container, text="Selected: 0", 
-                                       font=('Arial', 10 if not tab_frame else 9))
-        selection_count_label.pack(pady=(5, 10) if not tab_frame else 2)
+        # Selection count
+        selection_count_label = tk.Label(container, text="Selected: 0", font=('Arial', 10))
+        selection_count_label.pack(pady=5)
         
         def update_selection_count(*args):
             count = len(listbox.curselection())
@@ -3202,26 +3301,26 @@ Recent translations to summarize:
         
         listbox.bind('<<ListboxSelect>>', update_selection_count)
         
-        # Return data structure for external access
+        # Return data
         result = {
             'file_path': file_path,
             'output_dir': output_dir,
             'progress_file': progress_file,
             'prog': prog,
-            'files_to_entries': files_to_entries,
             'chapter_display_info': chapter_display_info,
             'listbox': listbox,
             'selection_count_label': selection_count_label,
             'dialog': dialog,
-            'container': container
+            'container': container,
+            'opf_spine': opf_spine,
+            'uses_zero_based': uses_zero_based
         }
         
-        # If standalone (no parent), add buttons
+        # Add buttons
         if not parent_dialog or tab_frame:
             self._add_retranslation_buttons(result)
         
         return result
-
 
     def _add_retranslation_buttons(self, data, button_frame=None):
         """Add the standard button set for retranslation dialogs"""
@@ -14369,7 +14468,7 @@ Important rules:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.9.3...")
+    print("🚀 Starting Glossarion v3.9.4...")
     
     # Initialize splash screen
     splash_manager = None
