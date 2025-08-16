@@ -52,8 +52,8 @@ class MetadataBatchTranslatorUI:
         # Field-specific prompts
         if 'metadata_field_prompts' not in self.gui.config:
             self.gui.config['metadata_field_prompts'] = {
-                'creator': "Translate this author name to English (romanize if needed). Do not output anything other than the translated text:",
-                'publisher': "Translate this publisher name to English. Do not output anything other than the translated text:",
+                'creator': "Romanize this author name. Do not output anything other than the romanized text.",
+                'publisher': "Romanize this publisher name name. Do not output anything other than the romanized text.",
                 'subject': "Translate this book genre/subject to English. Do not output anything other than the translated text:",
                 'description': "Translate this book description to English. Do not output anything other than the translated text:",
                 'series': "Translate this series name to English. Do not output anything other than the translated text:",
@@ -1080,7 +1080,23 @@ class MetadataTranslator:
             translated_metadata.update(translated_fields)
             
         return translated_metadata
-    
+ 
+    def _is_already_english(self, text: str) -> bool:
+        """Simple check if text is already in English"""
+        if not text:
+            return True
+        
+        # Check for CJK characters - if present, needs translation
+        for char in text:
+            if ('\u4e00' <= char <= '\u9fff' or  # Chinese
+                '\u3040' <= char <= '\u309f' or  # Hiragana
+                '\u30a0' <= char <= '\u30ff' or  # Katakana
+                '\uac00' <= char <= '\ud7af'):   # Korean
+                return False
+        
+        # If no CJK characters, assume it's already English
+        return True
+ 
     def _translate_fields_together(self, 
                                   metadata: Dict[str, Any],
                                   fields_to_translate: Dict[str, bool]) -> Dict[str, Any]:
@@ -1089,7 +1105,8 @@ class MetadataTranslator:
         
         for field, should_translate in fields_to_translate.items():
             if should_translate and field in metadata and metadata[field]:
-                fields_to_send[field] = metadata[field]
+                if not self._is_already_english(metadata[field]):
+                    fields_to_send[field] = metadata[field]
                 
         if not fields_to_send:
             return {}
@@ -1125,14 +1142,39 @@ class MetadataTranslator:
                 {"role": "user", "content": user_prompt}
             ]
             
-            response = self.client.send(messages)
-            translated = self._parse_metadata_response(response.content, fields_to_send)
+            # Get temperature and max_tokens from environment or config
+            temperature = float(os.getenv('TRANSLATION_TEMPERATURE', self.config.get('temperature', 0.3)))
+            max_tokens = int(os.getenv('MAX_OUTPUT_TOKENS', self.config.get('max_tokens', 4096)))
             
-            for field, value in translated.items():
-                if field in metadata:
-                    print(f"✓ Translated {field}: {metadata[field]} → {value}")
-                    
-            return translated
+            response = self.client.send(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                context='metadata_translation'
+            )
+            
+            # Extract content from response - handle both object and tuple formats
+            response_content = None
+            if hasattr(response, 'content'):
+                response_content = response.content
+            elif isinstance(response, tuple):
+                # If it's a tuple, first element is usually the content
+                response_content = response[0] if response else ""
+            else:
+                # Fallback: convert to string
+                response_content = str(response)
+            
+            if response_content:
+                translated = self._parse_metadata_response(response_content, fields_to_send)
+                
+                for field, value in translated.items():
+                    if field in metadata:
+                        print(f"✔ Translated {field}: {metadata[field]} → {value}")
+                        
+                return translated
+            else:
+                print("⚠️ Empty response from API")
+                return {}
             
         except Exception as e:
             print(f"Error translating metadata: {e}")
@@ -1144,7 +1186,7 @@ class MetadataTranslator:
         """Translate fields in parallel"""
         fields_to_process = [
             (field, value) for field, should_translate in fields_to_translate.items()
-            if should_translate and (value := metadata.get(field))
+            if should_translate and (value := metadata.get(field)) and not self._is_already_english(value)
         ]
         
         if not fields_to_process:
@@ -1173,6 +1215,8 @@ class MetadataTranslator:
     
     def _translate_single_field(self, field_name: str, field_value: str) -> Optional[str]:
         """Translate a single field using configured prompts"""
+        if self._is_already_english(field_value):
+            return field_value
         # Get field-specific prompts
         field_prompts = self.config.get('metadata_field_prompts', {})
         
@@ -1209,8 +1253,33 @@ class MetadataTranslator:
                 {"role": "user", "content": f"{prompt}\n\n{field_value}"}
             ]
             
-            response = self.client.send(messages)
-            return response.content.strip()
+            # Get temperature and max_tokens from environment or config
+            temperature = float(os.getenv('TRANSLATION_TEMPERATURE', self.config.get('temperature', 0.3)))
+            max_tokens = int(os.getenv('MAX_OUTPUT_TOKENS', self.config.get('max_tokens', 4096)))
+            
+            response = self.client.send(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                context='metadata_field_translation'
+            )
+            
+            # Extract content from response - handle both object and tuple formats
+            response_content = None
+            if hasattr(response, 'content'):
+                response_content = response.content
+            elif isinstance(response, tuple):
+                # If it's a tuple, first element is usually the content
+                response_content = response[0] if response else ""
+            else:
+                # Fallback: convert to string
+                response_content = str(response)
+            
+            if response_content:
+                return response_content.strip()
+            else:
+                print(f"⚠️ Empty response when translating {field_name}")
+                return None
             
         except Exception as e:
             print(f"Error translating {field_name}: {e}")
