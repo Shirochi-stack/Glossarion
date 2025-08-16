@@ -7272,7 +7272,7 @@ def main(log_callback=None, stop_callback=None):
                             header_msgs,
                             temperature=config.TEMP,
                             max_tokens=config.MAX_OUTPUT_TOKENS
-            )
+                        )
                         
                         if header_result:
                             # Clean the result
