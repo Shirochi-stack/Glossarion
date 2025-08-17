@@ -991,121 +991,100 @@ class ProgressManager:
             }
     
     def check_chapter_status(self, chapter_idx, actual_num, content_hash, output_dir, original_basename=None):
-        """Check if a chapter needs translation with OPF awareness"""
+        """Check if a chapter needs translation - DELETE qa_failed files"""
         
-        # FIRST: Check if this chapter number is already completed
-        for key, info in self.prog["chapters"].items():
-            if info.get("actual_num") == actual_num and info.get("status") == "completed":
-                output_file = info.get("output_file")
-                if output_file:
-                    output_path = os.path.join(output_dir, output_file)
-                    if os.path.exists(output_path):
-                        # Check if this is the same chapter by basename
-                        if original_basename and info.get("original_basename") == original_basename:
-                            return False, f"Chapter {actual_num} already translated: {output_file}", output_file
-                        # If no basename match but same number, still skip
-                        elif not original_basename:
-                            return False, f"Chapter {actual_num} already translated: {output_file}", output_file
+        # Look up chapter info
+        chapter_info = self.prog["chapters"].get(content_hash, {})
         
-        # Check by original basename if available
-        if original_basename:
+        # If not found by hash, try other methods
+        if not chapter_info:
+            # Try by actual number
             for key, info in self.prog["chapters"].items():
-                if info.get("original_basename") == original_basename and info.get("status") == "completed":
-                    output_file = info.get("output_file")
-                    if output_file:
-                        output_path = os.path.join(output_dir, output_file)
-                        if os.path.exists(output_path):
-                            return False, f"Chapter {original_basename} already translated: {output_file}", output_file
+                if info.get("actual_num") == actual_num:
+                    chapter_info = info
+                    content_hash = key
+                    break
         
-        # THEN: Do the normal content hash check
-        chapter_key = content_hash
+        if not chapter_info:
+            # Try by original basename
+            if original_basename:
+                for key, info in self.prog["chapters"].items():
+                    if info.get("original_basename") == original_basename:
+                        chapter_info = info
+                        content_hash = key
+                        break
         
-        if chapter_key in self.prog["chapters"]:
-            chapter_info = self.prog["chapters"][chapter_key]
-        else:
-            old_key = str(chapter_idx)
-            if old_key in self.prog["chapters"]:
-                chapter_info = self.prog["chapters"][old_key]
-                self.prog["chapters"][chapter_key] = chapter_info
-                chapter_info["content_hash"] = content_hash
-                if old_key in self.prog.get("chapter_chunks", {}):
-                    self.prog["chapter_chunks"][chapter_key] = self.prog["chapter_chunks"][old_key]
-                    del self.prog["chapter_chunks"][old_key]
-                del self.prog["chapters"][old_key]
-                self.save()
-            else:
-                return True, None, None
+        if not chapter_info:
+            # No record - needs translation
+            return True, None, None
         
         status = chapter_info.get("status")
         output_file = chapter_info.get("output_file")
         
-        # Handle file_deleted status - always needs retranslation
-        if status == "file_deleted":
-            return True, None, None
-
+        # Handle QA failed status - DELETE the file to force retranslation
         if status == "qa_failed":
-            return True, f"Chapter {actual_num} needs retranslation (QA failed: API response failure)", None
+            if output_file:
+                output_path = os.path.join(output_dir, output_file)
+                if os.path.exists(output_path):
+                    print(f"   🗑️ Deleting QA failed file: {output_file}")
+                    try:
+                        os.remove(output_path)
+                    except Exception as e:
+                        print(f"      ❌ Error deleting file: {e}")
+                
+                # Remove from progress tracking to force complete retranslation
+                del self.prog["chapters"][content_hash]
+                
+                # Remove from content_hashes
+                if content_hash in self.prog.get("content_hashes", {}):
+                    del self.prog["content_hashes"][content_hash]
+                
+                # Remove chunk data
+                if content_hash in self.prog.get("chapter_chunks", {}):
+                    del self.prog["chapter_chunks"][content_hash]
+                
+                self.save()
+                
+            return True, f"Chapter {actual_num} needs retranslation (QA failed - file deleted)", None
         
-        # Check various conditions for skipping
+        # Handle other statuses normally...
         if status == "completed" and output_file:
             output_path = os.path.join(output_dir, output_file)
             if os.path.exists(output_path):
+                # Check if it's actually a QA failed response
+                try:
+                    with open(output_path, 'r', encoding='utf-8') as f:
+                        content = f.read(2000)
+                        if is_qa_failed_response(content):
+                            # Delete and mark for retranslation
+                            print(f"   🗑️ Found QA failed content in 'completed' file - deleting: {output_file}")
+                            os.remove(output_path)
+                            
+                            # Update status and remove from tracking
+                            del self.prog["chapters"][content_hash]
+                            if content_hash in self.prog.get("content_hashes", {}):
+                                del self.prog["content_hashes"][content_hash]
+                            if content_hash in self.prog.get("chapter_chunks", {}):
+                                del self.prog["chapter_chunks"][content_hash]
+                            
+                            self.save()
+                            return True, f"Chapter {actual_num} needs retranslation (QA failed content detected)", None
+                except Exception as e:
+                    print(f"   ❌ Error checking file content: {e}")
+                
                 return False, f"Chapter {actual_num} already translated: {output_file}", output_file
             else:
-                # File is missing but not yet marked
-                print(f"⚠️ Chapter {actual_num} marked as completed but file missing: {output_file}")
-                # Mark it now
-                chapter_info["status"] = "file_deleted"
-                chapter_info["deletion_detected"] = time.time()
-                chapter_info["previous_status"] = "completed"
-                self.save()
-                return True, None, None
+                # File missing
+                return True, f"Chapter {actual_num} file missing", None
         
+        # Other statuses...
         if status == "completed_empty":
             return False, f"Chapter {actual_num} is empty (no content to translate)", output_file
         
         if status == "completed_image_only":
             return False, f"Chapter {actual_num} contains only images", output_file
         
-        # Check for duplicate content
-        if content_hash and content_hash in self.prog.get("content_hashes", {}):
-            duplicate_info = self.prog["content_hashes"][content_hash]
-            duplicate_idx = duplicate_info.get("chapter_idx")
-            
-            if duplicate_idx != chapter_idx:
-                duplicate_output = duplicate_info.get("output_file")
-                if duplicate_output:
-                    duplicate_path = os.path.join(output_dir, duplicate_output)
-                    if os.path.exists(duplicate_path):
-                        # Only copy duplicate content if the current file also exists
-                        if output_file and os.path.exists(os.path.join(output_dir, output_file)):
-                            print(f"📋 Copying duplicate content from chapter {duplicate_info.get('actual_num')}")
-                            
-                            safe_title = f"Chapter_{actual_num}"
-                            if 'num' in chapter_info:
-                                if isinstance(chapter_info['num'], float):
-                                    fname = f"response_{chapter_info['num']:06.1f}_{safe_title}.html"
-                                else:
-                                    fname = f"response_{chapter_info['num']:03d}_{safe_title}.html"
-                            else:
-                                fname = f"response_{actual_num:03d}_{safe_title}.html"
-                            
-                            output_path = os.path.join(output_dir, fname)
-                            shutil.copy2(duplicate_path, output_path)
-                            
-                            self.update(chapter_idx, actual_num, content_hash, fname, status="completed", 
-                                      original_basename=original_basename)
-                            self.save()
-                            
-                            return False, f"Chapter {actual_num} has same content as chapter {duplicate_info.get('actual_num')} (already translated)", None
-                        else:
-                            # File was deleted - respect user's action and retranslate
-                            print(f"📝 Chapter {actual_num} was deleted - will retranslate")
-                            return True, None, None
-                    else:
-                        return True, None, None
-        
-        # Chapter needs translation
+        # Default - needs translation
         return True, None, None
     
     def get_opf_status(self, output_dir):
@@ -6802,6 +6781,7 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     
     return '\n'.join(html_parts)
 
+
 # =====================================================
 # MAIN TRANSLATION FUNCTION - COMPLETE UPDATE WITH CONTENT.OPF PRIORITIZATION
 # =====================================================
@@ -6838,7 +6818,7 @@ def main(log_callback=None, stop_callback=None):
             return "Translation failed"
     
     def check_response_file_exists(chapter, out):
-        """Consolidated function to check if a valid response file exists for a chapter"""
+        """Consolidated function to check if a valid response file exists for a chapter - DELETES QA failed files"""
         original_basename = chapter.get('original_basename', '')
         actual_num = chapter.get('actual_chapter_num', chapter.get('num', 0))
         
@@ -6888,8 +6868,14 @@ def main(log_callback=None, stop_callback=None):
                             actual_fname = os.path.basename(check_path)
                             return True, actual_fname  # File exists and is valid
                         else:
-                            print(f"   ⚠️ Chapter {actual_num} has QA failure, will retranslate: {os.path.basename(check_path)}")
-                            return False, response_fname  # File exists but needs retranslation
+                            # QA FAILED - DELETE THE FILE TO FORCE RETRANSLATION
+                            print(f"   🗑️ Chapter {actual_num} has QA failure - DELETING file to force retranslation: {os.path.basename(check_path)}")
+                            try:
+                                os.remove(check_path)
+                                print(f"      ✅ Deleted QA failed file successfully")
+                            except Exception as del_error:
+                                print(f"      ❌ Error deleting file: {del_error}")
+                            return False, response_fname  # File deleted, needs retranslation
                 except Exception as e:
                     print(f"   ❌ Error checking {os.path.basename(check_path)}: {e}")
                     # Continue to check other paths
@@ -6918,6 +6904,15 @@ def main(log_callback=None, stop_callback=None):
                                     content = f.read(2000)
                                     if not is_qa_failed_response(content):
                                         return True, file  # File exists and is valid
+                                    else:
+                                        # QA FAILED - DELETE THE FILE TO FORCE RETRANSLATION
+                                        print(f"   🗑️ Chapter {actual_num} file has QA failure - DELETING: {file}")
+                                        try:
+                                            os.remove(check_path)
+                                            print(f"      ✅ Deleted QA failed file successfully")
+                                        except Exception as del_error:
+                                            print(f"      ❌ Error deleting file: {del_error}")
+                                        return False, file  # File deleted, needs retranslation
                             except:
                                 pass
         except Exception as e:
@@ -7291,38 +7286,93 @@ def main(log_callback=None, stop_callback=None):
     # CHECK TRANSLATION STATUS AND PRIORITIZE MISSING CHAPTERS
     # =====================================================
     
-    # Create a tracking dictionary for which chapters need translation
+    # Create tracking dictionaries
     chapters_needing_translation = {}
+    untranslated_in_opf = []
+    missing_from_opf = []
     
     if not is_text_file and spine_chapters:
         print("\n" + "="*50)
         print("🔍 CHECKING TRANSLATION STATUS AGAINST CONTENT.OPF")
         print("="*50)
         
-        # Check translation status for ALL chapters first
+        # First pass: Check translation status for ALL extracted chapters
+        print("📊 Checking translation status for all extracted chapters...")
+        translated_count = 0
+        needs_translation_count = 0
+        qa_failed_count = 0
+        
         for idx, chapter in enumerate(chapters):
             # Add debug index for tracking
             chapter['__debug_idx'] = idx
             
-            exists, response_fname = check_response_file_exists(chapter, out)
-            chapter['has_translation'] = exists
-            chapter['response_filename'] = response_fname
+            actual_num = chapter.get('actual_chapter_num', chapter.get('num'))
+            content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
+            original_basename = chapter.get('original_basename', '')
             
-            if not exists:
-                actual_num = chapter.get('actual_chapter_num', chapter.get('num'))
+            # Check with progress manager first
+            needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
+                idx, actual_num, content_hash, out, original_basename
+            )
+            
+            # Double-check with file existence for validation
+            if not needs_translation and existing_file:
+                # Verify the file actually exists and is valid
+                file_path = os.path.join(out, existing_file)
+                if os.path.exists(file_path):
+                    # Check if it's a QA failed response
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            content = f.read(2000)
+                            if is_qa_failed_response(content):
+                                needs_translation = True
+                                qa_failed_count += 1
+                                # Update progress manager
+                                if content_hash in progress_manager.prog["chapters"]:
+                                    progress_manager.prog["chapters"][content_hash]["status"] = "qa_failed"
+                                    progress_manager.prog["chapters"][content_hash]["qa_timestamp"] = time.time()
+                                    progress_manager.save()
+                                print(f"   ⚠️ Ch.{actual_num}: QA failure detected in {existing_file}")
+                    except Exception as e:
+                        print(f"   ⚠️ Error checking file {existing_file}: {e}")
+                else:
+                    # File doesn't exist
+                    needs_translation = True
+                    print(f"   ⚠️ Ch.{actual_num}: File missing: {existing_file}")
+            
+            # Also check with the response file function for additional validation
+            exists, response_fname = check_response_file_exists(chapter, out)
+            
+            # Store the final status
+            chapter['needs_translation'] = needs_translation
+            chapter['response_filename'] = existing_file or response_fname
+            
+            if needs_translation:
                 chapters_needing_translation[actual_num] = chapter
+                needs_translation_count += 1
+                if skip_reason and "qa_failed" in skip_reason.lower():
+                    qa_failed_count += 1
+            else:
+                translated_count += 1
         
-        print(f"📊 Translation Status:")
+        # Print initial status
+        print(f"\n📊 Initial Status:")
         print(f"   • Total chapters extracted: {len(chapters)}")
-        print(f"   • Chapters in content.opf spine: {len(spine_chapters)}")
-        print(f"   • Chapters needing translation: {len(chapters_needing_translation)}")
+        print(f"   • Already translated: {translated_count}")
+        print(f"   • Need translation: {needs_translation_count}")
+        if qa_failed_count > 0:
+            print(f"   • QA failed (will retranslate): {qa_failed_count}")
         
-        # List all files in output directory for debugging
+        # List files in output directory for debugging
         output_files = os.listdir(out)
         response_files = [f for f in output_files if f.startswith('response_') and f.endswith('.html')]
-        print(f"   • Response files in output directory: {len(response_files)}")
+        print(f"   • Response files in directory: {len(response_files)}")
         
-        # Find chapters that are in OPF but not translated
+        # Second pass: Check OPF spine chapters
+        print(f"\n📋 Checking {len(spine_chapters)} chapters from content.opf spine...")
+        opf_translated = 0
+        opf_untranslated = 0
+        
         for spine_ch in spine_chapters:
             filename = spine_ch['filename']
             
@@ -7335,48 +7385,78 @@ def main(log_callback=None, stop_callback=None):
                     spine_ch['chapter_data'] = chapter
                     break
             
-            # Check if this spine chapter has been translated
             if matched_chapter:
-                if not matched_chapter.get('has_translation', False):
+                # Check if this chapter needs translation
+                if matched_chapter.get('needs_translation', True):
+                    # This OPF chapter needs translation
                     untranslated_in_opf.append(spine_ch)
                     ch_num = spine_ch.get('file_chapter_num', '?')
-                    print(f"   📍 Will translate: {filename} (Chapter {ch_num})")
+                    print(f"   📍 Needs translation: {filename} (Chapter {ch_num})")
+                    
+                    # Mark for priority translation
+                    matched_chapter['force_translate'] = True
+                    matched_chapter['opf_priority'] = True
+                    matched_chapter['opf_position'] = spine_ch['position']
+                    opf_untranslated += 1
+                else:
+                    # Already translated
+                    opf_translated += 1
+                    response_file = matched_chapter.get('response_filename', 'unknown')
+                    print(f"   ✅ Already done: {filename} -> {response_file}")
             else:
-                # Chapter in OPF but not in extraction - this is a problem
-                print(f"   ⚠️ Not found in extraction: {filename}")
+                # Chapter in OPF but not extracted - serious issue
+                print(f"   ❌ ERROR: Not extracted: {filename}")
+                print(f"      This file is in the EPUB manifest but wasn't extracted!")
+                
+                # Check if translation exists anyway
+                expected_response = f"response_{filename}"
+                response_path = os.path.join(out, expected_response)
+                
+                if os.path.exists(response_path):
+                    print(f"      ✅ But translation exists: {expected_response}")
+                    opf_translated += 1
+                elif os.path.exists(response_path.replace('.html', '')):
+                    print(f"      ✅ But translation exists: {expected_response.replace('.html', '')}")
+                    opf_translated += 1
+                else:
+                    print(f"      ⚠️ No translation found - this chapter cannot be processed!")
+                    missing_from_opf.append({
+                        'filename': filename,
+                        'position': spine_ch['position'],
+                        'reason': 'not_extracted'
+                    })
+                    opf_untranslated += 1
         
+        print(f"\n📊 OPF Status Summary:")
+        print(f"   • Total in spine: {len(spine_chapters)}")
+        print(f"   • Already translated: {opf_translated}")
+        print(f"   • Need translation: {opf_untranslated}")
+        if missing_from_opf:
+            print(f"   • Not extracted (ERROR): {len(missing_from_opf)}")
+        
+        # Reorder chapters if we have untranslated OPF chapters
         if untranslated_in_opf:
-            print(f"\n⚠️ Found {len(untranslated_in_opf)} untranslated chapters in content.opf:")
+            print(f"\n⚠️ Found {len(untranslated_in_opf)} untranslated chapters in content.opf")
+            
+            # Show first 10
             for ch in untranslated_in_opf[:10]:
-                print(f"   • [{ch['position']}] {ch['filename']}")
+                print(f"   • [Pos {ch['position']}] {ch['filename']}")
             if len(untranslated_in_opf) > 10:
                 print(f"   ... and {len(untranslated_in_opf) - 10} more")
             
-            # CRITICAL FIX: Reorder chapters to prioritize OPF untranslated chapters
+            # Reorder chapters to prioritize OPF untranslated chapters
             print("\n📌 PRIORITIZING UNTRANSLATED CHAPTERS FROM CONTENT.OPF")
             
             priority_chapters = []
             regular_chapters = []
             
             for chapter in chapters:
-                chapter_basename = chapter.get('original_basename', '')
-                
-                # Check if this chapter is in the untranslated OPF list
-                is_priority = False
-                for opf_ch in untranslated_in_opf:
-                    if chapter_basename == opf_ch['filename']:
-                        is_priority = True
-                        chapter['opf_position'] = opf_ch['position']
-                        chapter['force_translate'] = True  # Mark for forced translation
-                        print(f"   ✅ Prioritizing: {chapter_basename} (OPF pos: {opf_ch['position']})")
-                        break
-                
-                if is_priority:
+                if chapter.get('opf_priority', False):
                     priority_chapters.append(chapter)
                 else:
                     regular_chapters.append(chapter)
             
-            # Sort priority chapters by their OPF position
+            # Sort priority chapters by their OPF spine position
             priority_chapters.sort(key=lambda x: x.get('opf_position', 999999))
             
             # Reorder chapters list: priority chapters first, then regular
@@ -7384,24 +7464,80 @@ def main(log_callback=None, stop_callback=None):
             
             print(f"✅ Reordered chapters: {len(priority_chapters)} priority, {len(regular_chapters)} regular")
             if priority_chapters:
-                print("📌 Priority chapter order:")
+                print("📌 Priority translation order:")
                 for i, ch in enumerate(priority_chapters[:10]):
-                    print(f"   [{i}] {ch.get('original_basename', 'unknown')} - Chapter {ch.get('num', '?')}")
+                    actual_num = ch.get('actual_chapter_num', ch.get('num', '?'))
+                    print(f"   [{i+1}] Ch.{actual_num}: {ch.get('original_basename', 'unknown')}")
+                if len(priority_chapters) > 10:
+                    print(f"   ... and {len(priority_chapters) - 10} more")
         else:
             print("\n✅ All chapters in content.opf have been translated!")
+        
+        if missing_from_opf:
+            print(f"\n❌ WARNING: {len(missing_from_opf)} OPF chapters were not extracted:")
+            for missing in missing_from_opf[:5]:
+                print(f"   • {missing['filename']} (position {missing['position']})")
+            if len(missing_from_opf) > 5:
+                print(f"   ... and {len(missing_from_opf) - 5} more")
+            print("   These chapters cannot be translated without re-extracting the EPUB!")
+            
     else:
-        # For non-OPF cases, still check translation status
+        # For non-OPF cases (text files or no spine chapters)
+        print("\n" + "="*50)
+        print("🔍 CHECKING TRANSLATION STATUS")
+        print("="*50)
+        
+        translated_count = 0
+        needs_translation_count = 0
+        qa_failed_count = 0
+        
         for idx, chapter in enumerate(chapters):
             # Add debug index for tracking
             chapter['__debug_idx'] = idx
             
-            exists, response_fname = check_response_file_exists(chapter, out)
-            chapter['has_translation'] = exists
-            chapter['response_filename'] = response_fname
+            actual_num = chapter.get('actual_chapter_num', chapter.get('num'))
+            content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
+            original_basename = chapter.get('original_basename', '')
             
-            if not exists:
-                actual_num = chapter.get('actual_chapter_num', chapter.get('num'))
+            # Check with progress manager
+            needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
+                idx, actual_num, content_hash, out, original_basename
+            )
+            
+            # Double-check with file existence
+            exists, response_fname = check_response_file_exists(chapter, out)
+            
+            # If progress says complete but file check says no, trust the file check
+            if not needs_translation and not exists:
+                needs_translation = True
+                print(f"   ⚠️ Ch.{actual_num}: Progress says complete but file missing/invalid")
+            
+            # Store status
+            chapter['needs_translation'] = needs_translation
+            chapter['response_filename'] = existing_file or response_fname
+            
+            if needs_translation:
                 chapters_needing_translation[actual_num] = chapter
+                needs_translation_count += 1
+                if skip_reason and "qa_failed" in skip_reason.lower():
+                    qa_failed_count += 1
+            else:
+                translated_count += 1
+        
+        print(f"📊 Translation Status:")
+        print(f"   • Total chapters: {len(chapters)}")
+        print(f"   • Already translated: {translated_count}")
+        print(f"   • Need translation: {needs_translation_count}")
+        if qa_failed_count > 0:
+            print(f"   • QA failed (will retranslate): {qa_failed_count}")
+    
+    # Final summary
+    print("\n" + "="*50)
+    if chapters_needing_translation:
+        print(f"📝 {len(chapters_needing_translation)} chapters queued for translation")
+    else:
+        print("✅ All chapters are already translated!")
+    print("="*50)
     
     # =====================================================
     # CONTINUE WITH EXISTING TRANSLATION LOGIC
@@ -7801,7 +7937,15 @@ def main(log_callback=None, stop_callback=None):
                 original_basename = c.get('original_basename', 'unknown')
                 print(f"   ⚠️ Ch.{actual_num} ({original_basename}): Missing translation file - looking for {response_fname}")
             else:
-                print(f"   ✓ Ch.{actual_num}: Found existing translation: {response_fname}")
+                # Even if file exists, check progress manager for qa_failed status
+                needs_translation_pm, skip_reason, _ = progress_manager.check_chapter_status(
+                    idx, actual_num, content_hash, out
+                )
+                if needs_translation_pm and skip_reason and "QA failed" in skip_reason:
+                    needs_translation = True
+                    print(f"   ⚠️ Ch.{actual_num}: {skip_reason}")
+                else:
+                    print(f"   ✓ Ch.{actual_num}: Found existing translation: {response_fname}")
         
         if not needs_translation:
             chunks_per_chapter[idx] = 0
@@ -7869,16 +8013,47 @@ def main(log_callback=None, stop_callback=None):
             if start is not None and not (start <= actual_num <= end):
                 continue
             
-            # Check if chapter needs translation (using the consolidated function)
+            # Check if chapter needs translation - CORRECTED LOGIC
             needs_translation = c.get('force_translate', False)  # Priority for OPF chapters
             
             if not needs_translation:
-                exists, response_fname = check_response_file_exists(c, out)
-                needs_translation = not exists
+                # First check progress manager for complete status (including qa_failed)
+                original_basename = c.get('original_basename', '')
+                needs_translation_pm, skip_reason, existing_file = progress_manager.check_chapter_status(
+                    idx, actual_num, content_hash, out, original_basename
+                )
+                
+                if needs_translation_pm:
+                    # Progress manager says it needs translation
+                    needs_translation = True
+                    if skip_reason:
+                        print(f"   ⚠️ {skip_reason}")
+                else:
+                    # Progress manager says it's complete, but verify file exists and is valid
+                    exists, response_fname = check_response_file_exists(c, out)
+                    
+                    if not exists:
+                        # File doesn't exist or check_response_file_exists detected QA failure
+                        needs_translation = True
+                        print(f"   ⚠️ Chapter {actual_num}: Translation file missing or contains QA failure")
+                        
+                        # Update progress manager if this is a QA failure we just detected
+                        # (check_response_file_exists returns False for QA failed content)
+                        if response_fname and os.path.exists(os.path.join(out, response_fname)):
+                            # File exists but has QA failure - update progress tracking
+                            if content_hash in progress_manager.prog["chapters"]:
+                                progress_manager.prog["chapters"][content_hash]["status"] = "qa_failed"
+                                progress_manager.prog["chapters"][content_hash]["qa_timestamp"] = time.time()
+                            else:
+                                # Create new entry for qa_failed status
+                                progress_manager.update(idx, actual_num, content_hash, response_fname, 
+                                                      status="qa_failed", original_basename=original_basename)
+                            progress_manager.save()
+                            print(f"   ⚠️ Updated progress: Chapter {actual_num} marked as qa_failed")
             
             if not needs_translation:
-                # Skip this chapter
-                print(f"[SKIP] Ch.{actual_num}: already translated: {c.get('response_filename', 'existing file')}")
+                # Skip this chapter - it's already properly translated
+                print(f"[SKIP] Ch.{actual_num}: already translated: {c.get('response_filename', existing_file or 'existing file')}")
                 chapters_completed += 1
                 continue
             
@@ -7920,14 +8095,16 @@ def main(log_callback=None, stop_callback=None):
                     f.write(c["body"])
                     
                 print(f"   📄 Saved empty chapter as {fname}")
-                progress_manager.update(idx, actual_num, content_hash, fname, status="completed_empty")
+                progress_manager.update(idx, actual_num, content_hash, fname, status="completed_empty", 
+                                       original_basename=original_basename)
                 progress_manager.save()
                 chapters_completed += 1
                 continue
             
             # Add to chapters to translate
             chapters_to_translate.append((idx, c))
-        
+            print(f"   📝 Chapter {actual_num} queued for translation")
+
         print(f"📊 Found {len(chapters_to_translate)} chapters to translate in parallel")
         
         # Process in batches
@@ -8148,6 +8325,15 @@ def main(log_callback=None, stop_callback=None):
             if not needs_translation:
                 exists, response_fname = check_response_file_exists(c, out)
                 needs_translation = not exists
+                
+                # Also check progress manager for qa_failed status
+                if exists:
+                    needs_translation_pm, skip_reason, _ = progress_manager.check_chapter_status(
+                        idx, actual_num, content_hash, out
+                    )
+                    if needs_translation_pm and skip_reason and "QA failed" in skip_reason:
+                        needs_translation = True
+                        print(f"   ⚠️ Chapter {actual_num} marked as qa_failed - will retranslate")
             
             if not needs_translation:
                 # Show the actual chapter number and filename
@@ -8468,23 +8654,41 @@ def main(log_callback=None, stop_callback=None):
                 
                 progress_manager.prog["chapter_chunks"][chapter_key_str]["total"] = len(chunks)
                 
-                # Get chapter status to check for qa_failed
+                # Get chapter status from progress manager
                 chapter_info = progress_manager.prog["chapters"].get(chapter_key_str, {})
                 chapter_status = chapter_info.get("status")
 
-                # Check if chunk is completed AND chapter is not qa_failed
-                if (chunk_idx in progress_manager.prog["chapter_chunks"][chapter_key_str]["completed"] 
-                    and chapter_status != "qa_failed" 
-                    and not c.get('force_translate', False)):
+                # Determine if we should skip or retranslate this chunk
+                should_skip_chunk = False
+                skip_reason = None
+
+                # Check various conditions for skipping/retranslating
+                if c.get('force_translate', False):
+                    # Force retranslation of OPF priority chapters
+                    should_skip_chunk = False
+                    skip_reason = "retranslating due to OPF priority"
+                elif chapter_status == "qa_failed":
+                    # Force retranslation of qa_failed chapters
+                    should_skip_chunk = False
+                    skip_reason = "retranslating due to QA failure"
+                    # Clear the chunk data for clean retranslation
+                    if chapter_key_str in progress_manager.prog["chapter_chunks"]:
+                        progress_manager.prog["chapter_chunks"][chapter_key_str]["completed"] = []
+                        progress_manager.prog["chapter_chunks"][chapter_key_str]["chunks"] = {}
+                elif chunk_idx in progress_manager.prog["chapter_chunks"][chapter_key_str].get("completed", []):
+                    # Check if we have a saved chunk
                     saved_chunk = progress_manager.prog["chapter_chunks"][chapter_key_str]["chunks"].get(str(chunk_idx))
                     if saved_chunk:
+                        # Chunk was previously completed and we have the data
+                        should_skip_chunk = True
                         translated_chunks.append((saved_chunk, chunk_idx, total_chunks))
-                        print(f"  [SKIP] Chunk {chunk_idx}/{total_chunks} already translated")
-                        continue
-                elif chapter_status == "qa_failed" or c.get('force_translate', False):
-                    # Force retranslation of qa_failed or OPF priority chapters
-                    reason = "OPF priority" if c.get('force_translate', False) else "QA failure"
-                    print(f"  [RETRY] Chunk {chunk_idx}/{total_chunks} - retranslating due to {reason}")
+
+                # Apply the decision
+                if should_skip_chunk:
+                    print(f"  [SKIP] Chunk {chunk_idx}/{total_chunks} already translated")
+                    continue
+                elif skip_reason:
+                    print(f"  [RETRY] Chunk {chunk_idx}/{total_chunks} - {skip_reason}")
                         
                 if config.CONTEXTUAL and history_manager.will_reset_on_next_append(config.HIST_LIMIT):
                     print(f"  📌 History will reset after this chunk (current: {len(history_manager.load_history())//2}/{config.HIST_LIMIT} exchanges)")
