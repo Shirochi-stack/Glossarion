@@ -3620,17 +3620,12 @@ Recent translations to summarize:
                     
                     # Remove from progress if it exists
                     if 'progress_entry' in ch_info and ch_info['progress_entry']:
-                        # Find and remove the progress entry
-                        for chapter_key, chapter_info in list(data['prog']["chapters"].items()):
-                            if chapter_info == ch_info['progress_entry']:
-                                content_hash = data['prog']["chapters"][chapter_key].get("content_hash")
+                        # Find and remove ONLY this specific progress entry
+                        for chapter_key in list(data['prog']["chapters"].keys()):
+                            if data['prog']["chapters"][chapter_key] == ch_info['progress_entry']:
+                                # Only delete this specific chapter entry
                                 del data['prog']["chapters"][chapter_key]
-                                
-                                if content_hash and content_hash in data['prog'].get("content_hashes", {}):
-                                    del data['prog']["content_hashes"][content_hash]
-                                
-                                if content_hash and content_hash in data['prog'].get("chapter_chunks", {}):
-                                    del data['prog']["chapter_chunks"][content_hash]
+                                # DON'T delete content_hashes or chapter_chunks - those might be shared!
                                 break
                 else:
                     # Just marking for translation (no file to delete)
