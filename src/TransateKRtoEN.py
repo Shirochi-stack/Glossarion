@@ -696,6 +696,7 @@ class ProgressManager:
     """Unified progress management with content.opf tracking"""
     
     def __init__(self, payloads_dir, epub_path=None):
+        """Initialize ProgressManager with automatic cleanup"""
         self.payloads_dir = payloads_dir
         self.epub_path = epub_path or os.getenv('EPUB_PATH')
         self.PROGRESS_FILE = os.path.join(payloads_dir, "translation_progress.json")
@@ -706,6 +707,14 @@ class ProgressManager:
         self.opf_chapter_order = {}
         if self.epub_path and os.path.exists(self.epub_path):
             self._parse_opf()
+        
+        # IMPORTANT: Clean up duplicates and missing files on startup
+        # This prevents the cascade issue where one deletion affects multiple chapters
+        if os.path.exists(os.path.join(payloads_dir, "Translated")):
+            output_dir = os.path.join(payloads_dir, "Translated")
+            cleaned, marked = self.cleanup_missing_files(output_dir)
+            if cleaned > 0 or marked > 0:
+                print(f"✨ Startup cleanup: {cleaned} removed, {marked} marked for retranslation")
     
     def _parse_opf(self):
         """Parse content.opf from EPUB to get chapter order"""
@@ -1145,7 +1154,7 @@ class ProgressManager:
         
         # First, find all actual_num values and their entries
         chapter_nums = {}
-        for chapter_key, chapter_info in self.prog["chapters"].items():
+        for chapter_key, chapter_info in list(self.prog["chapters"].items()):
             actual_num = chapter_info.get("actual_num")
             if actual_num is not None:
                 if actual_num not in chapter_nums:
@@ -1158,72 +1167,123 @@ class ProgressManager:
                 # Multiple entries for same chapter number - keep the best one
                 print(f"⚠️ Found {len(entries)} entries for chapter {actual_num}")
                 
-                # Sort by priority: completed > in_progress > failed > qa_failed > file_deleted
-                status_priority = {
-                    'completed': 5,
-                    'completed_empty': 4,
-                    'completed_image_only': 4,
-                    'in_progress': 3,
-                    'failed': 2,
-                    'qa_failed': 1,
-                    'file_deleted': 0
-                }
+                # First check which entries have actual files
+                entries_with_files = []
+                entries_without_files = []
                 
-                entries_sorted = sorted(entries, 
-                                      key=lambda x: (status_priority.get(x[1].get('status', ''), 0),
-                                                   x[1].get('last_updated', 0)),
-                                      reverse=True)
+                for key, info in entries:
+                    output_file = info.get("output_file")
+                    if output_file:
+                        output_path = os.path.join(output_dir, output_file)
+                        if os.path.exists(output_path):
+                            # Also check it's not a QA failed file
+                            try:
+                                with open(output_path, 'r', encoding='utf-8') as f:
+                                    content = f.read(500)
+                                    if 'qa_failed' not in content.lower():
+                                        entries_with_files.append((key, info))
+                                    else:
+                                        entries_without_files.append((key, info))
+                            except:
+                                entries_with_files.append((key, info))
+                        else:
+                            entries_without_files.append((key, info))
+                    else:
+                        entries_without_files.append((key, info))
                 
-                # Keep the best entry (first in sorted list)
-                keep_key, keep_info = entries_sorted[0]
-                
-                # Remove the others
-                for remove_key, remove_info in entries_sorted[1:]:
-                    print(f"  🗑️ Removing duplicate entry for chapter {actual_num}: status={remove_info.get('status')} (keeping {keep_info.get('status')})")
+                # Prefer entries with actual valid files
+                if entries_with_files:
+                    # Sort by priority: completed > in_progress > failed > qa_failed > file_deleted
+                    status_priority = {
+                        'completed': 5,
+                        'completed_empty': 4,
+                        'completed_image_only': 4,
+                        'in_progress': 3,
+                        'failed': 2,
+                        'qa_failed': 1,
+                        'file_deleted': 0
+                    }
                     
-                    # Remove the duplicate entry
-                    if remove_key in self.prog["chapters"]:
-                        del self.prog["chapters"][remove_key]
-                        cleaned_count += 1
+                    entries_sorted = sorted(entries_with_files, 
+                                          key=lambda x: (status_priority.get(x[1].get('status', ''), 0),
+                                                       x[1].get('last_updated', 0)),
+                                          reverse=True)
                     
-                    # Remove from content_hashes if it's there
-                    if remove_key in self.prog.get("content_hashes", {}):
-                        del self.prog["content_hashes"][remove_key]
+                    # Keep the best entry with a file
+                    keep_key, keep_info = entries_sorted[0]
+                    print(f"  ✅ Keeping entry with file: {keep_info.get('output_file')} (status={keep_info.get('status')})")
                     
-                    # Remove chunk data
-                    if remove_key in self.prog.get("chapter_chunks", {}):
-                        del self.prog["chapter_chunks"][remove_key]
+                    # Remove ALL other entries for this chapter
+                    for remove_key, remove_info in entries:
+                        if remove_key != keep_key:
+                            print(f"  🗑️ Removing duplicate: key={remove_key[:8]}... status={remove_info.get('status')}")
+                            
+                            if remove_key in self.prog["chapters"]:
+                                del self.prog["chapters"][remove_key]
+                                cleaned_count += 1
+                            
+                            # Remove from content_hashes
+                            if remove_key in self.prog.get("content_hashes", {}):
+                                del self.prog["content_hashes"][remove_key]
+                            
+                            # Also check if this content_hash points to this chapter and clean it
+                            content_hash = remove_info.get("content_hash")
+                            if content_hash and content_hash in self.prog.get("content_hashes", {}):
+                                if self.prog["content_hashes"][content_hash].get("actual_num") == actual_num:
+                                    del self.prog["content_hashes"][content_hash]
+                            
+                            # Remove chunk data
+                            if remove_key in self.prog.get("chapter_chunks", {}):
+                                del self.prog["chapter_chunks"][remove_key]
+                else:
+                    # No valid files exist, just keep one entry and mark it for retranslation
+                    print(f"  ❌ No valid files exist for chapter {actual_num}")
+                    
+                    # Keep the first entry and remove all others
+                    keep_key, keep_info = entries[0]
+                    
+                    # Mark it as file_deleted so it will be retranslated
+                    keep_info["status"] = "file_deleted"
+                    keep_info["deletion_detected"] = time.time()
+                    self.prog["chapters"][keep_key] = keep_info
+                    
+                    for remove_key, remove_info in entries[1:]:
+                        print(f"  🗑️ Removing duplicate: key={remove_key[:8]}...")
+                        
+                        if remove_key in self.prog["chapters"]:
+                            del self.prog["chapters"][remove_key]
+                            cleaned_count += 1
+                        
+                        if remove_key in self.prog.get("content_hashes", {}):
+                            del self.prog["content_hashes"][remove_key]
+                        
+                        if remove_key in self.prog.get("chapter_chunks", {}):
+                            del self.prog["chapter_chunks"][remove_key]
         
-        # Now do the original missing file check
+        # Now do the original missing file check (but skip those already marked as file_deleted)
         for chapter_key, chapter_info in list(self.prog["chapters"].items()):
             output_file = chapter_info.get("output_file")
             
             if output_file:
                 output_path = os.path.join(output_dir, output_file)
                 if not os.path.exists(output_path):
-                    # Get the status to determine what to do
                     current_status = chapter_info.get("status")
                     
-                    # If already marked as file_deleted, check if it's been long enough to clean up
+                    # If already marked as file_deleted, immediately clean up
                     if current_status == "file_deleted":
-                        deletion_time = chapter_info.get("deletion_detected", 0)
-                        # If marked as deleted more than 24 hours ago, remove from tracking
-                        if time.time() - deletion_time > 0:  # 0 seconds for immediate cleanup
-                            print(f"🗑️ Removing failed entry for chapter {chapter_info.get('actual_num', chapter_key)}: {output_file}")
-                            
-                            # Remove the chapter entry
-                            del self.prog["chapters"][chapter_key]
-                            
-                            # Remove from content_hashes
-                            content_hash = chapter_info.get("content_hash")
-                            if content_hash and content_hash in self.prog["content_hashes"]:
-                                del self.prog["content_hashes"][content_hash]
-                            
-                            # Remove chunk data
-                            if chapter_key in self.prog.get("chapter_chunks", {}):
-                                del self.prog["chapter_chunks"][chapter_key]
-                            
-                            cleaned_count += 1
+                        # Immediate cleanup - no waiting
+                        print(f"🗑️ Removing deleted entry for chapter {chapter_info.get('actual_num', chapter_key)}: {output_file}")
+                        
+                        del self.prog["chapters"][chapter_key]
+                        
+                        content_hash = chapter_info.get("content_hash")
+                        if content_hash and content_hash in self.prog["content_hashes"]:
+                            del self.prog["content_hashes"][content_hash]
+                        
+                        if chapter_key in self.prog.get("chapter_chunks", {}):
+                            del self.prog["chapter_chunks"][chapter_key]
+                        
+                        cleaned_count += 1
                     else:
                         # First time detecting missing file - mark it
                         print(f"🧹 Found missing file for chapter {chapter_info.get('actual_num', chapter_key)}: {output_file}")
@@ -1234,10 +1294,12 @@ class ProgressManager:
                         
                         marked_count += 1
         
-        if cleaned_count > 0:
-            print(f"🔄 Removed {cleaned_count} stale entries from progress tracking")
-        if marked_count > 0:
-            print(f"📝 Marked {marked_count} chapters with missing files for re-translation")
+        # Save after cleanup
+        if cleaned_count > 0 or marked_count > 0:
+            self.save()
+            print(f"🔄 Removed {cleaned_count} entries, marked {marked_count} for re-translation")
+        
+        return cleaned_count, marked_count
     
     def migrate_to_content_hash(self, chapters):
         """Migrate old index-based progress to content-hash-based with OPF awareness"""
