@@ -5959,7 +5959,8 @@ def detect_novel_numbering(chapters):
     content_numbers = []
     has_prefix_suffix = False
     prefix_suffix_numbers = []
-    
+    progress_manager.cleanup_missing_files(output_dir)
+
     for idx, chapter in enumerate(chapters):
         extracted_num = None
         
@@ -7520,6 +7521,8 @@ def main(log_callback=None, stop_callback=None):
         needs_translation_count = 0
         qa_failed_count = 0
         
+        progress_manager.cleanup_missing_files(out)
+
         for idx, chapter in enumerate(chapters):
             # Add debug index for tracking
             chapter['__debug_idx'] = idx
@@ -7711,7 +7714,8 @@ def main(log_callback=None, stop_callback=None):
         translated_count = 0
         needs_translation_count = 0
         qa_failed_count = 0
-        
+        progress_manager.cleanup_missing_files(out)
+
         for idx, chapter in enumerate(chapters):
             # Add debug index for tracking
             chapter['__debug_idx'] = idx
