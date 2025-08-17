@@ -3037,7 +3037,7 @@ Recent translations to summarize:
 
     def _force_retranslation_epub_or_text(self, file_path, parent_dialog=None, tab_frame=None):
         """
-        Shared logic for force retranslation of EPUB/text files
+        Shared logic for force retranslation of EPUB/text files with OPF support
         Can be used standalone or embedded in a tab
         
         Args:
@@ -3066,78 +3066,305 @@ Recent translations to summarize:
         with open(progress_file, 'r', encoding='utf-8') as f:
             prog = json.load(f)
         
-        if not prog.get("chapters"):
-            if not parent_dialog:
-                messagebox.showinfo("Info", "No chapters found in progress tracking.")
-            return None
+        # =====================================================
+        # PARSE CONTENT.OPF FOR CHAPTER MANIFEST
+        # =====================================================
+        
+        spine_chapters = []
+        opf_chapter_order = {}
+        is_epub = file_path.lower().endswith('.epub')
+        
+        if is_epub and os.path.exists(file_path):
+            try:
+                import xml.etree.ElementTree as ET
+                import zipfile
+                
+                with zipfile.ZipFile(file_path, 'r') as zf:
+                    # Find content.opf file
+                    opf_path = None
+                    opf_content = None
+                    
+                    # First try to find via container.xml
+                    try:
+                        container_content = zf.read('META-INF/container.xml')
+                        container_root = ET.fromstring(container_content)
+                        rootfile = container_root.find('.//{urn:oasis:names:tc:opendocument:xmlns:container}rootfile')
+                        if rootfile is not None:
+                            opf_path = rootfile.get('full-path')
+                    except:
+                        pass
+                    
+                    # Fallback: search for content.opf
+                    if not opf_path:
+                        for name in zf.namelist():
+                            if name.endswith('content.opf'):
+                                opf_path = name
+                                break
+                    
+                    if opf_path:
+                        opf_content = zf.read(opf_path)
+                        
+                        # Parse OPF
+                        root = ET.fromstring(opf_content)
+                        
+                        # Handle namespaces
+                        ns = {'opf': 'http://www.idpf.org/2007/opf'}
+                        if root.tag.startswith('{'):
+                            default_ns = root.tag[1:root.tag.index('}')]
+                            ns = {'opf': default_ns}
+                        
+                        # Get manifest - all chapter files
+                        manifest_chapters = {}
+                        
+                        for item in root.findall('.//opf:manifest/opf:item', ns):
+                            item_id = item.get('id')
+                            href = item.get('href')
+                            media_type = item.get('media-type', '')
+                            
+                            if item_id and href and ('html' in media_type.lower() or href.endswith(('.html', '.xhtml', '.htm'))):
+                                filename = os.path.basename(href)
+                                
+                                # Skip navigation, toc, and cover files
+                                if not any(skip in filename.lower() for skip in ['nav.', 'toc.', 'cover.']):
+                                    manifest_chapters[item_id] = {
+                                        'filename': filename,
+                                        'href': href,
+                                        'media_type': media_type
+                                    }
+                        
+                        # Get spine order - the reading order
+                        spine = root.find('.//opf:spine', ns)
+                        
+                        if spine is not None:
+                            for itemref in spine.findall('opf:itemref', ns):
+                                idref = itemref.get('idref')
+                                if idref and idref in manifest_chapters:
+                                    chapter_info = manifest_chapters[idref]
+                                    filename = chapter_info['filename']
+                                    
+                                    # Skip navigation, toc, and cover files
+                                    if not any(skip in filename.lower() for skip in ['nav.', 'toc.', 'cover.']):
+                                        # Extract chapter number from filename
+                                        import re
+                                        matches = re.findall(r'(\d+)', filename)
+                                        if matches:
+                                            file_chapter_num = int(matches[-1])
+                                        else:
+                                            file_chapter_num = len(spine_chapters)
+                                        
+                                        spine_chapters.append({
+                                            'id': idref,
+                                            'filename': filename,
+                                            'position': len(spine_chapters),
+                                            'file_chapter_num': file_chapter_num,
+                                            'status': 'unknown',  # Will be updated
+                                            'output_file': None    # Will be updated
+                                        })
+                                        
+                                        # Store the order for later use
+                                        opf_chapter_order[filename] = len(spine_chapters) - 1
+                                        
+                                        # Also store without extension for matching
+                                        filename_noext = os.path.splitext(filename)[0]
+                                        opf_chapter_order[filename_noext] = len(spine_chapters) - 1
+                        
+            except Exception as e:
+                print(f"Warning: Could not parse OPF: {e}")
+        
+        # =====================================================
+        # MATCH OPF CHAPTERS WITH TRANSLATION PROGRESS
+        # =====================================================
+        
+        # Build a map of original basenames to progress entries
+        basename_to_progress = {}
+        for chapter_key, chapter_info in prog.get("chapters", {}).items():
+            original_basename = chapter_info.get("original_basename", "")
+            if original_basename:
+                if original_basename not in basename_to_progress:
+                    basename_to_progress[original_basename] = []
+                basename_to_progress[original_basename].append((chapter_key, chapter_info))
+        
+        # Also build a map of response files
+        response_file_to_progress = {}
+        for chapter_key, chapter_info in prog.get("chapters", {}).items():
+            output_file = chapter_info.get("output_file", "")
+            if output_file:
+                if output_file not in response_file_to_progress:
+                    response_file_to_progress[output_file] = []
+                response_file_to_progress[output_file].append((chapter_key, chapter_info))
+        
+        # Update spine chapters with translation status
+        for spine_ch in spine_chapters:
+            filename = spine_ch['filename']
+            chapter_num = spine_ch['file_chapter_num']
+            
+            # Build expected response filename
+            expected_response = f"response_{filename}"
+            response_path = os.path.join(output_dir, expected_response)
+            
+            # Check various ways to find the translation
+            translation_found = False
+            matched_info = None
+            
+            # Method 1: Check by original basename
+            if filename in basename_to_progress:
+                entries = basename_to_progress[filename]
+                if entries:
+                    _, chapter_info = entries[0]
+                    matched_info = chapter_info
+                    translation_found = True
+            
+            # Method 2: Check by response file
+            if not translation_found and expected_response in response_file_to_progress:
+                entries = response_file_to_progress[expected_response]
+                if entries:
+                    _, chapter_info = entries[0]
+                    matched_info = chapter_info
+                    translation_found = True
+            
+            # Method 3: Check file existence directly
+            if not translation_found:
+                # Check with extension
+                if os.path.exists(response_path):
+                    translation_found = True
+                    spine_ch['status'] = 'completed'
+                    spine_ch['output_file'] = expected_response
+                # Check without extension
+                elif os.path.exists(response_path.replace('.html', '')):
+                    translation_found = True
+                    spine_ch['status'] = 'completed'
+                    spine_ch['output_file'] = expected_response.replace('.html', '')
+            
+            # Update spine chapter with status
+            if matched_info:
+                spine_ch['status'] = matched_info.get('status', 'unknown')
+                spine_ch['output_file'] = matched_info.get('output_file', expected_response)
+                spine_ch['progress_entry'] = matched_info
+                
+                # Verify file actually exists
+                if spine_ch['status'] == 'completed':
+                    output_path = os.path.join(output_dir, spine_ch['output_file'])
+                    if not os.path.exists(output_path):
+                        spine_ch['status'] = 'file_missing'
+            elif translation_found and not matched_info:
+                # File exists but not in progress tracking
+                spine_ch['status'] = 'completed'
+                if not spine_ch.get('output_file'):
+                    spine_ch['output_file'] = expected_response
+            else:
+                # No translation found
+                spine_ch['status'] = 'not_translated'
+                spine_ch['output_file'] = expected_response
+        
+        # =====================================================
+        # BUILD DISPLAY INFO
+        # =====================================================
+        
+        chapter_display_info = []
+        
+        if spine_chapters:
+            # Use OPF order
+            for spine_ch in spine_chapters:
+                display_info = {
+                    'key': spine_ch.get('filename', ''),
+                    'num': spine_ch['file_chapter_num'],
+                    'info': spine_ch.get('progress_entry', {}),
+                    'output_file': spine_ch['output_file'],
+                    'status': spine_ch['status'],
+                    'duplicate_count': 1,
+                    'entries': [],
+                    'opf_position': spine_ch['position'],
+                    'original_filename': spine_ch['filename']
+                }
+                chapter_display_info.append(display_info)
+        else:
+            # Fallback to original logic if no OPF
+            files_to_entries = {}
+            for chapter_key, chapter_info in prog.get("chapters", {}).items():
+                output_file = chapter_info.get("output_file", "")
+                if output_file:
+                    if output_file not in files_to_entries:
+                        files_to_entries[output_file] = []
+                    files_to_entries[output_file].append((chapter_key, chapter_info))
+            
+            for output_file, entries in files_to_entries.items():
+                chapter_key, chapter_info = entries[0]
+                
+                # Extract chapter number
+                import re
+                matches = re.findall(r'(\d+)', output_file)
+                if matches:
+                    chapter_num = int(matches[-1])
+                else:
+                    chapter_num = 999999
+                
+                # Override with stored values if available
+                if 'actual_num' in chapter_info and chapter_info['actual_num'] is not None:
+                    chapter_num = chapter_info['actual_num']
+                elif 'chapter_num' in chapter_info and chapter_info['chapter_num'] is not None:
+                    chapter_num = chapter_info['chapter_num']
+                
+                status = chapter_info.get("status", "unknown")
+                if status == "completed_empty":
+                    status = "completed"
+                
+                # Check file existence
+                if status == "completed":
+                    output_path = os.path.join(output_dir, output_file)
+                    if not os.path.exists(output_path):
+                        status = "file_missing"
+                
+                chapter_display_info.append({
+                    'key': chapter_key,
+                    'num': chapter_num,
+                    'info': chapter_info,
+                    'output_file': output_file,
+                    'status': status,
+                    'duplicate_count': len(entries),
+                    'entries': entries
+                })
+            
+            # Sort by chapter number
+            chapter_display_info.sort(key=lambda x: x['num'] if x['num'] is not None else 999999)
+        
+        # =====================================================
+        # CREATE UI
+        # =====================================================
         
         # If no parent dialog or tab frame, create standalone dialog
         if not parent_dialog and not tab_frame:
             dialog = self.wm.create_simple_dialog(
                 self.master,
-                "Force Retranslation",
-                width=900,
-                height=600
+                "Force Retranslation - OPF Based" if spine_chapters else "Force Retranslation",
+                width=1000,
+                height=700
             )
             container = dialog
         else:
             container = tab_frame or parent_dialog
             dialog = parent_dialog
         
-        # Process chapter data (same logic as before)
-        files_to_entries = {}
-        for chapter_key, chapter_info in prog.get("chapters", {}).items():
-            output_file = chapter_info.get("output_file", "")
-            if output_file:
-                if output_file not in files_to_entries:
-                    files_to_entries[output_file] = []
-                files_to_entries[output_file].append((chapter_key, chapter_info))
+        # Title
+        title_text = "Chapters from content.opf (in reading order):" if spine_chapters else "Select chapters to retranslate:"
+        tk.Label(container, text=title_text, 
+                font=('Arial', 12 if not tab_frame else 11, 'bold')).pack(pady=5)
         
-        # Build display info
-        chapter_display_info = []
-        for output_file, entries in files_to_entries.items():
-            chapter_key, chapter_info = entries[0]
+        # Statistics if OPF is available
+        if spine_chapters:
+            stats_frame = tk.Frame(container)
+            stats_frame.pack(pady=5)
             
-            # Extract chapter number
-            from TransateKRtoEN import extract_chapter_number_from_filename
-            chapter_num, _ = extract_chapter_number_from_filename(output_file)
+            total_chapters = len(spine_chapters)
+            completed = sum(1 for ch in spine_chapters if ch['status'] == 'completed')
+            missing = sum(1 for ch in spine_chapters if ch['status'] == 'not_translated')
+            failed = sum(1 for ch in spine_chapters if ch['status'] in ['failed', 'qa_failed'])
+            file_missing = sum(1 for ch in spine_chapters if ch['status'] == 'file_missing')
             
-            # Override with stored values if available
-            if 'actual_num' in chapter_info and chapter_info['actual_num'] is not None:
-                chapter_num = chapter_info['actual_num']
-            elif 'chapter_num' in chapter_info and chapter_info['chapter_num'] is not None:
-                chapter_num = chapter_info['chapter_num']
-            
-            status = chapter_info.get("status", "unknown")
-            if status == "completed_empty":
-                status = "completed"
-            
-            # Check file existence
-            if status == "completed":
-                output_path = os.path.join(output_dir, output_file)
-                if not os.path.exists(output_path):
-                    status = "file_missing"
-            
-            chapter_display_info.append({
-                'key': chapter_key,
-                'num': chapter_num,
-                'info': chapter_info,
-                'output_file': output_file,
-                'status': status,
-                'duplicate_count': len(entries),
-                'entries': entries
-            })
-        
-        # Sort by chapter number
-        chapter_display_info.sort(key=lambda x: x['num'] if x['num'] is not None else 999999)
-        
-        # Create UI elements
-        if not tab_frame:
-            tk.Label(container, text="Select chapters to retranslate (scroll horizontally if needed):", 
-                    font=('Arial', 12)).pack(pady=10)
-        else:
-            tk.Label(container, text="Select chapters to retranslate:", 
-                    font=('Arial', 11)).pack(pady=5)
+            tk.Label(stats_frame, text=f"Total: {total_chapters} | ", font=('Arial', 10)).pack(side=tk.LEFT)
+            tk.Label(stats_frame, text=f"✅ Completed: {completed} | ", font=('Arial', 10), fg='green').pack(side=tk.LEFT)
+            tk.Label(stats_frame, text=f"❌ Missing: {missing} | ", font=('Arial', 10), fg='red').pack(side=tk.LEFT)
+            tk.Label(stats_frame, text=f"⚠️ Failed: {failed} | ", font=('Arial', 10), fg='orange').pack(side=tk.LEFT)
+            tk.Label(stats_frame, text=f"📁 File Missing: {file_missing}", font=('Arial', 10), fg='purple').pack(side=tk.LEFT)
         
         # Main frame for listbox
         main_frame = tk.Frame(container)
@@ -3155,7 +3382,8 @@ Recent translations to summarize:
             selectmode=tk.MULTIPLE, 
             yscrollcommand=v_scrollbar.set,
             xscrollcommand=h_scrollbar.set,
-            width=100
+            width=120,
+            font=('Courier', 10)  # Fixed-width font for better alignment
         )
         listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
@@ -3169,7 +3397,18 @@ Recent translations to summarize:
             'qa_failed': '❌',
             'file_missing': '⚠️',
             'in_progress': '🔄',
+            'not_translated': '❌',
             'unknown': '❓'
+        }
+        
+        status_labels = {
+            'completed': 'Completed',
+            'failed': 'Failed',
+            'qa_failed': 'QA Failed',
+            'file_missing': 'File Missing',
+            'in_progress': 'In Progress',
+            'not_translated': 'Not Translated',
+            'unknown': 'Unknown'
         }
         
         for info in chapter_display_info:
@@ -3177,19 +3416,42 @@ Recent translations to summarize:
             status = info['status']
             output_file = info['output_file']
             icon = status_icons.get(status, '❓')
+            status_label = status_labels.get(status, status)
             
-            # Format display
-            if isinstance(chapter_num, float) and chapter_num.is_integer():
-                display = f"Chapter {int(chapter_num):03d} | {icon} {status} | {output_file}"
-            elif isinstance(chapter_num, float):
-                display = f"Chapter {chapter_num:06.1f} | {icon} {status} | {output_file}"
+            # Format display with OPF info if available
+            if 'opf_position' in info:
+                # OPF-based display
+                original_file = info.get('original_filename', '')
+                opf_pos = info['opf_position'] + 1  # 1-based for display
+                
+                # Format: [OPF Position] Chapter Number | Status | Original File -> Response File
+                if isinstance(chapter_num, float) and chapter_num.is_integer():
+                    display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:15s} | {original_file:30s} -> {output_file}"
+                else:
+                    display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:15s} | {original_file:30s} -> {output_file}"
             else:
-                display = f"Chapter {chapter_num:03d} | {icon} {status} | {output_file}"
+                # Original format
+                if isinstance(chapter_num, float) and chapter_num.is_integer():
+                    display = f"Chapter {int(chapter_num):03d} | {icon} {status_label:15s} | {output_file}"
+                elif isinstance(chapter_num, float):
+                    display = f"Chapter {chapter_num:06.1f} | {icon} {status_label:15s} | {output_file}"
+                else:
+                    display = f"Chapter {chapter_num:03d} | {icon} {status_label:15s} | {output_file}"
             
-            if info['duplicate_count'] > 1:
+            if info.get('duplicate_count', 1) > 1:
                 display += f" | ({info['duplicate_count']} entries)"
             
             listbox.insert(tk.END, display)
+            
+            # Color code based on status
+            if status == 'completed':
+                listbox.itemconfig(tk.END, fg='green')
+            elif status in ['failed', 'qa_failed', 'not_translated']:
+                listbox.itemconfig(tk.END, fg='red')
+            elif status == 'file_missing':
+                listbox.itemconfig(tk.END, fg='purple')
+            elif status == 'in_progress':
+                listbox.itemconfig(tk.END, fg='orange')
         
         # Selection count label
         selection_count_label = tk.Label(container, text="Selected: 0", 
@@ -3208,7 +3470,8 @@ Recent translations to summarize:
             'output_dir': output_dir,
             'progress_file': progress_file,
             'prog': prog,
-            'files_to_entries': files_to_entries,
+            'spine_chapters': spine_chapters,
+            'opf_chapter_order': opf_chapter_order,
             'chapter_display_info': chapter_display_info,
             'listbox': listbox,
             'selection_count_label': selection_count_label,
@@ -3218,20 +3481,20 @@ Recent translations to summarize:
         
         # If standalone (no parent), add buttons
         if not parent_dialog or tab_frame:
-            self._add_retranslation_buttons(result)
+            self._add_retranslation_buttons_opf(result)
         
         return result
 
 
-    def _add_retranslation_buttons(self, data, button_frame=None):
-        """Add the standard button set for retranslation dialogs"""
+    def _add_retranslation_buttons_opf(self, data, button_frame=None):
+        """Add the standard button set for retranslation dialogs with OPF support"""
         
         if not button_frame:
             button_frame = tk.Frame(data['container'])
             button_frame.pack(pady=10)
         
         # Configure column weights
-        for i in range(4):
+        for i in range(5):
             button_frame.columnconfigure(i, weight=1)
         
         # Helper functions that work with the data dict
@@ -3248,6 +3511,9 @@ Recent translations to summarize:
             for idx, info in enumerate(data['chapter_display_info']):
                 if status_to_select == 'failed':
                     if info['status'] in ['failed', 'qa_failed']:
+                        data['listbox'].select_set(idx)
+                elif status_to_select == 'missing':
+                    if info['status'] in ['not_translated', 'file_missing']:
                         data['listbox'].select_set(idx)
                 else:
                     if info['status'] == status_to_select:
@@ -3277,8 +3543,16 @@ Recent translations to summarize:
             # Remove marks
             cleared_count = 0
             for info in qa_failed_chapters:
-                for chapter_key, _ in info['entries']:
-                    if chapter_key in data['prog']["chapters"]:
+                # For OPF-based chapters
+                if 'progress_entry' in info and info['progress_entry']:
+                    chapter_key = None
+                    # Find the chapter key in progress
+                    for key, ch_info in data['prog']["chapters"].items():
+                        if ch_info == info['progress_entry']:
+                            chapter_key = key
+                            break
+                    
+                    if chapter_key and chapter_key in data['prog']["chapters"]:
                         data['prog']["chapters"][chapter_key]["status"] = "completed"
                         data['prog']["chapters"][chapter_key].pop("qa_issues", None)
                         data['prog']["chapters"][chapter_key].pop("qa_timestamp", None)
@@ -3300,70 +3574,104 @@ Recent translations to summarize:
                 messagebox.showwarning("No Selection", "Please select at least one chapter.")
                 return
             
+            selected_chapters = [data['chapter_display_info'][i] for i in selected]
+            
+            # Count different types
+            missing_count = sum(1 for ch in selected_chapters if ch['status'] == 'not_translated')
+            existing_count = sum(1 for ch in selected_chapters if ch['status'] != 'not_translated')
+            
             count = len(selected)
             if count > 10:
-                confirm_msg = f"This will delete {count} translated chapters and mark them for retranslation.\n\nContinue?"
+                if missing_count > 0 and existing_count > 0:
+                    confirm_msg = f"This will:\n• Mark {missing_count} missing chapters for translation\n• Delete and retranslate {existing_count} existing chapters\n\nTotal: {count} chapters\n\nContinue?"
+                elif missing_count > 0:
+                    confirm_msg = f"This will mark {missing_count} missing chapters for translation.\n\nContinue?"
+                else:
+                    confirm_msg = f"This will delete {existing_count} translated chapters and mark them for retranslation.\n\nContinue?"
             else:
-                chapters = [f"Chapter {data['chapter_display_info'][i]['num']}" for i in selected]
-                confirm_msg = f"This will delete and retranslate:\n\n{', '.join(chapters)}\n\nContinue?"
+                chapters = [f"Ch.{ch['num']}" for ch in selected_chapters]
+                confirm_msg = f"This will process:\n\n{', '.join(chapters)}\n\n"
+                if missing_count > 0:
+                    confirm_msg += f"• {missing_count} missing chapters will be marked for translation\n"
+                if existing_count > 0:
+                    confirm_msg += f"• {existing_count} existing chapters will be deleted and retranslated\n"
+                confirm_msg += "\nContinue?"
             
             if not messagebox.askyesno("Confirm Retranslation", confirm_msg):
                 return
             
-            # Delete files and update progress
+            # Process chapters
             deleted_count = 0
-            for idx in selected:
-                info = data['chapter_display_info'][idx]
-                output_file = info['output_file']
-                
-                # Delete file
-                if output_file:
-                    output_path = os.path.join(data['output_dir'], output_file)
-                    try:
-                        if os.path.exists(output_path):
-                            os.remove(output_path)
-                            deleted_count += 1
-                    except Exception as e:
-                        print(f"Failed to delete {output_path}: {e}")
-                
-                # Remove from progress
-                for chapter_key, _ in info['entries']:
-                    if chapter_key in data['prog']["chapters"]:
-                        content_hash = data['prog']["chapters"][chapter_key].get("content_hash")
-                        del data['prog']["chapters"][chapter_key]
-                        
-                        if content_hash and content_hash in data['prog'].get("content_hashes", {}):
-                            del data['prog']["content_hashes"][content_hash]
-                        
-                        if content_hash and content_hash in data['prog'].get("chapter_chunks", {}):
-                            del data['prog']["chapter_chunks"][content_hash]
+            marked_count = 0
             
-            # Save
+            for ch_info in selected_chapters:
+                output_file = ch_info['output_file']
+                
+                if ch_info['status'] != 'not_translated':
+                    # Delete existing file
+                    if output_file:
+                        output_path = os.path.join(data['output_dir'], output_file)
+                        try:
+                            if os.path.exists(output_path):
+                                os.remove(output_path)
+                                deleted_count += 1
+                        except Exception as e:
+                            print(f"Failed to delete {output_path}: {e}")
+                    
+                    # Remove from progress if it exists
+                    if 'progress_entry' in ch_info and ch_info['progress_entry']:
+                        # Find and remove the progress entry
+                        for chapter_key, chapter_info in list(data['prog']["chapters"].items()):
+                            if chapter_info == ch_info['progress_entry']:
+                                content_hash = data['prog']["chapters"][chapter_key].get("content_hash")
+                                del data['prog']["chapters"][chapter_key]
+                                
+                                if content_hash and content_hash in data['prog'].get("content_hashes", {}):
+                                    del data['prog']["content_hashes"][content_hash]
+                                
+                                if content_hash and content_hash in data['prog'].get("chapter_chunks", {}):
+                                    del data['prog']["chapter_chunks"][content_hash]
+                                break
+                else:
+                    # Just marking for translation (no file to delete)
+                    marked_count += 1
+            
+            # Save updated progress
             with open(data['progress_file'], 'w', encoding='utf-8') as f:
                 json.dump(data['prog'], f, ensure_ascii=False, indent=2)
             
-            messagebox.showinfo("Success", 
-                f"Deleted {deleted_count} files and cleared {len(selected)} chapters from tracking.")
+            if deleted_count > 0 and marked_count > 0:
+                messagebox.showinfo("Success", 
+                    f"Deleted {deleted_count} files and marked {marked_count} missing chapters for translation.\n\nTotal {len(selected)} chapters ready for translation.")
+            elif deleted_count > 0:
+                messagebox.showinfo("Success", 
+                    f"Deleted {deleted_count} files and cleared {len(selected)} chapters from tracking.")
+            else:
+                messagebox.showinfo("Success", 
+                    f"Marked {marked_count} missing chapters for translation.")
             
             if data.get('dialog'):
                 data['dialog'].destroy()
         
-        # Add buttons
+        # Add buttons - First row
         tb.Button(button_frame, text="Select All", command=select_all, 
                   bootstyle="info").grid(row=0, column=0, padx=5, pady=5, sticky="ew")
-        tb.Button(button_frame, text="Clear Selection", command=clear_selection, 
+        tb.Button(button_frame, text="Clear", command=clear_selection, 
                   bootstyle="secondary").grid(row=0, column=1, padx=5, pady=5, sticky="ew")
         tb.Button(button_frame, text="Select Completed", command=lambda: select_status('completed'), 
                   bootstyle="success").grid(row=0, column=2, padx=5, pady=5, sticky="ew")
-        tb.Button(button_frame, text="Select Failed", command=lambda: select_status('failed'), 
+        tb.Button(button_frame, text="Select Missing", command=lambda: select_status('missing'), 
                   bootstyle="danger").grid(row=0, column=3, padx=5, pady=5, sticky="ew")
+        tb.Button(button_frame, text="Select Failed", command=lambda: select_status('failed'), 
+                  bootstyle="warning").grid(row=0, column=4, padx=5, pady=5, sticky="ew")
         
+        # Second row
         tb.Button(button_frame, text="Retranslate Selected", command=retranslate_selected, 
                   bootstyle="warning").grid(row=1, column=0, columnspan=2, padx=5, pady=10, sticky="ew")
         tb.Button(button_frame, text="Remove QA Failed Mark", command=remove_qa_failed_mark, 
                   bootstyle="success").grid(row=1, column=2, columnspan=1, padx=5, pady=10, sticky="ew")
         tb.Button(button_frame, text="Cancel", command=lambda: data['dialog'].destroy() if data.get('dialog') else None, 
-                  bootstyle="secondary").grid(row=1, column=3, columnspan=1, padx=5, pady=10, sticky="ew")
+                  bootstyle="secondary").grid(row=1, column=3, columnspan=2, padx=5, pady=10, sticky="ew")
 
 
     def _force_retranslation_multiple_files(self):
