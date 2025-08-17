@@ -3621,11 +3621,6 @@ Recent translations to summarize:
                 else:
                     # Just marking for translation (no file to delete)
                     marked_count += 1
-
-            # DON'T SAVE PROGRESS - we didn't change it!
-            # The translation process will detect missing files automatically
-            
-
             
             if deleted_count > 0 and marked_count > 0:
                 messagebox.showinfo("Success", 
