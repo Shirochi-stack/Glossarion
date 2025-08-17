@@ -1540,10 +1540,10 @@ class ContentProcessor:
             return '\n'.join(new_paragraphs)
         
         return text
-    
+        
     @staticmethod
-    def get_content_hash(html_content):
-        """Create a stable hash of content"""
+    def get_content_hash(html_content, unique_id=None):
+        """Create a stable hash of content with optional unique identifier to prevent collisions"""
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
             
@@ -1553,11 +1553,17 @@ class ContentProcessor:
             text_content = soup.get_text(separator=' ', strip=True)
             text_content = ' '.join(text_content.split())
             
+            # Add unique identifier to make hash unique even for identical content
+            if unique_id:
+                text_content = f"{unique_id}_{text_content}"
+            
             return hashlib.md5(text_content.encode('utf-8')).hexdigest()
             
         except Exception as e:
             print(f"[WARNING] Failed to create hash: {e}")
-            return hashlib.md5(html_content.encode('utf-8')).hexdigest()
+            # Include unique_id in fallback too
+            fallback_content = f"{unique_id}_{html_content}" if unique_id else html_content
+            return hashlib.md5(fallback_content.encode('utf-8')).hexdigest()
     
     @staticmethod
     def is_meaningful_text_content(html_content):
@@ -3977,14 +3983,17 @@ class BatchTranslationProcessor:
             print(f"    📖 Extracted actual chapter number: {actual_num} (from raw: {raw_num})")
         
         try:
-            # Rest of the processing logic...
             # Check if this is from a text file
             ai_features = None
             is_text_source = self.is_text_file or chapter.get('filename', '').endswith('.txt') or chapter.get('is_chunk', False)
             terminology = "Section" if is_text_source else "Chapter"
             print(f"🔄 Starting #{idx+1} (Internal: {terminology} {chap_num}, Actual: {terminology} {actual_num})  (thread: {threading.current_thread().name}) [File: {chapter.get('original_basename', f'{terminology}_{chap_num}')}]")
                       
-            content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
+            # Create unique identifier from original filename or index
+            original_basename = chapter.get('original_basename', '')
+            unique_id = original_basename if original_basename else f"idx_{chapter.get('__debug_idx', idx)}"
+            content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"], unique_id)
+            
             with self.progress_lock:
                 self.update_progress_fn(idx, actual_num, content_hash, None, status="in_progress")
                 self.save_progress_fn()
@@ -6875,7 +6884,10 @@ def main(log_callback=None, stop_callback=None):
                                 print(f"      ✅ Deleted QA failed file successfully")
                                 
                                 # CRITICAL FIX: Also remove from progress tracking to ensure retranslation
-                                content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
+                                # Create unique identifier from original filename or index
+                                original_basename = chapter.get('original_basename', '')
+                                unique_id = original_basename if original_basename else f"idx_{chapter.get('__debug_idx', idx)}"
+                                content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"], unique_id)
                                 if content_hash in progress_manager.prog["chapters"]:
                                     del progress_manager.prog["chapters"][content_hash]
                                     print(f"      ✅ Removed from progress tracking")
@@ -6892,57 +6904,7 @@ def main(log_callback=None, stop_callback=None):
                                 print(f"      ❌ Error deleting file: {del_error}")
                             return False, response_fname  # File deleted, needs retranslation
                 except Exception as e:
-                    print(f"   ❌ Error checking {os.path.basename(check_path)}: {e}")
-                    # Continue to check other paths
-        
-        # Also check for pattern-based files in the directory
-        # This handles cases where files might be named differently
-        
-        # List all response files in directory
-        try:
-            existing_files = os.listdir(out)
-            # Look for files that might match this chapter
-            for file in existing_files:
-                if file.startswith('response_'):
-                    # Extract ALL numbers from filename and use the last one
-                    import re
-                    matches = re.findall(r'(\d+)', file)
-                    if matches:
-                        file_num = int(matches[-1])
-                        if file_num == actual_num:
-                            # Found a matching file
-                            check_path = os.path.join(out, file)
-                            if debug_idx < 5 or actual_num < 5:
-                                print(f"   [DEBUG] Found matching file by number: {file}")
-                            try:
-                                with open(check_path, 'r', encoding='utf-8') as f:
-                                    content = f.read(2000)
-                                    if not is_qa_failed_response(content):
-                                        return True, file  # File exists and is valid
-                                    else:
-                                        # QA FAILED - DELETE THE FILE TO FORCE RETRANSLATION
-                                        print(f"   🗑️ Chapter {actual_num} file has QA failure - DELETING: {file}")
-                                        try:
-                                            os.remove(check_path)
-                                            print(f"      ✅ Deleted QA failed file successfully")
-                                            
-                                            # CRITICAL FIX: Also remove from progress tracking
-                                            content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
-                                            if content_hash in progress_manager.prog["chapters"]:
-                                                del progress_manager.prog["chapters"][content_hash]
-                                            if content_hash in progress_manager.prog.get("content_hashes", {}):
-                                                del progress_manager.prog["content_hashes"][content_hash]
-                                            if content_hash in progress_manager.prog.get("chapter_chunks", {}):
-                                                del progress_manager.prog["chapter_chunks"][content_hash]
-                                            progress_manager.save()
-                                            
-                                        except Exception as del_error:
-                                            print(f"      ❌ Error deleting file: {del_error}")
-                                        return False, file  # File deleted, needs retranslation
-                            except:
-                                pass
-        except Exception as e:
-            print(f"   ⚠️ Error listing directory: {e}")
+                    print(f"   ❌ Error checking {os.path.basename(check_path)}: {e}")     
         
         if debug_idx < 5 or actual_num < 5:
             print(f"   [DEBUG] File not found for Ch.{actual_num}")
@@ -7501,8 +7463,11 @@ def main(log_callback=None, stop_callback=None):
             chapter['__debug_idx'] = idx
             
             actual_num = chapter.get('actual_chapter_num', chapter.get('num'))
-            content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
+            # Create unique identifier from original filename or index
             original_basename = chapter.get('original_basename', '')
+            unique_id = original_basename if original_basename else f"idx_{chapter.get('__debug_idx', idx)}"
+            content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"], unique_id)
+
             
             # Check with progress manager first
             needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
@@ -7690,8 +7655,9 @@ def main(log_callback=None, stop_callback=None):
             chapter['__debug_idx'] = idx
             
             actual_num = chapter.get('actual_chapter_num', chapter.get('num'))
-            content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
             original_basename = chapter.get('original_basename', '')
+            unique_id = original_basename if original_basename else f"idx_{chapter.get('__debug_idx', idx)}"
+            content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"], unique_id)
             
             # Check with progress manager
             needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
