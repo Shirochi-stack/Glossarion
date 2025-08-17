@@ -2802,7 +2802,7 @@ def update_progress_file(folder_path, results, log):
     is_new_format = "chapters" in prog and isinstance(prog.get("chapters"), dict)
     
     if is_new_format:
-        update_new_format_progress(prog, faulty_chapters, log)
+        update_new_format_progress(prog, faulty_chapters, log, folder_path)
     else:
         update_legacy_format_progress(prog, faulty_chapters, log)
     
@@ -2824,30 +2824,99 @@ def update_progress_file(folder_path, results, log):
         
         # For the log display (to match HTML report)
         affected_chapters_for_log.append(faulty_row.get("file_index", 0))
-
     if affected_chapters_for_log:
         log(f"📝 Chapters marked for re-translation: {', '.join(str(c) for c in sorted(affected_chapters_for_log))}")
 
-def update_new_format_progress(prog, faulty_chapters, log):
-    """Update new format progress file"""
+def update_new_format_progress(prog, faulty_chapters, log, folder_path):
+    """Update new format progress file with content hash support"""
     log("[INFO] Detected new progress format")
     
-    # Build reverse mapping
+    # Build multiple mappings to find chapters
     output_file_to_chapter_key = {}
+    actual_num_to_chapter_key = {}
+    basename_to_chapter_key = {}
+    
     for chapter_key, chapter_info in prog["chapters"].items():
         output_file = chapter_info.get("output_file")
         if output_file:
             output_file_to_chapter_key[output_file] = chapter_key
+            
+            # Also map without response_ prefix for matching
+            if output_file.startswith("response_"):
+                alt_name = output_file[9:]  # Remove "response_" prefix
+                output_file_to_chapter_key[alt_name] = chapter_key
+        
+        # Map by actual chapter number
+        actual_num = chapter_info.get("actual_num")
+        if actual_num is not None:
+            if actual_num not in actual_num_to_chapter_key:
+                actual_num_to_chapter_key[actual_num] = []
+            actual_num_to_chapter_key[actual_num].append(chapter_key)
+        
+        # Map by original basename
+        original_basename = chapter_info.get("original_basename")
+        if original_basename:
+            basename_to_chapter_key[original_basename] = chapter_key
+            # Also map response_ version
+            basename_to_chapter_key[f"response_{original_basename}"] = chapter_key
     
     updated_count = 0
     for faulty_row in faulty_chapters:
         faulty_filename = faulty_row["filename"]
+        chapter_key = None
+        
+        # Method 1: Direct output file match
         chapter_key = output_file_to_chapter_key.get(faulty_filename)
+        
+        # Method 2: Try without response_ prefix
+        if not chapter_key and faulty_filename.startswith("response_"):
+            base_name = faulty_filename[9:]
+            chapter_key = basename_to_chapter_key.get(base_name)
+        
+        # Method 3: Extract chapter number and match
+        if not chapter_key:
+            # Extract chapter number from filename
+            import re
+            matches = re.findall(r'(\d+)', faulty_filename)
+            if matches:
+                chapter_num = int(matches[-1])  # Use last number found
+                
+                # Look for matching chapter by number
+                if chapter_num in actual_num_to_chapter_key:
+                    # If multiple entries, find the one with matching output file
+                    candidates = actual_num_to_chapter_key[chapter_num]
+                    for candidate_key in candidates:
+                        candidate_info = prog["chapters"][candidate_key]
+                        candidate_output = candidate_info.get("output_file", "")
+                        if candidate_output == faulty_filename or candidate_output.endswith(faulty_filename):
+                            chapter_key = candidate_key
+                            break
+                    
+                    # If still not found, use first candidate
+                    if not chapter_key and candidates:
+                        chapter_key = candidates[0]
+        
+        # Method 4: If still not found, try to calculate content hash from file
+        if not chapter_key and os.path.exists(os.path.join(folder_path, faulty_filename)):
+            try:
+                # Read the file and calculate its content hash
+                # This is a fallback for when the mapping isn't found
+                with open(os.path.join(folder_path, faulty_filename), 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                # Try to find by scanning all chapters for matching output file
+                for ch_key, ch_info in prog["chapters"].items():
+                    if ch_info.get("output_file") == faulty_filename:
+                        chapter_key = ch_key
+                        break
+            except:
+                pass
         
         if chapter_key and chapter_key in prog["chapters"]:
             chapter_info = prog["chapters"][chapter_key]
             old_status = chapter_info.get("status", "unknown")
             
+            # Update status to qa_failed
             chapter_info["status"] = "qa_failed"
             chapter_info["qa_issues"] = True
             chapter_info["qa_timestamp"] = time.time()
@@ -2862,18 +2931,41 @@ def update_new_format_progress(prog, faulty_chapters, log):
                 chapter_num = chapter_info.get('actual_num', faulty_row.get("file_index", 0) + 1)
             log(f"   └─ Marked chapter {chapter_num} as qa_failed (was: {old_status})")
             
-            # Remove from content_hashes
-            content_hash = chapter_info.get("content_hash")
-            if content_hash and content_hash in prog.get("content_hashes", {}):
-                del prog["content_hashes"][content_hash]
+            # IMPORTANT: Don't remove from content_hashes or chapter_chunks
+            # Just mark as qa_failed so it will be retranslated
+            # The translation process will handle cleanup when retranslating
             
-            # Remove chunk data
-            if "chapter_chunks" in prog and chapter_key in prog["chapter_chunks"]:
-                del prog["chapter_chunks"][chapter_key]
-                log(f"   └─ Removed chunk data for chapter {chapter_num}")
+            # Optional: Log what we're NOT removing for clarity
+            content_hash = chapter_info.get("content_hash")
+            if content_hash:
+                log(f"   └─ Keeping content hash {content_hash[:8]}... for retranslation")
+        else:
+            # Log failure to find chapter
+            log(f"   ⚠️ Could not find chapter entry for {faulty_filename}")
+            
+            # Try to create a new entry if we can determine the chapter number
+            import re
+            matches = re.findall(r'(\d+)', faulty_filename)
+            if matches:
+                chapter_num = int(matches[-1])
+                
+                # Create a placeholder entry for qa_failed
+                # Use a temporary key based on filename
+                temp_key = f"qa_failed_{faulty_filename}"
+                prog["chapters"][temp_key] = {
+                    "status": "qa_failed",
+                    "output_file": faulty_filename,
+                    "actual_num": chapter_num,
+                    "qa_issues": True,
+                    "qa_timestamp": time.time(),
+                    "qa_issues_found": faulty_row.get("issues", []),
+                    "duplicate_confidence": faulty_row.get("duplicate_confidence", 0)
+                }
+                log(f"   └─ Created qa_failed entry for chapter {chapter_num}")
+                updated_count += 1
     
     log(f"🔧 Updated {updated_count} chapters in new format")
-
+    
 def update_legacy_format_progress(prog, faulty_chapters, log):
     """Update legacy format progress file"""
     log("[INFO] Detected legacy progress format")
