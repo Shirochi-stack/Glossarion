@@ -690,16 +690,139 @@ class FileUtilities:
                     return f"response_{actual_num:04d}.html"
 
 # =====================================================
-# UNIFIED PROGRESS MANAGER
+# UNIFIED PROGRESS MANAGER WITH OPF SUPPORT
 # =====================================================
 class ProgressManager:
-    """Unified progress management"""
+    """Unified progress management with content.opf tracking"""
     
-    def __init__(self, payloads_dir):
+    def __init__(self, payloads_dir, epub_path=None):
         self.payloads_dir = payloads_dir
+        self.epub_path = epub_path or os.getenv('EPUB_PATH')
         self.PROGRESS_FILE = os.path.join(payloads_dir, "translation_progress.json")
         self.prog = self._init_or_load()
         
+        # Parse OPF if EPUB is available
+        self.spine_chapters = []
+        self.opf_chapter_order = {}
+        if self.epub_path and os.path.exists(self.epub_path):
+            self._parse_opf()
+    
+    def _parse_opf(self):
+        """Parse content.opf from EPUB to get chapter order"""
+        try:
+            import xml.etree.ElementTree as ET
+            import zipfile
+            
+            if not self.epub_path.lower().endswith('.epub'):
+                return
+            
+            with zipfile.ZipFile(self.epub_path, 'r') as zf:
+                # Find content.opf file
+                opf_path = None
+                opf_content = None
+                
+                # First try to find via container.xml
+                try:
+                    container_content = zf.read('META-INF/container.xml')
+                    container_root = ET.fromstring(container_content)
+                    rootfile = container_root.find('.//{urn:oasis:names:tc:opendocument:xmlns:container}rootfile')
+                    if rootfile is not None:
+                        opf_path = rootfile.get('full-path')
+                        print(f"[PROGRESS] Found OPF via container.xml: {opf_path}")
+                except:
+                    pass
+                
+                # Fallback: search for content.opf
+                if not opf_path:
+                    for name in zf.namelist():
+                        if name.endswith('content.opf'):
+                            opf_path = name
+                            print(f"[PROGRESS] Found OPF via search: {opf_path}")
+                            break
+                
+                if opf_path:
+                    opf_content = zf.read(opf_path)
+                    
+                    # Parse OPF
+                    root = ET.fromstring(opf_content)
+                    
+                    # Handle namespaces
+                    ns = {'opf': 'http://www.idpf.org/2007/opf'}
+                    if root.tag.startswith('{'):
+                        default_ns = root.tag[1:root.tag.index('}')]
+                        ns = {'opf': default_ns}
+                    
+                    # Get manifest - all chapter files
+                    opf_dir = os.path.dirname(opf_path) if opf_path else ''
+                    manifest_chapters = {}
+                    
+                    for item in root.findall('.//opf:manifest/opf:item', ns):
+                        item_id = item.get('id')
+                        href = item.get('href')
+                        media_type = item.get('media-type', '')
+                        
+                        if item_id and href and ('html' in media_type.lower() or href.endswith(('.html', '.xhtml', '.htm'))):
+                            filename = os.path.basename(href)
+                            
+                            # Skip navigation, toc, and cover files
+                            if not any(skip in filename.lower() for skip in ['nav.', 'toc.', 'cover.']):
+                                if opf_dir:
+                                    full_path = os.path.join(opf_dir, href).replace('\\', '/')
+                                else:
+                                    full_path = href
+                                    
+                                manifest_chapters[item_id] = {
+                                    'filename': filename,
+                                    'path': full_path,
+                                    'media_type': media_type
+                                }
+                    
+                    print(f"[PROGRESS] Found {len(manifest_chapters)} chapter files in manifest")
+                    
+                    # Get spine order - the reading order
+                    spine = root.find('.//opf:spine', ns)
+                    
+                    if spine is not None:
+                        for itemref in spine.findall('opf:itemref', ns):
+                            idref = itemref.get('idref')
+                            if idref and idref in manifest_chapters:
+                                chapter_info = manifest_chapters[idref]
+                                filename = chapter_info['filename']
+                                
+                                # Skip navigation, toc, and cover files
+                                if not any(skip in filename.lower() for skip in ['nav.', 'toc.', 'cover.']):
+                                    # Extract chapter number from filename
+                                    import re
+                                    matches = re.findall(r'(\d+)', filename)
+                                    if matches:
+                                        file_chapter_num = int(matches[-1])
+                                    else:
+                                        file_chapter_num = len(self.spine_chapters)
+                                    
+                                    self.spine_chapters.append({
+                                        'id': idref,
+                                        'filename': filename,
+                                        'path': chapter_info['path'],
+                                        'position': len(self.spine_chapters),
+                                        'file_chapter_num': file_chapter_num
+                                    })
+                                    
+                                    # Store the order for later use
+                                    self.opf_chapter_order[filename] = len(self.spine_chapters) - 1
+                                    
+                                    # Also store without extension for matching
+                                    filename_noext = os.path.splitext(filename)[0]
+                                    self.opf_chapter_order[filename_noext] = len(self.spine_chapters) - 1
+                    
+                    print(f"[PROGRESS] Spine contains {len(self.spine_chapters)} chapters in reading order")
+                    
+                    # Store OPF info in progress
+                    self.prog["opf_spine"] = self.spine_chapters
+                    self.prog["opf_chapter_order"] = self.opf_chapter_order
+                    
+        except Exception as e:
+            print(f"[PROGRESS] Warning: Could not parse OPF: {e}")
+    
     def _init_or_load(self):
         """Initialize or load progress tracking with improved structure"""
         if os.path.exists(self.PROGRESS_FILE):
@@ -739,7 +862,9 @@ class ProgressManager:
                         "chapters": {},
                         "content_hashes": {},
                         "chapter_chunks": {},
-                        "version": "2.0"
+                        "opf_spine": [],
+                        "opf_chapter_order": {},
+                        "version": "3.0"
                     }
             
             if "chapters" not in prog:
@@ -755,6 +880,10 @@ class ProgressManager:
                 prog["content_hashes"] = {}
             if "chapter_chunks" not in prog:
                 prog["chapter_chunks"] = {}
+            if "opf_spine" not in prog:
+                prog["opf_spine"] = []
+            if "opf_chapter_order" not in prog:
+                prog["opf_chapter_order"] = {}
                 
         else:
             prog = {
@@ -762,7 +891,9 @@ class ProgressManager:
                 "content_hashes": {},
                 "chapter_chunks": {},
                 "image_chunks": {},
-                "version": "2.1"
+                "opf_spine": [],
+                "opf_chapter_order": {},
+                "version": "3.0"
             }
         
         return prog
@@ -778,11 +909,18 @@ class ProgressManager:
                         "idx": chapter_info.get("chapter_idx", 0),
                         "title": f"Chapter {chapter_info.get('chapter_num', 0)}",
                         "file": chapter_info.get("output_file", ""),
-                        "key": chapter_key
+                        "key": chapter_key,
+                        "original_basename": chapter_info.get("original_basename", "")
                     })
             
             if self.prog.get("completed_list"):
                 self.prog["completed_list"].sort(key=lambda x: x["num"])
+            
+            # Save OPF info if available
+            if self.spine_chapters:
+                self.prog["opf_spine"] = self.spine_chapters
+            if self.opf_chapter_order:
+                self.prog["opf_chapter_order"] = self.opf_chapter_order
             
             temp_file = self.PROGRESS_FILE + '.tmp'
             with open(temp_file, "w", encoding="utf-8") as pf:
@@ -800,8 +938,9 @@ class ProgressManager:
                 except:
                     pass
     
-    def update(self, idx, actual_num, content_hash, output_file, status="in_progress", ai_features=None, raw_num=None):
-        """Update progress for a chapter"""
+    def update(self, idx, actual_num, content_hash, output_file, status="in_progress", 
+               ai_features=None, raw_num=None, original_basename=None):
+        """Update progress for a chapter with OPF tracking"""
         chapter_key = str(idx)
         
         chapter_info = {
@@ -809,8 +948,14 @@ class ProgressManager:
             "content_hash": content_hash,
             "output_file": output_file,
             "status": status,
-            "last_updated": time.time()
+            "last_updated": time.time(),
+            "chapter_idx": idx,
+            "chapter_num": actual_num
         }
+        
+        # Add original basename for OPF matching
+        if original_basename:
+            chapter_info["original_basename"] = original_basename
         
         # Add raw number tracking
         if raw_num is not None:
@@ -822,13 +967,17 @@ class ProgressManager:
         else:
             chapter_info["zero_adjusted"] = (raw_num != actual_num) if raw_num is not None else False
         
-        # FIXED: Store AI features if provided
+        # Store AI features if provided
         if ai_features is not None:
             chapter_info["ai_features"] = ai_features
         
         # Preserve existing AI features if not overwriting
         elif chapter_key in self.prog["chapters"] and "ai_features" in self.prog["chapters"][chapter_key]:
             chapter_info["ai_features"] = self.prog["chapters"][chapter_key]["ai_features"]
+        
+        # Check OPF position if available
+        if original_basename and original_basename in self.opf_chapter_order:
+            chapter_info["opf_position"] = self.opf_chapter_order[original_basename]
         
         self.prog["chapters"][chapter_key] = chapter_info
         
@@ -837,11 +986,12 @@ class ProgressManager:
             self.prog["content_hashes"][content_hash] = {
                 "chapter_idx": idx,
                 "actual_num": actual_num,
-                "output_file": output_file
+                "output_file": output_file,
+                "original_basename": original_basename
             }
-        
-    def check_chapter_status(self, chapter_idx, actual_num, content_hash, output_dir):
-        """Check if a chapter needs translation with fallback"""
+    
+    def check_chapter_status(self, chapter_idx, actual_num, content_hash, output_dir, original_basename=None):
+        """Check if a chapter needs translation with OPF awareness"""
         
         # FIRST: Check if this chapter number is already completed
         for key, info in self.prog["chapters"].items():
@@ -850,8 +1000,22 @@ class ProgressManager:
                 if output_file:
                     output_path = os.path.join(output_dir, output_file)
                     if os.path.exists(output_path):
-                        # Chapter is already completed with a file that exists
-                        return False, f"Chapter {actual_num} already translated: {output_file}", output_file
+                        # Check if this is the same chapter by basename
+                        if original_basename and info.get("original_basename") == original_basename:
+                            return False, f"Chapter {actual_num} already translated: {output_file}", output_file
+                        # If no basename match but same number, still skip
+                        elif not original_basename:
+                            return False, f"Chapter {actual_num} already translated: {output_file}", output_file
+        
+        # Check by original basename if available
+        if original_basename:
+            for key, info in self.prog["chapters"].items():
+                if info.get("original_basename") == original_basename and info.get("status") == "completed":
+                    output_file = info.get("output_file")
+                    if output_file:
+                        output_path = os.path.join(output_dir, output_file)
+                        if os.path.exists(output_path):
+                            return False, f"Chapter {original_basename} already translated: {output_file}", output_file
         
         # THEN: Do the normal content hash check
         chapter_key = content_hash
@@ -861,7 +1025,6 @@ class ProgressManager:
         else:
             old_key = str(chapter_idx)
             if old_key in self.prog["chapters"]:
-                #print(f"[PROGRESS] Using legacy index-based tracking for chapter {actual_num}")
                 chapter_info = self.prog["chapters"][old_key]
                 self.prog["chapters"][chapter_key] = chapter_info
                 chapter_info["content_hash"] = content_hash
@@ -889,7 +1052,7 @@ class ProgressManager:
             if os.path.exists(output_path):
                 return False, f"Chapter {actual_num} already translated: {output_file}", output_file
             else:
-                # File is missing but not yet marked - this shouldn't happen if cleanup_missing_files ran
+                # File is missing but not yet marked
                 print(f"⚠️ Chapter {actual_num} marked as completed but file missing: {output_file}")
                 # Mark it now
                 chapter_info["status"] = "file_deleted"
@@ -915,7 +1078,6 @@ class ProgressManager:
                     duplicate_path = os.path.join(output_dir, duplicate_output)
                     if os.path.exists(duplicate_path):
                         # Only copy duplicate content if the current file also exists
-                        # If the file was deleted, respect the user's action and retranslate
                         if output_file and os.path.exists(os.path.join(output_dir, output_file)):
                             print(f"📋 Copying duplicate content from chapter {duplicate_info.get('actual_num')}")
                             
@@ -931,7 +1093,8 @@ class ProgressManager:
                             output_path = os.path.join(output_dir, fname)
                             shutil.copy2(duplicate_path, output_path)
                             
-                            self.update(chapter_idx, actual_num, content_hash, fname, status="completed")
+                            self.update(chapter_idx, actual_num, content_hash, fname, status="completed", 
+                                      original_basename=original_basename)
                             self.save()
                             
                             return False, f"Chapter {actual_num} has same content as chapter {duplicate_info.get('actual_num')} (already translated)", None
@@ -942,9 +1105,59 @@ class ProgressManager:
                     else:
                         return True, None, None
         
-        # FIXED: Add the missing return statement for when none of the above conditions are met
-        # This means the chapter needs translation
+        # Chapter needs translation
         return True, None, None
+    
+    def get_opf_status(self, output_dir):
+        """Get translation status for all OPF chapters"""
+        if not self.spine_chapters:
+            return []
+        
+        opf_status = []
+        for spine_ch in self.spine_chapters:
+            filename = spine_ch['filename']
+            chapter_num = spine_ch['file_chapter_num']
+            
+            # Build expected response filename
+            expected_response = f"response_{filename}"
+            response_path = os.path.join(output_dir, expected_response)
+            
+            # Check if translation exists
+            translation_found = False
+            chapter_info = None
+            
+            # Check by original basename in progress
+            for ch_key, ch_info in self.prog["chapters"].items():
+                if ch_info.get("original_basename") == filename:
+                    chapter_info = ch_info
+                    translation_found = True
+                    break
+            
+            # Check file existence directly
+            if not translation_found:
+                if os.path.exists(response_path) or os.path.exists(response_path.replace('.html', '')):
+                    translation_found = True
+            
+            status = "not_translated"
+            if chapter_info:
+                status = chapter_info.get("status", "unknown")
+                # Verify file exists for completed status
+                if status == "completed":
+                    output_file = chapter_info.get("output_file", expected_response)
+                    if not os.path.exists(os.path.join(output_dir, output_file)):
+                        status = "file_missing"
+            elif translation_found:
+                status = "completed"
+            
+            opf_status.append({
+                'position': spine_ch['position'],
+                'filename': filename,
+                'chapter_num': chapter_num,
+                'status': status,
+                'expected_response': expected_response
+            })
+        
+        return opf_status
     
     def cleanup_missing_files(self, output_dir):
         """Scan progress tracking and clean up any references to missing files AND duplicate entries"""
@@ -1016,7 +1229,7 @@ class ProgressManager:
                     if current_status == "file_deleted":
                         deletion_time = chapter_info.get("deletion_detected", 0)
                         # If marked as deleted more than 24 hours ago, remove from tracking
-                        if time.time() - deletion_time > 0:  # 0 seconds
+                        if time.time() - deletion_time > 0:  # 0 seconds for immediate cleanup
                             print(f"🗑️ Removing failed entry for chapter {chapter_info.get('actual_num', chapter_key)}: {output_file}")
                             
                             # Remove the chapter entry
@@ -1032,14 +1245,13 @@ class ProgressManager:
                                 del self.prog["chapter_chunks"][chapter_key]
                             
                             cleaned_count += 1
-                        # Otherwise, leave it marked as file_deleted
                     else:
                         # First time detecting missing file - mark it
                         print(f"🧹 Found missing file for chapter {chapter_info.get('actual_num', chapter_key)}: {output_file}")
                         
                         chapter_info["status"] = "file_deleted"
                         chapter_info["deletion_detected"] = time.time()
-                        chapter_info["previous_status"] = current_status  # Save what it was before
+                        chapter_info["previous_status"] = current_status
                         
                         marked_count += 1
         
@@ -1049,9 +1261,8 @@ class ProgressManager:
             print(f"📝 Marked {marked_count} chapters with missing files for re-translation")
     
     def migrate_to_content_hash(self, chapters):
-        """Migrate old index-based progress to content-hash-based"""
+        """Migrate old index-based progress to content-hash-based with OPF awareness"""
         if not self.prog.get("version") or self.prog["version"] < "3.0":
-            #print("🔄 Migrating progress tracking to content-hash-based system...")
             
             old_chapters = self.prog.get("chapters", {})
             new_chapters = {}
@@ -1062,6 +1273,11 @@ class ProgressManager:
             for idx, chapter in enumerate(chapters):
                 content_hash = chapter.get("content_hash") or get_content_hash(chapter["body"])
                 idx_to_hash[str(idx)] = content_hash
+                
+                # Also store original basename if available
+                if chapter.get('original_basename'):
+                    if content_hash in new_chapters:
+                        new_chapters[content_hash]["original_basename"] = chapter['original_basename']
             
             for old_key, chapter_info in old_chapters.items():
                 if old_key in idx_to_hash:
@@ -1077,17 +1293,24 @@ class ProgressManager:
             self.prog["chapters"] = new_chapters
             self.prog["chapter_chunks"] = new_chunks
             self.prog["version"] = "3.0"
-            
-            #print(f"✅ Migrated {len(new_chapters)} chapters to new system")
     
     def get_stats(self, output_dir):
-        """Get statistics about translation progress"""
+        """Get statistics about translation progress with OPF awareness"""
         stats = {
             "total_tracked": len(self.prog["chapters"]),
             "completed": 0,
             "missing_files": 0,
-            "in_progress": 0
+            "in_progress": 0,
+            "qa_failed": 0,
+            "not_translated": 0
         }
+        
+        # Get OPF status if available
+        if self.spine_chapters:
+            opf_status = self.get_opf_status(output_dir)
+            stats["total_in_opf"] = len(opf_status)
+            stats["opf_completed"] = sum(1 for ch in opf_status if ch['status'] == 'completed')
+            stats["opf_missing"] = sum(1 for ch in opf_status if ch['status'] == 'not_translated')
         
         for chapter_info in self.prog["chapters"].values():
             status = chapter_info.get("status")
@@ -1101,10 +1324,33 @@ class ProgressManager:
                     stats["missing_files"] += 1
             elif status == "in_progress":
                 stats["in_progress"] += 1
-            elif status == "file_missing":
+            elif status == "file_missing" or status == "file_deleted":
                 stats["missing_files"] += 1
+            elif status == "qa_failed":
+                stats["qa_failed"] += 1
+            elif status == "not_translated":
+                stats["not_translated"] += 1
         
         return stats
+    
+    def get_missing_from_opf(self, output_dir):
+        """Get list of chapters that are in OPF but not translated"""
+        if not self.spine_chapters:
+            return []
+        
+        missing = []
+        opf_status = self.get_opf_status(output_dir)
+        
+        for ch in opf_status:
+            if ch['status'] in ['not_translated', 'file_missing', 'failed', 'qa_failed']:
+                missing.append({
+                    'position': ch['position'],
+                    'filename': ch['filename'],
+                    'chapter_num': ch['chapter_num'],
+                    'status': ch['status']
+                })
+        
+        return missing
 
 # =====================================================
 # UNIFIED CONTENT PROCESSOR
