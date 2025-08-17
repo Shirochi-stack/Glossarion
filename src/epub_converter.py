@@ -2136,19 +2136,29 @@ class EPUBCompiler:
                     chapter_order = opf_order[original_name]
                     ordered_files.append((chapter_order, output_file))
                     self.log(f"  Mapped: {output_file} -> {original_name} (order: {chapter_order})")
+                # Replace the broken fuzzy matching section with:
                 else:
-                    # Try fuzzy matching
+                    # Try more precise matching based on chapter numbers
                     found = False
-                    for opf_name, order in opf_order.items():
-                        opf_base = os.path.splitext(opf_name)[0]  # e.g., "76261-h-0"
+                    
+                    # Extract chapter number from our filename
+                    our_chapter_match = re.search(r'chapter_(\d+)', original_name, re.IGNORECASE)
+                    
+                    if our_chapter_match:
+                        our_chapter_num = our_chapter_match.group(1)
                         
-                        # Check if the OPF base name appears in our filename
-                        # This matches "76261-h-0" in "5266498218463370876_76261-h-0.html"
-                        if opf_base in original_name:
-                            ordered_files.append((order, output_file))
-                            self.log(f"  Mapped (fuzzy): {output_file} -> {opf_name} (order: {order})")
-                            found = True
-                            break
+                        # Look for exact chapter number match in OPF files
+                        for opf_name, order in opf_order.items():
+                            opf_chapter_match = re.search(r'chapter_(\d+)', opf_name, re.IGNORECASE)
+                            if opf_chapter_match:
+                                opf_chapter_num = opf_chapter_match.group(1)
+                                
+                                # Exact chapter number match
+                                if our_chapter_num == opf_chapter_num:
+                                    ordered_files.append((order, output_file))
+                                    self.log(f"  Mapped (exact chapter): {output_file} -> {opf_name} (order: {order})")
+                                    found = True
+                                    break
                     
                     if not found:
                         unmapped_files.append(output_file)
