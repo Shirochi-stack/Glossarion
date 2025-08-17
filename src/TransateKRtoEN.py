@@ -6986,6 +6986,23 @@ def main(log_callback=None, stop_callback=None):
     # INITIALIZE CONFIGURATION AND SETUP (keeping existing code)
     config = TranslationConfig()
     builtins._DISABLE_ZERO_DETECTION = config.DISABLE_ZERO_DETECTION
+
+    # Debug output to confirm the setting
+    print(f"[DEBUG] CONTEXTUAL setting: {config.CONTEXTUAL} (type: {type(config.CONTEXTUAL)})")
+    
+    if not config.CONTEXTUAL:
+        print("=" * 60)
+        print("📚 CONTEXTUAL TRANSLATION IS DISABLED")
+        print("   • No translation history will be maintained")
+        print("   • No context will be passed between chunks")
+        print("   • No history file will be created")
+        print("=" * 60)
+    else:
+        print("=" * 60)
+        print("📚 CONTEXTUAL TRANSLATION IS ENABLED")
+        print(f"   • History limit: {config.HIST_LIMIT} exchanges")
+        print(f"   • Rolling window: {config.TRANSLATION_HISTORY_ROLLING}")
+        print("=" * 60)
     
     if config.DISABLE_ZERO_DETECTION:
         print("=" * 60)
@@ -7063,20 +7080,49 @@ def main(log_callback=None, stop_callback=None):
     os.environ["EPUB_OUTPUT_DIR"] = out
     payloads_dir = out
     
-    history_manager = HistoryManager(payloads_dir)
+    # =====================================================
+    # FIX: CONDITIONAL MANAGER INITIALIZATION
+    # =====================================================
+
+    # Only create HistoryManager if CONTEXTUAL is True
+    if config.CONTEXTUAL:
+        print("📚 Initializing HistoryManager for contextual translation...")
+        history_manager = HistoryManager(payloads_dir)
+        
+        # Only delete history file if contextual is enabled
+        history_file = os.path.join(payloads_dir, "translation_history.json")
+        if os.path.exists(history_file):
+            os.remove(history_file)
+            print(f"[DEBUG] Purged translation history → {history_file}")
+    else:
+        print("📚 Skipping HistoryManager initialization (contextual disabled)")
+        history_manager = None
+        
+        # Clean up any existing history file from previous runs
+        history_file = os.path.join(payloads_dir, "translation_history.json")
+        if os.path.exists(history_file):
+            os.remove(history_file)
+            print(f"[DEBUG] Removed old history file (contextual disabled) → {history_file}")
+
+    # Initialize other managers
     chapter_splitter = ChapterSplitter(model_name=config.MODEL)
-    chunk_context_manager = ChunkContextManager()
+
+    # Only create ChunkContextManager if contextual is enabled
+    if config.CONTEXTUAL:
+        chunk_context_manager = ChunkContextManager()
+        print("📚 Initialized ChunkContextManager for contextual translation")
+    else:
+        chunk_context_manager = None
+        print("📚 Skipping ChunkContextManager (contextual disabled)")
+
     progress_manager = ProgressManager(payloads_dir)
     chapter_extractor = ChapterExtractor()
+
     # Only set progress manager if the method exists
     if hasattr(chapter_extractor, 'set_progress_manager'):
         chapter_extractor.set_progress_manager(progress_manager)
+        
     glossary_manager = GlossaryManager()
-
-    history_file = os.path.join(payloads_dir, "translation_history.json")
-    if os.path.exists(history_file):
-        os.remove(history_file)
-        print(f"[DEBUG] Purged translation history → {history_file}")
 
     print("🔍 Checking for deleted output files...")
     progress_manager.cleanup_missing_files(out)
@@ -7392,9 +7438,9 @@ def main(log_callback=None, stop_callback=None):
                                     print(f"   ✅ Extracted missing chapter: {missing_file} (Ch.{chapter_num})")
                                     
                                     # Also save the original file for reference
-                                    chapter_filename = f"chapter_{chapter_num:04d}.html"
-                                    with open(os.path.join(out, chapter_filename), 'w', encoding='utf-8') as f:
-                                        f.write(content)
+                                    #chapter_filename = f"chapter_{chapter_num:04d}.html"
+                                    #with open(os.path.join(out, chapter_filename), 'w', encoding='utf-8') as f:
+                                    #    f.write(content)
                                     
                                 except Exception as e:
                                     print(f"   ❌ Failed to extract {missing_file}: {e}")
@@ -8004,8 +8050,8 @@ def main(log_callback=None, stop_callback=None):
             config.TEMP,
             log_callback,
             progress_manager,
-            history_manager,
-            chunk_context_manager
+            history_manager,  # Will be None if contextual is disabled
+            chunk_context_manager  # Will be None if contextual is disabled
         )
         
         known_vision_models = [
@@ -8502,7 +8548,8 @@ def main(log_callback=None, stop_callback=None):
 
             print(f"\n🔄 Processing #{idx+1}/{total_chapters} (Actual: {terminology} {actual_num}) ({chapter_position} to translate): {c['title']} [File: {file_ref}]")
 
-            chunk_context_manager.start_chapter(actual_num, c['title'])
+            if config.CONTEXTUAL and chunk_context_manager:
+                chunk_context_manager.start_chapter(actual_num, c['title'])
             
             has_images = c.get('has_images', False)
             has_meaningful_text = ContentProcessor.is_meaningful_text_content(c["body"])
@@ -8926,14 +8973,16 @@ def main(log_callback=None, stop_callback=None):
                 else:
                     user_prompt = chunk_html
                 
-                history = history_manager.load_history()
-                
-                if config.CONTEXTUAL:
+                if config.CONTEXTUAL and history_manager:
+                    history = history_manager.load_history()
                     trimmed = history[-config.HIST_LIMIT*2:]
                     
-                    chunk_context = chunk_context_manager.get_context_messages(limit=2)
-                    
+                    if chunk_context_manager:
+                        chunk_context = chunk_context_manager.get_context_messages(limit=2)
+                    else:
+                        chunk_context = []
                 else:
+                    history = []
                     trimmed = []
                     chunk_context = []
 
@@ -8991,18 +9040,23 @@ def main(log_callback=None, stop_callback=None):
 
                 translated_chunks.append((result, chunk_idx, total_chunks))
                 
-                chunk_context_manager.add_chunk(user_prompt, result, chunk_idx, total_chunks)
+                if config.CONTEXTUAL and chunk_context_manager:
+                    chunk_context_manager.add_chunk(user_prompt, result, chunk_idx, total_chunks)
 
                 progress_manager.prog["chapter_chunks"][chapter_key_str]["completed"].append(chunk_idx)
                 progress_manager.prog["chapter_chunks"][chapter_key_str]["chunks"][str(chunk_idx)] = result
                 progress_manager.save()
 
                 chunks_completed += 1
-                    
-                will_reset = history_manager.will_reset_on_next_append(
-                    config.HIST_LIMIT if config.CONTEXTUAL else 0, 
-                    config.TRANSLATION_HISTORY_ROLLING
-                )
+
+                # Only check for reset if contextual is enabled
+                if config.CONTEXTUAL and history_manager:
+                    will_reset = history_manager.will_reset_on_next_append(
+                        config.HIST_LIMIT, 
+                        config.TRANSLATION_HISTORY_ROLLING
+                    )
+                else:
+                    will_reset = False
 
                 if will_reset and config.USE_ROLLING_SUMMARY and config.CONTEXTUAL:
                     if check_stop():
@@ -9031,14 +9085,15 @@ def main(log_callback=None, stop_callback=None):
                             base_msg.insert(1, summary_msg)
                         else:
                             base_msg.insert(0, summary_msg)
-
-                history = history_manager.append_to_history(
-                    user_prompt, 
-                    result, 
-                    config.HIST_LIMIT if config.CONTEXTUAL else 0,
-                    reset_on_limit=True,
-                    rolling_window=config.TRANSLATION_HISTORY_ROLLING
-                )
+                
+                if config.CONTEXTUAL and history_manager:
+                    history = history_manager.append_to_history(
+                        user_prompt, 
+                        result, 
+                        config.HIST_LIMIT,
+                        reset_on_limit=True,
+                        rolling_window=config.TRANSLATION_HISTORY_ROLLING
+                    )
 
                 if chunk_idx < total_chunks:
                     # Handle float delays while checking for stop
@@ -9083,7 +9138,8 @@ def main(log_callback=None, stop_callback=None):
                     )
                     print(f"  📝 Added chapter summary to history")
 
-            chunk_context_manager.clear()
+            if config.CONTEXTUAL and chunk_context_manager:
+                chunk_context_manager.clear()
 
             # For text file chunks, ensure we pass the decimal number
             if is_text_file and c.get('is_chunk', False) and isinstance(c.get('num'), float):
