@@ -3600,40 +3600,32 @@ Recent translations to summarize:
             if not messagebox.askyesno("Confirm Retranslation", confirm_msg):
                 return
             
-            # Process chapters
+            # Process chapters - JUST DELETE THE FILES
             deleted_count = 0
             marked_count = 0
-            
+
             for ch_info in selected_chapters:
                 output_file = ch_info['output_file']
                 
                 if ch_info['status'] != 'not_translated':
-                    # Delete existing file
+                    # Delete existing file ONLY
                     if output_file:
                         output_path = os.path.join(data['output_dir'], output_file)
                         try:
                             if os.path.exists(output_path):
                                 os.remove(output_path)
                                 deleted_count += 1
+                                print(f"Deleted: {output_path}")
                         except Exception as e:
                             print(f"Failed to delete {output_path}: {e}")
-                    
-                    # Remove from progress if it exists
-                    if 'progress_entry' in ch_info and ch_info['progress_entry']:
-                        # Find and remove ONLY this specific progress entry
-                        for chapter_key in list(data['prog']["chapters"].keys()):
-                            if data['prog']["chapters"][chapter_key] == ch_info['progress_entry']:
-                                # Only delete this specific chapter entry
-                                del data['prog']["chapters"][chapter_key]
-                                # DON'T delete content_hashes or chapter_chunks - those might be shared!
-                                break
                 else:
                     # Just marking for translation (no file to delete)
                     marked_count += 1
+
+            # DON'T SAVE PROGRESS - we didn't change it!
+            # The translation process will detect missing files automatically
             
-            # Save updated progress
-            with open(data['progress_file'], 'w', encoding='utf-8') as f:
-                json.dump(data['prog'], f, ensure_ascii=False, indent=2)
+
             
             if deleted_count > 0 and marked_count > 0:
                 messagebox.showinfo("Success", 
