@@ -6783,7 +6783,7 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
 
 
 # =====================================================
-# MAIN TRANSLATION FUNCTION - COMPLETE UPDATE WITH CONTENT.OPF PRIORITIZATION
+# MAIN TRANSLATION FUNCTION - FIXED VERSION
 # =====================================================
 def main(log_callback=None, stop_callback=None):
     """Main translation function with content.opf prioritization and response_ file handling"""
@@ -6873,6 +6873,21 @@ def main(log_callback=None, stop_callback=None):
                             try:
                                 os.remove(check_path)
                                 print(f"      ✅ Deleted QA failed file successfully")
+                                
+                                # CRITICAL FIX: Also remove from progress tracking to ensure retranslation
+                                content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
+                                if content_hash in progress_manager.prog["chapters"]:
+                                    del progress_manager.prog["chapters"][content_hash]
+                                    print(f"      ✅ Removed from progress tracking")
+                                if content_hash in progress_manager.prog.get("content_hashes", {}):
+                                    del progress_manager.prog["content_hashes"][content_hash]
+                                    
+                                # Also clear any chunk data
+                                if content_hash in progress_manager.prog.get("chapter_chunks", {}):
+                                    del progress_manager.prog["chapter_chunks"][content_hash]
+                                
+                                progress_manager.save()
+                                
                             except Exception as del_error:
                                 print(f"      ❌ Error deleting file: {del_error}")
                             return False, response_fname  # File deleted, needs retranslation
@@ -6910,6 +6925,17 @@ def main(log_callback=None, stop_callback=None):
                                         try:
                                             os.remove(check_path)
                                             print(f"      ✅ Deleted QA failed file successfully")
+                                            
+                                            # CRITICAL FIX: Also remove from progress tracking
+                                            content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
+                                            if content_hash in progress_manager.prog["chapters"]:
+                                                del progress_manager.prog["chapters"][content_hash]
+                                            if content_hash in progress_manager.prog.get("content_hashes", {}):
+                                                del progress_manager.prog["content_hashes"][content_hash]
+                                            if content_hash in progress_manager.prog.get("chapter_chunks", {}):
+                                                del progress_manager.prog["chapter_chunks"][content_hash]
+                                            progress_manager.save()
+                                            
                                         except Exception as del_error:
                                             print(f"      ❌ Error deleting file: {del_error}")
                                         return False, file  # File deleted, needs retranslation
@@ -6957,6 +6983,7 @@ def main(log_callback=None, stop_callback=None):
                 c['raw_chapter_num'] = c.get('num', idx)
                 c['zero_adjusted'] = False
     
+    # INITIALIZE CONFIGURATION AND SETUP (keeping existing code)
     config = TranslationConfig()
     builtins._DISABLE_ZERO_DETECTION = config.DISABLE_ZERO_DETECTION
     
@@ -7260,7 +7287,128 @@ def main(log_callback=None, stop_callback=None):
         print("🚀 Using comprehensive chapter extraction with resource handling...")
         with zipfile.ZipFile(input_path, 'r') as zf:
             metadata = chapter_extractor._extract_epub_metadata(zf)
+            
+            # CRITICAL FIX: Extract ALL chapters including those that might be missed
             chapters = chapter_extractor.extract_chapters(zf, out)
+            
+            # FIX FOR MISSING CHAPTERS: Check if we extracted all files from manifest
+            print("🔍 Verifying all manifest files were extracted...")
+            try:
+                # Re-open the EPUB to check manifest
+                opf_path = None
+                opf_content = None
+                
+                # Find content.opf
+                for name in zf.namelist():
+                    if name.endswith('content.opf'):
+                        opf_path = name
+                        opf_content = zf.read(name)
+                        break
+                
+                if opf_content:
+                    import xml.etree.ElementTree as ET
+                    root = ET.fromstring(opf_content)
+                    
+                    # Handle namespaces
+                    ns = {'opf': 'http://www.idpf.org/2007/opf'}
+                    if root.tag.startswith('{'):
+                        default_ns = root.tag[1:root.tag.index('}')]
+                        ns = {'opf': default_ns}
+                    
+                    # Get all HTML files from manifest
+                    manifest_files = set()
+                    for item in root.findall('.//opf:manifest/opf:item', ns):
+                        href = item.get('href')
+                        media_type = item.get('media-type', '')
+                        
+                        if href and ('html' in media_type.lower() or href.endswith(('.html', '.xhtml', '.htm'))):
+                            filename = os.path.basename(href)
+                            # Skip nav/toc/cover files
+                            if not any(skip in filename.lower() for skip in ['nav.', 'toc.', 'cover.']):
+                                manifest_files.add(filename)
+                    
+                    # Check which files we extracted
+                    extracted_files = set()
+                    for chapter in chapters:
+                        if chapter.get('original_basename'):
+                            extracted_files.add(chapter['original_basename'])
+                    
+                    # Find missing files
+                    missing_files = manifest_files - extracted_files
+                    
+                    if missing_files:
+                        print(f"⚠️ Found {len(missing_files)} files in manifest but not extracted:")
+                        for missing_file in sorted(missing_files)[:10]:
+                            print(f"   • {missing_file}")
+                        
+                        # Try to extract missing files
+                        print("🔧 Attempting to extract missing files...")
+                        opf_dir = os.path.dirname(opf_path) if opf_path else ''
+                        
+                        for missing_file in missing_files:
+                            # Find the full path in the EPUB
+                            full_path = None
+                            for name in zf.namelist():
+                                if os.path.basename(name) == missing_file:
+                                    full_path = name
+                                    break
+                            
+                            if full_path:
+                                try:
+                                    # Extract the file
+                                    content = zf.read(full_path).decode('utf-8')
+                                    
+                                    # Parse to get title
+                                    from bs4 import BeautifulSoup
+                                    soup = BeautifulSoup(content, 'html.parser')
+                                    title = "Unknown"
+                                    for tag in ['h1', 'h2', 'h3', 'title']:
+                                        element = soup.find(tag)
+                                        if element:
+                                            title = element.get_text(strip=True)
+                                            if title:
+                                                break
+                                    
+                                    # Extract chapter number from filename
+                                    import re
+                                    match = re.search(r'(\d+)', missing_file)
+                                    chapter_num = int(match.group(1)) if match else len(chapters)
+                                    
+                                    # Add to chapters list
+                                    new_chapter = {
+                                        'num': chapter_num,
+                                        'actual_chapter_num': chapter_num,
+                                        'title': title,
+                                        'body': content,
+                                        'original_basename': missing_file,
+                                        'filename': missing_file,
+                                        'content_hash': ContentProcessor.get_content_hash(content),
+                                        'has_images': '<img' in content.lower(),
+                                        'file_size': len(content),
+                                        'detection_method': 'fallback_extraction'
+                                    }
+                                    
+                                    chapters.append(new_chapter)
+                                    print(f"   ✅ Extracted missing chapter: {missing_file} (Ch.{chapter_num})")
+                                    
+                                    # Also save the original file for reference
+                                    chapter_filename = f"chapter_{chapter_num:04d}.html"
+                                    with open(os.path.join(out, chapter_filename), 'w', encoding='utf-8') as f:
+                                        f.write(content)
+                                    
+                                except Exception as e:
+                                    print(f"   ❌ Failed to extract {missing_file}: {e}")
+                            else:
+                                print(f"   ❌ Could not find {missing_file} in EPUB")
+                        
+                        # Resort chapters by number
+                        chapters.sort(key=lambda x: x.get('actual_chapter_num', x.get('num', 999)))
+                        print(f"📊 Total chapters after fallback extraction: {len(chapters)}")
+                    else:
+                        print("✅ All manifest files were successfully extracted")
+                        
+            except Exception as e:
+                print(f"⚠️ Could not verify manifest extraction: {e}")
             
             # Fix chapter numbering based on original filenames
             set_chapter_numbers_from_filenames(chapters)
