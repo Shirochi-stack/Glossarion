@@ -690,312 +690,86 @@ class FileUtilities:
                     return f"response_{actual_num:04d}.html"
 
 # =====================================================
-# UNIFIED PROGRESS MANAGER WITH OPF SUPPORT
+# UNIFIED PROGRESS MANAGER
 # =====================================================
 class ProgressManager:
-    """Clean progress management - ONLY translation_progress.json, NO BACKUPS"""
+    """Unified progress management"""
     
-    def __init__(self, payloads_dir, epub_path=None):
-        """Initialize ProgressManager"""
+    def __init__(self, payloads_dir):
         self.payloads_dir = payloads_dir
-        self.epub_path = epub_path or os.getenv('EPUB_PATH')
         self.PROGRESS_FILE = os.path.join(payloads_dir, "translation_progress.json")
+        self.prog = self._init_or_load()
         
-        # Parse OPF if EPUB is available
-        self.spine_chapters = []
-        self.opf_chapter_order = {}
-        if self.epub_path and os.path.exists(self.epub_path):
-            self._parse_opf()
-        
-        # Rebuild progress from actual files
-        output_dir = os.path.join(payloads_dir, "Translated") if os.path.exists(os.path.join(payloads_dir, "Translated")) else payloads_dir
-        self.prog = self._rebuild_from_files(output_dir)
-    
-    def normalize_to_html(self, filename):
-        """ALWAYS ensure .html extension for any HTML-like file"""
-        if not filename:
-            return filename
-            
-        # Remove response_ prefix if we're normalizing a response file
-        if filename.startswith('response_'):
-            base = filename[9:]
-        else:
-            base = filename
-        
-        # Check if it has ANY HTML-like extension
-        if base.endswith(('.html', '.xhtml', '.htm')):
-            # Get the base without extension
-            name_without_ext = os.path.splitext(base)[0]
-            # ALWAYS return with .html
-            return f"{name_without_ext}.html"
-        else:
-            # If no HTML extension, check if we should add one
-            # Don't add .html to files that already have other extensions like .css, .jpg, etc
-            if '.' in base:
-                return base  # Has some other extension, leave it
-            else:
-                # No extension at all, add .html
-                return f"{base}.html"
-    
-    def get_response_filename(self, original_basename):
-        """Get the response filename with PROPER .html extension"""
-        if not original_basename:
-            return None
-        
-        # Normalize the original basename first
-        normalized = self.normalize_to_html(original_basename)
-        
-        # Add response_ prefix
-        return f"response_{normalized}"
-    
-    def extract_chapter_number(self, filename):
-        """Extract chapter number from filename, return negative offset if no number found"""
-        matches = re.findall(r'(\d+)', filename)
-        if matches:
-            # Use the last number found (usually the most significant)
-            return int(matches[-1])
-        else:
-            # No number found - use negative offset so these appear first
-            # Use hash of filename for consistent ordering
-            return -1000 + (hash(filename) % 1000)
-    
-    def _rebuild_from_files(self, output_dir):
-        """Rebuild progress from actual files with proper extension handling"""
-        print("🔧 Rebuilding progress tracking from actual files...")
-        
-        # Try to load existing progress for preservation of chunk data
-        existing_prog = {}
+    def _init_or_load(self):
+        """Initialize or load progress tracking with improved structure"""
         if os.path.exists(self.PROGRESS_FILE):
             try:
                 with open(self.PROGRESS_FILE, "r", encoding="utf-8") as pf:
-                    existing_prog = json.load(pf)
-                print(f"📁 Loaded existing progress file for migration")
-            except Exception as e:
-                print(f"⚠️ Could not load existing progress: {e}")
-                existing_prog = {}
-        
-        # Start fresh structure
-        new_prog = {
-            "chapters": {},
-            "content_hashes": {},
-            "chapter_chunks": {},
-            "opf_spine": self.spine_chapters,
-            "opf_chapter_order": self.opf_chapter_order,
-            "version": "6.0_clean"
-        }
-        
-        # Find all response files
-        response_files = {}
-        if os.path.exists(output_dir):
-            for fname in os.listdir(output_dir):
-                if fname.startswith('response_') and fname.endswith(('.html', '.xhtml', '.htm')):
-                    # Extract the original basename (remove response_ prefix)
-                    original_part = fname[9:]
+                    prog = json.load(pf)
+            except json.JSONDecodeError as e:
+                print(f"⚠️ Warning: Progress file is corrupted: {e}")
+                print("🔧 Attempting to fix JSON syntax...")
+                
+                try:
+                    with open(self.PROGRESS_FILE, "r", encoding="utf-8") as pf:
+                        content = pf.read()
                     
-                    # Normalize to .html
-                    normalized_basename = self.normalize_to_html(original_part)
+                    content = re.sub(r',\s*\]', ']', content)
+                    content = re.sub(r',\s*\}', '}', content)
                     
-                    # Check if file is valid (not QA failed)
-                    file_path = os.path.join(output_dir, fname)
+                    prog = json.loads(content)
+                    
+                    with open(self.PROGRESS_FILE, "w", encoding="utf-8") as pf:
+                        json.dump(prog, pf, ensure_ascii=False, indent=2)
+                    print("✅ Successfully fixed and saved progress file")
+                    
+                except Exception as fix_error:
+                    print(f"❌ Could not fix progress file: {fix_error}")
+                    print("🔄 Creating backup and starting fresh...")
+                    
+                    backup_name = f"translation_progress_backup_{int(time.time())}.json"
+                    backup_path = os.path.join(self.payloads_dir, backup_name)
                     try:
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            content = f.read(2000)
-                        
-                        # Check for QA failure
-                        qa_indicators = [
-                            "content policy violation",
-                            "unable to translate",
-                            "cannot process",
-                            "inappropriate content",
-                            "I cannot",
-                            "I can't",
-                            "I'm not able to",
-                            "I am not able to"
-                        ]
-                        
-                        if any(indicator in content.lower() for indicator in qa_indicators):
-                            print(f"   🗑️ Found QA failed file, deleting: {fname}")
-                            os.remove(file_path)
-                            continue
-                        
-                        # Extract chapter number (with negative offset for files without numbers)
-                        chapter_num = self.extract_chapter_number(normalized_basename)
-                        
-                        # Store with normalized basename as key
-                        response_files[normalized_basename] = {
-                            'actual_filename': fname,  # The actual file on disk
-                            'normalized_filename': f"response_{normalized_basename}",  # What it should be
-                            'chapter_num': chapter_num,
-                            'path': file_path
-                        }
-                        
-                    except Exception as e:
-                        print(f"   ⚠️ Error checking {fname}: {e}")
-        
-        print(f"📊 Found {len(response_files)} valid translated files")
-        
-        # Create progress entries for each valid file
-        for normalized_basename, file_info in response_files.items():
-            # Use the normalized basename as the key
-            key = normalized_basename
+                        shutil.copy(self.PROGRESS_FILE, backup_path)
+                        print(f"📁 Backup saved to: {backup_name}")
+                    except:
+                        pass
+                    
+                    prog = {
+                        "chapters": {},
+                        "content_hashes": {},
+                        "chapter_chunks": {},
+                        "version": "2.0"
+                    }
             
-            new_prog["chapters"][key] = {
-                "actual_num": file_info['chapter_num'],
-                "chapter_num": file_info['chapter_num'],
-                "output_file": file_info['normalized_filename'],  # Store the normalized name
-                "actual_file": file_info['actual_filename'],  # Keep track of actual file
-                "original_basename": normalized_basename,
-                "status": "completed",
-                "last_updated": time.time()
+            if "chapters" not in prog:
+                prog["chapters"] = {}
+                
+                for idx in prog.get("completed", []):
+                    prog["chapters"][str(idx)] = {
+                        "status": "completed",
+                        "timestamp": None
+                    }
+            
+            if "content_hashes" not in prog:
+                prog["content_hashes"] = {}
+            if "chapter_chunks" not in prog:
+                prog["chapter_chunks"] = {}
+                
+        else:
+            prog = {
+                "chapters": {},
+                "content_hashes": {},
+                "chapter_chunks": {},
+                "image_chunks": {},
+                "version": "2.1"
             }
         
-        # Try to preserve chunk data from old progress
-        if existing_prog.get("chapter_chunks"):
-            print(f"📦 Attempting to preserve chunk data...")
-            preserved = 0
-            
-            for key in new_prog["chapters"]:
-                # Try to find matching chunk data in old progress
-                # Check various possible keys
-                possible_keys = [
-                    key,  # Direct match
-                    key.replace('.html', '.xhtml'),  # Try .xhtml version
-                    key.replace('.html', '.htm'),  # Try .htm version
-                    os.path.splitext(key)[0],  # Without extension
-                ]
-                
-                for test_key in possible_keys:
-                    if test_key in existing_prog.get("chapter_chunks", {}):
-                        new_prog["chapter_chunks"][key] = existing_prog["chapter_chunks"][test_key]
-                        preserved += 1
-                        break
-                    # Also check with hash keys (16 char hex strings)
-                    for old_key in existing_prog.get("chapter_chunks", {}):
-                        if len(old_key) == 16 and all(c in '0123456789abcdef' for c in old_key):
-                            # This is likely a hash key, check if it might match
-                            if key in str(existing_prog["chapter_chunks"][old_key]):
-                                new_prog["chapter_chunks"][key] = existing_prog["chapter_chunks"][old_key]
-                                preserved += 1
-                                break
-            
-            if preserved > 0:
-                print(f"✅ Preserved chunk data for {preserved} chapters")
-        
-        # Save the rebuilt progress - NO BACKUP
-        print(f"💾 Saving rebuilt progress: {len(new_prog['chapters'])} chapters tracked")
-        
-        with open(self.PROGRESS_FILE, "w", encoding="utf-8") as pf:
-            json.dump(new_prog, pf, ensure_ascii=False, indent=2)
-        
-        return new_prog
-    
-    def _parse_opf(self):
-        """Parse content.opf from EPUB to get chapter order"""
-        try:
-            import xml.etree.ElementTree as ET
-            import zipfile
-            
-            if not self.epub_path.lower().endswith('.epub'):
-                return
-            
-            with zipfile.ZipFile(self.epub_path, 'r') as zf:
-                # Find content.opf file
-                opf_path = None
-                opf_content = None
-                
-                # First try to find via container.xml
-                try:
-                    container_content = zf.read('META-INF/container.xml')
-                    container_root = ET.fromstring(container_content)
-                    rootfile = container_root.find('.//{urn:oasis:names:tc:opendocument:xmlns:container}rootfile')
-                    if rootfile is not None:
-                        opf_path = rootfile.get('full-path')
-                except:
-                    pass
-                
-                # Fallback: search for content.opf
-                if not opf_path:
-                    for name in zf.namelist():
-                        if name.endswith('content.opf'):
-                            opf_path = name
-                            break
-                
-                if opf_path:
-                    opf_content = zf.read(opf_path)
-                    
-                    # Parse OPF
-                    root = ET.fromstring(opf_content)
-                    
-                    # Handle namespaces
-                    ns = {'opf': 'http://www.idpf.org/2007/opf'}
-                    if root.tag.startswith('{'):
-                        default_ns = root.tag[1:root.tag.index('}')]
-                        ns = {'opf': default_ns}
-                    
-                    # Get manifest - all chapter files
-                    manifest_chapters = {}
-                    
-                    for item in root.findall('.//opf:manifest/opf:item', ns):
-                        item_id = item.get('id')
-                        href = item.get('href')
-                        media_type = item.get('media-type', '')
-                        
-                        if item_id and href and ('html' in media_type.lower() or href.endswith(('.html', '.xhtml', '.htm'))):
-                            filename = os.path.basename(href)
-                            
-                            # Skip navigation, toc, and cover files
-                            if not any(skip in filename.lower() for skip in ['nav.', 'toc.', 'cover.']):
-                                # NORMALIZE the filename to .html
-                                normalized_filename = self.normalize_to_html(filename)
-                                
-                                manifest_chapters[item_id] = {
-                                    'filename': normalized_filename,  # Store normalized
-                                    'original_filename': filename,  # Keep original too
-                                    'path': os.path.join(os.path.dirname(opf_path) if opf_path else '', href).replace('\\', '/'),
-                                    'media_type': media_type
-                                }
-                    
-                    # Get spine order - the reading order
-                    spine = root.find('.//opf:spine', ns)
-                    
-                    if spine is not None:
-                        for itemref in spine.findall('opf:itemref', ns):
-                            idref = itemref.get('idref')
-                            if idref and idref in manifest_chapters:
-                                chapter_info = manifest_chapters[idref]
-                                normalized_filename = chapter_info['filename']
-                                
-                                # Extract chapter number (with negative offset for no numbers)
-                                file_chapter_num = self.extract_chapter_number(normalized_filename)
-                                
-                                self.spine_chapters.append({
-                                    'id': idref,
-                                    'filename': normalized_filename,  # Use normalized
-                                    'original_filename': chapter_info['original_filename'],
-                                    'path': chapter_info['path'],
-                                    'position': len(self.spine_chapters),
-                                    'file_chapter_num': file_chapter_num
-                                })
-                                
-                                # Store the order for later use (with normalized name)
-                                self.opf_chapter_order[normalized_filename] = len(self.spine_chapters) - 1
-                                
-                                # Also store without extension for matching
-                                filename_noext = os.path.splitext(normalized_filename)[0]
-                                self.opf_chapter_order[filename_noext] = len(self.spine_chapters) - 1
-                    
-                    print(f"📋 Parsed OPF: {len(self.spine_chapters)} chapters in reading order")
-                    
-        except Exception as e:
-            print(f"⚠️ Warning: Could not parse OPF: {e}")
+        return prog
     
     def save(self):
-        """Save progress to file - NO BACKUPS"""
+        """Save progress to file"""
         try:
-            # Clean up before saving
-            self._clean_duplicates()
-            
-            # Add completed_list for compatibility
             self.prog["completed_list"] = []
             for chapter_key, chapter_info in self.prog.get("chapters", {}).items():
                 if chapter_info.get("status") == "completed" and chapter_info.get("output_file"):
@@ -1004,26 +778,21 @@ class ProgressManager:
                         "idx": chapter_info.get("chapter_idx", 0),
                         "title": f"Chapter {chapter_info.get('chapter_num', 0)}",
                         "file": chapter_info.get("output_file", ""),
-                        "key": chapter_key,
-                        "original_basename": chapter_info.get("original_basename", "")
+                        "key": chapter_key
                     })
             
             if self.prog.get("completed_list"):
-                # Sort by chapter number, handling negative numbers for files without numbers
                 self.prog["completed_list"].sort(key=lambda x: x["num"])
             
-            # Save with atomic write - NO BACKUP
             temp_file = self.PROGRESS_FILE + '.tmp'
             with open(temp_file, "w", encoding="utf-8") as pf:
                 json.dump(self.prog, pf, ensure_ascii=False, indent=2)
             
-            # Atomic replace
             if os.path.exists(self.PROGRESS_FILE):
                 os.remove(self.PROGRESS_FILE)
             os.rename(temp_file, self.PROGRESS_FILE)
         except Exception as e:
             print(f"⚠️ Warning: Failed to save progress: {e}")
-            # Clean up temp file if it exists
             temp_file = self.PROGRESS_FILE + '.tmp'
             if os.path.exists(temp_file):
                 try:
@@ -1031,300 +800,322 @@ class ProgressManager:
                 except:
                     pass
     
-    def _clean_duplicates(self):
-        """Remove any duplicate entries before saving"""
-        seen_nums = {}
-        to_remove = []
+    def update(self, idx, actual_num, content_hash, output_file, status="in_progress", ai_features=None, raw_num=None):
+        """Update progress for a chapter"""
+        chapter_key = str(idx)
         
-        for key, info in list(self.prog.get("chapters", {}).items()):
-            chapter_num = info.get("chapter_num") or info.get("actual_num")
-            if chapter_num is not None:
-                if chapter_num in seen_nums:
-                    # Keep the one with better status
-                    existing_key = seen_nums[chapter_num]
-                    existing_info = self.prog["chapters"][existing_key]
-                    
-                    # Prefer completed over other statuses
-                    if info.get("status") == "completed" and existing_info.get("status") != "completed":
-                        to_remove.append(existing_key)
-                        seen_nums[chapter_num] = key
-                    else:
-                        to_remove.append(key)
-                else:
-                    seen_nums[chapter_num] = key
-        
-        # Remove duplicates
-        for key in to_remove:
-            if key in self.prog["chapters"]:
-                del self.prog["chapters"][key]
-    
-    def get_key_for_chapter(self, chapter):
-        """Get the key for this chapter - ALWAYS with .html extension"""
-        original_basename = chapter.get('original_basename', '')
-        
-        if original_basename:
-            # Normalize to .html
-            return self.normalize_to_html(original_basename)
-        else:
-            # Fallback to chapter number with .html extension
-            actual_num = chapter.get('actual_chapter_num', chapter.get('num', 0))
-            # Handle negative numbers for files without numbers
-            if actual_num < 0:
-                return f"chapter_special_{abs(actual_num):04d}.html"
-            else:
-                return f"chapter_{actual_num:04d}.html"
-    
-    def update(self, idx, actual_num, content_hash, output_file, status="in_progress", 
-               ai_features=None, raw_num=None, original_basename=None):
-        """Update progress for a chapter - ALWAYS with .html extension"""
-        
-        # Get the key with proper extension
-        if original_basename:
-            key = self.normalize_to_html(original_basename)
-        else:
-            # Handle negative numbers for files without numbers
-            if actual_num < 0:
-                key = f"chapter_special_{abs(actual_num):04d}.html"
-            else:
-                key = f"chapter_{actual_num:04d}.html"
-        
-        # ENSURE output_file has .html extension
-        if output_file:
-            # If it's a response file, handle it specially
-            if output_file.startswith('response_'):
-                base_part = output_file[9:]
-                normalized_base = self.normalize_to_html(base_part)
-                output_file = f"response_{normalized_base}"
-            else:
-                output_file = self.normalize_to_html(output_file)
-        
-        # Update the chapter info
-        self.prog["chapters"][key] = {
+        chapter_info = {
             "actual_num": actual_num,
-            "chapter_num": actual_num,
+            "content_hash": content_hash,
             "output_file": output_file,
-            "original_basename": key,
             "status": status,
-            "last_updated": time.time(),
-            "chapter_idx": idx
+            "last_updated": time.time()
         }
         
-        # Store AI features if provided
-        if ai_features is not None:
-            self.prog["chapters"][key]["ai_features"] = ai_features
-        
-        # Store raw number if provided
+        # Add raw number tracking
         if raw_num is not None:
-            self.prog["chapters"][key]["raw_chapter_num"] = raw_num
-    
-    def check_chapter_status(self, chapter_idx, actual_num, content_hash, output_dir, original_basename=None):
-        """Check if a chapter needs translation - ALWAYS check .html files"""
+            chapter_info["raw_chapter_num"] = raw_num
         
-        # Get the key with proper extension
-        if original_basename:
-            key = self.normalize_to_html(original_basename)
+        # Check if zero detection was disabled
+        if hasattr(builtins, '_DISABLE_ZERO_DETECTION') and builtins._DISABLE_ZERO_DETECTION:
+            chapter_info["zero_adjusted"] = False
         else:
-            # Handle negative numbers for files without numbers
-            if actual_num < 0:
-                key = f"chapter_special_{abs(actual_num):04d}.html"
+            chapter_info["zero_adjusted"] = (raw_num != actual_num) if raw_num is not None else False
+        
+        # FIXED: Store AI features if provided
+        if ai_features is not None:
+            chapter_info["ai_features"] = ai_features
+        
+        # Preserve existing AI features if not overwriting
+        elif chapter_key in self.prog["chapters"] and "ai_features" in self.prog["chapters"][chapter_key]:
+            chapter_info["ai_features"] = self.prog["chapters"][chapter_key]["ai_features"]
+        
+        self.prog["chapters"][chapter_key] = chapter_info
+        
+        # Update content hash index
+        if content_hash and status == "completed":
+            self.prog["content_hashes"][content_hash] = {
+                "chapter_idx": idx,
+                "actual_num": actual_num,
+                "output_file": output_file
+            }
+        
+    def check_chapter_status(self, chapter_idx, actual_num, content_hash, output_dir):
+        """Check if a chapter needs translation with fallback"""
+        
+        # FIRST: Check if this chapter number exists and what its status is
+        for key, info in self.prog["chapters"].items():
+            if info.get("actual_num") == actual_num:
+                status = info.get("status")
+                
+                # If ANY entry for this chapter number has a failure status, it needs retranslation
+                if status in ["qa_failed", "file_deleted", "file_missing", "failed", "error"]:
+                    return True, f"Chapter {actual_num} needs retranslation ({status})", None
+                
+                # Only return "completed" if the file actually exists
+                if status == "completed":
+                    output_file = info.get("output_file")
+                    if output_file:
+                        output_path = os.path.join(output_dir, output_file)
+                        if os.path.exists(output_path):
+                            # Chapter is already completed with a file that exists
+                            return False, f"Chapter {actual_num} already translated: {output_file}", output_file
+                        else:
+                            # File missing - needs retranslation
+                            return True, f"Chapter {actual_num} file missing", None
+            
+        # THEN: Do the normal content hash check
+        chapter_key = content_hash
+        
+        if chapter_key in self.prog["chapters"]:
+            chapter_info = self.prog["chapters"][chapter_key]
+        else:
+            old_key = str(chapter_idx)
+            if old_key in self.prog["chapters"]:
+                #print(f"[PROGRESS] Using legacy index-based tracking for chapter {actual_num}")
+                chapter_info = self.prog["chapters"][old_key]
+                self.prog["chapters"][chapter_key] = chapter_info
+                chapter_info["content_hash"] = content_hash
+                if old_key in self.prog.get("chapter_chunks", {}):
+                    self.prog["chapter_chunks"][chapter_key] = self.prog["chapter_chunks"][old_key]
+                    del self.prog["chapter_chunks"][old_key]
+                del self.prog["chapters"][old_key]
+                self.save()
             else:
-                key = f"chapter_{actual_num:04d}.html"
-        
-        # Check if we have this chapter
-        chapter_info = self.prog["chapters"].get(key, {})
-        
-        if not chapter_info:
-            # No record - needs translation
-            return True, f"Chapter {actual_num} not in progress tracking", None
+                return True, None, None
         
         status = chapter_info.get("status")
         output_file = chapter_info.get("output_file")
         
-        # ENSURE output_file has proper extension
-        if output_file:
-            if output_file.startswith('response_'):
-                base_part = output_file[9:]
-                normalized_base = self.normalize_to_html(base_part)
-                output_file = f"response_{normalized_base}"
-            else:
-                output_file = self.normalize_to_html(output_file)
+        # Handle file_deleted status - always needs retranslation
+        if status == "file_deleted":
+            return True, None, None
+
+        if status == "qa_failed":
+            return True, f"Chapter {actual_num} needs retranslation (QA failed: API response failure)", None
         
-        # Check if the file actually exists
+        # Check various conditions for skipping
         if status == "completed" and output_file:
-            # Try both the normalized name and any actual file stored
-            files_to_check = [output_file]
-            if 'actual_file' in chapter_info:
-                files_to_check.append(chapter_info['actual_file'])
-            
-            file_found = False
-            file_path = None
-            
-            for fname in files_to_check:
-                test_path = os.path.join(output_dir, fname)
-                if os.path.exists(test_path):
-                    file_found = True
-                    file_path = test_path
-                    output_file = fname
-                    break
-            
-            if file_found:
-                # Check if it's a QA failed response
-                try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        content = f.read(2000)
-                    
-                    qa_indicators = [
-                        "content policy violation",
-                        "unable to translate",
-                        "cannot process",
-                        "inappropriate content",
-                        "I cannot",
-                        "I can't",
-                        "I'm not able to",
-                        "I am not able to"
-                    ]
-                    
-                    if any(indicator in content.lower() for indicator in qa_indicators):
-                        # Delete QA failed file
-                        print(f"   🗑️ Found QA failed content, deleting: {output_file}")
-                        os.remove(file_path)
-                        
-                        # Remove from tracking
-                        del self.prog["chapters"][key]
-                        # Also remove from chunk data
-                        if key in self.prog.get("chapter_chunks", {}):
-                            del self.prog["chapter_chunks"][key]
-                        self.save()
-                        
-                        return True, f"Chapter {actual_num} had QA failure (deleted)", None
-                    
-                    # File exists and is valid
-                    return False, f"Chapter {actual_num} already translated", output_file
-                    
-                except Exception as e:
-                    print(f"   ❌ Error checking file: {e}")
-                    return True, f"Chapter {actual_num} file error", None
+            output_path = os.path.join(output_dir, output_file)
+            if os.path.exists(output_path):
+                return False, f"Chapter {actual_num} already translated: {output_file}", output_file
             else:
-                # File missing
-                return True, f"Chapter {actual_num} file missing", None
+                # File is missing but not yet marked - this shouldn't happen if cleanup_missing_files ran
+                print(f"⚠️ Chapter {actual_num} marked as completed but file missing: {output_file}")
+                # Mark it now
+                chapter_info["status"] = "file_deleted"
+                chapter_info["deletion_detected"] = time.time()
+                chapter_info["previous_status"] = "completed"
+                self.save()
+                return True, None, None
         
-        # Handle other statuses
         if status == "completed_empty":
-            return False, f"Chapter {actual_num} is empty", output_file
+            return False, f"Chapter {actual_num} is empty (no content to translate)", output_file
         
         if status == "completed_image_only":
             return False, f"Chapter {actual_num} contains only images", output_file
         
-        # Default - needs translation
-        return True, f"Chapter {actual_num} status: {status}", None
+        # Check for duplicate content
+        if content_hash and content_hash in self.prog.get("content_hashes", {}):
+            duplicate_info = self.prog["content_hashes"][content_hash]
+            duplicate_idx = duplicate_info.get("chapter_idx")
+            
+            if duplicate_idx != chapter_idx:
+                duplicate_output = duplicate_info.get("output_file")
+                if duplicate_output:
+                    duplicate_path = os.path.join(output_dir, duplicate_output)
+                    if os.path.exists(duplicate_path):
+                        # Only copy duplicate content if the current file also exists
+                        # If the file was deleted, respect the user's action and retranslate
+                        if output_file and os.path.exists(os.path.join(output_dir, output_file)):
+                            print(f"📋 Copying duplicate content from chapter {duplicate_info.get('actual_num')}")
+                            
+                            safe_title = f"Chapter_{actual_num}"
+                            if 'num' in chapter_info:
+                                if isinstance(chapter_info['num'], float):
+                                    fname = f"response_{chapter_info['num']:06.1f}_{safe_title}.html"
+                                else:
+                                    fname = f"response_{chapter_info['num']:03d}_{safe_title}.html"
+                            else:
+                                fname = f"response_{actual_num:03d}_{safe_title}.html"
+                            
+                            output_path = os.path.join(output_dir, fname)
+                            shutil.copy2(duplicate_path, output_path)
+                            
+                            self.update(chapter_idx, actual_num, content_hash, fname, status="completed")
+                            self.save()
+                            
+                            return False, f"Chapter {actual_num} has same content as chapter {duplicate_info.get('actual_num')} (already translated)", None
+                        else:
+                            # File was deleted - respect user's action and retranslate
+                            print(f"📝 Chapter {actual_num} was deleted - will retranslate")
+                            return True, None, None
+                    else:
+                        return True, None, None
+        
+        # FIXED: Add the missing return statement for when none of the above conditions are met
+        # This means the chapter needs translation
+        return True, None, None
     
     def cleanup_missing_files(self, output_dir):
-        """Remove entries for files that don't exist"""
-        removed = 0
-        for key, info in list(self.prog["chapters"].items()):
-            output_file = info.get("output_file")
+        """Scan progress tracking and clean up any references to missing files AND duplicate entries"""
+        cleaned_count = 0
+        marked_count = 0
+        
+        # First, find all actual_num values and their entries
+        chapter_nums = {}
+        for chapter_key, chapter_info in self.prog["chapters"].items():
+            actual_num = chapter_info.get("actual_num")
+            if actual_num is not None:
+                if actual_num not in chapter_nums:
+                    chapter_nums[actual_num] = []
+                chapter_nums[actual_num].append((chapter_key, chapter_info))
+        
+        # Check for duplicates and clean them up
+        for actual_num, entries in chapter_nums.items():
+            if len(entries) > 1:
+                # Multiple entries for same chapter number - keep the best one
+                print(f"⚠️ Found {len(entries)} entries for chapter {actual_num}")
+                
+                # Sort by priority: completed > in_progress > failed > qa_failed > file_deleted
+                status_priority = {
+                    'completed': 5,
+                    'completed_empty': 4,
+                    'completed_image_only': 4,
+                    'in_progress': 3,
+                    'failed': 2,
+                    'qa_failed': 1,
+                    'file_deleted': 0
+                }
+                
+                entries_sorted = sorted(entries, 
+                                      key=lambda x: (status_priority.get(x[1].get('status', ''), 0),
+                                                   x[1].get('last_updated', 0)),
+                                      reverse=True)
+                
+                # Keep the best entry (first in sorted list)
+                keep_key, keep_info = entries_sorted[0]
+                
+                # Remove the others
+                for remove_key, remove_info in entries_sorted[1:]:
+                    print(f"  🗑️ Removing duplicate entry for chapter {actual_num}: status={remove_info.get('status')} (keeping {keep_info.get('status')})")
+                    
+                    # Remove the duplicate entry
+                    if remove_key in self.prog["chapters"]:
+                        del self.prog["chapters"][remove_key]
+                        cleaned_count += 1
+                    
+                    # Remove from content_hashes if it's there
+                    if remove_key in self.prog.get("content_hashes", {}):
+                        del self.prog["content_hashes"][remove_key]
+                    
+                    # Remove chunk data
+                    if remove_key in self.prog.get("chapter_chunks", {}):
+                        del self.prog["chapter_chunks"][remove_key]
+        
+        # Now do the original missing file check
+        for chapter_key, chapter_info in list(self.prog["chapters"].items()):
+            output_file = chapter_info.get("output_file")
+            
             if output_file:
-                # Check both normalized and actual file
-                files_to_check = [output_file]
-                if 'actual_file' in info:
-                    files_to_check.append(info['actual_file'])
-                
-                file_exists = False
-                for fname in files_to_check:
-                    if os.path.exists(os.path.join(output_dir, fname)):
-                        file_exists = True
-                        break
-                
-                if not file_exists:
-                    del self.prog["chapters"][key]
-                    if key in self.prog.get("chapter_chunks", {}):
-                        del self.prog["chapter_chunks"][key]
-                    removed += 1
+                output_path = os.path.join(output_dir, output_file)
+                if not os.path.exists(output_path):
+                    # Get the status to determine what to do
+                    current_status = chapter_info.get("status")
+                    
+                    # If already marked as file_deleted, check if it's been long enough to clean up
+                    if current_status == "file_deleted":
+                        deletion_time = chapter_info.get("deletion_detected", 0)
+                        # If marked as deleted more than 24 hours ago, remove from tracking
+                        if time.time() - deletion_time > 0:  # 0 seconds
+                            print(f"🗑️ Removing failed entry for chapter {chapter_info.get('actual_num', chapter_key)}: {output_file}")
+                            
+                            # Remove the chapter entry
+                            del self.prog["chapters"][chapter_key]
+                            
+                            # Remove from content_hashes
+                            content_hash = chapter_info.get("content_hash")
+                            if content_hash and content_hash in self.prog["content_hashes"]:
+                                del self.prog["content_hashes"][content_hash]
+                            
+                            # Remove chunk data
+                            if chapter_key in self.prog.get("chapter_chunks", {}):
+                                del self.prog["chapter_chunks"][chapter_key]
+                            
+                            cleaned_count += 1
+                        # Otherwise, leave it marked as file_deleted
+                    else:
+                        # First time detecting missing file - mark it
+                        print(f"🧹 Found missing file for chapter {chapter_info.get('actual_num', chapter_key)}: {output_file}")
+                        
+                        chapter_info["status"] = "file_deleted"
+                        chapter_info["deletion_detected"] = time.time()
+                        chapter_info["previous_status"] = current_status  # Save what it was before
+                        
+                        marked_count += 1
         
-        if removed > 0:
-            self.save()
-            print(f"🧹 Removed {removed} entries for missing files")
-        
-        return removed, 0
+        if cleaned_count > 0:
+            print(f"🔄 Removed {cleaned_count} stale entries from progress tracking")
+        if marked_count > 0:
+            print(f"📝 Marked {marked_count} chapters with missing files for re-translation")
+    
+    def migrate_to_content_hash(self, chapters):
+        """Migrate old index-based progress to content-hash-based"""
+        if not self.prog.get("version") or self.prog["version"] < "3.0":
+            #print("🔄 Migrating progress tracking to content-hash-based system...")
+            
+            old_chapters = self.prog.get("chapters", {})
+            new_chapters = {}
+            old_chunks = self.prog.get("chapter_chunks", {})
+            new_chunks = {}
+            
+            idx_to_hash = {}
+            for idx, chapter in enumerate(chapters):
+                content_hash = chapter.get("content_hash") or get_content_hash(chapter["body"])
+                idx_to_hash[str(idx)] = content_hash
+            
+            for old_key, chapter_info in old_chapters.items():
+                if old_key in idx_to_hash:
+                    new_key = idx_to_hash[old_key]
+                    new_chapters[new_key] = chapter_info
+                    chapter_info["chapter_idx"] = int(old_key)
+            
+            for old_key, chunk_info in old_chunks.items():
+                if old_key in idx_to_hash:
+                    new_key = idx_to_hash[old_key]
+                    new_chunks[new_key] = chunk_info
+            
+            self.prog["chapters"] = new_chapters
+            self.prog["chapter_chunks"] = new_chunks
+            self.prog["version"] = "3.0"
+            
+            #print(f"✅ Migrated {len(new_chapters)} chapters to new system")
     
     def get_stats(self, output_dir):
         """Get statistics about translation progress"""
         stats = {
             "total_tracked": len(self.prog["chapters"]),
-            "completed": sum(1 for info in self.prog["chapters"].values() 
-                           if info.get("status") == "completed"),
+            "completed": 0,
             "missing_files": 0,
-            "in_progress": sum(1 for info in self.prog["chapters"].values() 
-                             if info.get("status") == "in_progress"),
-            "qa_failed": 0,
-            "not_translated": 0
+            "in_progress": 0
         }
         
-        # Count actual files
-        if os.path.exists(output_dir):
-            response_files = [f for f in os.listdir(output_dir) 
-                            if f.startswith('response_') and f.endswith(('.html', '.xhtml', '.htm'))]
-            stats["actual_files"] = len(response_files)
+        for chapter_info in self.prog["chapters"].values():
+            status = chapter_info.get("status")
+            output_file = chapter_info.get("output_file")
+            
+            if status == "completed" and output_file:
+                output_path = os.path.join(output_dir, output_file)
+                if os.path.exists(output_path):
+                    stats["completed"] += 1
+                else:
+                    stats["missing_files"] += 1
+            elif status == "in_progress":
+                stats["in_progress"] += 1
+            elif status == "file_missing":
+                stats["missing_files"] += 1
         
         return stats
-    
-    def get_opf_status(self, output_dir):
-        """Get translation status for all OPF chapters"""
-        if not self.spine_chapters:
-            return []
-        
-        opf_status = []
-        for spine_ch in self.spine_chapters:
-            filename = spine_ch['filename']  # Already normalized in _parse_opf
-            chapter_num = spine_ch['file_chapter_num']
-            
-            # Check if we have this chapter
-            chapter_info = self.prog["chapters"].get(filename, {})
-            
-            status = "not_translated"
-            if chapter_info:
-                status = chapter_info.get("status", "unknown")
-                # Verify file exists for completed status
-                if status == "completed":
-                    output_file = chapter_info.get("output_file")
-                    if output_file and not os.path.exists(os.path.join(output_dir, output_file)):
-                        status = "file_missing"
-            
-            # Expected response filename with .html
-            expected_response = self.get_response_filename(filename)
-            
-            opf_status.append({
-                'position': spine_ch['position'],
-                'filename': filename,
-                'chapter_num': chapter_num,
-                'status': status,
-                'expected_response': expected_response
-            })
-        
-        return opf_status
-    
-    def migrate_to_content_hash(self, chapters):
-        """Compatibility method - no migration needed"""
-        pass
-    
-    def get_missing_from_opf(self, output_dir):
-        """Get list of chapters that are in OPF but not translated"""
-        if not self.spine_chapters:
-            return []
-        
-        missing = []
-        opf_status = self.get_opf_status(output_dir)
-        
-        for ch in opf_status:
-            if ch['status'] in ['not_translated', 'file_missing', 'failed', 'qa_failed']:
-                missing.append({
-                    'position': ch['position'],
-                    'filename': ch['filename'],
-                    'chapter_num': ch['chapter_num'],
-                    'status': ch['status']
-                })
-        
-        return missing
 
 # =====================================================
 # UNIFIED CONTENT PROCESSOR
@@ -1535,10 +1326,10 @@ class ContentProcessor:
             return '\n'.join(new_paragraphs)
         
         return text
-        
+    
     @staticmethod
-    def get_content_hash(html_content, unique_id=None):
-        """Create a stable hash of content with optional unique identifier to prevent collisions"""
+    def get_content_hash(html_content):
+        """Create a stable hash of content"""
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
             
@@ -1548,17 +1339,11 @@ class ContentProcessor:
             text_content = soup.get_text(separator=' ', strip=True)
             text_content = ' '.join(text_content.split())
             
-            # Add unique identifier to make hash unique even for identical content
-            if unique_id:
-                text_content = f"{unique_id}_{text_content}"
-            
             return hashlib.md5(text_content.encode('utf-8')).hexdigest()
             
         except Exception as e:
             print(f"[WARNING] Failed to create hash: {e}")
-            # Include unique_id in fallback too
-            fallback_content = f"{unique_id}_{html_content}" if unique_id else html_content
-            return hashlib.md5(fallback_content.encode('utf-8')).hexdigest()
+            return hashlib.md5(html_content.encode('utf-8')).hexdigest()
     
     @staticmethod
     def is_meaningful_text_content(html_content):
@@ -3978,17 +3763,14 @@ class BatchTranslationProcessor:
             print(f"    📖 Extracted actual chapter number: {actual_num} (from raw: {raw_num})")
         
         try:
+            # Rest of the processing logic...
             # Check if this is from a text file
             ai_features = None
             is_text_source = self.is_text_file or chapter.get('filename', '').endswith('.txt') or chapter.get('is_chunk', False)
             terminology = "Section" if is_text_source else "Chapter"
             print(f"🔄 Starting #{idx+1} (Internal: {terminology} {chap_num}, Actual: {terminology} {actual_num})  (thread: {threading.current_thread().name}) [File: {chapter.get('original_basename', f'{terminology}_{chap_num}')}]")
                       
-            # Create unique identifier from original filename or index
-            original_basename = chapter.get('original_basename', '')
-            unique_id = original_basename if original_basename else f"idx_{chapter.get('__debug_idx', idx)}"
-            content_hash = get_consistent_content_hash(chapter)
-            
+            content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
             with self.progress_lock:
                 self.update_progress_fn(idx, actual_num, content_hash, None, status="in_progress")
                 self.save_progress_fn()
@@ -5892,8 +5674,7 @@ def detect_novel_numbering(chapters):
     content_numbers = []
     has_prefix_suffix = False
     prefix_suffix_numbers = []
-    progress_manager.cleanup_missing_files(output_dir)
-
+    
     for idx, chapter in enumerate(chapters):
         extracted_num = None
         
@@ -6785,193 +6566,24 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
         html_parts.append(f'<p>{line}</p>')
     
     return '\n'.join(html_parts)
-
-def get_consistent_content_hash(chapter):
-    """Generate consistent content hash for a chapter - NO unique_id bullshit"""
-    # If chapter already has a hash, use it
-    if chapter.get("content_hash"):
-        return chapter["content_hash"]
-    
-    # Generate hash from body content only - NO parameters that change
-    # This ensures the same content ALWAYS gets the same hash
-    from hashlib import sha256
-    content = chapter.get("body", "")
-    return sha256(content.encode('utf-8')).hexdigest()[:16]
-    
 # =====================================================
-# MAIN TRANSLATION FUNCTION - FIXED VERSION
+# MAIN TRANSLATION FUNCTION
 # =====================================================
 def main(log_callback=None, stop_callback=None):
-    """Main translation function with content.opf prioritization and response_ file handling"""
-
-    # Define helper functions at the beginning
-    def is_qa_failed_response(content):
-        """Check if response indicates QA failure"""
-        if not content:
-            return False
-        qa_indicators = [
-            "content policy violation",
-            "unable to translate",
-            "cannot process",
-            "inappropriate content",
-            "I cannot",
-            "I can't",
-            "I'm not able to",
-            "I am not able to"
-        ]
-        content_lower = content[:2000].lower() if len(content) > 2000 else content.lower()
-        return any(indicator in content_lower for indicator in qa_indicators)
+    """Main translation function with enhanced duplicate detection and progress tracking"""
     
-    def get_failure_reason(content):
-        """Get failure reason from content"""
-        if "content policy" in content.lower():
-            return "Content policy violation"
-        elif "unable to translate" in content.lower():
-            return "Unable to translate"
-        elif "cannot process" in content.lower():
-            return "Cannot process content"
-        else:
-            return "Translation failed"
-    
-
-    def check_response_file_exists(chapter, out, progress_manager=None):
-        """Consolidated function to check if a valid response file exists for a chapter"""
-        original_basename = chapter.get('original_basename', '')
-        actual_num = chapter.get('actual_chapter_num', chapter.get('num', 0))
-        
-        # Debug: Show what we're looking for
-        debug_idx = chapter.get('__debug_idx', -1)
-        if debug_idx < 5 or actual_num < 5:  # Debug first few chapters
-            print(f"   [DEBUG] Checking Ch.{actual_num}: original_basename='{original_basename}'")
-        
-        # Build expected response filename - PROPERLY HANDLE ALL HTML EXTENSIONS
-        if original_basename:
-            # Check if it ends with any HTML-like extension
-            if original_basename.endswith(('.html', '.xhtml', '.htm')):
-                # Strip the extension and add .html
-                base_name = os.path.splitext(original_basename)[0]
-                response_fname = f"response_{base_name}.html"  # FORCE .html HERE
-            else:
-                # No HTML extension, add .html
-                response_fname = f"response_{original_basename}.html"  # ADD .html HERE
-        else:
-            # Use the actual chapter number from the chapter data
-            fname = FileUtilities.create_chapter_filename(chapter, actual_num)
-            # Ensure .html extension
-            if not fname.endswith('.html'):
-                fname = f"{fname}.html"
-            response_fname = fname.replace('chapter_', 'response_', 1) if fname.startswith('chapter_') else f"response_{fname}"
-        
-        response_path = os.path.join(out, response_fname)
-        
-        # Debug output
-        if debug_idx < 5 or actual_num < 5:
-            print(f"   [DEBUG] Looking for: {response_fname}")
-        
-        # Check if file exists
-        if os.path.exists(response_path):
-            if debug_idx < 5 or actual_num < 5:
-                print(f"   [DEBUG] Found file: {os.path.basename(response_path)}")
-            try:
-                with open(response_path, 'r', encoding='utf-8') as f:
-                    content = f.read(2000)  # Read first 2000 chars for speed
-                    if not is_qa_failed_response(content):
-                        # RETURN response_fname WHICH HAS .html
-                        return True, response_fname  # <-- THIS NOW HAS .html
-                    else:
-                        # QA FAILED - DELETE THE FILE TO FORCE RETRANSLATION
-                        print(f"   🗑️ Chapter {actual_num} has QA failure - DELETING file to force retranslation: {os.path.basename(response_path)}")
-                        try:
-                            os.remove(response_path)
-                            print(f"      ✅ Deleted QA failed file successfully")
-                            
-                            # CRITICAL FIX: Also remove from progress tracking to ensure retranslation
-                            if progress_manager:  # Only if progress_manager was passed
-                                # Create unique identifier from original filename or index
-                                content_hash = get_consistent_content_hash(chapter)
-                                if content_hash in progress_manager.prog["chapters"]:
-                                    del progress_manager.prog["chapters"][content_hash]
-                                    print(f"      ✅ Removed from progress tracking")
-                                if content_hash in progress_manager.prog.get("content_hashes", {}):
-                                    del progress_manager.prog["content_hashes"][content_hash]
-                                    
-                                # Also clear any chunk data
-                                if content_hash in progress_manager.prog.get("chapter_chunks", {}):
-                                    del progress_manager.prog["chapter_chunks"][content_hash]
-                                
-                                progress_manager.save()
-                            
-                        except Exception as del_error:
-                            print(f"      ❌ Error deleting file: {del_error}")
-                        return False, response_fname  # File deleted, needs retranslation
-            except Exception as e:
-                print(f"   ❌ Error checking {os.path.basename(response_path)}: {e}")     
-        
-        if debug_idx < 5 or actual_num < 5:
-            print(f"   [DEBUG] File not found for Ch.{actual_num}")
-        
-        return False, response_fname  # File doesn't exist - response_fname HAS .html
-    
-    def set_chapter_numbers_from_filenames(chapters):
-        """Set actual chapter numbers based on filenames - single source of truth"""
-        print("📊 Setting chapter numbers from filenames...")
-        for idx, c in enumerate(chapters):
-            original_basename = c.get('original_basename', '')
-            if original_basename:
-                # Extract ALL numbers from filename and use the last one
-                # This handles cases like "chapternotice_0000.html" -> 0
-                import re
-                matches = re.findall(r'(\d+)', original_basename)
-                if matches:
-                    # Use the last number found (usually the most significant)
-                    file_num = int(matches[-1])
-                    c['file_number'] = file_num
-                    # Set all chapter number fields consistently
-                    c['actual_chapter_num'] = file_num
-                    c['num'] = file_num
-                    c['raw_chapter_num'] = file_num
-                    c['zero_adjusted'] = False
-                    if idx < 15:
-                        print(f"   [{idx:3d}] Ch.{file_num:3d}: {original_basename}")
-                else:
-                    # Fallback if no number in filename
-                    c['actual_chapter_num'] = c.get('num', idx)
-                    c['raw_chapter_num'] = c.get('num', idx)
-                    c['zero_adjusted'] = False
-                    if idx < 15:
-                        print(f"   [{idx:3d}] Ch.{c['actual_chapter_num']:3d}: {original_basename} (no number found)")
-            else:
-                # Fallback for chapters without original_basename
-                c['actual_chapter_num'] = c.get('num', idx)
-                c['raw_chapter_num'] = c.get('num', idx)
-                c['zero_adjusted'] = False
-    
-    # INITIALIZE CONFIGURATION AND SETUP (keeping existing code)
     config = TranslationConfig()
     builtins._DISABLE_ZERO_DETECTION = config.DISABLE_ZERO_DETECTION
-
-    # Debug output to confirm the setting
-    print(f"[DEBUG] CONTEXTUAL setting: {config.CONTEXTUAL} (type: {type(config.CONTEXTUAL)})")
-    
-    if not config.CONTEXTUAL:
-        print("=" * 60)
-        print("📚 CONTEXTUAL TRANSLATION IS DISABLED")
-        print("   • No translation history will be maintained")
-        print("   • No context will be passed between chunks")
-        print("   • No history file will be created")
-        print("=" * 60)
-    else:
-        print("=" * 60)
-        print("📚 CONTEXTUAL TRANSLATION IS ENABLED")
-        print(f"   • History limit: {config.HIST_LIMIT} exchanges")
-        print(f"   • Rolling window: {config.TRANSLATION_HISTORY_ROLLING}")
-        print("=" * 60)
     
     if config.DISABLE_ZERO_DETECTION:
         print("=" * 60)
         print("⚠️  0-BASED DETECTION DISABLED BY USER")
         print("⚠️  All chapter numbers will be used exactly as found")
         print("=" * 60)
+    
+    args = None
+    chapters_completed = 0
+    chunks_completed = 0
     
     args = None
     chapters_completed = 0
@@ -7043,49 +6655,17 @@ def main(log_callback=None, stop_callback=None):
     os.environ["EPUB_OUTPUT_DIR"] = out
     payloads_dir = out
     
-    # =====================================================
-    # FIX: CONDITIONAL MANAGER INITIALIZATION
-    # =====================================================
-
-    # Only create HistoryManager if CONTEXTUAL is True
-    if config.CONTEXTUAL:
-        print("📚 Initializing HistoryManager for contextual translation...")
-        history_manager = HistoryManager(payloads_dir)
-        
-        # Only delete history file if contextual is enabled
-        history_file = os.path.join(payloads_dir, "translation_history.json")
-        if os.path.exists(history_file):
-            os.remove(history_file)
-            print(f"[DEBUG] Purged translation history → {history_file}")
-    else:
-        print("📚 Skipping HistoryManager initialization (contextual disabled)")
-        history_manager = None
-        
-        # Clean up any existing history file from previous runs
-        history_file = os.path.join(payloads_dir, "translation_history.json")
-        if os.path.exists(history_file):
-            os.remove(history_file)
-            print(f"[DEBUG] Removed old history file (contextual disabled) → {history_file}")
-
-    # Initialize other managers
+    history_manager = HistoryManager(payloads_dir)
     chapter_splitter = ChapterSplitter(model_name=config.MODEL)
-
-    # Only create ChunkContextManager if contextual is enabled
-    if config.CONTEXTUAL:
-        chunk_context_manager = ChunkContextManager()
-        print("📚 Initialized ChunkContextManager for contextual translation")
-    else:
-        chunk_context_manager = None
-        print("📚 Skipping ChunkContextManager (contextual disabled)")
-
+    chunk_context_manager = ChunkContextManager()
     progress_manager = ProgressManager(payloads_dir)
     chapter_extractor = ChapterExtractor()
-
-    # Only set progress manager if the method exists
-    if hasattr(chapter_extractor, 'set_progress_manager'):
-        chapter_extractor.set_progress_manager(progress_manager)
-        
     glossary_manager = GlossaryManager()
+
+    history_file = os.path.join(payloads_dir, "translation_history.json")
+    if os.path.exists(history_file):
+        os.remove(history_file)
+        print(f"[DEBUG] Purged translation history → {history_file}")
 
     print("🔍 Checking for deleted output files...")
     progress_manager.cleanup_missing_files(out)
@@ -7098,7 +6678,16 @@ def main(log_callback=None, stop_callback=None):
             
             # Include all failure states for reset
             if status in ["failed", "qa_failed", "file_missing", "error", "file_deleted", "in_progress"]:
+                # Delete the chapter entry completely
                 del progress_manager.prog["chapters"][chapter_key]
+                
+                # Also delete by actual_num to ensure it's really gone
+                actual_num = chapter_info.get("actual_num")
+                if actual_num:
+                    # Check all entries for matching actual_num
+                    for other_key, other_info in list(progress_manager.prog["chapters"].items()):
+                        if other_info.get("actual_num") == actual_num:
+                            del progress_manager.prog["chapters"][other_key]
                 
                 content_hash = chapter_info.get("content_hash")
                 if content_hash and content_hash in progress_manager.prog["content_hashes"]:
@@ -7120,6 +6709,7 @@ def main(log_callback=None, stop_callback=None):
         print("❌ Error: Set API_KEY, OPENAI_API_KEY, or OPENAI_OR_Gemini_API_KEY in your environment.")
         return
 
+    #print(f"[DEBUG] Found API key: {config.API_KEY[:10]}...")
     print(f"[DEBUG] Using model = {config.MODEL}")
     print(f"[DEBUG] Max output tokens = {config.MAX_OUTPUT_TOKENS}")
 
@@ -7130,146 +6720,10 @@ def main(log_callback=None, stop_callback=None):
         print(f"   Active keys: {stats.get('active_keys', 0)}")
     else:
         print(f"🔑 Single-key mode: Using {config.MODEL}")    
-    
     # Reset cleanup state when starting new translation
     if hasattr(client, 'reset_cleanup_state'):
         client.reset_cleanup_state()    
-    
-    # =====================================================
-    # CONTENT.OPF PARSING AND CHAPTER PRIORITIZATION
-    # =====================================================
-    
-    spine_chapters = []
-    manifest_chapters = {}
-    missing_from_opf = []
-    opf_chapter_order = {}
-    untranslated_in_opf = []
-    
-    if not is_text_file:
-        print("\n" + "="*50)
-        print("📋 PARSING CONTENT.OPF FOR CHAPTER MANIFEST")
-        print("="*50)
         
-        try:
-            import xml.etree.ElementTree as ET
-            with zipfile.ZipFile(input_path, 'r') as zf:
-                # Find content.opf file
-                opf_path = None
-                opf_content = None
-                
-                # First try to find via container.xml
-                try:
-                    container_content = zf.read('META-INF/container.xml')
-                    container_root = ET.fromstring(container_content)
-                    rootfile = container_root.find('.//{urn:oasis:names:tc:opendocument:xmlns:container}rootfile')
-                    if rootfile is not None:
-                        opf_path = rootfile.get('full-path')
-                        print(f"📋 Found OPF via container.xml: {opf_path}")
-                except:
-                    pass
-                
-                # Fallback: search for content.opf
-                if not opf_path:
-                    for name in zf.namelist():
-                        if name.endswith('content.opf'):
-                            opf_path = name
-                            print(f"📋 Found OPF via search: {opf_path}")
-                            break
-                
-                if opf_path:
-                    opf_content = zf.read(opf_path)
-                    
-                    # Parse OPF
-                    root = ET.fromstring(opf_content)
-                    
-                    # Handle namespaces
-                    ns = {'opf': 'http://www.idpf.org/2007/opf'}
-                    if root.tag.startswith('{'):
-                        default_ns = root.tag[1:root.tag.index('}')]
-                        ns = {'opf': default_ns}
-                    
-                    # Get manifest - all chapter files
-                    opf_dir = os.path.dirname(opf_path) if opf_path else ''
-                    
-                    for item in root.findall('.//opf:manifest/opf:item', ns):
-                        item_id = item.get('id')
-                        href = item.get('href')
-                        media_type = item.get('media-type', '')
-                        
-                        if item_id and href and ('html' in media_type.lower() or href.endswith(('.html', '.xhtml', '.htm'))):
-                            # Get the base filename
-                            filename = os.path.basename(href)
-                            
-                            # Skip navigation, toc, and cover files
-                            if not any(skip in filename.lower() for skip in ['nav.', 'toc.', 'cover.']):
-                                if opf_dir:
-                                    full_path = os.path.join(opf_dir, href).replace('\\', '/')
-                                else:
-                                    full_path = href
-                                    
-                                manifest_chapters[item_id] = {
-                                    'filename': filename,
-                                    'path': full_path,
-                                    'media_type': media_type
-                                }
-                    
-                    print(f"📋 Found {len(manifest_chapters)} chapter files in manifest")
-                    
-                    # Get spine order - the reading order
-                    spine = root.find('.//opf:spine', ns)
-                    
-                    if spine is not None:
-                        for itemref in spine.findall('opf:itemref', ns):
-                            idref = itemref.get('idref')
-                            if idref and idref in manifest_chapters:
-                                chapter_info = manifest_chapters[idref]
-                                filename = chapter_info['filename']
-                                
-                                # Skip navigation, toc, and cover files
-                                if not any(skip in filename.lower() for skip in ['nav.', 'toc.', 'cover.']):
-                                    # Extract chapter number from filename
-                                    import re
-                                    match = re.search(r'(\d+)', filename)
-                                    if match:
-                                        file_chapter_num = int(match.group(1))
-                                    else:
-                                        file_chapter_num = len(spine_chapters)  # Fallback
-                                    
-                                    spine_chapters.append({
-                                        'id': idref,
-                                        'filename': filename,
-                                        'path': chapter_info['path'],
-                                        'position': len(spine_chapters),
-                                        'file_chapter_num': file_chapter_num  # The actual chapter number from filename
-                                    })
-                                    
-                                    # Store the order for later use
-                                    opf_chapter_order[filename] = len(spine_chapters) - 1
-                                    
-                                    # Also store without extension for matching
-                                    filename_noext = os.path.splitext(filename)[0]
-                                    opf_chapter_order[filename_noext] = len(spine_chapters) - 1
-                    
-                    print(f"📋 Spine contains {len(spine_chapters)} chapters in reading order")
-                    
-                    if spine_chapters:
-                        print("📋 OPF Chapter mapping (first 15):")
-                        for ch in spine_chapters[:15]:
-                            print(f"   Ch.{ch['file_chapter_num']:3d}: {ch['filename']} (spine pos: {ch['position']})")
-                        if len(spine_chapters) > 15:
-                            print(f"   ... and {len(spine_chapters) - 15} more")
-                else:
-                    print("⚠️ No content.opf file found in EPUB")
-                    
-        except Exception as e:
-            print(f"⚠️ Error parsing content.opf: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    # =====================================================
-    # CHAPTER EXTRACTION AND PROCESSING
-    # =====================================================
-    
     if is_text_file:
         print("📄 Processing text file...")
         try:
@@ -7296,416 +6750,13 @@ def main(log_callback=None, stop_callback=None):
         print("🚀 Using comprehensive chapter extraction with resource handling...")
         with zipfile.ZipFile(input_path, 'r') as zf:
             metadata = chapter_extractor._extract_epub_metadata(zf)
-            
-            # CRITICAL FIX: Extract ALL chapters including those that might be missed
             chapters = chapter_extractor.extract_chapters(zf, out)
-            
-            # FIX FOR MISSING CHAPTERS: Check if we extracted all files from manifest
-            print("🔍 Verifying all manifest files were extracted...")
-            try:
-                # Re-open the EPUB to check manifest
-                opf_path = None
-                opf_content = None
-                
-                # Find content.opf
-                for name in zf.namelist():
-                    if name.endswith('content.opf'):
-                        opf_path = name
-                        opf_content = zf.read(name)
-                        break
-                
-                if opf_content:
-                    import xml.etree.ElementTree as ET
-                    root = ET.fromstring(opf_content)
-                    
-                    # Handle namespaces
-                    ns = {'opf': 'http://www.idpf.org/2007/opf'}
-                    if root.tag.startswith('{'):
-                        default_ns = root.tag[1:root.tag.index('}')]
-                        ns = {'opf': default_ns}
-                    
-                    # Get all HTML files from manifest
-                    manifest_files = set()
-                    for item in root.findall('.//opf:manifest/opf:item', ns):
-                        href = item.get('href')
-                        media_type = item.get('media-type', '')
-                        
-                        if href and ('html' in media_type.lower() or href.endswith(('.html', '.xhtml', '.htm'))):
-                            filename = os.path.basename(href)
-                            # Skip nav/toc/cover files
-                            if not any(skip in filename.lower() for skip in ['nav.', 'toc.', 'cover.']):
-                                manifest_files.add(filename)
-                    
-                    # Check which files we extracted
-                    extracted_files = set()
-                    for chapter in chapters:
-                        if chapter.get('original_basename'):
-                            extracted_files.add(chapter['original_basename'])
-                    
-                    # Find missing files
-                    missing_files = manifest_files - extracted_files
-                    
-                    if missing_files:
-                        print(f"⚠️ Found {len(missing_files)} files in manifest but not extracted:")
-                        for missing_file in sorted(missing_files)[:10]:
-                            print(f"   • {missing_file}")
-                        
-                        # Try to extract missing files
-                        print("🔧 Attempting to extract missing files...")
-                        opf_dir = os.path.dirname(opf_path) if opf_path else ''
-                        
-                        for missing_file in missing_files:
-                            # Find the full path in the EPUB
-                            full_path = None
-                            for name in zf.namelist():
-                                if os.path.basename(name) == missing_file:
-                                    full_path = name
-                                    break
-                            
-                            if full_path:
-                                try:
-                                    # Extract the file
-                                    content = zf.read(full_path).decode('utf-8')
-                                    
-                                    # Parse to get title
-                                    from bs4 import BeautifulSoup
-                                    soup = BeautifulSoup(content, 'html.parser')
-                                    title = "Unknown"
-                                    for tag in ['h1', 'h2', 'h3', 'title']:
-                                        element = soup.find(tag)
-                                        if element:
-                                            title = element.get_text(strip=True)
-                                            if title:
-                                                break
-                                    
-                                    # Extract chapter number from filename
-                                    import re
-                                    match = re.search(r'(\d+)', missing_file)
-                                    chapter_num = int(match.group(1)) if match else len(chapters)
-                                    
-                                    # Add to chapters list
-                                    new_chapter = {
-                                        'num': chapter_num,
-                                        'actual_chapter_num': chapter_num,
-                                        'title': title,
-                                        'body': content,
-                                        'original_basename': missing_file,
-                                        'filename': missing_file,
-                                        'content_hash': ContentProcessor.get_content_hash(content),
-                                        'has_images': '<img' in content.lower(),
-                                        'file_size': len(content),
-                                        'detection_method': 'fallback_extraction'
-                                    }
-                                    
-                                    chapters.append(new_chapter)
-                                    print(f"   ✅ Extracted missing chapter: {missing_file} (Ch.{chapter_num})")
-                                    
-                                    # Also save the original file for reference
-                                    #chapter_filename = f"chapter_{chapter_num:04d}.html"
-                                    #with open(os.path.join(out, chapter_filename), 'w', encoding='utf-8') as f:
-                                    #    f.write(content)
-                                    
-                                except Exception as e:
-                                    print(f"   ❌ Failed to extract {missing_file}: {e}")
-                            else:
-                                print(f"   ❌ Could not find {missing_file} in EPUB")
-                        
-                        # Resort chapters by number
-                        chapters.sort(key=lambda x: x.get('actual_chapter_num', x.get('num', 999)))
-                        print(f"📊 Total chapters after fallback extraction: {len(chapters)}")
-                    else:
-                        print("✅ All manifest files were successfully extracted")
-                        
-            except Exception as e:
-                print(f"⚠️ Could not verify manifest extraction: {e}")
-            
-            # Fix chapter numbering based on original filenames
-            set_chapter_numbers_from_filenames(chapters)
-            
-            # Debug: Check if original_basename is properly set
-            print(f"📋 Extracted {len(chapters)} chapters from EPUB")
-            print("📋 Chapter mapping (first 15):")
-            for i, ch in enumerate(chapters[:15]):
-                basename = ch.get('original_basename', 'NO BASENAME')
-                title = ch.get('title', 'NO TITLE')[:30]
-                ch_num = ch.get('num', '?')
-                print(f"   [{i:3d}] Ch.{ch_num:3d}: {basename} - {title}...")
-            if len(chapters) > 15:
-                print(f"   ... and {len(chapters) - 15} more")
             
             validate_chapter_continuity(chapters)
         
         print("\n" + "="*50)
         validate_epub_structure(out)
         print("="*50 + "\n")
-    
-    # =====================================================
-    # CHECK TRANSLATION STATUS AND PRIORITIZE MISSING CHAPTERS
-    # =====================================================
-    
-    # Create tracking dictionaries
-    chapters_needing_translation = {}
-    untranslated_in_opf = []
-    missing_from_opf = []
-    
-    if not is_text_file and spine_chapters:
-        print("\n" + "="*50)
-        print("🔍 CHECKING TRANSLATION STATUS AGAINST CONTENT.OPF")
-        print("="*50)
-        
-        # First pass: Check translation status for ALL extracted chapters
-        print("📊 Checking translation status for all extracted chapters...")
-        translated_count = 0
-        needs_translation_count = 0
-        qa_failed_count = 0
-        
-        progress_manager.cleanup_missing_files(out)
-
-        for idx, chapter in enumerate(chapters):
-            # Add debug index for tracking
-            chapter['__debug_idx'] = idx
-            
-            actual_num = chapter.get('actual_chapter_num', chapter.get('num'))
-            # Create unique identifier from original filename or index
-            original_basename = chapter.get('original_basename', '')
-            unique_id = original_basename if original_basename else f"idx_{chapter.get('__debug_idx', idx)}"
-            content_hash = get_consistent_content_hash(chapter)
-
-            
-            # Check with progress manager first
-            needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
-                idx, actual_num, content_hash, out, original_basename
-            )
-            
-            # Double-check with file existence for validation
-            if not needs_translation and existing_file:
-                # Verify the file actually exists and is valid
-                file_path = os.path.join(out, existing_file)
-                if os.path.exists(file_path):
-                    # Check if it's a QA failed response
-                    try:
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            content = f.read(2000)
-                            if is_qa_failed_response(content):
-                                needs_translation = True
-                                qa_failed_count += 1
-                                # Update progress manager
-                                if content_hash in progress_manager.prog["chapters"]:
-                                    progress_manager.prog["chapters"][content_hash]["status"] = "qa_failed"
-                                    progress_manager.prog["chapters"][content_hash]["qa_timestamp"] = time.time()
-                                    progress_manager.save()
-                                print(f"   ⚠️ Ch.{actual_num}: QA failure detected in {existing_file}")
-                    except Exception as e:
-                        print(f"   ⚠️ Error checking file {existing_file}: {e}")
-                else:
-                    # File doesn't exist
-                    needs_translation = True
-                    print(f"   ⚠️ Ch.{actual_num}: File missing: {existing_file}")
-            
-            # Also check with the response file function for additional validation
-            exists, response_fname = check_response_file_exists(chapter, out, progress_manager)
-            
-            # Store the final status
-            chapter['needs_translation'] = needs_translation
-            chapter['response_filename'] = existing_file or response_fname
-            
-            if needs_translation:
-                chapters_needing_translation[actual_num] = chapter
-                needs_translation_count += 1
-                if skip_reason and "qa_failed" in skip_reason.lower():
-                    qa_failed_count += 1
-            else:
-                translated_count += 1
-        
-        # Print initial status
-        print(f"\n📊 Initial Status:")
-        print(f"   • Total chapters extracted: {len(chapters)}")
-        print(f"   • Already translated: {translated_count}")
-        print(f"   • Need translation: {needs_translation_count}")
-        if qa_failed_count > 0:
-            print(f"   • QA failed (will retranslate): {qa_failed_count}")
-        
-        # List files in output directory for debugging
-        output_files = os.listdir(out)
-        response_files = [f for f in output_files if f.startswith('response_') and f.endswith('.html')]
-        print(f"   • Response files in directory: {len(response_files)}")
-        
-        # Second pass: Check OPF spine chapters
-        print(f"\n📋 Checking {len(spine_chapters)} chapters from content.opf spine...")
-        opf_translated = 0
-        opf_untranslated = 0
-        
-        for spine_ch in spine_chapters:
-            filename = spine_ch['filename']
-            
-            # Find matching chapter in extracted chapters
-            matched_chapter = None
-            for chapter in chapters:
-                chapter_basename = chapter.get('original_basename', '')
-                if chapter_basename == filename:
-                    matched_chapter = chapter
-                    spine_ch['chapter_data'] = chapter
-                    break
-            
-            if matched_chapter:
-                # Check if this chapter needs translation
-                if matched_chapter.get('needs_translation', True):
-                    # This OPF chapter needs translation
-                    untranslated_in_opf.append(spine_ch)
-                    ch_num = spine_ch.get('file_chapter_num', '?')
-                    print(f"   📍 Needs translation: {filename} (Chapter {ch_num})")
-                    
-                    # Mark for priority translation
-                    matched_chapter['force_translate'] = True
-                    matched_chapter['opf_priority'] = True
-                    matched_chapter['opf_position'] = spine_ch['position']
-                    opf_untranslated += 1
-                else:
-                    # Already translated
-                    opf_translated += 1
-                    response_file = matched_chapter.get('response_filename', 'unknown')
-                    print(f"   ✅ Already done: {filename} -> {response_file}")
-            else:
-                # Chapter in OPF but not extracted - serious issue
-                print(f"   ❌ ERROR: Not extracted: {filename}")
-                print(f"      This file is in the EPUB manifest but wasn't extracted!")
-                
-                # Check if translation exists anyway
-                expected_response = f"response_{filename}"
-                response_path = os.path.join(out, expected_response)
-                
-                if os.path.exists(response_path):
-                    print(f"      ✅ But translation exists: {expected_response}")
-                    opf_translated += 1
-                elif os.path.exists(response_path.replace('.html', '')):
-                    print(f"      ✅ But translation exists: {expected_response.replace('.html', '')}")
-                    opf_translated += 1
-                else:
-                    print(f"      ⚠️ No translation found - this chapter cannot be processed!")
-                    missing_from_opf.append({
-                        'filename': filename,
-                        'position': spine_ch['position'],
-                        'reason': 'not_extracted'
-                    })
-                    opf_untranslated += 1
-        
-        print(f"\n📊 OPF Status Summary:")
-        print(f"   • Total in spine: {len(spine_chapters)}")
-        print(f"   • Already translated: {opf_translated}")
-        print(f"   • Need translation: {opf_untranslated}")
-        if missing_from_opf:
-            print(f"   • Not extracted (ERROR): {len(missing_from_opf)}")
-        
-        # Reorder chapters if we have untranslated OPF chapters
-        if untranslated_in_opf:
-            print(f"\n⚠️ Found {len(untranslated_in_opf)} untranslated chapters in content.opf")
-            
-            # Show first 10
-            for ch in untranslated_in_opf[:10]:
-                print(f"   • [Pos {ch['position']}] {ch['filename']}")
-            if len(untranslated_in_opf) > 10:
-                print(f"   ... and {len(untranslated_in_opf) - 10} more")
-            
-            # Reorder chapters to prioritize OPF untranslated chapters
-            print("\n📌 PRIORITIZING UNTRANSLATED CHAPTERS FROM CONTENT.OPF")
-            
-            priority_chapters = []
-            regular_chapters = []
-            
-            for chapter in chapters:
-                if chapter.get('opf_priority', False):
-                    priority_chapters.append(chapter)
-                else:
-                    regular_chapters.append(chapter)
-            
-            # Sort priority chapters by their OPF spine position
-            priority_chapters.sort(key=lambda x: x.get('opf_position', 999999))
-            
-            # Reorder chapters list: priority chapters first, then regular
-            chapters = priority_chapters + regular_chapters
-            
-            print(f"✅ Reordered chapters: {len(priority_chapters)} priority, {len(regular_chapters)} regular")
-            if priority_chapters:
-                print("📌 Priority translation order:")
-                for i, ch in enumerate(priority_chapters[:10]):
-                    actual_num = ch.get('actual_chapter_num', ch.get('num', '?'))
-                    print(f"   [{i+1}] Ch.{actual_num}: {ch.get('original_basename', 'unknown')}")
-                if len(priority_chapters) > 10:
-                    print(f"   ... and {len(priority_chapters) - 10} more")
-        else:
-            print("\n✅ All chapters in content.opf have been translated!")
-        
-        if missing_from_opf:
-            print(f"\n❌ WARNING: {len(missing_from_opf)} OPF chapters were not extracted:")
-            for missing in missing_from_opf[:5]:
-                print(f"   • {missing['filename']} (position {missing['position']})")
-            if len(missing_from_opf) > 5:
-                print(f"   ... and {len(missing_from_opf) - 5} more")
-            print("   These chapters cannot be translated without re-extracting the EPUB!")
-            
-    else:
-        # For non-OPF cases (text files or no spine chapters)
-        print("\n" + "="*50)
-        print("🔍 CHECKING TRANSLATION STATUS")
-        print("="*50)
-        
-        translated_count = 0
-        needs_translation_count = 0
-        qa_failed_count = 0
-        progress_manager.cleanup_missing_files(out)
-
-        for idx, chapter in enumerate(chapters):
-            # Add debug index for tracking
-            chapter['__debug_idx'] = idx
-            
-            actual_num = chapter.get('actual_chapter_num', chapter.get('num'))
-            original_basename = chapter.get('original_basename', '')
-            unique_id = original_basename if original_basename else f"idx_{chapter.get('__debug_idx', idx)}"
-            content_hash = get_consistent_content_hash(chapter)
-            
-            # Check with progress manager
-            needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
-                idx, actual_num, content_hash, out, original_basename
-            )
-            
-            # Double-check with file existence
-            exists, response_fname = check_response_file_exists(chapter, out, progress_manager)
-            
-            # If progress says complete but file check says no, trust the file check
-            if not needs_translation and not exists:
-                needs_translation = True
-                print(f"   ⚠️ Ch.{actual_num}: Progress says complete but file missing/invalid")
-            
-            # Store status
-            chapter['needs_translation'] = needs_translation
-            chapter['response_filename'] = existing_file or response_fname
-            
-            if needs_translation:
-                chapters_needing_translation[actual_num] = chapter
-                needs_translation_count += 1
-                if skip_reason and "qa_failed" in skip_reason.lower():
-                    qa_failed_count += 1
-            else:
-                translated_count += 1
-        
-        print(f"📊 Translation Status:")
-        print(f"   • Total chapters: {len(chapters)}")
-        print(f"   • Already translated: {translated_count}")
-        print(f"   • Need translation: {needs_translation_count}")
-        if qa_failed_count > 0:
-            print(f"   • QA failed (will retranslate): {qa_failed_count}")
-    
-    # Final summary
-    print("\n" + "="*50)
-    if chapters_needing_translation:
-        print(f"📝 {len(chapters_needing_translation)} chapters queued for translation")
-    else:
-        print("✅ All chapters are already translated!")
-    print("="*50)
-    
-    # =====================================================
-    # CONTINUE WITH EXISTING TRANSLATION LOGIC
-    # =====================================================
     
     progress_manager.migrate_to_content_hash(chapters)
     progress_manager.save()
@@ -7720,10 +6771,6 @@ def main(log_callback=None, stop_callback=None):
 
     metadata["chapter_count"] = len(chapters)
     metadata["chapter_titles"] = {str(c["num"]): c["title"] for c in chapters}
-    
-    # Store OPF chapter order if available
-    if opf_chapter_order:
-        metadata["opf_chapter_order"] = opf_chapter_order
 
     print(f"[DEBUG] Initializing client with model = {config.MODEL}")
     client = UnifiedClient(api_key=config.API_KEY, model=config.MODEL, output_dir=out)
@@ -7738,7 +6785,6 @@ def main(log_callback=None, stop_callback=None):
     if hasattr(client, 'reset_cleanup_state'):
         client.reset_cleanup_state()
         
-    # Title translation logic
     if "title" in metadata and config.TRANSLATE_BOOK_TITLE and not metadata.get("title_translated", False):
         original_title = metadata["title"]
         print(f"📚 Original title: {original_title}")
@@ -7760,7 +6806,7 @@ def main(log_callback=None, stop_callback=None):
         else:
             print("❌ Title translation skipped due to stop request")
             
-    # Metadata translation logic
+    # Translate other metadata fields if configured
     translate_metadata_fields_str = os.getenv('TRANSLATE_METADATA_FIELDS', '{}')
     metadata_translation_mode = os.getenv('METADATA_TRANSLATION_MODE', 'together')
 
@@ -7768,11 +6814,13 @@ def main(log_callback=None, stop_callback=None):
         translate_metadata_fields = json.loads(translate_metadata_fields_str)
         
         if translate_metadata_fields and any(translate_metadata_fields.values()):
+            # Filter out fields that should be translated (excluding already translated fields)
             fields_to_translate = {}
             skipped_fields = []
             
             for field_name, should_translate in translate_metadata_fields.items():
                 if should_translate and field_name != 'title' and field_name in metadata:
+                    # Check if already translated
                     if metadata.get(f"{field_name}_translated", False):
                         skipped_fields.append(field_name)
                         print(f"✓ Skipping {field_name} - already translated")
@@ -7785,10 +6833,12 @@ def main(log_callback=None, stop_callback=None):
                 print("="*50)
                 print(f"🌐 Translating {len(fields_to_translate)} metadata fields...")
                 
+                # Get ALL configuration from environment - NO DEFAULTS
                 system_prompt = os.getenv('BOOK_TITLE_SYSTEM_PROMPT', '')
                 if not system_prompt:
                     print("❌ No system prompt configured, skipping metadata translation")
                 else:
+                    # Get field-specific prompts
                     field_prompts_str = os.getenv('METADATA_FIELD_PROMPTS', '{}')
                     try:
                         field_prompts = json.loads(field_prompts_str)
@@ -7798,10 +6848,12 @@ def main(log_callback=None, stop_callback=None):
                     if not field_prompts and not field_prompts.get('_default'):
                         print("❌ No field prompts configured, skipping metadata translation")
                     else:
+                        # Get language configuration
                         lang_behavior = os.getenv('LANG_PROMPT_BEHAVIOR', 'auto')
                         forced_source_lang = os.getenv('FORCED_SOURCE_LANG', 'Korean')
                         output_language = os.getenv('OUTPUT_LANGUAGE', 'English')
                         
+                        # Determine source language
                         source_lang = metadata.get('language', '').lower()
                         if lang_behavior == 'never':
                             lang_str = ""
@@ -7817,6 +6869,7 @@ def main(log_callback=None, stop_callback=None):
                             else:
                                 lang_str = ''
                         
+                        # Individual translation mode (simpler for metadata)
                         print("📝 Using individual translation mode...")
                         
                         for field_name in fields_to_translate:
@@ -7825,12 +6878,14 @@ def main(log_callback=None, stop_callback=None):
                                 print(f"\n📋 Translating {field_name}: {original_value[:100]}..." 
                                       if len(str(original_value)) > 100 else f"\n📋 Translating {field_name}: {original_value}")
                                 
+                                # Get field-specific prompt
                                 prompt_template = field_prompts.get(field_name, field_prompts.get('_default', ''))
                                 
                                 if not prompt_template:
                                     print(f"⚠️ No prompt configured for field '{field_name}', skipping")
                                     continue
                                 
+                                # Replace variables in prompt
                                 field_prompt = prompt_template.replace('{source_lang}', lang_str)
                                 field_prompt = field_prompt.replace('{output_lang}', output_language)
                                 field_prompt = field_prompt.replace('English', output_language)
@@ -7842,15 +6897,18 @@ def main(log_callback=None, stop_callback=None):
                                 ]
                                 
                                 try:
-                                    if config.DELAY > 0:
+                                    # Add delay using the config instance from main()
+                                    if config.DELAY > 0:  # ✅ FIXED - use config.DELAY instead of config.SEND_INTERVAL
                                         time.sleep(config.DELAY)
                                     
+                                    # Use the same client instance from main()
+                                    # ✅ FIXED - Properly unpack tuple response and provide max_tokens
                                     content, finish_reason = client.send(
                                         messages, 
                                         temperature=config.TEMP,
-                                        max_tokens=config.MAX_OUTPUT_TOKENS
+                                        max_tokens=config.MAX_OUTPUT_TOKENS  # ✅ FIXED - provide max_tokens to avoid NoneType error
                                     )
-                                    translated_value = content.strip()
+                                    translated_value = content.strip()  # ✅ FIXED - use content from unpacked tuple
                                     
                                     metadata[f"original_{field_name}"] = original_value
                                     metadata[field_name] = translated_value
@@ -7876,8 +6934,7 @@ def main(log_callback=None, stop_callback=None):
     with open(metadata_path, 'w', encoding='utf-8') as mf:
         json.dump(metadata, mf, ensure_ascii=False, indent=2)
     print(f"💾 Saved metadata with {'translated' if metadata.get('title_translated', False) else 'original'} title")
-    
-    # Glossary generation phase
+        
     print("\n" + "="*50)
     print("📑 GLOSSARY GENERATION PHASE")
     print("="*50)
@@ -7901,6 +6958,7 @@ def main(log_callback=None, stop_callback=None):
             glossary_manager.save_glossary(out, chapters, instructions)
             print("✅ Automatic glossary generation COMPLETED")
             
+            # Handle deferred glossary appending
             if os.getenv('DEFER_GLOSSARY_APPEND') == '1':
                 print("📑 Processing deferred glossary append to system prompt...")
                 
@@ -7910,6 +6968,7 @@ def main(log_callback=None, stop_callback=None):
                         with open(glossary_path, 'r', encoding='utf-8') as f:
                             glossary_data = json.load(f)
                         
+                        # Format glossary for prompt
                         formatted_entries = {}
                         
                         if isinstance(glossary_data, dict) and 'entries' in glossary_data:
@@ -7920,23 +6979,28 @@ def main(log_callback=None, stop_callback=None):
                         if formatted_entries:
                             glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
                             
+                            # Get the stored append prompt
                             glossary_prompt = os.getenv('GLOSSARY_APPEND_PROMPT', 
                                 "Character/Term Glossary (use these translations consistently):")
                             
+                            # Update the system prompt in config
                             current_prompt = config.PROMPT
                             if current_prompt:
                                 current_prompt += "\n\n"
                             current_prompt += f"{glossary_prompt}\n{glossary_block}"
                             
+                            # Update the config with the new prompt
                             config.PROMPT = current_prompt
                             
                             print(f"✅ Added {len(formatted_entries)} auto-generated glossary entries to system prompt")
                             
+                            # Clear the deferred flag
                             del os.environ['DEFER_GLOSSARY_APPEND']
                             if 'GLOSSARY_APPEND_PROMPT' in os.environ:
                                 del os.environ['GLOSSARY_APPEND_PROMPT']
                         else:
                             print("⚠️ Auto-generated glossary has no entries - skipping append")
+                            # Still clear the deferred flag even if we don't append
                             if 'DEFER_GLOSSARY_APPEND' in os.environ:
                                 del os.environ['DEFER_GLOSSARY_APPEND']
                             if 'GLOSSARY_APPEND_PROMPT' in os.environ:
@@ -7950,6 +7014,7 @@ def main(log_callback=None, stop_callback=None):
             print(f"❌ Glossary generation failed: {e}")
     else:
         print("📑 Automatic glossary generation disabled")
+        # Don't create an empty glossary - let any existing manual glossary remain
 
     glossary_path = os.path.join(out, "glossary.json")
     if os.path.exists(glossary_path):
@@ -7984,13 +7049,13 @@ def main(log_callback=None, stop_callback=None):
         except Exception as e:
             print(f"⚠️ Glossary file exists but is not valid JSON: {e}")
             print(f"📑 Will use as-is (might be CSV/TXT format)")
+            # REMOVED: Don't overwrite the file!
     else:
         print("📑 No glossary.json file found")
+        # REMOVED: Don't create empty file!
 
     print("="*50)
     print("🚀 STARTING MAIN TRANSLATION PHASE")
-    if untranslated_in_opf and not is_text_file:
-        print(f"📌 PRIORITY MODE: Translating {len(untranslated_in_opf)} missing chapters from content.opf first")
     print("="*50 + "\n")
 
     glossary_path = os.path.join(out, "glossary.json")
@@ -8018,10 +7083,10 @@ def main(log_callback=None, stop_callback=None):
             config.PROFILE_NAME, 
             system, 
             config.TEMP,
-            log_callback,
+            log_callback ,
             progress_manager,
-            history_manager,  # Will be None if contextual is disabled
-            chunk_context_manager  # Will be None if contextual is disabled
+            history_manager,
+            chunk_context_manager
         )
         
         known_vision_models = [
@@ -8036,10 +7101,11 @@ def main(log_callback=None, stop_callback=None):
     
     total_chapters = len(chapters)
 
-    # Zero-based detection
+    # Only detect numbering if the toggle is not disabled
     if config.DISABLE_ZERO_DETECTION:
         print(f"📊 0-based detection disabled by user setting")
         uses_zero_based = False
+        # Important: Set a flag that can be checked throughout the codebase
         config._force_disable_zero_detection = True
     else:
         if chapters:
@@ -8049,67 +7115,73 @@ def main(log_callback=None, stop_callback=None):
             uses_zero_based = False
         config._force_disable_zero_detection = False
 
+    # Store this for later use
     config._uses_zero_based = uses_zero_based
+
 
     rng = os.getenv("CHAPTER_RANGE", "")
     start = None
     end = None
     if rng and re.match(r"^\d+\s*-\s*\d+$", rng):
-        start, end = map(int, rng.split("-", 1))
-        
-        if config.DISABLE_ZERO_DETECTION:
-            print(f"📊 0-based detection disabled - using range as specified: {start}-{end}")
-        elif uses_zero_based:
-            print(f"📊 0-based novel detected")
-            print(f"📊 User range {start}-{end} will be used as-is (chapters are already adjusted)")
-        else:
-            print(f"📊 1-based novel detected")
-            print(f"📊 Using range as specified: {start}-{end}")
+            start, end = map(int, rng.split("-", 1))
+            
+            if config.DISABLE_ZERO_DETECTION:
+                print(f"📊 0-based detection disabled - using range as specified: {start}-{end}")
+            elif uses_zero_based:
+                print(f"📊 0-based novel detected")
+                print(f"📊 User range {start}-{end} will be used as-is (chapters are already adjusted)")
+            else:
+                print(f"📊 1-based novel detected")
+                print(f"📊 Using range as specified: {start}-{end}")
     
     print("📊 Calculating total chunks needed...")
     total_chunks_needed = 0
     chunks_per_chapter = {}
     chapters_to_process = 0
-    
-    # Debug: Show what we're checking
-    print(f"📋 Checking translation status for {len(chapters)} chapters...")
 
-    # Count chapters needing translation
+    # When setting actual chapter numbers (in the main function)
     for idx, c in enumerate(chapters):
-        # Add debug index for tracking
-        c['__debug_idx'] = idx
+        chap_num = c["num"]
+        content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
         
-        actual_num = c.get('actual_chapter_num', c.get('num'))
-        content_hash = get_consistent_content_hash(c)
+        # Extract the raw chapter number from the file
+        raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
+        #print(f"[DEBUG] Extracted raw_num={raw_num} from {c.get('original_basename', 'unknown')}")
+
         
-        # Skip chapters outside range
-        if start is not None and not (start <= actual_num <= end):
-            continue
+        # Apply the offset
+        offset = config.CHAPTER_NUMBER_OFFSET if hasattr(config, 'CHAPTER_NUMBER_OFFSET') else 0
+        raw_num += offset
         
-        # Check if chapter needs translation
-        needs_translation = False
-        
-        # Priority 1: Check if marked for forced translation (from OPF prioritization)
-        if c.get('force_translate', False):
-            needs_translation = True
-            print(f"   📌 Ch.{actual_num}: Forced translation (OPF priority)")
+        # When toggle is disabled, use raw numbers without any 0-based adjustment
+        if config.DISABLE_ZERO_DETECTION:
+            c['actual_chapter_num'] = raw_num
+            # Store raw number for consistency
+            c['raw_chapter_num'] = raw_num
+            c['zero_adjusted'] = False
         else:
-            # Priority 2: Check if translation file exists
-            exists, response_fname = check_response_file_exists(c, out)
-            if not exists:
-                needs_translation = True
-                original_basename = c.get('original_basename', 'unknown')
-                print(f"   ⚠️ Ch.{actual_num} ({original_basename}): Missing translation file - looking for {response_fname}")
+            # Store raw number
+            c['raw_chapter_num'] = raw_num
+            # Apply adjustment only if this is a 0-based novel
+            if uses_zero_based:
+                c['actual_chapter_num'] = raw_num + 1
+                c['zero_adjusted'] = True
             else:
-                # Even if file exists, check progress manager for qa_failed status
-                needs_translation_pm, skip_reason, _ = progress_manager.check_chapter_status(
-                    idx, actual_num, content_hash, out
-                )
-                if needs_translation_pm and skip_reason and "QA failed" in skip_reason:
-                    needs_translation = True
-                    print(f"   ⚠️ Ch.{actual_num}: {skip_reason}")
-                else:
-                    print(f"   ✓ Ch.{actual_num}: Found existing translation: {response_fname}")
+                c['actual_chapter_num'] = raw_num
+                c['zero_adjusted'] = False
+        
+        # Now we can safely use actual_num
+        actual_num = c['actual_chapter_num']
+
+
+        if start is not None:
+            if not (start <= c['actual_chapter_num'] <= end):
+                #print(f"[SKIP] Chapter {c['actual_chapter_num']} outside range {start}-{end}")
+                continue
+                
+        needs_translation, skip_reason, _ = progress_manager.check_chapter_status(
+            idx, actual_num, content_hash, out
+        )
         
         if not needs_translation:
             chunks_per_chapter[idx] = 0
@@ -8117,22 +7189,48 @@ def main(log_callback=None, stop_callback=None):
         
         chapters_to_process += 1
         
-        # Calculate chunks needed
+        chapter_key = str(idx)
+        if chapter_key in progress_manager.prog["chapters"] and progress_manager.prog["chapters"][chapter_key].get("status") == "in_progress":
+            pass
+        
+        # Calculate based on OUTPUT limit only
         max_output_tokens = config.MAX_OUTPUT_TOKENS 
         safety_margin_output = 500
         
+        # Korean to English typically compresses to 0.7-0.9x
         compression_factor = config.COMPRESSION_FACTOR
         available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
         
+        # Ensure minimum
         available_tokens = max(available_tokens, 1000)
         
+        #print(f"📊 Chunk size: {available_tokens:,} tokens (based on {max_output_tokens:,} output limit, compression: {compression_factor})")
+        
+        # For mixed content chapters, calculate on clean text
+        # For mixed content chapters, calculate on clean text
         if c.get('has_images', False) and ContentProcessor.is_meaningful_text_content(c["body"]):
+            # Don't modify c["body"] at all during chunk calculation
+            # Just pass the body as-is, the chunking will be slightly off but that's OK
             chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
         else:
             chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
         
-        chunks_per_chapter[idx] = len(chunks)
-        total_chunks_needed += len(chunks)
+        chapter_key_str = content_hash
+        old_key_str = str(idx)
+
+        if chapter_key_str not in progress_manager.prog.get("chapter_chunks", {}) and old_key_str in progress_manager.prog.get("chapter_chunks", {}):
+            progress_manager.prog["chapter_chunks"][chapter_key_str] = progress_manager.prog["chapter_chunks"][old_key_str]
+            del progress_manager.prog["chapter_chunks"][old_key_str]
+            #print(f"[PROGRESS] Migrated chunks for chapter {actual_num} to new tracking system")
+
+        if chapter_key_str in progress_manager.prog.get("chapter_chunks", {}):
+            completed_chunks = len(progress_manager.prog["chapter_chunks"][chapter_key_str].get("completed", []))
+            chunks_needed = len(chunks) - completed_chunks
+            chunks_per_chapter[idx] = max(0, chunks_needed)
+        else:
+            chunks_per_chapter[idx] = len(chunks)
+        
+        total_chunks_needed += chunks_per_chapter[idx]
     
     terminology = "Sections" if is_text_file else "Chapters"
     print(f"📊 Total chunks to translate: {total_chunks_needed}")
@@ -8140,6 +7238,7 @@ def main(log_callback=None, stop_callback=None):
     
     multi_chunk_chapters = [(idx, count) for idx, count in chunks_per_chapter.items() if count > 1]
     if multi_chunk_chapters:
+        # Determine terminology based on file type
         terminology = "Sections" if is_text_file else "Chapters"
         print(f"📄 {terminology} requiring multiple chunks:")
         for idx, chunk_count in multi_chunk_chapters:
@@ -8153,7 +7252,6 @@ def main(log_callback=None, stop_callback=None):
     
     current_chunk_number = 0
 
-    # BATCH TRANSLATION MODE
     if config.BATCH_TRANSLATION:
         print(f"\n📦 PARALLEL TRANSLATION MODE ENABLED")
         print(f"📦 Processing chapters with up to {config.BATCH_SIZE} concurrent API calls")
@@ -8165,59 +7263,69 @@ def main(log_callback=None, stop_callback=None):
         
         chapters_to_translate = []
         
+        # FIX: First pass to set actual chapter numbers for ALL chapters
+        # This ensures batch mode has the same chapter numbering as non-batch mode
+        print("📊 Setting chapter numbers...")
         for idx, c in enumerate(chapters):
-            actual_num = c.get('actual_chapter_num', c.get('num'))
-            content_hash = get_consistent_content_hash(c)
+            raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
+            
+            # Apply offset if configured
+            offset = config.CHAPTER_NUMBER_OFFSET if hasattr(config, 'CHAPTER_NUMBER_OFFSET') else 0
+            raw_num += offset
+            
+            if config.DISABLE_ZERO_DETECTION:
+                # Use raw numbers without adjustment
+                c['actual_chapter_num'] = raw_num
+                c['raw_chapter_num'] = raw_num
+                c['zero_adjusted'] = False
+            else:
+                # Store raw number
+                c['raw_chapter_num'] = raw_num
+                # Apply 0-based adjustment if detected
+                if uses_zero_based:
+                    c['actual_chapter_num'] = raw_num + 1
+                    c['zero_adjusted'] = True
+                else:
+                    c['actual_chapter_num'] = raw_num
+                    c['zero_adjusted'] = False
+        
+        for idx, c in enumerate(chapters):
+            chap_num = c["num"]
+            content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
             
             # Check if this is a pre-split text chunk with decimal number
             if (is_text_file and c.get('is_chunk', False) and isinstance(c['num'], float)):
                 actual_num = c['num']  # Preserve the decimal for text files only
+            else:
+                actual_num = c.get('actual_chapter_num', c['num'])  # Now this will exist!
             
             # Skip chapters outside the range
             if start is not None and not (start <= actual_num <= end):
                 continue
             
-            # Check if chapter needs translation - CORRECTED LOGIC
-            needs_translation = c.get('force_translate', False)  # Priority for OPF chapters
-            
-            if not needs_translation:
-                # First check progress manager for complete status (including qa_failed)
-                original_basename = c.get('original_basename', '')
-                needs_translation_pm, skip_reason, existing_file = progress_manager.check_chapter_status(
-                    idx, actual_num, content_hash, out, original_basename
-                )
-                
-                if needs_translation_pm:
-                    # Progress manager says it needs translation
+            # Check if chapter needs translation
+            needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
+                idx, actual_num, content_hash, out
+            )
+            # Add explicit file check for supposedly completed chapters
+            if not needs_translation and existing_file:
+                file_path = os.path.join(out, existing_file)
+                if not os.path.exists(file_path):
+                    print(f"⚠️ Output file missing for chapter {actual_num}: {existing_file}")
                     needs_translation = True
-                    if skip_reason:
-                        print(f"   ⚠️ {skip_reason}")
-                else:
-                    # Progress manager says it's complete, but verify file exists and is valid
-                    exists, response_fname = check_response_file_exists(c, out)
+                    skip_reason = None
+                    # Update status to file_missing
+                    progress_manager.update(idx, actual_num, content_hash, None, status="file_missing")
+                    progress_manager.save()
                     
-                    if not exists:
-                        # File doesn't exist or check_response_file_exists detected QA failure
-                        needs_translation = True
-                        print(f"   ⚠️ Chapter {actual_num}: Translation file missing or contains QA failure")
-                        
-                        # Update progress manager if this is a QA failure we just detected
-                        # (check_response_file_exists returns False for QA failed content)
-                        if response_fname and os.path.exists(os.path.join(out, response_fname)):
-                            # File exists but has QA failure - update progress tracking
-                            if content_hash in progress_manager.prog["chapters"]:
-                                progress_manager.prog["chapters"][content_hash]["status"] = "qa_failed"
-                                progress_manager.prog["chapters"][content_hash]["qa_timestamp"] = time.time()
-                            else:
-                                # Create new entry for qa_failed status
-                                progress_manager.update(idx, actual_num, content_hash, response_fname, 
-                                                      status="qa_failed", original_basename=original_basename)
-                            progress_manager.save()
-                            print(f"   ⚠️ Updated progress: Chapter {actual_num} marked as qa_failed")
-            
             if not needs_translation:
-                # Skip this chapter - it's already properly translated
-                print(f"[SKIP] Ch.{actual_num}: already translated: {c.get('response_filename', existing_file or 'existing file')}")
+                # Modify skip_reason to use appropriate terminology
+                is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
+                terminology = "Section" if is_text_source else "Chapter"
+                
+                # Replace "Chapter" with appropriate terminology in skip_reason
+                skip_reason_modified = skip_reason.replace("Chapter", terminology)
+                print(f"[SKIP] {skip_reason_modified}")
                 chapters_completed += 1
                 continue
             
@@ -8231,51 +7339,27 @@ def main(log_callback=None, stop_callback=None):
             
             # Handle empty chapters
             if is_empty_chapter:
-                print(f"📄 Empty chapter {actual_num} - will process individually")
+                print(f"📄 Empty chapter {chap_num} - will process individually")
                 
                 safe_title = make_safe_filename(c['title'], c['num'])
                 
-                # Create filename with response_ prefix - FIX FOR .xhtml AND .htm
-                original_basename = c.get('original_basename', '')
                 if isinstance(c['num'], float):
                     fname = FileUtilities.create_chapter_filename(c, c['num'])
-                    if not fname.endswith('.html'):
-                        fname = f"{fname}.html"
-                elif original_basename:
-                    # Check if it has ANY HTML-like extension
-                    if original_basename.endswith(('.html', '.xhtml', '.htm')):
-                        # Remove the extension and add .html
-                        base_name = os.path.splitext(original_basename)[0]
-                        fname = f"response_{base_name}.html"
-                    else:
-                        # No HTML extension, add .html
-                        fname = f"response_{original_basename}.html"
                 else:
                     fname = FileUtilities.create_chapter_filename(c, c['num'])
-                    if not fname.endswith('.html'):
-                        fname = f"{fname}.html"
-                    if fname.startswith('chapter_'):
-                        fname = fname.replace('chapter_', 'response_', 1)
-                    elif not fname.startswith('response_'):
-                        fname = f"response_{fname}"
-                
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
                     f.write(c["body"])
-                    
-                print(f"   📄 Saved empty chapter as {fname}")
-                progress_manager.update(idx, actual_num, content_hash, fname, status="completed_empty", 
-                                       original_basename=original_basename)
+                progress_manager.update(idx, actual_num, content_hash, fname, status="completed_empty")
                 progress_manager.save()
                 chapters_completed += 1
                 continue
             
             # Add to chapters to translate
             chapters_to_translate.append((idx, c))
-            print(f"   📝 Chapter {actual_num} queued for translation")
-
+        
         print(f"📊 Found {len(chapters_to_translate)} chapters to translate in parallel")
         
-        # Process in batches
+        # Continue with the rest of the existing batch processing code...
         batch_processor = BatchTranslationProcessor(
             config, client, base_msg, out, progress_lock,
             progress_manager.save, 
@@ -8361,7 +7445,7 @@ def main(log_callback=None, stop_callback=None):
                 actual_num = c.get('actual_chapter_num', c['num'])
             
             # Check if this chapter was processed and has qa_failed status
-            content_hash = get_consistent_content_hash(c)
+            content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
             
             # Check if this chapter exists in progress
             chapter_info = progress_manager.prog["chapters"].get(content_hash, {})
@@ -8383,7 +7467,7 @@ def main(log_callback=None, stop_callback=None):
                 else:
                     actual_num = c.get('actual_chapter_num', c['num'])
                 
-                content_hash = get_consistent_content_hash(c)
+                content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
                 chapter_info = progress_manager.prog["chapters"].get(content_hash, {})
                 if chapter_info.get("status") == "qa_failed":
                     qa_failed_chapters.append(actual_num)
@@ -8393,7 +7477,6 @@ def main(log_callback=None, stop_callback=None):
         # Stop translation completely after batch mode
         print("\n📌 Batch translation completed.")
     
-    # SEQUENTIAL TRANSLATION MODE
     elif not config.BATCH_TRANSLATION:
         translation_processor = TranslationProcessor(config, client, out, log_callback, check_stop, uses_zero_based, is_text_file)
         
@@ -8446,6 +7529,9 @@ def main(log_callback=None, stop_callback=None):
                 # Create and inject the improved AI Hunter
                 ai_hunter = ImprovedAIHunterDetection(main_config)
 
+                # The TranslationProcessor class has a method that checks for duplicates
+                # We need to replace it with our enhanced AI Hunter
+                
                 # Create a wrapper to match the expected signature
                 def enhanced_duplicate_check(self, result, idx, prog, out):
                     # Try to get the actual chapter number from progress
@@ -8469,43 +7555,69 @@ def main(log_callback=None, stop_callback=None):
                 print("🤖 AI Hunter: Using enhanced detection with configurable thresholds")
             else:
                 print("⚠️ AI Hunter: Config file not found, using default detection")
-
-        # Process chapters
+                
+        # First pass: set actual chapter numbers respecting the config
         for idx, c in enumerate(chapters):
-            # Add debug index for tracking
-            c['__debug_idx'] = idx
+            raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
+            #print(f"[DEBUG] Extracted raw_num={raw_num} from {c.get('original_basename', 'unknown')}")
+
             
-            actual_num = c.get('actual_chapter_num', c.get('num'))
+            # Apply offset if configured
+            offset = config.CHAPTER_NUMBER_OFFSET if hasattr(config, 'CHAPTER_NUMBER_OFFSET') else 0
+            raw_num += offset
+            
+            if config.DISABLE_ZERO_DETECTION:
+                # Use raw numbers without adjustment
+                c['actual_chapter_num'] = raw_num
+                c['raw_chapter_num'] = raw_num
+                c['zero_adjusted'] = False
+            else:
+                # Store raw number
+                c['raw_chapter_num'] = raw_num
+                # Apply 0-based adjustment if detected
+                if uses_zero_based:
+                    c['actual_chapter_num'] = raw_num + 1
+                    c['zero_adjusted'] = True
+                else:
+                    c['actual_chapter_num'] = raw_num
+                    c['zero_adjusted'] = False
+
+        # Second pass: process chapters
+        for idx, c in enumerate(chapters):
+            chap_num = c["num"]
             
             # Check if this is a pre-split text chunk with decimal number
-            if (is_text_file and c.get('is_chunk', False) and isinstance(c.get('num'), float)):
+            if (is_text_file and c.get('is_chunk', False) and isinstance(c['num'], float)):
                 actual_num = c['num']  # Preserve the decimal for text files only
-                
-            content_hash = get_consistent_content_hash(c)
+            else:
+                actual_num = c.get('actual_chapter_num', c['num'])
+            content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
             
-            # Skip chapters outside range
             if start is not None and not (start <= actual_num <= end):
+                #print(f"[SKIP] Chapter {actual_num} (file: {c.get('original_basename', 'unknown')}) outside range {start}-{end}")
                 continue
             
-            # Check if chapter needs translation
-            needs_translation = c.get('force_translate', False)  # Priority for OPF chapters
-            
+            needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
+                idx, actual_num, content_hash, out
+            )
+            # Add explicit file check for supposedly completed chapters
+            if not needs_translation and existing_file:
+                file_path = os.path.join(out, existing_file)
+                if not os.path.exists(file_path):
+                    print(f"⚠️ Output file missing for chapter {actual_num}: {existing_file}")
+                    needs_translation = True
+                    skip_reason = None
+                    # Update status to file_missing
+                    progress_manager.update(idx, actual_num, content_hash, None, status="file_missing")
+                    progress_manager.save() 
             if not needs_translation:
-                exists, response_fname = check_response_file_exists(c, out)
-                needs_translation = not exists
+                # Modify skip_reason to use appropriate terminology
+                is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
+                terminology = "Section" if is_text_source else "Chapter"
                 
-                # Also check progress manager for qa_failed status
-                if exists:
-                    needs_translation_pm, skip_reason, _ = progress_manager.check_chapter_status(
-                        idx, actual_num, content_hash, out
-                    )
-                    if needs_translation_pm and skip_reason and "QA failed" in skip_reason:
-                        needs_translation = True
-                        print(f"   ⚠️ Chapter {actual_num} marked as qa_failed - will retranslate")
-            
-            if not needs_translation:
-                # Show the actual chapter number and filename
-                print(f"[SKIP] Ch.{actual_num}: already translated: {c.get('response_filename', 'existing file')}")
+                # Replace "Chapter" with appropriate terminology in skip_reason
+                skip_reason_modified = skip_reason.replace("Chapter", terminology)
+                print(f"[SKIP] {skip_reason_modified}")
                 continue
 
             chapter_position = f"{chapters_completed + 1}/{chapters_to_process}"
@@ -8522,8 +7634,7 @@ def main(log_callback=None, stop_callback=None):
 
             print(f"\n🔄 Processing #{idx+1}/{total_chapters} (Actual: {terminology} {actual_num}) ({chapter_position} to translate): {c['title']} [File: {file_ref}]")
 
-            if config.CONTEXTUAL and chunk_context_manager:
-                chunk_context_manager.start_chapter(actual_num, c['title'])
+            chunk_context_manager.start_chapter(chap_num, c['title'])
             
             has_images = c.get('has_images', False)
             has_meaningful_text = ContentProcessor.is_meaningful_text_content(c["body"])
@@ -8537,33 +7648,15 @@ def main(log_callback=None, stop_callback=None):
             if is_empty_chapter:
                 print(f"📄 Empty chapter {actual_num} detected")
                 
-                # Create filename for empty chapter with response_ prefix - FIX FOR .xhtml AND .htm
-                original_basename = c.get('original_basename', '')
+                # Create filename for empty chapter
                 if isinstance(c['num'], float):
                     fname = FileUtilities.create_chapter_filename(c, c['num'])
-                    if not fname.endswith('.html'):
-                        fname = f"{fname}.html"
-                elif original_basename:
-                    # Check if it has ANY HTML-like extension
-                    if original_basename.endswith(('.html', '.xhtml', '.htm')):
-                        # Remove the extension and add .html
-                        base_name = os.path.splitext(original_basename)[0]
-                        fname = f"response_{base_name}.html"
-                    else:
-                        # No HTML extension, add .html
-                        fname = f"response_{original_basename}.html"
                 else:
                     fname = FileUtilities.create_chapter_filename(c, actual_num)
-                    if not fname.endswith('.html'):
-                        fname = f"{fname}.html"
-                    if fname.startswith('chapter_'):
-                        fname = fname.replace('chapter_', 'response_', 1)
                 
                 # Save original content
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
                     f.write(c["body"])
-                
-                print(f"   📄 Saved empty chapter as {fname}")
                 
                 # Update progress tracking
                 progress_manager.update(idx, actual_num, content_hash, fname, status="completed_empty")
@@ -8582,7 +7675,7 @@ def main(log_callback=None, stop_callback=None):
                 # Step 1: Process images if image translation is enabled
                 if image_translator and config.ENABLE_IMAGE_TRANSLATION:
                     print(f"🖼️ Translating {c.get('image_count', 0)} images...")
-                    image_translator.set_current_chapter(actual_num)
+                    image_translator.set_current_chapter(chap_num)
                     
                     translated_html, image_translations = process_chapter_images(
                         c["body"], 
@@ -8658,27 +7751,13 @@ def main(log_callback=None, stop_callback=None):
                     print(f"ℹ️ No headers found to translate")
                     status = "completed_image_only"
                 
-                # Step 3: Save with correct filename including response_ prefix
-                if original_basename:
-                    # Check if it ends with any HTML-like extension
-                    if original_basename.endswith(('.html', '.xhtml', '.htm')):
-                        # Strip the extension and add .html
-                        base_name = os.path.splitext(original_basename)[0]
-                        fname = f"response_{base_name}.html"
-                    else:
-                        # No HTML extension, just prepend response_
-                        fname = f"response_{original_basename}"
-                else:
-                    # Fallback when no original_basename
-                    fname = FileUtilities.create_chapter_filename(c, actual_num)
-                    if not fname.endswith('.html'):
-                        fname = f"{fname}.html"
-                    if fname.startswith('chapter_'):
-                        fname = fname.replace('chapter_', 'response_', 1)
-                    elif not fname.startswith('response_'):
-                        fname = f"response_{fname}"
+                # Step 3: Save with correct filename
+                fname = FileUtilities.create_chapter_filename(c, actual_num)
                 
-                print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved image-only chapter as {fname}")
+                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                    f.write(translated_html)
+                
+                print(f"[Chapter {idx+1}/{total_chapters}] ✅ Saved image-only chapter")
                 progress_manager.update(idx, actual_num, content_hash, fname, status=status)
                 progress_manager.save()
                 chapters_completed += 1
@@ -8696,7 +7775,7 @@ def main(log_callback=None, stop_callback=None):
                     print(f"[DEBUG] Has h1 tags: {'<h1>' in c['body']}")
                     print(f"[DEBUG] Has h2 tags: {'<h2>' in c['body']}")
                     
-                    image_translator.set_current_chapter(actual_num)
+                    image_translator.set_current_chapter(chap_num)
                     
                     # Store the original body before processing
                     original_body = c["body"]
@@ -8718,6 +7797,7 @@ def main(log_callback=None, stop_callback=None):
                         # Store the body with images for later merging
                         c["body_with_images"] = c["body"]
                         
+                        # For chapters with only images and title, we still need to translate the title
                         # Extract clean text for translation from ORIGINAL body
                         from bs4 import BeautifulSoup
                         soup_clean = BeautifulSoup(original_body, 'html.parser')
@@ -8726,9 +7806,11 @@ def main(log_callback=None, stop_callback=None):
                         for img in soup_clean.find_all('img'):
                             img.decompose()
 
-                        # Set clean text for translation
+                        # Set clean text for translation - use prettify() or str() on the full document
                         c["body"] = str(soup_clean) if soup_clean.body else original_body
                         
+                        # If there's no meaningful text content after removing images, 
+                        # the text translation will just translate the title, which is correct
                         print(f"   📝 Clean text for translation: {len(c['body'])} chars")
                         
                         # Update text_size to reflect actual text to translate
@@ -8743,18 +7825,22 @@ def main(log_callback=None, stop_callback=None):
                         c["body"] = original_body
 
                 print(f"📖 Translating text content ({text_size} characters)")
-                progress_manager.update(idx, actual_num, content_hash, output_file=None, status="in_progress")
+                progress_manager.update(idx, chap_num, content_hash, output_file=None, status="in_progress")
                 progress_manager.save()
+
 
                 # Check if this chapter is already a chunk from text file splitting
                 if c.get('is_chunk', False):
-                    # This is already a pre-split chunk
+                    # This is already a pre-split chunk, but still check if it needs further splitting
+                    # Calculate based on OUTPUT limit only
                     max_output_tokens = config.MAX_OUTPUT_TOKENS
                     safety_margin_output = 500
                     
+                    # CJK to English typically compresses to 0.7-0.9x
                     compression_factor = config.COMPRESSION_FACTOR
                     available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
                     
+                    # Ensure minimum
                     available_tokens = max(available_tokens, 1000)
                     
                     print(f"📊 Chunk size: {available_tokens:,} tokens (based on {max_output_tokens:,} output limit, compression: {compression_factor})")
@@ -8769,13 +7855,16 @@ def main(log_callback=None, stop_callback=None):
                         chunks = [(c["body"], 1, 1)]
                         print(f"📄 Section {c['num']} (pre-split from text file)")
                 else:
-                    # Normal splitting logic
+                    # Normal splitting logic for non-text files
+                    # Calculate based on OUTPUT limit only
                     max_output_tokens = config.MAX_OUTPUT_TOKENS
                     safety_margin_output = 500
                     
+                    # CJK to English typically compresses to 0.7-0.9x
                     compression_factor = config.COMPRESSION_FACTOR
                     available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
                     
+                    # Ensure minimum
                     available_tokens = max(available_tokens, 1000)
                     
                     print(f"📊 Chunk size: {available_tokens:,} tokens (based on {max_output_tokens:,} output limit, compression: {compression_factor})")
@@ -8818,6 +7907,7 @@ def main(log_callback=None, stop_callback=None):
                 if chapter_key_str not in progress_manager.prog.get("chapter_chunks", {}) and old_key_str in progress_manager.prog.get("chapter_chunks", {}):
                     progress_manager.prog["chapter_chunks"][chapter_key_str] = progress_manager.prog["chapter_chunks"][old_key_str]
                     del progress_manager.prog["chapter_chunks"][old_key_str]
+                    #print(f"[PROGRESS] Migrated chunks for chapter {chap_num} to new tracking system")
                 
                 if chapter_key_str not in progress_manager.prog["chapter_chunks"]:
                     progress_manager.prog["chapter_chunks"][chapter_key_str] = {
@@ -8828,41 +7918,21 @@ def main(log_callback=None, stop_callback=None):
                 
                 progress_manager.prog["chapter_chunks"][chapter_key_str]["total"] = len(chunks)
                 
-                # Get chapter status from progress manager
+                # Get chapter status to check for qa_failed
                 chapter_info = progress_manager.prog["chapters"].get(chapter_key_str, {})
                 chapter_status = chapter_info.get("status")
 
-                # Determine if we should skip or retranslate this chunk
-                should_skip_chunk = False
-                skip_reason = None
-
-                # Check various conditions for skipping/retranslating
-                if c.get('force_translate', False):
-                    # Force retranslation of OPF priority chapters
-                    should_skip_chunk = False
-                    skip_reason = "retranslating due to OPF priority"
-                elif chapter_status == "qa_failed":
-                    # Force retranslation of qa_failed chapters
-                    should_skip_chunk = False
-                    skip_reason = "retranslating due to QA failure"
-                    # Clear the chunk data for clean retranslation
-                    if chapter_key_str in progress_manager.prog["chapter_chunks"]:
-                        progress_manager.prog["chapter_chunks"][chapter_key_str]["completed"] = []
-                        progress_manager.prog["chapter_chunks"][chapter_key_str]["chunks"] = {}
-                elif chunk_idx in progress_manager.prog["chapter_chunks"][chapter_key_str].get("completed", []):
-                    # Check if we have a saved chunk
+                # Check if chunk is completed AND chapter is not qa_failed
+                if (chunk_idx in progress_manager.prog["chapter_chunks"][chapter_key_str]["completed"] 
+                    and chapter_status != "qa_failed"):
                     saved_chunk = progress_manager.prog["chapter_chunks"][chapter_key_str]["chunks"].get(str(chunk_idx))
                     if saved_chunk:
-                        # Chunk was previously completed and we have the data
-                        should_skip_chunk = True
                         translated_chunks.append((saved_chunk, chunk_idx, total_chunks))
-
-                # Apply the decision
-                if should_skip_chunk:
-                    print(f"  [SKIP] Chunk {chunk_idx}/{total_chunks} already translated")
-                    continue
-                elif skip_reason:
-                    print(f"  [RETRY] Chunk {chunk_idx}/{total_chunks} - {skip_reason}")
+                        print(f"  [SKIP] Chunk {chunk_idx}/{total_chunks} already translated")
+                        continue
+                elif chapter_status == "qa_failed":
+                    # Force retranslation of qa_failed chapters
+                    print(f"  [RETRY] Chunk {chunk_idx}/{total_chunks} - retranslating due to QA failure")
                         
                 if config.CONTEXTUAL and history_manager.will_reset_on_next_append(config.HIST_LIMIT):
                     print(f"  📌 History will reset after this chunk (current: {len(history_manager.load_history())//2}/{config.HIST_LIMIT} exchanges)")
@@ -8952,16 +8022,14 @@ def main(log_callback=None, stop_callback=None):
                 else:
                     user_prompt = chunk_html
                 
-                if config.CONTEXTUAL and history_manager:
-                    history = history_manager.load_history()
+                history = history_manager.load_history()
+                
+                if config.CONTEXTUAL:
                     trimmed = history[-config.HIST_LIMIT*2:]
                     
-                    if chunk_context_manager:
-                        chunk_context = chunk_context_manager.get_context_messages(limit=2)
-                    else:
-                        chunk_context = []
+                    chunk_context = chunk_context_manager.get_context_messages(limit=2)
+                    
                 else:
-                    history = []
                     trimmed = []
                     chunk_context = []
 
@@ -9019,23 +8087,18 @@ def main(log_callback=None, stop_callback=None):
 
                 translated_chunks.append((result, chunk_idx, total_chunks))
                 
-                if config.CONTEXTUAL and chunk_context_manager:
-                    chunk_context_manager.add_chunk(user_prompt, result, chunk_idx, total_chunks)
+                chunk_context_manager.add_chunk(user_prompt, result, chunk_idx, total_chunks)
 
                 progress_manager.prog["chapter_chunks"][chapter_key_str]["completed"].append(chunk_idx)
                 progress_manager.prog["chapter_chunks"][chapter_key_str]["chunks"][str(chunk_idx)] = result
                 progress_manager.save()
 
                 chunks_completed += 1
-
-                # Only check for reset if contextual is enabled
-                if config.CONTEXTUAL and history_manager:
-                    will_reset = history_manager.will_reset_on_next_append(
-                        config.HIST_LIMIT, 
-                        config.TRANSLATION_HISTORY_ROLLING
-                    )
-                else:
-                    will_reset = False
+                    
+                will_reset = history_manager.will_reset_on_next_append(
+                    config.HIST_LIMIT if config.CONTEXTUAL else 0, 
+                    config.TRANSLATION_HISTORY_ROLLING
+                )
 
                 if will_reset and config.USE_ROLLING_SUMMARY and config.CONTEXTUAL:
                     if check_stop():
@@ -9064,15 +8127,14 @@ def main(log_callback=None, stop_callback=None):
                             base_msg.insert(1, summary_msg)
                         else:
                             base_msg.insert(0, summary_msg)
-                
-                if config.CONTEXTUAL and history_manager:
-                    history = history_manager.append_to_history(
-                        user_prompt, 
-                        result, 
-                        config.HIST_LIMIT,
-                        reset_on_limit=True,
-                        rolling_window=config.TRANSLATION_HISTORY_ROLLING
-                    )
+
+                history = history_manager.append_to_history(
+                    user_prompt, 
+                    result, 
+                    config.HIST_LIMIT if config.CONTEXTUAL else 0,
+                    reset_on_limit=True,
+                    rolling_window=config.TRANSLATION_HISTORY_ROLLING
+                )
 
                 if chunk_idx < total_chunks:
                     # Handle float delays while checking for stop
@@ -9117,36 +8179,13 @@ def main(log_callback=None, stop_callback=None):
                     )
                     print(f"  📝 Added chapter summary to history")
 
-            if config.CONTEXTUAL and chunk_context_manager:
-                chunk_context_manager.clear()
+            chunk_context_manager.clear()
 
             # For text file chunks, ensure we pass the decimal number
             if is_text_file and c.get('is_chunk', False) and isinstance(c.get('num'), float):
                 fname = FileUtilities.create_chapter_filename(c, c['num'])  # Use the decimal num directly
-                if not fname.endswith('.txt'):
-                    fname = f"{fname}.txt"  # Text files use .txt extension
             else:
-                # Prefer using original basename if available for consistency with OPF
-                original_basename = c.get('original_basename', '')
-                if original_basename:
-
-                    # Check if it ends with any HTML-like extension
-                    if original_basename.endswith(('.html', '.xhtml', '.htm')):
-                        # Strip the extension and add .html
-                        base_name = os.path.splitext(original_basename)[0]
-                        fname = f"response_{base_name}.html"
-                    else:
-                        # No HTML extension, just prepend response_
-                        fname = f"response_{original_basename}"
-                else:
-                    # Fallback when no original_basename
-                    fname = FileUtilities.create_chapter_filename(c, actual_num)
-                    if not fname.endswith('.html'):
-                        fname = f"{fname}.html"
-                    if fname.startswith('chapter_'):
-                        fname = fname.replace('chapter_', 'response_', 1)
-                    elif not fname.startswith('response_'):
-                        fname = f"response_{fname}"
+                fname = FileUtilities.create_chapter_filename(c, actual_num)
 
             client.set_output_filename(fname)
             cleaned = re.sub(r"^```(?:html)?\s*\n?", "", merged_result, count=1, flags=re.MULTILINE)
@@ -9208,7 +8247,7 @@ def main(log_callback=None, stop_callback=None):
                     f.write(text_content)
                 
                 final_title = c['title'] or make_safe_filename(c['title'], actual_num)
-                print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title} as {fname_txt}")
+                print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
                 
                 # Update progress with .txt filename
                 progress_manager.update(idx, actual_num, content_hash, fname_txt, status="completed")
@@ -9218,7 +8257,7 @@ def main(log_callback=None, stop_callback=None):
                     f.write(cleaned)
                 
                 final_title = c['title'] or make_safe_filename(c['title'], actual_num)
-                print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title} as {fname}")
+                print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
                 
             # Determine status based on comprehensive failure detection
             if is_qa_failed_response(cleaned):
@@ -9228,17 +8267,11 @@ def main(log_callback=None, stop_callback=None):
             else:
                 chapter_status = "completed"
 
-            # Update progress with the actual filename we saved
-            if is_text_file:
-                progress_manager.update(idx, actual_num, content_hash, fname_txt, status=chapter_status)
-            else:
-                progress_manager.update(idx, actual_num, content_hash, fname, status=chapter_status)
-            
+            progress_manager.update(idx, actual_num, content_hash, fname, status=chapter_status)
             progress_manager.save()
             
             chapters_completed += 1
 
-    # FINAL OUTPUT PROCESSING
     if is_text_file:
         print("📄 Text file translation complete!")
         try:
@@ -9369,7 +8402,6 @@ def main(log_callback=None, stop_callback=None):
                     with open(src, 'r', encoding='utf-8') as f:
                         content = f.read()
                     
-                    from bs4 import BeautifulSoup
                     soup = BeautifulSoup(content, 'html.parser')
                     notice = soup.new_tag('p')
                     notice.string = "[Note: This chapter could not be translated - showing original content]"
@@ -9394,11 +8426,6 @@ def main(log_callback=None, stop_callback=None):
         print("📘 Building final EPUB…")
         try:
             from epub_converter import fallback_compile_epub
-            
-            # Pass OPF chapter order to epub converter if available
-            if opf_chapter_order:
-                os.environ["OPF_CHAPTER_ORDER"] = json.dumps(opf_chapter_order)
-            
             fallback_compile_epub(out, log_callback=log_callback)
             print("✅ All done: your final EPUB is in", out)
             
@@ -9418,16 +8445,6 @@ def main(log_callback=None, stop_callback=None):
             print(f"\n📊 Progress Tracking Summary:")
             print(f"   • Total chapters tracked: {stats['total_tracked']}")
             print(f"   • Successfully completed: {stats['completed']}")
-            if untranslated_in_opf:
-                translated_count = 0
-                for ch in untranslated_in_opf:
-                    if 'chapter_data' in ch:
-                        chapter_data = ch['chapter_data']
-                        fname = FileUtilities.create_chapter_filename(chapter_data, chapter_data.get('actual_chapter_num', chapter_data['num']))
-                        response_fname = fname.replace('chapter_', 'response_', 1) if fname.startswith('chapter_') else f"response_{fname}"
-                        if os.path.exists(os.path.join(out, response_fname)) or os.path.exists(os.path.join(out, fname)):
-                            translated_count += 1
-                print(f"   • Prioritized OPF chapters translated: {translated_count}/{len(untranslated_in_opf)}")
             print(f"   • Missing files: {stats['missing_files']}")
             print(f"   • In progress: {stats['in_progress']}")
                 
