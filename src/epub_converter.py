@@ -1471,8 +1471,7 @@ class EPUBCompiler:
                     self.log("⚠️ No source headers found, skipping batch translation")
                 elif not hasattr(self, 'header_translator'):
                     self.log("⚠️ No header translator available")
-            
-            # Rest of the compile method continues as before...
+
             # Find HTML files
             html_files = self._find_html_files()
             if not html_files:
