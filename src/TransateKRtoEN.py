@@ -844,8 +844,10 @@ class ProgressManager:
         """Check if a chapter needs translation with fallback"""
         
         # FIRST: Check if this chapter number exists and what its status is
+        found_chapter_num = False
         for key, info in self.prog["chapters"].items():
             if info.get("actual_num") == actual_num:
+                found_chapter_num = True
                 status = info.get("status")
                 
                 # If ANY entry for this chapter number has a failure status, it needs retranslation
@@ -863,7 +865,12 @@ class ProgressManager:
                         else:
                             # File missing - needs retranslation
                             return True, f"Chapter {actual_num} file missing", None
-            
+        
+        # If no entry found for this chapter number, it's new and needs translation
+        if not found_chapter_num:
+            print(f"📝 Chapter {actual_num} is new - will translate")
+            return True, None, None
+        
         # THEN: Do the normal content hash check
         chapter_key = content_hash
         
@@ -940,6 +947,7 @@ class ProgressManager:
                                 fname = f"response_{actual_num:03d}_{safe_title}.html"
                             
                             output_path = os.path.join(output_dir, fname)
+                            import shutil
                             shutil.copy2(duplicate_path, output_path)
                             
                             self.update(chapter_idx, actual_num, content_hash, fname, status="completed")
@@ -1411,6 +1419,144 @@ class ChapterExtractor:
     def __init__(self, progress_callback=None):
         self.pattern_manager = PatternManager()
         self.progress_callback = progress_callback  # Add progress callback
+
+    def ensure_all_opf_chapters_extracted(zf, chapters, out):
+        """Ensure ALL chapters from OPF spine are extracted, not just what ChapterExtractor found"""
+        
+        # Parse OPF to get ALL chapters in spine
+        opf_chapters = []
+        
+        try:
+            # Find content.opf
+            opf_content = None
+            for name in zf.namelist():
+                if name.endswith('content.opf'):
+                    opf_content = zf.read(name)
+                    break
+            
+            if not opf_content:
+                return chapters  # No OPF, return original
+            
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(opf_content)
+            
+            # Handle namespaces
+            ns = {'opf': 'http://www.idpf.org/2007/opf'}
+            if root.tag.startswith('{'):
+                default_ns = root.tag[1:root.tag.index('}')]
+                ns = {'opf': default_ns}
+            
+            # Get manifest
+            manifest = {}
+            for item in root.findall('.//opf:manifest/opf:item', ns):
+                item_id = item.get('id')
+                href = item.get('href')
+                media_type = item.get('media-type', '')
+                
+                if item_id and href and ('html' in media_type.lower() or href.endswith(('.html', '.xhtml', '.htm'))):
+                    manifest[item_id] = href
+            
+            # Get spine order
+            spine = root.find('.//opf:spine', ns)
+            if spine:
+                for itemref in spine.findall('opf:itemref', ns):
+                    idref = itemref.get('idref')
+                    if idref and idref in manifest:
+                        href = manifest[idref]
+                        filename = os.path.basename(href)
+                        
+                        # Skip nav, toc, cover
+                        if any(skip in filename.lower() for skip in ['nav', 'toc', 'cover']):
+                            continue
+                        
+                        opf_chapters.append(href)
+            
+            print(f"📚 OPF spine contains {len(opf_chapters)} chapters")
+            
+            # Check which OPF chapters are missing from extraction
+            extracted_files = set()
+            for c in chapters:
+                if 'filename' in c:
+                    extracted_files.add(c['filename'])
+                if 'original_basename' in c:
+                    extracted_files.add(c['original_basename'])
+            
+            missing_chapters = []
+            for opf_chapter in opf_chapters:
+                basename = os.path.basename(opf_chapter)
+                if basename not in extracted_files and opf_chapter not in extracted_files:
+                    missing_chapters.append(opf_chapter)
+            
+            if missing_chapters:
+                print(f"⚠️ {len(missing_chapters)} chapters in OPF but not extracted!")
+                print(f"   Missing: {missing_chapters[:5]}{'...' if len(missing_chapters) > 5 else ''}")
+                
+                # Extract the missing chapters
+                for href in missing_chapters:
+                    try:
+                        # Read the chapter content
+                        content = zf.read(href).decode('utf-8')
+                        
+                        # Extract chapter number
+                        import re
+                        basename = os.path.basename(href)
+                        matches = re.findall(r'(\d+)', basename)
+                        if matches:
+                            chapter_num = int(matches[-1])
+                        else:
+                            chapter_num = len(chapters) + 1
+                        
+                        # Create chapter entry
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(content, 'html.parser')
+                        
+                        # Get title
+                        title = "Chapter " + str(chapter_num)
+                        title_tag = soup.find('title')
+                        if title_tag:
+                            title = title_tag.get_text().strip() or title
+                        else:
+                            for tag in ['h1', 'h2', 'h3']:
+                                header = soup.find(tag)
+                                if header:
+                                    title = header.get_text().strip() or title
+                                    break
+                        
+                        # Save the chapter file
+                        output_filename = f"chapter_{chapter_num:04d}_{basename}"
+                        output_path = os.path.join(out, output_filename)
+                        with open(output_path, 'w', encoding='utf-8') as f:
+                            f.write(content)
+                        
+                        # Add to chapters list
+                        new_chapter = {
+                            'num': chapter_num,
+                            'title': title,
+                            'body': content,
+                            'filename': href,
+                            'original_basename': basename,
+                            'file_size': len(content),
+                            'has_images': bool(soup.find_all('img')),
+                            'detection_method': 'opf_recovery',
+                            'content_hash': None  # Will be calculated later
+                        }
+                        
+                        chapters.append(new_chapter)
+                        print(f"   ✅ Recovered chapter {chapter_num}: {basename}")
+                        
+                    except Exception as e:
+                        print(f"   ❌ Failed to extract {href}: {e}")
+                
+                # Re-sort chapters by number
+                chapters.sort(key=lambda x: x['num'])
+                print(f"✅ Total chapters after OPF recovery: {len(chapters)}")
+            
+        except Exception as e:
+            print(f"⚠️ Error checking OPF chapters: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        return chapters
         
     def extract_chapters(self, zf, output_dir):
         """Extract chapters and all resources from EPUB using ThreadPoolExecutor"""
@@ -5790,31 +5936,72 @@ def validate_chapter_continuity(chapters):
     
     issues = []
     
+    # Get all chapter numbers
     chapter_nums = [c['num'] for c in chapters]
+    actual_nums = [c.get('actual_chapter_num', c['num']) for c in chapters]
+    
+    # Check for duplicates
     duplicates = [num for num in chapter_nums if chapter_nums.count(num) > 1]
     if duplicates:
         issues.append(f"Duplicate chapter numbers found: {set(duplicates)}")
     
+    # Check for gaps in sequence
     min_num = min(chapter_nums)
     max_num = max(chapter_nums)
     expected = set(range(min_num, max_num + 1))
     actual = set(chapter_nums)
     missing = expected - actual
+    
     if missing:
         issues.append(f"Missing chapter numbers: {sorted(missing)}")
+        # Show gaps more clearly
+        gaps = []
+        sorted_missing = sorted(missing)
+        if sorted_missing:
+            start = sorted_missing[0]
+            end = sorted_missing[0]
+            for num in sorted_missing[1:]:
+                if num == end + 1:
+                    end = num
+                else:
+                    gaps.append(f"{start}-{end}" if start != end else str(start))
+                    start = end = num
+            gaps.append(f"{start}-{end}" if start != end else str(start))
+            issues.append(f"Gap ranges: {', '.join(gaps)}")
     
-    for i in range(len(chapters) - 1):
-        for j in range(i + 1, len(chapters)):
-            title1 = chapters[i]['title'].lower()
-            title2 = chapters[j]['title'].lower()
-            if title1 == title2 and chapters[i]['num'] != chapters[j]['num']:
-                issues.append(f"Chapters {chapters[i]['num']} and {chapters[j]['num']} have identical titles")
+    # Check for duplicate titles
+    title_map = {}
+    for c in chapters:
+        title_lower = c['title'].lower().strip()
+        if title_lower in title_map:
+            title_map[title_lower].append(c['num'])
+        else:
+            title_map[title_lower] = [c['num']]
+    
+    for title, nums in title_map.items():
+        if len(nums) > 1:
+            issues.append(f"Duplicate title '{title}' in chapters: {nums}")
+    
+    # Print summary
+    print("\n" + "="*60)
+    print("📚 CHAPTER VALIDATION SUMMARY")
+    print("="*60)
+    print(f"Total chapters: {len(chapters)}")
+    print(f"Chapter range: {min_num} to {max_num}")
+    print(f"Expected count: {max_num - min_num + 1}")
+    print(f"Actual count: {len(chapters)}")
+    
+    if len(chapters) != (max_num - min_num + 1):
+        print(f"⚠️  Chapter count mismatch - missing {(max_num - min_num + 1) - len(chapters)} chapters")
     
     if issues:
-        print("\n⚠️  Chapter Validation Issues:")
+        print("\n⚠️  Issues found:")
         for issue in issues:
             print(f"  - {issue}")
-        print()
+    else:
+        print("✅ No continuity issues detected")
+    
+    print("="*60 + "\n")
 
 def validate_epub_structure(output_dir):
     """Validate that all necessary EPUB structure files are present"""
@@ -6751,7 +6938,21 @@ def main(log_callback=None, stop_callback=None):
         with zipfile.ZipFile(input_path, 'r') as zf:
             metadata = chapter_extractor._extract_epub_metadata(zf)
             chapters = chapter_extractor.extract_chapters(zf, out)
-            
+
+            print(f"\n📚 Extraction Summary:")
+            print(f"   Total chapters extracted: {len(chapters)}")
+            if chapters:
+                nums = [c.get('num', 0) for c in chapters]
+                print(f"   Chapter range: {min(nums)} to {max(nums)}")
+                
+                # Check for gaps in the sequence
+                expected_count = max(nums) - min(nums) + 1
+                if len(chapters) < expected_count:
+                    print(f"\n⚠️ Potential missing chapters detected:")
+                    print(f"   Expected {expected_count} chapters (from {min(nums)} to {max(nums)})")
+                    print(f"   Actually found: {len(chapters)} chapters")
+                    print(f"   Potentially missing: {expected_count - len(chapters)} chapters")         
+
             validate_chapter_continuity(chapters)
         
         print("\n" + "="*50)
