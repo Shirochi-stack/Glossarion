@@ -3198,8 +3198,13 @@ Recent translations to summarize:
             filename = spine_ch['filename']
             chapter_num = spine_ch['file_chapter_num']
             
-            # Build expected response filename
-            expected_response = f"response_{filename}"
+            # Build expected response filename - FIX: Always use .html
+            if filename.endswith(('.html', '.xhtml', '.htm')):
+                base_name = os.path.splitext(filename)[0]
+                expected_response = f"response_{base_name}.html"
+            else:
+                expected_response = f"response_{filename}"
+            
             response_path = os.path.join(output_dir, expected_response)
             
             # Check various ways to find the translation
@@ -3214,7 +3219,7 @@ Recent translations to summarize:
                     matched_info = chapter_info
                     translation_found = True
             
-            # Method 2: Check by response file
+            # Method 2: Check by response file (with corrected extension)
             if not translation_found and expected_response in response_file_to_progress:
                 entries = response_file_to_progress[expected_response]
                 if entries:
@@ -3224,21 +3229,19 @@ Recent translations to summarize:
             
             # Method 3: Check file existence directly
             if not translation_found:
-                # Check with extension
                 if os.path.exists(response_path):
                     translation_found = True
                     spine_ch['status'] = 'completed'
                     spine_ch['output_file'] = expected_response
-                # Check without extension
-                elif os.path.exists(response_path.replace('.html', '')):
-                    translation_found = True
-                    spine_ch['status'] = 'completed'
-                    spine_ch['output_file'] = expected_response.replace('.html', '')
             
             # Update spine chapter with status
             if matched_info:
                 spine_ch['status'] = matched_info.get('status', 'unknown')
                 spine_ch['output_file'] = matched_info.get('output_file', expected_response)
+                # FIX: Ensure output_file uses .html extension
+                if spine_ch['output_file'].endswith(('.xhtml', '.htm')):
+                    base_name = os.path.splitext(spine_ch['output_file'])[0]
+                    spine_ch['output_file'] = f"{base_name}.html"
                 spine_ch['progress_entry'] = matched_info
                 
                 # Verify file actually exists
