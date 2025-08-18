@@ -593,7 +593,7 @@ class BatchHeaderTranslator:
         )
         # Get default batch size from config or environment
         self.default_batch_size = int(os.getenv('HEADERS_PER_BATCH', 
-                                      self.config.get('headers_per_batch', '800')))
+                                      self.config.get('headers_per_batch', '350')))
         
     def set_stop_flag(self, flag: bool):
         self.stop_flag = flag
@@ -1479,7 +1479,7 @@ def enhance_epub_compiler(compiler_instance):
         translate_metadata_fields = {}
     
     batch_translate = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
-    headers_per_batch = int(os.getenv('HEADERS_PER_BATCH', 800))
+    headers_per_batch = int(os.getenv('HEADERS_PER_BATCH', 350))
     update_html = os.getenv('UPDATE_HTML_HEADERS', '1') == '1'
     save_translations = os.getenv('SAVE_HEADER_TRANSLATIONS', '1') == '1'
     
