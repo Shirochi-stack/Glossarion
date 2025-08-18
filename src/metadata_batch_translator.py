@@ -580,7 +580,7 @@ class MetadataBatchTranslatorUI:
         return metadata_fields
 
 class BatchHeaderTranslator:
-    """Translate chapter headers using ONLY FILENAMES when OPF exists"""
+    """Translate chapter headers in batches"""
     
     def __init__(self, client, config: dict = None):
         self.client = client
@@ -591,198 +591,172 @@ class BatchHeaderTranslator:
             os.getenv('BOOK_TITLE_SYSTEM_PROMPT') or
             "You are a translator. Respond with only the translated text, nothing else."
         )
+        # Get default batch size from config or environment
+        self.default_batch_size = int(os.getenv('HEADERS_PER_BATCH', 
+                                      self.config.get('headers_per_batch', '800')))
         
     def set_stop_flag(self, flag: bool):
         self.stop_flag = flag
-    
+        
     def translate_and_save_headers(self,
                                   html_dir: str,
-                                  headers_dict: Dict, 
-                                  batch_size: int = 500,
+                                  headers_dict: Dict[int, str], 
+                                  batch_size: int = None,  # Changed from hardcoded 500
                                   output_dir: str = None,
                                   update_html: bool = True,
                                   save_to_file: bool = True,
-                                  current_titles: Dict = None) -> Dict:
-        """Main entry point - uses FILENAMES when OPF exists, numbers only as fallback"""
+                                  current_titles: Dict[int, Dict[str, str]] = None) -> Dict[int, str]:
+        """Translate headers with optional file output and HTML updates
         
-        if output_dir is None:
-            output_dir = html_dir
-            
-        # Check for OPF
-        opf_path = os.path.join(output_dir, 'content.opf')
+        Args:
+            html_dir: Directory containing HTML files
+            headers_dict: Dict mapping chapter numbers to source titles
+            batch_size: Number of titles to translate in one API call (uses config if not specified)
+            output_dir: Directory for saving translation file
+            update_html: Whether to update HTML files
+            save_to_file: Whether to save translations to file
+            current_titles: Dict mapping chapter numbers to {'title': str, 'filename': str}
+        """
+        # Use configured batch size if not explicitly provided
+        if batch_size is None:
+            batch_size = int(os.getenv('HEADERS_PER_BATCH', str(self.default_batch_size)))
+            print(f"[DEBUG] Using headers_per_batch from GUI/env: {batch_size}")
         
-        if os.path.exists(opf_path):
-            # OPF EXISTS - USE FILENAME-BASED PROCESSING
-            print("\n🔒 OPF FOUND - USING FILENAME-ONLY MODE")
-            return self._process_with_opf(opf_path, html_dir, output_dir, batch_size, update_html, save_to_file)
-        else:
-            # NO OPF - FALLBACK TO OLD NUMBER-BASED SYSTEM
-            print("\n⚠️ No OPF found - using fallback number-based processing")
-            return self._process_without_opf(headers_dict, html_dir, output_dir, batch_size, 
-                                            update_html, save_to_file, current_titles)
-    
-    def _process_with_opf(self, opf_path: str, html_dir: str, output_dir: str, 
-                         batch_size: int, update_html: bool, save_to_file: bool) -> Dict[str, str]:
-        """Process using ONLY FILENAMES from OPF"""
+        # Translate headers
+        translated_headers = self.translate_headers_batch(
+            headers_dict, batch_size
+        )
         
-        # Step 1: Parse OPF to get file list
-        opf_files = self._parse_opf_for_files(opf_path)
-        if not opf_files:
-            print("❌ Could not parse OPF")
+        if not translated_headers:
             return {}
         
-        print(f"📚 Found {len(opf_files)} files in OPF")
-        
-        # Step 2: Extract titles from existing HTML files (the ones that were translated)
-        file_to_title = {}  # Maps filename -> current title in HTML
-        files_needing_translation = []
-        
-        for source_file in opf_files:
-            base_name = os.path.splitext(source_file)[0]
-            output_filename = f"response_{base_name}.html"
-            output_path = os.path.join(html_dir, output_filename)
-            
-            if os.path.exists(output_path):
-                # Extract title from translated file
-                title = self._extract_title_from_html(output_path)
-                if title:
-                    file_to_title[source_file] = title
-                    files_needing_translation.append(source_file)
-            else:
-                print(f"   ⏭️ {source_file} -> {output_filename} [NOT TRANSLATED YET]")
-        
-        print(f"📖 Found {len(file_to_title)} files with titles to translate")
-        
-        if not file_to_title:
-            print("❌ No titles to translate")
-            return {}
-        
-        # Step 3: Translate titles (keyed by filename)
-        translations = self._translate_file_titles(file_to_title, batch_size)
-        
-        # Step 4: Save translations (with filenames)
+        # Save to file if requested
         if save_to_file:
+            if output_dir is None:
+                output_dir = html_dir
             translations_file = os.path.join(output_dir, "translated_headers.txt")
-            self._save_filename_translations(opf_files, file_to_title, translations, translations_file)
+            self._save_translations_to_file(headers_dict, translated_headers, translations_file)
         
-        # Step 5: Update HTML files
+        # Update HTML files if requested
         if update_html:
-            self._update_html_files_by_filename(html_dir, opf_files, file_to_title, translations)
+            if current_titles:
+                # Use exact replacement method
+                self._update_html_headers_exact(html_dir, translated_headers, current_titles)
+            else:
+                # Fallback to pattern-based method
+                self._update_html_headers(html_dir, translated_headers)
         
-        return translations
-    
-    def _parse_opf_for_files(self, opf_path: str) -> List[str]:
-        """Parse OPF and return list of files in spine order"""
-        try:
-            with open(opf_path, 'r', encoding='utf-8') as f:
-                opf_content = f.read()
-            
-            soup = BeautifulSoup(opf_content, 'xml')
-            
-            # Get spine and manifest
-            spine = soup.find('spine')
-            manifest = soup.find('manifest')
-            
-            if not spine or not manifest:
-                return []
-            
-            # Build id to href mapping
-            id_to_href = {}
-            for item in manifest.find_all('item'):
-                item_id = item.get('id')
-                href = item.get('href')
-                if item_id and href:
-                    id_to_href[item_id] = href
-            
-            # Get files in spine order
-            files = []
-            for itemref in spine.find_all('itemref'):
-                idref = itemref.get('idref')
-                if idref and idref in id_to_href:
-                    href = id_to_href[idref]
-                    # Store just the filename
-                    files.append(os.path.basename(href))
-            
-            return files
-            
-        except Exception as e:
-            print(f"❌ Error parsing OPF: {e}")
-            return []
-    
-    def _extract_title_from_html(self, html_path: str) -> Optional[str]:
-        """Extract title from an HTML file"""
-        try:
-            with open(html_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            soup = BeautifulSoup(content, 'html.parser')
-            
-            # Try title tag
-            title_tag = soup.find('title')
-            if title_tag and title_tag.get_text().strip():
-                return title_tag.get_text().strip()
-            
-            # Try headers
-            for tag in ['h1', 'h2', 'h3']:
-                header = soup.find(tag)
-                if header:
-                    text = header.get_text().strip()
-                    if text:
-                        return text
-            
-            return None
-            
-        except Exception as e:
-            print(f"❌ Error reading {html_path}: {e}")
-            return None
-    
-    def _translate_file_titles(self, file_to_title: Dict[str, str], batch_size: int) -> Dict[str, str]:
-        """Translate titles, maintaining filename keys"""
+        return translated_headers
         
-        if not file_to_title:
+    def translate_headers_batch(self, headers_dict: Dict[int, str], batch_size: int = None) -> Dict[int, str]:
+        """Translate headers in batches using configured prompts"""
+        if not headers_dict:
             return {}
         
-        # Convert to lists for batch processing
-        files = list(file_to_title.keys())
-        titles = [file_to_title[f] for f in files]
+        # Import tiktoken for token counting
+        try:
+            import tiktoken
+            # Try to use model-specific encoding
+            try:
+                model_name = self.client.model if hasattr(self.client, 'model') else 'gpt-3.5-turbo'
+                enc = tiktoken.encoding_for_model(model_name)
+            except:
+                # Fallback to cl100k_base encoding
+                enc = tiktoken.get_encoding("cl100k_base")
+            has_tiktoken = True
+        except ImportError:
+            has_tiktoken = False
+            print("[DEBUG] tiktoken not available, using character-based estimation")
         
-        all_translations = {}  # Will map filename -> translated title
-        total_batches = (len(titles) + batch_size - 1) // batch_size
+        def count_tokens(text: str) -> int:
+            """Count tokens in text"""
+            if has_tiktoken and enc:
+                return len(enc.encode(text))
+            else:
+                # Fallback: estimate ~4 characters per token
+                return max(1, len(text) // 4)
         
-        # Get translation settings
-        temperature = float(os.getenv('TRANSLATION_TEMPERATURE', self.config.get('temperature', 0.3)))
-        max_tokens = int(os.getenv('MAX_OUTPUT_TOKENS', self.config.get('max_tokens', 4096)))
+        # Get configured prompt template
+        prompt_template = self.config.get('batch_header_prompt',
+            "Translate these chapter titles to English.\n"
+            "Return ONLY a JSON object with chapter numbers as keys.\n"
+            "Format: {\"1\": \"translated title\", \"2\": \"translated title\"}")
+        
+        # Handle language in prompt
+        source_lang = _get_source_language()
+        lang_behavior = self.config.get('lang_prompt_behavior', 'auto')
+        
+        if lang_behavior == 'never':
+            lang_str = ""
+        elif lang_behavior == 'always':
+            lang_str = self.config.get('forced_source_lang', 'Korean')
+        else:  # auto
+            lang_str = source_lang if source_lang else ""
+        
+        # Handle output language
         output_lang = self.config.get('output_language', 'English')
+        
+        # Replace variables in prompt
+        prompt_template = prompt_template.replace('{source_lang}', lang_str)
+        prompt_template = prompt_template.replace('English', output_lang)
+        
+        # Add the titles to translate
+        user_prompt_template = prompt_template + "\n\nTitles to translate:\n"
+        
+        sorted_headers = sorted(headers_dict.items())
+        all_translations = {}
+        total_batches = (len(sorted_headers) + batch_size - 1) // batch_size
+        
+        # Get temperature and max_tokens from environment (passed by GUI) or config as fallback
+        temperature = float(os.getenv('TRANSLATION_TEMPERATURE', self.config.get('temperature', 0.3)))
+        max_tokens = int(os.getenv('MAX_OUTPUT_TOKENS', self.config.get('max_tokens', 12000)))
+        
+        print(f"[DEBUG] Using temperature: {temperature}, max_tokens: {max_tokens} (from GUI/env)")
+        
+        # Count system prompt tokens once
+        system_tokens = count_tokens(self.system_prompt)
+        print(f"[DEBUG] System prompt tokens: {system_tokens}")
         
         for batch_num in range(total_batches):
             if self.stop_flag:
                 print("Translation interrupted by user")
                 break
+                
+            start_idx = batch_num * batch_size
+            end_idx = min((batch_num + 1) * batch_size, len(sorted_headers))
+            batch_headers = dict(sorted_headers[start_idx:end_idx])
             
-            start = batch_num * batch_size
-            end = min(start + batch_size, len(titles))
-            
-            batch_files = files[start:end]
-            batch_titles = titles[start:end]
-            
-            print(f"\n📚 Translating batch {batch_num + 1}/{total_batches} ({len(batch_titles)} titles)")
+            print(f"\n📚 Translating header batch {batch_num + 1}/{total_batches}")
             
             try:
-                # Create JSON with simple indices
-                batch_json = {str(i): title for i, title in enumerate(batch_titles)}
+                titles_json = json.dumps(batch_headers, ensure_ascii=False, indent=2)
+                user_prompt = user_prompt_template + titles_json
                 
-                prompt = f"""Translate these titles to {output_lang}.
-Return ONLY a JSON object with the same indices as keys.
-Format: {{"0": "translated title", "1": "translated title"}}
-
-Titles to translate:
-{json.dumps(batch_json, ensure_ascii=False, indent=2)}"""
+                # Count tokens in the user prompt
+                user_tokens = count_tokens(user_prompt)
+                total_input_tokens = system_tokens + user_tokens
+                
+                # Debug output showing input tokens
+                print(f"[DEBUG] Batch {batch_num + 1} input tokens:")
+                print(f"  - User prompt: {user_tokens} tokens")
+                print(f"  - Total input: {total_input_tokens} tokens (including system prompt)")
+                print(f"  - Headers in batch: {len(batch_headers)}")
+                
+                # Show a sample of the headers being translated (first 3)
+                sample_headers = list(batch_headers.items())[:3]
+                if sample_headers:
+                    print(f"[DEBUG] Sample headers being sent:")
+                    for ch_num, title in sample_headers:
+                        print(f"    Chapter {ch_num}: {title}")
+                    if len(batch_headers) > 3:
+                        print(f"    ... and {len(batch_headers) - 3} more")
                 
                 messages = [
                     {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": user_prompt}
                 ]
                 
+                # Pass temperature and max_tokens explicitly
                 response = self.client.send(
                     messages=messages,
                     temperature=temperature,
@@ -790,216 +764,416 @@ Titles to translate:
                     context='batch_header_translation'
                 )
                 
-                # Extract content from response
+                # Extract content from response - handle both object and tuple formats
                 response_content = None
                 if hasattr(response, 'content'):
                     response_content = response.content
                 elif isinstance(response, tuple):
+                    # If it's a tuple, first element is usually the content
                     response_content = response[0] if response else ""
                 else:
+                    # Fallback: convert to string
                     response_content = str(response)
                 
                 if response_content:
-                    # Parse JSON response
-                    parsed = self._parse_json_response(response_content)
+                    translations = self._parse_json_response(response_content, batch_headers)
+                    all_translations.update(translations)
                     
-                    # Map back to filenames
-                    for idx_str, translation in parsed.items():
-                        idx = int(idx_str)
-                        if 0 <= idx < len(batch_files):
-                            filename = batch_files[idx]
-                            all_translations[filename] = translation
-                            
-                            # Show sample
-                            if len(all_translations) <= 3:
-                                print(f"  ✓ {filename}: {batch_titles[idx][:30]}... → {translation[:30]}...")
-                
+                    # Count output tokens for debug
+                    output_tokens = count_tokens(response_content)
+                    print(f"[DEBUG] Response tokens: {output_tokens}")
+                    
+                    for num, translated in translations.items():
+                        if num in batch_headers:
+                            print(f"  ✓ Ch{num}: {batch_headers[num]} → {translated}")
+                else:
+                    print(f"  ⚠️ Empty response from API")
+                    
+            except json.JSONDecodeError as e:
+                print(f"  ❌ Failed to parse JSON response: {e}")
+                # Try to extract translations manually from the response
+                if response_content:
+                    translations = self._fallback_parse(response_content, batch_headers)
+                    all_translations.update(translations)
             except Exception as e:
                 print(f"  ❌ Error in batch {batch_num + 1}: {e}")
                 continue
         
-        print(f"\n✅ Translated {len(all_translations)} titles total")
+        print(f"\n✅ Translated {len(all_translations)} headers total")
         return all_translations
     
-    def _parse_json_response(self, response: str) -> Dict:
+    def _parse_json_response(self, response: str, original_headers: Dict[int, str]) -> Dict[int, str]:
         """Parse JSON response from API"""
         try:
             response = response.strip()
             
-            # Remove markdown blocks if present
-            if "```" in response:
-                response = response.split("```json")[-1].split("```")[0]
+            # Remove markdown blocks
+            if response.startswith("```"):
+                lines = response.split('\n')
+                response_lines = []
+                in_code_block = False
+                
+                for line in lines:
+                    if line.strip().startswith("```"):
+                        in_code_block = not in_code_block
+                        continue
+                    if in_code_block:
+                        response_lines.append(line)
+                
+                response = '\n'.join(response_lines)
             
-            return json.loads(response)
+            parsed = json.loads(response)
+            
+            result = {}
+            for key, value in parsed.items():
+                try:
+                    chapter_num = int(key)
+                    if chapter_num in original_headers:
+                        result[chapter_num] = str(value).strip()
+                except (ValueError, TypeError):
+                    continue
+                    
+            return result
             
         except json.JSONDecodeError:
-            # Try to extract JSON manually
-            result = {}
-            pattern = r'["\']?(\d+)["\']?\s*:\s*["\']([^"\']+)["\']'
-            
-            for match in re.finditer(pattern, response):
-                try:
-                    idx = match.group(1)
-                    title = match.group(2).strip()
-                    if title:
-                        result[idx] = title
-                except:
-                    continue
-            
-            return result
+            return self._fallback_parse(response, original_headers)
+        except Exception:
+            return {}
     
-    def _save_filename_translations(self, opf_files: List[str], file_to_title: Dict[str, str],
-                                   translations: Dict[str, str], output_path: str):
-        """Save translations with FILENAMES"""
+    def _fallback_parse(self, response: str, original_headers: Dict[int, str]) -> Dict[int, str]:
+        """Fallback parsing if JSON fails"""
+        result = {}
+        pattern = r'["\']?(\d+)["\']?\s*:\s*["\']([^"\']+)["\']'
+        
+        for match in re.finditer(pattern, response):
+            try:
+                num = int(match.group(1))
+                title = match.group(2).strip()
+                if num in original_headers and title:
+                    result[num] = title
+            except:
+                continue
+                
+        return result
+    
+    def _save_translations_to_file(self, 
+                                  original: Dict[int, str], 
+                                  translated: Dict[int, str],
+                                  output_path: str):
+        """Save translations to text file"""
         try:
             with open(output_path, 'w', encoding='utf-8') as f:
-                f.write("FILE-TO-FILE HEADER TRANSLATIONS\n")
-                f.write("=" * 80 + "\n\n")
+                f.write("Chapter Header Translations\n")
+                f.write("=" * 50 + "\n\n")
                 
-                for source_file in opf_files:
-                    base_name = os.path.splitext(source_file)[0]
-                    output_file = f"response_{base_name}.html"
-                    
-                    f.write(f"SOURCE: {source_file:<40} → OUTPUT: {output_file}\n")
-                    
-                    if source_file in file_to_title:
-                        original = file_to_title[source_file]
-                        translated = translations.get(source_file, "[TRANSLATION FAILED]")
-                        f.write(f"  Original:   {original}\n")
-                        f.write(f"  Translated: {translated}\n")
-                    else:
-                        f.write(f"  [FILE NOT TRANSLATED YET]\n")
-                    
-                    f.write("-" * 80 + "\n")
+                # Sort chapter numbers, ensuring chapter 0 comes first if present
+                chapter_numbers = sorted(original.keys())
                 
-                # Summary
-                f.write(f"\nSUMMARY:\n")
-                f.write(f"Total files in EPUB: {len(opf_files)}\n")
-                f.write(f"Files translated: {len(file_to_title)}\n")
-                f.write(f"Headers translated: {len(translations)}\n")
-            
+                # Summary info
+                total_chapters = len(original)
+                successfully_translated = len(translated)
+                
+                # Check if we have chapter 0
+                has_chapter_zero = 0 in chapter_numbers
+                if has_chapter_zero:
+                    f.write(f"Note: This novel uses 0-based chapter numbering (starts with Chapter 0)\n")
+                    f.write("-" * 50 + "\n\n")
+                
+                # Write each chapter's translation
+                for num in chapter_numbers:
+                    orig_title = original.get(num, "Unknown")
+                    trans_title = translated.get(num, orig_title)
+                    
+                    f.write(f"Chapter {num}:\n")
+                    f.write(f"  Original:   {orig_title}\n")
+                    f.write(f"  Translated: {trans_title}\n")
+                    
+                    # Mark if translation failed for this chapter
+                    if num not in translated:
+                        f.write(f"  Status:     ⚠️ Using original (translation failed)\n")
+                    
+                    f.write("-" * 40 + "\n")
+                
+                # Summary at the end
+                f.write(f"\nSummary:\n")
+                f.write(f"Total chapters: {total_chapters}\n")
+                f.write(f"Chapter range: {min(chapter_numbers)} to {max(chapter_numbers)}\n")
+                f.write(f"Successfully translated: {successfully_translated}\n")
+                
+                if successfully_translated < total_chapters:
+                    failed_chapters = [num for num in original if num not in translated]
+                    f.write(f"Failed chapters: {', '.join(map(str, failed_chapters))}\n")
+                
             print(f"✅ Saved translations to: {output_path}")
             
         except Exception as e:
             print(f"❌ Error saving translations: {e}")
     
-    def _update_html_files_by_filename(self, html_dir: str, opf_files: List[str],
-                                      file_to_title: Dict[str, str], 
-                                      translations: Dict[str, str]):
-        """Update HTML files using FILENAME mapping"""
+    def _check_html_has_header(self, html_path: str) -> tuple:
+        """Check if HTML file has any header tags (h1-h6)
         
-        updated = 0
-        skipped = 0
+        Returns:
+            tuple: (has_header, soup) where has_header is bool and soup is BeautifulSoup object
+        """
+        try:
+            with open(html_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            # Check ONLY for header tags (h1-h6)
+            # NOT checking title tag per user requirement
+            header_tags = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+            
+            has_header = bool(header_tags)
+            
+            if not has_header:
+                print(f"📝 {os.path.basename(html_path)} has no header tags (h1-h6)")
+            
+            return has_header, soup
+            
+        except Exception as e:
+            print(f"❌ Error checking HTML structure for {html_path}: {e}")
+            return True, None  # Assume it has header to avoid accidental overwrites
+    
+    def _insert_header_into_html(self, soup, new_title: str, preferred_tag: str = 'h1') -> bool:
+        """Insert a header into HTML that lacks one
         
-        for source_file in opf_files:
-            if source_file not in translations:
-                continue
+        Args:
+            soup: BeautifulSoup object of the HTML
+            new_title: The translated title to insert
+            preferred_tag: The header tag to use (h1, h2, h3, etc.)
             
-            # Build output path
-            base_name = os.path.splitext(source_file)[0]
-            output_filename = f"response_{base_name}.html"
-            output_path = os.path.join(html_dir, output_filename)
+        Returns:
+            bool: True if successfully inserted, False otherwise
+        """
+        try:
+            # NOTE: NOT updating title tag per user requirement
+            # Only adding h1 tag to body
             
-            if not os.path.exists(output_path):
-                skipped += 1
+            # Optional: Update meta og:title if it exists (comment out if not needed)
+            # meta_title = soup.find('meta', {'property': 'og:title'})
+            # if meta_title:
+            #     meta_title['content'] = new_title
+            
+            # Insert header in body
+            body = soup.find('body')
+            if body:
+                # Create new header tag
+                header_tag = soup.new_tag(preferred_tag)
+                header_tag.string = new_title
+                
+                # Find the best position to insert the header
+                # Try to insert it as the first element in body
+                first_element = None
+                for child in body.children:
+                    if child.name:  # Skip text nodes
+                        first_element = child
+                        break
+                
+                if first_element:
+                    # Insert before the first element
+                    first_element.insert_before(header_tag)
+                else:
+                    # Body is empty or has only text, insert at beginning
+                    body.insert(0, header_tag)
+                
+                print(f"✓ Added {preferred_tag} tag with: '{new_title}'")
+                return True
+            else:
+                print(f"⚠️ No body tag found in HTML")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Error inserting header: {e}")
+            return False
+    
+    def _update_html_headers_exact(self, html_dir: str, translated_headers: Dict[int, str], 
+                                  current_titles: Dict[int, Dict[str, str]]):
+        """Update HTML files by replacing exact current titles with translations
+        Also handles HTML files without headers by adding them.
+        """
+        updated_count = 0
+        added_count = 0
+        
+        for num, new_title in translated_headers.items():
+            if num not in current_titles:
+                print(f"⚠️ No HTML file mapping for chapter {num}")
                 continue
+                
+            current_info = current_titles[num]
+            current_title = current_info['title']
+            html_file = current_info['filename']
+            html_path = os.path.join(html_dir, html_file)
             
             try:
-                # Read file
-                with open(output_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
+                # Check if HTML has a header
+                has_header, soup = self._check_html_has_header(html_path)
                 
-                soup = BeautifulSoup(content, 'html.parser')
-                
-                # Get original and new titles
-                original_title = file_to_title.get(source_file)
-                new_title = translations[source_file]
-                
-                if not original_title:
+                if not soup:
+                    print(f"⚠️ Could not parse {html_file}")
                     continue
                 
-                # Update everywhere the title appears
-                changes = False
-                
-                # Title tag
-                title_tag = soup.find('title')
-                if title_tag and title_tag.get_text().strip() == original_title:
-                    title_tag.string = new_title
-                    changes = True
-                
-                # Headers
-                for tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
-                    for header in soup.find_all(tag):
-                        if header.get_text().strip() == original_title:
-                            header.clear()
-                            header.string = new_title
-                            changes = True
-                
-                # Meta tags
-                for meta in soup.find_all('meta'):
-                    if meta.get('content', '').strip() == original_title:
-                        meta['content'] = new_title
-                        changes = True
-                
-                if changes:
-                    with open(output_path, 'w', encoding='utf-8') as f:
-                        f.write(str(soup))
-                    print(f"✅ Updated: {output_filename}")
-                    updated += 1
+                if not has_header:
+                    # HTML has no header, insert the translated one
+                    print(f"📝 Adding header to {html_file}: '{new_title}'")
+                    if self._insert_header_into_html(soup, new_title):
+                        # Write back with proper encoding
+                        html_str = str(soup)
+                        with open(html_path, 'w', encoding='utf-8') as f:
+                            f.write(html_str)
+                        added_count += 1
+                        print(f"✓ Added header to {html_file}")
+                    else:
+                        print(f"⚠️ Failed to add header to {html_file}")
+                else:
+                    # HTML has header, update it
+                    updated = False
+                    
+                    # Update title tag
+                    title_tag = soup.find('title')
+                    if title_tag and title_tag.get_text().strip() == current_title:
+                        title_tag.string = new_title
+                        updated = True
+                    
+                    # Update ALL elements that contain the exact current title
+                    for element in soup.find_all(text=current_title):
+                        if element.parent.name not in ['script', 'style']:
+                            element.replace_with(new_title)
+                            updated = True
+                    
+                    # Also check elements where the text might have extra whitespace
+                    for tag in ['h1', 'h2', 'h3', 'p', 'div', 'span']:
+                        for element in soup.find_all(tag):
+                            if element.get_text().strip() == current_title:
+                                element.clear()
+                                element.string = new_title
+                                updated = True
+                    
+                    # Update meta og:title if it matches
+                    meta_title = soup.find('meta', {'property': 'og:title'})
+                    if meta_title and meta_title.get('content', '').strip() == current_title:
+                        meta_title['content'] = new_title
+                        updated = True
+                    
+                    if updated:
+                        # Write back with proper encoding
+                        html_str = str(soup)
+                        with open(html_path, 'w', encoding='utf-8') as f:
+                            f.write(html_str)
+                        updated_count += 1
+                        print(f"✓ Updated {html_file}: '{current_title}' → '{new_title}'")
+                    else:
+                        print(f"⚠️ Could not find '{current_title}' in {html_file}")
                     
             except Exception as e:
-                print(f"❌ Error updating {output_filename}: {e}")
+                print(f"❌ Error processing {html_file}: {e}")
+                import traceback
+                traceback.print_exc()
         
-        print(f"\n📊 Updated {updated} files, skipped {skipped} non-existent files")
+        print(f"\n📝 Updated {updated_count} HTML files, added headers to {added_count} files")
     
-    def _process_without_opf(self, headers_dict: Dict[int, str], html_dir: str, output_dir: str,
-                           batch_size: int, update_html: bool, save_to_file: bool,
-                           current_titles: Dict) -> Dict[int, str]:
-        """FALLBACK: Old number-based processing when no OPF exists"""
+    def _update_html_headers(self, html_dir: str, translated_headers: Dict[int, str]):
+        """Fallback: Update HTML files with translated headers using pattern matching
+        Also handles HTML files without headers by adding them.
+        """
+        updated_count = 0
+        added_count = 0
         
-        print("⚠️ Using legacy number-based processing (no OPF)")
+        # Get all HTML files in directory
+        all_html_files = [f for f in os.listdir(html_dir) if f.endswith('.html')]
         
-        # This is your old translate_headers_batch method
-        translated = self.translate_headers_batch(headers_dict, batch_size)
-        
-        if save_to_file:
-            translations_file = os.path.join(output_dir, "translated_headers.txt")
-            self._save_number_translations(headers_dict, translated, translations_file)
-        
-        if update_html and current_titles:
-            self._update_html_headers_by_numbers(html_dir, translated, current_titles)
-        
-        return translated
-    
-    def translate_headers_batch(self, headers_dict: Dict[int, str], batch_size: int) -> Dict[int, str]:
-        """LEGACY: Translate using chapter numbers (only when no OPF)"""
-        # [Your existing translate_headers_batch code here - keeping numbers]
-        # This is only used as fallback when no OPF exists
-        return {}
-    
-    def _save_number_translations(self, original: Dict[int, str], translated: Dict[int, str], 
-                                 output_path: str):
-        """LEGACY: Save with chapter numbers (only when no OPF)"""
-        try:
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write("Chapter Translations (No OPF - Legacy Mode)\n")
-                f.write("=" * 50 + "\n\n")
-                
-                for num in sorted(original.keys()):
-                    f.write(f"Chapter {num}:\n")
-                    f.write(f"  Original:   {original[num]}\n")
-                    f.write(f"  Translated: {translated.get(num, original[num])}\n")
-                    f.write("-" * 40 + "\n")
+        for num, new_title in translated_headers.items():
+            # Try multiple filename patterns
+            possible_patterns = [
+                f"response_{num}_",  # Standard pattern
+                f"response_{num}.",  # With dot
+                f"chapter_{num}_",   # Alternative pattern
+                f"chapter{num}_",    # Without underscore
+                f"{num}_",           # Just number
+                f"{num}.",           # Number with dot
+                f"ch{num}_",         # Abbreviated
+                f"ch_{num}_",        # Abbreviated with underscore
+            ]
             
-            print(f"✅ Saved (legacy) to: {output_path}")
-        except Exception as e:
-            print(f"❌ Error: {e}")
-    
-    def _update_html_headers_by_numbers(self, html_dir: str, translated: Dict[int, str],
-                                       current_titles: Dict):
-        """LEGACY: Update using chapter numbers (only when no OPF)"""
-        # [Your existing number-based update code]
-        pass
+            html_file = None
+            for pattern in possible_patterns:
+                matching_files = [f for f in all_html_files if f.startswith(pattern)]
+                if matching_files:
+                    html_file = matching_files[0]
+                    break
+            
+            if not html_file:
+                # Last resort: check if any file contains the chapter number
+                for f in all_html_files:
+                    if re.search(rf'\b{num}\b', f):
+                        html_file = f
+                        break
+            
+            if not html_file:
+                print(f"⚠️ No HTML file found for chapter {num}")
+                continue
+                
+            html_path = os.path.join(html_dir, html_file)
+            
+            try:
+                # Check if HTML has a header
+                has_header, soup = self._check_html_has_header(html_path)
+                
+                if not soup:
+                    print(f"⚠️ Could not parse {html_file}")
+                    continue
+                
+                if not has_header:
+                    # HTML has no header, insert the translated one
+                    print(f"📝 Adding header to {html_file}: '{new_title}'")
+                    if self._insert_header_into_html(soup, new_title):
+                        # Write back with proper encoding
+                        html_str = str(soup)
+                        with open(html_path, 'w', encoding='utf-8') as f:
+                            f.write(html_str)
+                        added_count += 1
+                        print(f"✓ Added header to {html_file}")
+                    else:
+                        print(f"⚠️ Failed to add header to {html_file}")
+                else:
+                    # HTML has header, update it
+                    updated = False
+                    
+                    # Update title tag
+                    title_tag = soup.find('title')
+                    if title_tag:
+                        title_tag.string = new_title
+                        updated = True
+                    
+                    # Update first h1, h2, or h3 tag
+                    for tag in ['h1', 'h2', 'h3']:
+                        header = soup.find(tag)
+                        if header:
+                            header.clear()
+                            header.string = new_title
+                            updated = True
+                            break
+                    
+                    # Update meta og:title
+                    meta_title = soup.find('meta', {'property': 'og:title'})
+                    if meta_title:
+                        meta_title['content'] = new_title
+                        updated = True
+                    
+                    if updated:
+                        # Ensure proper encoding
+                        html_str = str(soup)
+                        # Preserve Unicode characters
+                        with open(html_path, 'w', encoding='utf-8') as f:
+                            f.write(html_str)
+                        updated_count += 1
+                        print(f"✓ Updated {html_file} with: {new_title}")
+                    
+            except Exception as e:
+                print(f"❌ Error processing chapter {num}: {e}")
+        
+        print(f"\n📝 Updated {updated_count} HTML files, added headers to {added_count} files")
 
 class MetadataTranslator:
     """Translate EPUB metadata fields"""
@@ -1305,7 +1479,7 @@ def enhance_epub_compiler(compiler_instance):
         translate_metadata_fields = {}
     
     batch_translate = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
-    headers_per_batch = int(os.getenv('HEADERS_PER_BATCH', '400'))
+    headers_per_batch = int(os.getenv('HEADERS_PER_BATCH', 800))
     update_html = os.getenv('UPDATE_HTML_HEADERS', '1') == '1'
     save_translations = os.getenv('SAVE_HEADER_TRANSLATIONS', '1') == '1'
     
@@ -1480,7 +1654,7 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                     actual_num = chapter_info.get('actual_num')
                     if actual_num == 0:
                         has_chapter_zero = True
-                        log("  ✓ Found Chapter 0 in translation_progress.json")
+                        log("  ✔ Found Chapter 0 in translation_progress.json")
                         break
             
             # Build complete mapping (excluding cover.html)
@@ -1637,18 +1811,20 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                                 full_path = href
                             manifest[item_id] = full_path
                     
-                    # Get spine order - include ALL files except navigation and cover
+                    # Get spine order - include ALL files except navigation, title, and cover
+                    # FIX: Added 'title.' to the skip list
                     spine = root.find('.//opf:spine', ns)
                     if spine is not None:
                         for itemref in spine.findall('opf:itemref', ns):
                             idref = itemref.get('idref')
                             if idref and idref in manifest:
                                 file_path = manifest[idref]
-                                # Skip navigation, toc, and cover files
-                                if not any(skip in file_path.lower() for skip in ['nav.', 'toc.', 'cover.']):
+                                # Skip navigation, toc, title, and cover files
+                                # FIXED: Added 'title.' to skip list
+                                if not any(skip in file_path.lower() for skip in ['nav.', 'toc.', 'cover.', 'title.']):
                                     spine_order.append(file_path)
                     
-                    log(f"📋 Found {len(spine_order)} content files in OPF spine order (excluding nav/toc/cover)")
+                    log(f"📋 Found {len(spine_order)} content files in OPF spine order (excluding nav/toc/title/cover)")
                     
                     # Show breakdown
                     notice_count = sum(1 for f in spine_order if 'notice' in f.lower())
@@ -1662,16 +1838,17 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                     log(f"⚠️ Error parsing OPF: {e}")
                     spine_order = []
             
-            # Use spine order if available, otherwise alphabetical (excluding cover)
+            # Use spine order if available, otherwise alphabetical (excluding cover and title)
             if spine_order:
                 epub_html_files = spine_order
                 log("✅ Using STRICT OPF spine order for source headers")
             else:
+                # FIXED: Added 'title.' to skip list in fallback
                 epub_html_files = sorted([f for f in zf.namelist() 
                                          if f.endswith(('.html', '.xhtml', '.htm')) 
                                          and not f.startswith('__MACOSX')
-                                         and not any(skip in f.lower() for skip in ['nav.', 'toc.', 'cover.'])])
-                log("⚠️ No OPF spine found, using alphabetical order (excluding nav/toc/cover)")
+                                         and not any(skip in f.lower() for skip in ['nav.', 'toc.', 'cover.', 'title.'])])
+                log("⚠️ No OPF spine found, using alphabetical order (excluding nav/toc/title/cover)")
             
             log(f"📚 Processing {len(epub_html_files)} content files from source EPUB")
             
@@ -1793,4 +1970,5 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
         import traceback
         log(traceback.format_exc())
     
+    return source_headers, current_titles
     return source_headers, current_titles
