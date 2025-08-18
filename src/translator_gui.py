@@ -13941,7 +13941,7 @@ Important rules:
                     'TRANSLATE_METADATA_FIELDS': json.dumps(self.translate_metadata_fields),
                     'METADATA_TRANSLATION_MODE': self.config.get('metadata_translation_mode', 'together'),
                     'BATCH_TRANSLATE_HEADERS': "1" if self.batch_translate_headers_var.get() else "0",
-                    'HEADERS_PER_BATCH': str(self.config.get('headers_per_batch', 400)),
+                    'HEADERS_PER_BATCH': str(self.config.get('headers_per_batch', 800)),
                     'UPDATE_HTML_HEADERS': "1" if self.update_html_headers_var.get() else "0",
                     'SAVE_HEADER_TRANSLATIONS': "1" if self.save_header_translations_var.get() else "0",
                     # EXTRACTION_MODE:
