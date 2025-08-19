@@ -2230,10 +2230,38 @@ class EPUBCompiler:
         
         self.log(f"\n📚 Processing {len(html_files)} chapters...")
         
+        # CRITICAL: Check if we have chapter 0 in our chapter_titles_info
+        has_chapter_zero = 0 in chapter_titles_info
+        
+        # Also check translation_progress.json for confirmation
+        if not has_chapter_zero:
+            progress_file = os.path.join(self.output_dir, 'translation_progress.json')
+            if os.path.exists(progress_file):
+                try:
+                    with open(progress_file, 'r', encoding='utf-8') as f:
+                        progress_data = json.load(f)
+                        if progress_data.get('uses_zero_based', False):
+                            has_chapter_zero = True
+                            self.log("📌 Detected 0-based numbering from translation_progress.json")
+                        # Also check if any chapter has actual_num = 0
+                        for chapter_info in progress_data.get('chapters', {}).values():
+                            if isinstance(chapter_info, dict) and chapter_info.get('actual_num') == 0:
+                                has_chapter_zero = True
+                                self.log("📌 Found Chapter 0 in translation progress")
+                                break
+                except:
+                    pass
+        
+        # Set starting number
+        start_num = 0 if has_chapter_zero else 1
+        
+        self.log(f"📌 Using {'0-based' if has_chapter_zero else '1-based'} chapter numbering")
+        self.log(f"📌 Starting from chapter {start_num}")
+        
         # Process in EXACT order - use position-based numbering
         for idx, filename in enumerate(html_files):
-            # FIXED: Use position-based numbering to match _analyze_chapters
-            chapter_num = idx + 1  # 1-based numbering, same as in _analyze_chapters
+            # Use correct starting number
+            chapter_num = idx + start_num  # Will be 0, 1, 2... if has_chapter_zero, else 1, 2, 3...
             
             try:
                 if self._process_single_chapter(
@@ -2422,9 +2450,6 @@ class EPUBCompiler:
         # Primary source: pre-analyzed title using position-based number
         if num in chapter_titles_info:
             title, confidence, stored_filename = chapter_titles_info[num]
-            # Verify this is the right file (optional safety check)
-            if stored_filename != filename:
-                self.log(f"[WARNING] Filename mismatch for chapter {num}: expected {stored_filename}, got {filename}")
         
         # Re-extract if low confidence or missing
         if not title or confidence < 0.5:
@@ -3295,7 +3320,7 @@ img {
         
         book.add_item(gallery_page)
         return gallery_page
-        
+            
     def _create_nav_content(self, toc_items, book_title="Book"):
         """Create navigation content manually"""
         nav_content = '''<?xml version="1.0" encoding="utf-8"?>
@@ -3309,6 +3334,8 @@ img {
     <h1>Table of Contents</h1>
     <ol>'''
         
+        # The toc_items are already sorted properly by _finalize_book
+        # Don't re-sort them here - just use them as-is
         for item in toc_items:
             if hasattr(item, 'title') and hasattr(item, 'file_name'):
                 nav_content += f'\n<li><a href="{item.file_name}">{ContentProcessor.safe_escape(item.title)}</a></li>'
@@ -3369,15 +3396,63 @@ img {
                 cover_item = first_item
                 spine = spine[1:]  # Remove cover from spine temporarily
         
-        # Set TOC
-        book.toc = toc
+        # DEBUG: Log what we have before sorting
+        #self.log("\n[DEBUG] Before sorting TOC:")
+        #self.log("Spine order:")
+        for idx, item in enumerate(spine):
+            if hasattr(item, 'file_name') and hasattr(item, 'title'):
+                self.log(f"  Spine[{idx}]: {item.file_name} -> {item.title}")
+        
+        #self.log("\nTOC order (before sorting):")
+        for idx, item in enumerate(toc):
+            if hasattr(item, 'file_name') and hasattr(item, 'title'):
+                self.log(f"  TOC[{idx}]: {item.file_name} -> {item.title}")
+        
+        # CRITICAL FIX: Sort TOC to match spine order
+        # Create a mapping of file_name to spine position
+        spine_order = {}
+        for idx, item in enumerate(spine):
+            if hasattr(item, 'file_name'):
+                spine_order[item.file_name] = idx
+        
+        # Sort the TOC based on spine order
+        sorted_toc = []
+        unsorted_items = []
+        
+        for toc_item in toc:
+            if hasattr(toc_item, 'file_name'):
+                if toc_item.file_name in spine_order:
+                    sorted_toc.append((spine_order[toc_item.file_name], toc_item))
+                else:
+                    # Items not in spine (like gallery) go at the end
+                    unsorted_items.append(toc_item)
+            else:
+                unsorted_items.append(toc_item)
+        
+        # Sort by spine position
+        sorted_toc.sort(key=lambda x: x[0])
+        
+        # Extract just the items (remove the sort key)
+        final_toc = [item for _, item in sorted_toc]
+        
+        # Add any unsorted items at the end (like gallery)
+        final_toc.extend(unsorted_items)
+        
+        # DEBUG: Log after sorting
+        #self.log("\nTOC order (after sorting to match spine):")
+        for idx, item in enumerate(final_toc):
+            if hasattr(item, 'file_name') and hasattr(item, 'title'):
+                self.log(f"  TOC[{idx}]: {item.file_name} -> {item.title}")
+        
+        # Set the sorted TOC
+        book.toc = final_toc
         
         # Add NCX
         ncx = epub.EpubNcx()
         book.add_item(ncx)
         
         if use_ncx_only:
-            self.log(f"[INFO] NCX-only navigation forced - {len(toc)} chapters")
+            self.log(f"[INFO] NCX-only navigation forced - {len(final_toc)} chapters")
             
             # Build final spine: Cover (if exists) → Chapters
             final_spine = []
@@ -3395,11 +3470,11 @@ img {
                 
         else:
             # Normal EPUB3 processing with Nav
-            self.log(f"[INFO] EPUB3 format - {len(toc)} chapters")
+            self.log(f"[INFO] EPUB3 format - {len(final_toc)} chapters")
             
-            # Create Nav with manual content
+            # Create Nav with manual content using SORTED TOC
             nav = epub.EpubNav()
-            nav.content = self._create_nav_content(toc, book.title).encode('utf-8')
+            nav.content = self._create_nav_content(final_toc, book.title).encode('utf-8')
             nav.uid = 'nav'
             nav.file_name = 'nav.xhtml'
             book.add_item(nav)
