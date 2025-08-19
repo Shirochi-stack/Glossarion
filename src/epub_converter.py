@@ -1912,55 +1912,38 @@ class EPUBCompiler:
         if opf_order:
             self.log("✅ Using authoritative chapter order from OPF/EPUB")
             
-            # Create mapping: remove "response_" prefix from output files to match OPF
-            output_to_original = {}
-            for output_file in html_files:
-                # Strip "response_" prefix if present
-                if output_file.startswith('response_'):
-                    original_name = output_file[len('response_'):]
-                    output_to_original[output_file] = original_name
-                else:
-                    output_to_original[output_file] = output_file
-            
-            # Now sort the output files based on OPF order
+            # Create mapping based on core filename (no extensions, no prefixes)
             ordered_files = []
             unmapped_files = []
             
             for output_file in html_files:
-                original_name = output_to_original[output_file]
+                # Get core name by stripping response_ and ALL extensions
+                core_name = output_file
+                if core_name.startswith('response_'):
+                    core_name = core_name[9:]  # Remove 'response_'
                 
-                # Check if this original name is in our OPF order
-                if original_name in opf_order:
-                    chapter_order = opf_order[original_name]
-                    ordered_files.append((chapter_order, output_file))
-                    self.log(f"  Mapped: {output_file} -> {original_name} (order: {chapter_order})")
-                # Replace the broken fuzzy matching section with:
-                else:
-                    # Try more precise matching based on chapter numbers
-                    found = False
+                # Strip extension to get base name
+                core_name = core_name.rsplit('.', 1)[0]  # Remove .html
+                
+                # Now match against OPF entries
+                matched = False
+                for opf_name, chapter_order in opf_order.items():
+                    # Get OPF core name - handle .htm.xhtml case
+                    opf_core = opf_name
+                    if opf_core.endswith('.xhtml'):
+                        opf_core = opf_core[:-6]  # Remove .xhtml
+                    if opf_core.endswith('.htm'):
+                        opf_core = opf_core[:-4]  # Remove .htm
                     
-                    # Extract chapter number from our filename
-                    our_chapter_match = re.search(r'chapter_(\d+)', original_name, re.IGNORECASE)
-                    
-                    if our_chapter_match:
-                        our_chapter_num = our_chapter_match.group(1)
-                        
-                        # Look for exact chapter number match in OPF files
-                        for opf_name, order in opf_order.items():
-                            opf_chapter_match = re.search(r'chapter_(\d+)', opf_name, re.IGNORECASE)
-                            if opf_chapter_match:
-                                opf_chapter_num = opf_chapter_match.group(1)
-                                
-                                # Exact chapter number match
-                                if our_chapter_num == opf_chapter_num:
-                                    ordered_files.append((order, output_file))
-                                    self.log(f"  Mapped (exact chapter): {output_file} -> {opf_name} (order: {order})")
-                                    found = True
-                                    break
-                    
-                    if not found:
-                        unmapped_files.append(output_file)
-                        self.log(f"  ⚠️ Could not map: {output_file} (original: {original_name})")
+                    if core_name == opf_core:
+                        ordered_files.append((chapter_order, output_file))
+                        self.log(f"  Mapped: {output_file} -> {opf_name} (order: {chapter_order})")
+                        matched = True
+                        break
+                
+                if not matched:
+                    unmapped_files.append(output_file)
+                    self.log(f"  ⚠️ Could not map: {output_file} (core: {core_name})")
             
             if ordered_files:
                 # Sort by chapter order and extract just the filenames
@@ -1973,14 +1956,6 @@ class EPUBCompiler:
                     final_order.extend(sorted(unmapped_files))
                 
                 self.log(f"✅ Successfully ordered {len(final_order)} chapters using OPF")
-                
-                # Debug: Show final order
-                self.log("\n[DEBUG] Final chapter order:")
-                for i, f in enumerate(final_order[:10]):
-                    self.log(f"  {i+1}. {f}")
-                if len(final_order) > 10:
-                    self.log(f"  ... and {len(final_order)-10} more")
-                
                 return final_order
             else:
                 self.log("⚠️ Could not map any files using OPF order, falling back to pattern matching")
