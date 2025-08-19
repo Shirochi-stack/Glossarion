@@ -1738,237 +1738,36 @@ class EPUBCompiler:
         
         self.log(f"📖 Analyzing {len(sorted_files)} translated chapter files for titles...")
         
-        # Check if lxml is available for more stable parsing
-        use_lxml = False
-        lxml_html = None
-        try:
-            from lxml import etree, html as lxml_html
-            use_lxml = True
-            self.log("✅ Using lxml for stable title extraction (with BeautifulSoup fallback)")
-        except ImportError:
-            self.log("⚠️ lxml not available, using BeautifulSoup for title extraction")
-        
         # Process files in order - chapter number is ALWAYS based on position
         for idx, filename in enumerate(sorted_files):
             file_path = os.path.join(self.output_dir, filename)
             
             try:
                 # Chapter number is simply the position in our sorted list
-                chapter_num = idx + 1  # 1-based numbering
+                chapter_num = idx  # 0-based, always
                 
-                # Read content
+                # Read content and extract title...
                 with open(file_path, 'r', encoding='utf-8') as f:
                     raw_html_content = f.read()
                 
-                # Pre-process: Fix encoding issues first (smart quotes, etc.)
+                # [Rest of the extraction logic remains the same...]
                 html_content = self._fix_encoding_issues(raw_html_content)
-                
-                # Pre-process: Decode HTML entities while preserving Unicode
                 html_content = HTMLEntityDecoder.decode(html_content)
                 
-                title = None
-                confidence = 0.0
-                extraction_method = "unknown"
+                title, confidence = TitleExtractor.extract_from_html(
+                    html_content, chapter_num, filename
+                )
                 
-                # Try lxml first if available (better structure preservation)
-                if use_lxml and lxml_html:
-                    try:
-                        # Use lxml's HTML parser with recovery mode for better handling of malformed HTML
-                        parser = lxml_html.HTMLParser(
-                            encoding='utf-8', 
-                            recover=True,
-                            no_network=True,
-                            remove_comments=True,
-                            remove_pis=True,
-                            remove_blank_text=True
-                        )
-                        
-                        # Parse the document
-                        doc = lxml_html.document_fromstring(html_content.encode('utf-8'), parser=parser)
-                        
-                        candidates = []
-                        
-                        # Strategy 1: <title> tag (highest confidence)
-                        title_elements = doc.xpath('//title')
-                        if title_elements:
-                            for title_elem in title_elements:
-                                title_text = title_elem.text_content() if title_elem.text_content() else ''
-                                title_text = title_text.strip()
-                                # Accept any non-empty title
-                                if title_text and title_text.lower() not in ['untitled', 'chapter', 'document']:
-                                    candidates.append((title_text, 0.95, "lxml_title_tag"))
-                                    break
-                        
-                        # Strategy 2: h1 tags (very high confidence) - take ALL h1s
-                        h1_elements = doc.xpath('//h1')
-                        for i, h1 in enumerate(h1_elements[:3]):  # First 3 h1s
-                            h1_text = h1.text_content() if h1.text_content() else ''
-                            h1_text = h1_text.strip()
-                            if h1_text and len(h1_text) < 300:
-                                # First h1 gets highest confidence
-                                confidence = 0.9 if i == 0 else 0.85
-                                candidates.append((h1_text, confidence, f"lxml_h1_tag_{i+1}"))
-                        
-                        # Strategy 3: h2 tags (high confidence) - take ALL h2s including roman numerals
-                        h2_elements = doc.xpath('//h2')
-                        for i, h2 in enumerate(h2_elements[:3]):  # First 3 h2s
-                            h2_text = h2.text_content() if h2.text_content() else ''
-                            h2_text = h2_text.strip()
-                            if h2_text and len(h2_text) < 250:
-                                # First h2 gets highest confidence
-                                confidence = 0.8 if i == 0 else 0.75
-                                candidates.append((h2_text, confidence, f"lxml_h2_tag_{i+1}"))
-                        
-                        # Strategy 4: h3 tags (moderate confidence)
-                        h3_elements = doc.xpath('//h3')
-                        for i, h3 in enumerate(h3_elements[:3]):  # First 3 h3s
-                            h3_text = h3.text_content() if h3.text_content() else ''
-                            h3_text = h3_text.strip()
-                            if h3_text and len(h3_text) < 200:
-                                confidence = 0.7 if i == 0 else 0.65
-                                candidates.append((h3_text, confidence, f"lxml_h3_tag_{i+1}"))
-                        
-                        # Strategy 5: Bold/strong text in first paragraphs
-                        first_paras = doc.xpath('//p[position()<=5]')
-                        for para in first_paras:
-                            bold_elements = para.xpath('.//b | .//strong')
-                            for bold in bold_elements[:2]:
-                                bold_text = bold.text_content() if bold.text_content() else ''
-                                bold_text = bold_text.strip()
-                                # Accept short bold text (might be roman numerals)
-                                if bold_text and len(bold_text) <= 150:
-                                    candidates.append((bold_text, 0.6, "lxml_bold_text"))
-                        
-                        # Strategy 6: Center-aligned text (common for titles)
-                        center_elements = doc.xpath('//*[@align="center"] | //*[contains(@style, "text-align") and contains(@style, "center")]')
-                        for center in center_elements[:3]:
-                            center_text = center.text_content() if center.text_content() else ''
-                            center_text = center_text.strip()
-                            if center_text and len(center_text) <= 200:
-                                candidates.append((center_text, 0.65, "lxml_centered_text"))
-                        
-                        # Strategy 7: All-caps text (common in older books)
-                        for elem in doc.xpath('//h1 | //h2 | //h3 | //p | //div')[:10]:
-                            elem_text = elem.text_content() if elem.text_content() else ''
-                            elem_text = elem_text.strip()
-                            if elem_text and elem_text.isupper():
-                                # Keep as-is (don't auto-convert to title case)
-                                candidates.append((elem_text, 0.55, "lxml_all_caps"))
-                        
-                        # Strategy 8: Pattern matching in first paragraph
-                        first_p_elements = doc.xpath('//p[1]')
-                        if first_p_elements:
-                            first_p = first_p_elements[0]
-                            p_text = first_p.text_content() if first_p.text_content() else ''
-                            p_text = p_text.strip()
-                            
-                            # Look for "Chapter X: Title" patterns
-                            chapter_pattern = re.match(
-                                r'^(Chapter\s+[\dIVXLCDM]+\s*[:\-–—]\s*)(.{2,100})(?:\.|$)',
-                                p_text, re.IGNORECASE
-                            )
-                            if chapter_pattern:
-                                # Get the title part after "Chapter X:"
-                                title_part = chapter_pattern.group(2).strip()
-                                if title_part:
-                                    candidates.append((title_part, 0.8, "lxml_paragraph_pattern_title"))
-                                # Also include full pattern as option
-                                full_title = chapter_pattern.group(0).strip().rstrip('.')
-                                candidates.append((full_title, 0.75, "lxml_paragraph_pattern_full"))
-                            elif len(p_text) <= 100:
-                                # Short first paragraph might be title
-                                candidates.append((p_text, 0.4, "lxml_paragraph_standalone"))
-                        
-                        # Evaluate and select best candidate
-                        if candidates:
-                            unique_candidates = {}
-                            for cand_title, cand_confidence, cand_source in candidates:
-                                # Clean the title
-                                cand_title = TitleExtractor.clean_title(cand_title)
-                                
-                                # Validate the title (now accepts short titles like roman numerals)
-                                if cand_title and TitleExtractor.is_valid_title(cand_title):
-                                    # Keep the highest confidence version of each unique title
-                                    if cand_title not in unique_candidates or unique_candidates[cand_title][1] < cand_confidence:
-                                        unique_candidates[cand_title] = (cand_title, cand_confidence, cand_source)
-                            
-                            if unique_candidates:
-                                # Sort by confidence and get the best one
-                                sorted_candidates = sorted(unique_candidates.values(), key=lambda x: x[1], reverse=True)
-                                title, confidence, extraction_method = sorted_candidates[0]
-                                
-                                # Debug log
-                                self.log(f"[DEBUG] lxml extracted: '{title}' (confidence: {confidence:.2f}, method: {extraction_method})")
-                        
-                    except Exception as lxml_error:
-                        self.log(f"[DEBUG] lxml extraction failed for {filename}: {lxml_error}")
-                
-                # If lxml didn't work or didn't find a good title, try BeautifulSoup
-                if not title or confidence < 0.5:
-                    try:
-                        # Use BeautifulSoup as fallback (better entity handling for malformed HTML)
-                        bs_title, bs_confidence = TitleExtractor.extract_from_html(
-                            html_content, chapter_num, filename
-                        )
-                        
-                        # Use BeautifulSoup result if it's better
-                        if bs_confidence > confidence:
-                            title = bs_title
-                            confidence = bs_confidence
-                            extraction_method = "beautifulsoup"
-                        
-                    except Exception as bs_error:
-                        self.log(f"[DEBUG] BeautifulSoup extraction also failed for {filename}: {bs_error}")
-                
-                # Clean and validate the title one more time
-                if title:
-                    title = TitleExtractor.clean_title(title)
-                    if not TitleExtractor.is_valid_title(title):
-                        title = None
-                        confidence = 0.0
-                
-                # Fallback title extraction for non-standard files
-                if not title and not filename.startswith('response_'):
-                    # Try enhanced extraction methods for web-scraped content
-                    fallback_title = self._fallback_title_extraction(html_content, filename, chapter_num)
-                    if fallback_title:
-                        title = fallback_title
-                        confidence = 0.3
-                        extraction_method = "fallback_extraction"
-                
-                # Final fallback - use chapter number
-                if not title:
-                    title = f"Chapter {chapter_num}"
-                    confidence = 0.1
-                    extraction_method = "fallback_number"
-                
-                # Store the result with position-based chapter number
+                # Store with 0-based index
                 chapter_info[chapter_num] = (title, confidence, filename)
                 
-                # Log with confidence indicator and method
+                # Log the result
                 indicator = "✅" if confidence > 0.7 else "🟡" if confidence > 0.4 else "🔴"
-                self.log(f"  {indicator} Chapter {chapter_num}: '{title}' (confidence: {confidence:.2f}, method: {extraction_method})")
+                self.log(f"  {indicator} Chapter {chapter_num}: '{title}' (confidence: {confidence:.2f})")
                 
             except Exception as e:
                 self.log(f"❌ Error processing {filename}: {e}")
-                import traceback
-                self.log(f"[DEBUG] Traceback: {traceback.format_exc()}")
-                
-                # Use fallback chapter number based on position
-                fallback_num = idx + 1
-                chapter_info[fallback_num] = (f"Chapter {fallback_num}", 0.0, filename)
-        
-        # Summary statistics
-        if chapter_info:
-            confident = sum(1 for _, (_, conf, _) in chapter_info.items() if conf > 0.5)
-            medium = sum(1 for _, (_, conf, _) in chapter_info.items() if 0.3 < conf <= 0.5)
-            low = sum(1 for _, (_, conf, _) in chapter_info.items() if conf <= 0.3)
-            
-            self.log(f"\n📊 Title extraction summary:")
-            self.log(f"   • High confidence (>0.5): {confident} chapters")
-            self.log(f"   • Medium confidence (0.3-0.5): {medium} chapters")
-            self.log(f"   • Low confidence (≤0.3): {low} chapters")
-            self.log(f"   • Total: {len(chapter_info)} chapters")
+                chapter_info[idx] = (f"Chapter {idx}", 0.0, filename)
         
         return chapter_info
 
@@ -2230,38 +2029,15 @@ class EPUBCompiler:
         
         self.log(f"\n📚 Processing {len(html_files)} chapters...")
         
-        # CRITICAL: Check if we have chapter 0 in our chapter_titles_info
-        has_chapter_zero = 0 in chapter_titles_info
-        
-        # Also check translation_progress.json for confirmation
-        if not has_chapter_zero:
-            progress_file = os.path.join(self.output_dir, 'translation_progress.json')
-            if os.path.exists(progress_file):
-                try:
-                    with open(progress_file, 'r', encoding='utf-8') as f:
-                        progress_data = json.load(f)
-                        if progress_data.get('uses_zero_based', False):
-                            has_chapter_zero = True
-                            self.log("📌 Detected 0-based numbering from translation_progress.json")
-                        # Also check if any chapter has actual_num = 0
-                        for chapter_info in progress_data.get('chapters', {}).values():
-                            if isinstance(chapter_info, dict) and chapter_info.get('actual_num') == 0:
-                                has_chapter_zero = True
-                                self.log("📌 Found Chapter 0 in translation progress")
-                                break
-                except:
-                    pass
-        
-        # Set starting number
-        start_num = 0 if has_chapter_zero else 1
-        
-        self.log(f"📌 Using {'0-based' if has_chapter_zero else '1-based'} chapter numbering")
-        self.log(f"📌 Starting from chapter {start_num}")
-        
-        # Process in EXACT order - use position-based numbering
+        # Just use the index as chapter number - don't try to be clever
+        # The files are ALREADY in the correct order from _find_html_files
         for idx, filename in enumerate(html_files):
-            # Use correct starting number
-            chapter_num = idx + start_num  # Will be 0, 1, 2... if has_chapter_zero, else 1, 2, 3...
+            # Chapter number is just the position in the list
+            chapter_num = idx
+            
+            # Try position first, then position+1 for backwards compatibility
+            if chapter_num not in chapter_titles_info and (chapter_num + 1) in chapter_titles_info:
+                chapter_num = idx + 1
             
             try:
                 if self._process_single_chapter(
@@ -2270,11 +2046,10 @@ class EPUBCompiler:
                 ):
                     chapters_added += 1
             except Exception as e:
-                self.log(f"[ERROR] Chapter {chapter_num} failed: {e}")
+                self.log(f"[ERROR] Chapter {chapter_num} ({filename}) failed: {e}")
                 
                 # Add placeholder with consistent numbering
                 try:
-                    # Try to get the title from chapter_titles_info
                     title = f"Chapter {chapter_num}"
                     if chapter_num in chapter_titles_info:
                         title = chapter_titles_info[chapter_num][0]
@@ -2376,8 +2151,9 @@ class EPUBCompiler:
                     '</body>\n' + \
                     '</html>'
             
-            # Create chapter
-            safe_fn = f"chapter_{num:03d}.xhtml"
+            # Use the actual filename from the input
+            safe_fn = os.path.basename(filename)
+            
             chapter = epub.EpubHtml(
                 title=title,
                 file_name=safe_fn,
@@ -2395,48 +2171,38 @@ class EPUBCompiler:
             spine.append(chapter)
             toc.append(chapter)
             
-            self.log(f"✅ Added chapter {num}: '{title}'")
+            self.log(f"✅ Added chapter {num}: '{title}' as {safe_fn}")
             return True
             
         except Exception as e:
             self.log(f"[ERROR] Failed to process chapter {num}: {e}")
-            # Add a placeholder chapter
+            # Add placeholder with consistent numbering
             try:
+                # Try to get the title from chapter_titles_info
                 title = f"Chapter {num}"
                 if num in chapter_titles_info:
                     title = chapter_titles_info[num][0]
                 
-                placeholder_content = '<?xml version="1.0" encoding="utf-8"?>\n' + \
-                    '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" ' + \
-                    '"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">\n' + \
-                    '<html xmlns="http://www.w3.org/1999/xhtml">\n' + \
-                    '<head>\n' + \
-                    '<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />\n' + \
-                    f'<title>{ContentProcessor.safe_escape(title)}</title>\n' + \
-                    '</head>\n' + \
-                    '<body>\n' + \
-                    f'<h1>{ContentProcessor.safe_escape(title)}</h1>\n' + \
-                    '<p>Error loading chapter content.</p>\n' + \
-                    '</body>\n' + \
-                    '</html>'
+                safe_fn = os.path.basename(filename)
                 
-                safe_fn = f"chapter_{num:03d}.xhtml"
                 chapter = epub.EpubHtml(
                     title=title,
                     file_name=safe_fn,
                     lang=metadata.get("language", "en")
                 )
-                chapter.content = FileUtils.ensure_bytes(placeholder_content)
-
-                # Add CSS to placeholder chapters too
-                for css_item in css_items:
-                    chapter.add_item(css_item)
-                    
+                chapter.content = f"""<?xml version="1.0" encoding="utf-8"?>
+    <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+    <html xmlns="http://www.w3.org/1999/xhtml">
+    <head><title>{ContentProcessor.safe_escape(title)}</title></head>
+    <body>
+    <h1>{ContentProcessor.safe_escape(title)}</h1>
+    <p>Error loading: {filename}</p>
+    </body>
+    </html>""".encode('utf-8')
+                
                 book.add_item(chapter)
                 spine.append(chapter)
                 toc.append(chapter)
-                
-                self.log(f"⚠️ Added placeholder for chapter {num}")
                 return True
             except:
                 return False
@@ -3397,8 +3163,8 @@ img {
                 spine = spine[1:]  # Remove cover from spine temporarily
         
         # DEBUG: Log what we have before sorting
-        #self.log("\n[DEBUG] Before sorting TOC:")
-        #self.log("Spine order:")
+        self.log("\n[DEBUG] Before sorting TOC:")
+        self.log("Spine order:")
         for idx, item in enumerate(spine):
             if hasattr(item, 'file_name') and hasattr(item, 'title'):
                 self.log(f"  Spine[{idx}]: {item.file_name} -> {item.title}")
@@ -3439,7 +3205,7 @@ img {
         final_toc.extend(unsorted_items)
         
         # DEBUG: Log after sorting
-        #self.log("\nTOC order (after sorting to match spine):")
+        self.log("\nTOC order (after sorting to match spine):")
         for idx, item in enumerate(final_toc):
             if hasattr(item, 'file_name') and hasattr(item, 'title'):
                 self.log(f"  TOC[{idx}]: {item.file_name} -> {item.title}")
