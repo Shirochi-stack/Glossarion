@@ -3208,12 +3208,19 @@ Recent translations to summarize:
             filename = spine_ch['filename']
             chapter_num = spine_ch['file_chapter_num']
             
-            # Build expected response filename - FIX: Always use .html
-            if filename.endswith(('.html', '.xhtml', '.htm')):
-                base_name = os.path.splitext(filename)[0]
+            # Find the actual response file that exists
+            base_name = os.path.splitext(filename)[0]
+            expected_response = None
+            
+            # Look for any response file that contains the base_name
+            for file in os.listdir(output_dir):
+                if file.startswith('response_') and base_name in file:
+                    expected_response = file
+                    break
+            
+            # Fallback if no file found
+            if not expected_response:
                 expected_response = f"response_{base_name}.html"
-            else:
-                expected_response = f"response_{filename}"
             
             response_path = os.path.join(output_dir, expected_response)
             
