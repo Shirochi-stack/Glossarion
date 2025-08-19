@@ -868,7 +868,7 @@ class ProgressManager:
         
         # If no entry found for this chapter number, it's new and needs translation
         if not found_chapter_num:
-            print(f"📝 Chapter {actual_num} is new - will translate")
+            #print(f"📝 Chapter {actual_num} is new - will translate")
             return True, None, None
         
         # THEN: Do the normal content hash check
@@ -3881,6 +3881,40 @@ class BatchTranslationProcessor:
     
     def process_single_chapter(self, chapter_data):
         """Process a single chapter (runs in thread)"""
+        # APPLY INTERRUPTIBLE THREADING DELAY FIRST
+        thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
+        if thread_delay > 0:
+            # Check if we need to wait (same logic as unified_api_client)
+            if hasattr(self.client, '_thread_submission_lock') and hasattr(self.client, '_last_thread_submission_time'):
+                with self.client._thread_submission_lock:
+                    current_time = time.time()
+                    time_since_last = current_time - self.client._last_thread_submission_time
+                    
+                    if time_since_last < thread_delay:
+                        sleep_time = thread_delay - time_since_last
+                        thread_name = threading.current_thread().name
+                        
+                        # PRINT BEFORE THE DELAY STARTS
+                        idx, chapter = chapter_data  # Extract chapter info for better logging
+                        print(f"🧵 [{thread_name}] Applying thread delay: {sleep_time:.1f}s for Chapter {idx+1}")
+                        
+                        # Interruptible sleep - check stop flag every 0.1 seconds
+                        elapsed = 0
+                        check_interval = 0.1
+                        while elapsed < sleep_time:
+                            if self.check_stop_fn():
+                                print(f"🛑 Threading delay interrupted by stop flag")
+                                raise Exception("Translation stopped by user during threading delay")
+                            
+                            sleep_chunk = min(check_interval, sleep_time - elapsed)
+                            time.sleep(sleep_chunk)
+                            elapsed += sleep_chunk
+                    
+                    self.client._last_thread_submission_time = time.time()
+                    if not hasattr(self.client, '_thread_submission_count'):
+                        self.client._thread_submission_count = 0
+                    self.client._thread_submission_count += 1
+        
         idx, chapter = chapter_data
         chap_num = chapter["num"]
         
@@ -3909,7 +3943,6 @@ class BatchTranslationProcessor:
             print(f"    📖 Extracted actual chapter number: {actual_num} (from raw: {raw_num})")
         
         try:
-            # Rest of the processing logic...
             # Check if this is from a text file
             ai_features = None
             is_text_source = self.is_text_file or chapter.get('filename', '').endswith('.txt') or chapter.get('is_chunk', False)
