@@ -3321,6 +3321,38 @@ img {
         
         return nav_content
 
+
+    def _get_order_from_progress_file(self, progress_file: str) -> Dict[str, int]:
+        """Get chapter order from translation_progress.json
+        Returns dict mapping original_filename -> chapter_number
+        """
+        try:
+            with open(progress_file, 'r', encoding='utf-8') as f:
+                progress_data = json.load(f)
+            
+            filename_to_order = {}
+            
+            # Extract chapter order from progress data
+            chapters = progress_data.get('chapters', {})
+            
+            for chapter_key, chapter_info in chapters.items():
+                # Get the original basename from progress data
+                original_basename = chapter_info.get('original_basename', '')
+                if original_basename:
+                    # Map to chapter position (key is usually the chapter number)
+                    try:
+                        chapter_num = int(chapter_key)
+                        filename_to_order[original_basename] = chapter_num - 1  # Convert to 0-based
+                        self.log(f"  Progress mapping: {original_basename} -> Chapter {chapter_num}")
+                    except (ValueError, TypeError):
+                        pass
+            
+            return filename_to_order if filename_to_order else None
+            
+        except Exception as e:
+            self.log(f"⚠️ Error reading translation_progress.json: {e}")
+            return None
+
     def _finalize_book(self, book: epub.EpubBook, spine: List, toc: List, 
                       cover_file: Optional[str]):
         """Finalize book structure"""
