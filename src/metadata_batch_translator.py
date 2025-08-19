@@ -948,44 +948,109 @@ class BatchHeaderTranslator:
             bool: True if successfully inserted, False otherwise
         """
         try:
-            # NOTE: NOT updating title tag per user requirement
-            # Only adding h1 tag to body
-            
-            # Optional: Update meta og:title if it exists (comment out if not needed)
-            # meta_title = soup.find('meta', {'property': 'og:title'})
-            # if meta_title:
-            #     meta_title['content'] = new_title
-            
-            # Insert header in body
+            # Find or create body tag
             body = soup.find('body')
+            
+            # If no body tag exists, try to find the main content area
+            if not body:
+                # Sometimes the HTML might not have a proper body tag
+                # Look for the html tag instead
+                html_tag = soup.find('html')
+                if html_tag:
+                    # Create a body tag
+                    body = soup.new_tag('body')
+                    # Move all content from html to body
+                    for child in list(html_tag.children):
+                        if child.name != 'head':
+                            body.append(child.extract())
+                    html_tag.append(body)
+                else:
+                    # Last resort: treat the entire soup as the body
+                    body = soup
+            
             if body:
-                # Create new header tag
+                # Create new header tag with the translated title
                 header_tag = soup.new_tag(preferred_tag)
                 header_tag.string = new_title
                 
-                # Find the best position to insert the header
-                # Try to insert it as the first element in body
-                first_element = None
+                # Add some styling to make it stand out (optional)
+                # header_tag['style'] = 'text-align: center; margin: 1em 0;'
+                
+                # Find the best insertion point
+                insertion_done = False
+                
+                # Strategy 1: Insert after any <head> or <meta> tags at the beginning
+                first_content = None
                 for child in body.children:
-                    if child.name:  # Skip text nodes
-                        first_element = child
+                    # Skip whitespace text nodes
+                    if hasattr(child, 'name'):
+                        if child.name and child.name not in ['script', 'style', 'link', 'meta']:
+                            first_content = child
+                            break
+                    elif isinstance(child, str) and child.strip():
+                        # Non-empty text node
+                        first_content = child
+                        break
+                
+                if first_content:
+                    # Insert before the first content element
+                    first_content.insert_before(header_tag)
+                    insertion_done = True
+                    print(f"✓ Inserted {preferred_tag} before first content element")
+                else:
+                    # Body appears to be empty or contains only scripts/styles
+                    # Insert at the beginning of body
+                    if len(list(body.children)) > 0:
+                        # Body has some children (maybe scripts/styles)
+                        # Insert at position 0
+                        body.insert(0, header_tag)
+                    else:
+                        # Body is completely empty
+                        body.append(header_tag)
+                    insertion_done = True
+                    print(f"✓ Inserted {preferred_tag} at beginning of body")
+                
+                # Also add a line break after the header for better formatting
+                if insertion_done:
+                    br_tag = soup.new_tag('br')
+                    header_tag.insert_after(br_tag)
+                    
+                    # Optional: Also add a horizontal rule for visual separation
+                    # hr_tag = soup.new_tag('hr')
+                    # br_tag.insert_after(hr_tag)
+                
+                print(f"✓ Successfully added {preferred_tag} tag with: '{new_title}'")
+                return True
+                
+            else:
+                print(f"⚠️ Could not find or create body tag in HTML")
+                
+                # Fallback: Try to insert at the root level
+                # Create the header tag
+                header_tag = soup.new_tag(preferred_tag)
+                header_tag.string = new_title
+                
+                # Find first element that's not a DOCTYPE or processing instruction
+                first_element = None
+                for item in soup.contents:
+                    if hasattr(item, 'name') and item.name:
+                        first_element = item
                         break
                 
                 if first_element:
-                    # Insert before the first element
                     first_element.insert_before(header_tag)
+                    print(f"✓ Added {preferred_tag} tag at root level with: '{new_title}'")
+                    return True
                 else:
-                    # Body is empty or has only text, insert at beginning
-                    body.insert(0, header_tag)
-                
-                print(f"✓ Added {preferred_tag} tag with: '{new_title}'")
-                return True
-            else:
-                print(f"⚠️ No body tag found in HTML")
-                return False
-                
+                    # Last resort: append to soup
+                    soup.append(header_tag)
+                    print(f"✓ Appended {preferred_tag} tag to document with: '{new_title}'")
+                    return True
+                    
         except Exception as e:
             print(f"❌ Error inserting header: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def _update_html_headers_exact(self, html_dir: str, translated_headers: Dict[int, str], 
@@ -1624,11 +1689,11 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
     
     log("📖 Extracting headers and mapping to output files...")
     
-    # Step 1: Get ALL HTML files and sort them (EXCLUDING cover.html)
+    # Step 1: Get HTML files that contain numbers
     all_html_files = sorted([f for f in os.listdir(html_dir) 
                              if f.endswith('.html') 
-                             and f.lower() != 'cover.html'])
-    log(f"📁 Found {len(all_html_files)} HTML files in {html_dir} (excluding cover.html)")
+                             and re.search(r'\d+', f)])  # Only files with numbers
+    log(f"📁 Found {len(all_html_files)} HTML files with numbers in {html_dir}")
     
     # Step 2: Load translation_progress.json to understand the chapter mapping
     progress_file = os.path.join(html_dir, 'translation_progress.json')
@@ -1657,7 +1722,7 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                         log("  ✔ Found Chapter 0 in translation_progress.json")
                         break
             
-            # Build complete mapping (excluding cover.html)
+            # Build complete mapping (only files with numbers)
             for chapter_hash, chapter_info in all_chapters.items():
                 if isinstance(chapter_info, dict):
                     has_output = chapter_info.get('output_file')
@@ -1667,14 +1732,14 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                         actual_num = chapter_info.get('actual_num')
                         output_file = os.path.basename(chapter_info['output_file'])
                         
-                        # Skip cover.html
-                        if output_file.lower() == 'cover.html':
+                        # Skip files without numbers
+                        if not re.search(r'\d+', output_file):
                             continue
                         
                         if actual_num is not None and output_file in all_html_files:
                             chapter_to_file_map[actual_num] = output_file
                             
-            log(f"📊 Found {len(chapter_to_file_map)} chapter mappings in translation_progress.json (excluding cover)")
+            log(f"📊 Found {len(chapter_to_file_map)} chapter mappings in translation_progress.json")
             
             if chapter_to_file_map:
                 min_ch = min(chapter_to_file_map.keys())
@@ -1716,7 +1781,7 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
             except Exception as e:
                 log(f"⚠️ Error reading {html_file}: {e}")
     else:
-        # No mapping - use file order (excluding cover.html)
+        # No mapping - use file order (only files with numbers)
         log("⚠️ No translation_progress.json mapping found, using file order")
         start_num = 0 if has_chapter_zero else 1
         
@@ -1811,20 +1876,18 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                                 full_path = href
                             manifest[item_id] = full_path
                     
-                    # Get spine order - include ALL files except navigation, title, and cover
-                    # FIX: Added 'title.' to the skip list
+                    # Get spine order - only include files with numbers
                     spine = root.find('.//opf:spine', ns)
                     if spine is not None:
                         for itemref in spine.findall('opf:itemref', ns):
                             idref = itemref.get('idref')
                             if idref and idref in manifest:
                                 file_path = manifest[idref]
-                                # Skip navigation, toc, title, and cover files
-                                # FIXED: Added 'title.' to skip list
-                                if not any(skip in file_path.lower() for skip in ['nav.', 'toc.', 'cover.', 'title.']):
+                                # Only include files with numbers
+                                if re.search(r'\d+', file_path):
                                     spine_order.append(file_path)
                     
-                    log(f"📋 Found {len(spine_order)} content files in OPF spine order (excluding nav/toc/title/cover)")
+                    log(f"📋 Found {len(spine_order)} content files with numbers in OPF spine order")
                     
                     # Show breakdown
                     notice_count = sum(1 for f in spine_order if 'notice' in f.lower())
@@ -1838,17 +1901,17 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                     log(f"⚠️ Error parsing OPF: {e}")
                     spine_order = []
             
-            # Use spine order if available, otherwise alphabetical (excluding cover and title)
+            # Use spine order if available, otherwise alphabetical (only files with numbers)
             if spine_order:
                 epub_html_files = spine_order
                 log("✅ Using STRICT OPF spine order for source headers")
             else:
-                # FIXED: Added 'title.' to skip list in fallback
+                # Fallback: only files with numbers
                 epub_html_files = sorted([f for f in zf.namelist() 
                                          if f.endswith(('.html', '.xhtml', '.htm')) 
                                          and not f.startswith('__MACOSX')
-                                         and not any(skip in f.lower() for skip in ['nav.', 'toc.', 'cover.', 'title.'])])
-                log("⚠️ No OPF spine found, using alphabetical order (excluding nav/toc/title/cover)")
+                                         and re.search(r'\d+', f)])
+                log("⚠️ No OPF spine found, using alphabetical order (only files with numbers)")
             
             log(f"📚 Processing {len(epub_html_files)} content files from source EPUB")
             
@@ -1916,10 +1979,10 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
                     has_output = chapter_info.get('output_file')
                     is_completed = chapter_info.get('status') == 'completed' or has_output
                     
-                    # Skip if output file is cover.html
+                    # Skip if output file doesn't have a number
                     if has_output:
                         output_file = os.path.basename(chapter_info['output_file'])
-                        if output_file.lower() == 'cover.html':
+                        if not re.search(r'\d+', output_file):
                             continue
                     
                     if is_completed and actual_num is not None:
@@ -1970,5 +2033,4 @@ def extract_source_headers_and_current_titles(epub_path: str, html_dir: str, log
         import traceback
         log(traceback.format_exc())
     
-    return source_headers, current_titles
     return source_headers, current_titles
