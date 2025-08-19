@@ -448,6 +448,11 @@ class UnifiedClient:
         self.original_api_key = api_key
         self.original_model = model
         
+        # Thread submission timing controls
+        self._thread_submission_lock = threading.Lock()
+        self._last_thread_submission_time = 0
+        self._thread_submission_count = 0
+        
         # Add unique session ID for this client instance
         self.session_id = str(uuid.uuid4())[:8]
         
@@ -472,17 +477,6 @@ class UnifiedClient:
         self._key_assignment_lock = RLock()
         self._thread_key_assignments = {}  # {thread_id: (key_index, timestamp)}
         self._instance_model_lock = threading.RLock()
-        
-        # ===== ENHANCED THREAD SAFETY STRUCTURES =====
-        
-        # Thread-safe request deduplication with caching
-        #self._request_cache = {}  # {request_hash: (content, finish_reason, timestamp)}
-        #self._request_cache_lock = RLock()
-        #self._cache_expiry_seconds = 300  # 5 minutes
-        
-        # Active request tracking to prevent duplicate processing
-        #self._active_requests = {}  # {request_hash: threading.Event}
-        #self._active_requests_lock = RLock()
         
         # Thread-local storage for client instances
         self._thread_local = threading.local()
@@ -659,7 +653,55 @@ class UnifiedClient:
                         print(f"[DEBUG] Custom base URL set but model {self.model} uses {self.client_type}, not overriding")
                 elif custom_base_url and not use_custom_endpoint:
                     print(f"[DEBUG] Custom base URL detected but disabled via toggle, using standard client")
-    
+ 
+    def _apply_thread_submission_delay(self):
+        # Get threading delay from environment (default 0.5)
+        thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
+        
+        if thread_delay <= 0:
+            return
+        
+        sleep_time = 0
+        should_log = False
+        log_message = ""
+        
+        # HOLD LOCK ONLY BRIEFLY to check timing and update counter
+        with self._thread_submission_lock:
+            current_time = time.time()
+            time_since_last_submission = current_time - self._last_thread_submission_time
+            
+            if time_since_last_submission < thread_delay:
+                sleep_time = thread_delay - time_since_last_submission
+                # Update the timestamp NOW while we have the lock
+                self._last_thread_submission_time = time.time()
+                
+                # Determine if we should log (but don't log yet)
+                if self._thread_submission_count < 3:
+                    should_log = True
+                    log_message = f"🧵 [{threading.current_thread().name}] Thread delay: {sleep_time:.1f}s"
+                elif self._thread_submission_count == 3:
+                    should_log = True
+                    log_message = f"🧵 [Subsequent thread delays: {thread_delay}s each...]"
+            
+            self._thread_submission_count += 1
+        # LOCK RELEASED HERE
+        
+        # NOW do the sleep OUTSIDE the lock
+        if sleep_time > 0:
+            if should_log:
+                print(log_message)
+            
+            # Interruptible sleep
+            elapsed = 0
+            check_interval = 0.1
+            while elapsed < sleep_time:
+                if self._cancelled:
+                    print(f"🛑 Threading delay cancelled")
+                    return  # Exit early if cancelled
+                
+                time.sleep(min(check_interval, sleep_time - elapsed))
+                elapsed += check_interval
+        
     def _get_thread_local_client(self):
         """Get or create thread-local client"""
         thread_id = threading.current_thread().ident
@@ -2609,6 +2651,7 @@ class UnifiedClient:
     def send(self, messages, temperature=None, max_tokens=None, 
              max_completion_tokens=None, context=None) -> Tuple[str, Optional[str]]:
         """Thread-safe send with proper key management and deduplication for batch translation"""
+        self._apply_thread_submission_delay()
         thread_name = threading.current_thread().name
         
         # GENERATE UNIQUE REQUEST ID FOR THIS CALL
@@ -2650,17 +2693,6 @@ class UnifiedClient:
             processing_by_other = False
             event_to_wait = None
             
-            #with self._active_requests_lock:
-            #    if request_hash in self._active_requests:
-            #        # Another thread is processing
-            #        event_to_wait = self._active_requests[request_hash]
-            #        processing_by_other = True
-            #        logger.info(f"[{thread_name}] Request {request_hash[:8]} is being processed by another thread")
-            #    else:
-            #        # We're the first, create an event for others
-            #        event = threading.Event()
-            #        self._active_requests[request_hash] = event
-            #        logger.debug(f"[{thread_name}] Taking ownership of request {request_hash[:8]}")
             
             # Step 3: If another thread is processing, wait for it
             if processing_by_other and event_to_wait:
@@ -2905,27 +2937,9 @@ class UnifiedClient:
             if successful_response and context in ['translation', 'glossary', 'image_translation']:
                 content, finish_reason = successful_response
                 
-                # Cache the successful response
-              #  with self._request_cache_lock:
-              #      self._request_cache[request_hash] = (content, finish_reason, time.time())
-                    
-              #      # Cleanup old cache entries if too many
-              #      if len(self._request_cache) > 1000:
-              #          sorted_items = sorted(self._request_cache.items(), key=lambda x: x[1][2])
-              #          for key, _ in sorted_items[:100]:
-              #              del self._request_cache[key]
                 
                 logger.info(f"[{thread_name}] Cached successful response for {context_str}")
                 
-                # Signal waiting threads BEFORE cleanup
-                #with self._active_requests_lock:
-                #    if request_hash in self._active_requests:
-                #        event = self._active_requests[request_hash]
-                #        event.set()  # Wake up waiting threads
-                #        logger.debug(f"[{thread_name}] Signaled completion of {request_hash[:8]}")
-                #        
-                #        # Schedule cleanup after a delay to ensure waiters get the result
-                #        threading.Timer(5.0, self._cleanup_active_request, args=[request_hash]).start()
             
             if successful_response:
                 return successful_response
@@ -2934,24 +2948,11 @@ class UnifiedClient:
             if last_error:
                 print(f"[{thread_name}] Exhausted {max_retries} retries, last reason: {retry_reason}")
                 
-                # Clean up on failure too
-                #with self._active_requests_lock:
-                #    if request_hash in self._active_requests:
-                 #       event = self._active_requests.pop(request_hash, None)
-                 #       if event:
-                 #           event.set()  # Signal failure to waiters
-                
                 raise last_error
             else:
                 raise Exception(f"Failed after {max_retries} attempts")
                 
         except Exception as e:
-            # Clean up on any exception
-            #with self._active_requests_lock:
-            #    if request_hash in self._active_requests:
-            #        event = self._active_requests.pop(request_hash, None)
-            #        if event:
-            #            event.set()  # Signal error to waiters
             raise
 
     def _send_internal(self, messages, temperature=None, max_tokens=None, 
@@ -3638,6 +3639,7 @@ class UnifiedClient:
                   max_completion_tokens: Optional[int] = None,
                   context: str = 'image_translation') -> Tuple[str, str]:
         """Thread-safe image send with proper key management and deduplication for batch translation"""
+        self._apply_thread_submission_delay()
         thread_name = threading.current_thread().name
         
         # GENERATE UNIQUE REQUEST ID FOR THIS CALL
@@ -3701,18 +3703,6 @@ class UnifiedClient:
             # Step 2: Check if another thread is processing this image (atomic check-and-set)
             processing_by_other = False
             event_to_wait = None
-            
-            #with self._active_requests_lock:
-             #   if request_hash in self._active_requests:
-                    # Another thread is processing this image
-             #       event_to_wait = self._active_requests[request_hash]
-             #       processing_by_other = True
-             #       logger.info(f"[{thread_name}] Image request {request_hash[:8]} is being processed by another thread")
-             #   else:
-              #      # We're the first, create an event for others
-               #     event = threading.Event()
-               #     self._active_requests[request_hash] = event
-                #    logger.debug(f"[{thread_name}] Taking ownership of image request {request_hash[:8]}")
             
             # Step 3: If another thread is processing, wait for it
             if processing_by_other and event_to_wait:
@@ -3986,53 +3976,21 @@ class UnifiedClient:
             if successful_response and context in ['image_translation', 'glossary']:
                 content, finish_reason = successful_response
                 
-                # Cache the successful response
-              #  with self._request_cache_lock:
-              #      self._request_cache[request_hash] = (content, finish_reason, time.time())
-                    
-                    # Cleanup old cache entries if too many
-              #      if len(self._request_cache) > 1000:
-              #          sorted_items = sorted(self._request_cache.items(), key=lambda x: x[1][2])
-              #          for key, _ in sorted_items[:100]:
-              #              del self._request_cache[key]
                 
                 logger.info(f"[{thread_name}] Cached successful image response for {context_str}")
                 
-                # Signal waiting threads BEFORE cleanup
-               # with self._active_requests_lock:
-               #     if request_hash in self._active_requests:
-               #         event = self._active_requests[request_hash]
-               #         event.set()  # Wake up waiting threads
-               #         logger.debug(f"[{thread_name}] Signaled completion of image {request_hash[:8]}")
-                        
-                        # Schedule cleanup after delay to ensure waiters get the result
-               #         threading.Timer(5.0, self._cleanup_active_request, args=[request_hash]).start()
-            
+
             if successful_response:
                 return successful_response
             
             # Exhausted retries
             if last_error:
                 print(f"[{thread_name}] Exhausted {max_retries} image retries, last reason: {retry_reason}")
-                
-                # Clean up on failure too
-                #with self._active_requests_lock:
-                #    if request_hash in self._active_requests:
-                #        event = self._active_requests.pop(request_hash, None)
-                #        if event:
-                #            event.set()  # Signal failure to waiters
-                
                 raise last_error
             else:
                 raise Exception(f"Image request failed after {max_retries} attempts")
                 
         except Exception as e:
-            # Clean up on any exception
-            #with self._active_requests_lock:
-            #    if request_hash in self._active_requests:
-            #        event = self._active_requests.pop(request_hash, None)
-            #        if event:
-            #            event.set()  # Signal error to waiters
             raise
 
     def _send_image_internal(self, messages: List[Dict[str, Any]], image_data: Any,
