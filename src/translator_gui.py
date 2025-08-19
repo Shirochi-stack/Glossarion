@@ -1028,7 +1028,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.9.5"
+        __version__ = "3.9.6"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1128,6 +1128,7 @@ class TranslatorGUI:
         self.single_api_image_chunks_var = tk.BooleanVar(value=False)
         self.enable_gemini_thinking_var = tk.BooleanVar(value=self.config.get('enable_gemini_thinking', True))
         self.thinking_budget_var = tk.StringVar(value=str(self.config.get('thinking_budget', '-1')))
+        self.thread_delay_var = tk.StringVar(value=str(self.config.get('thread_submission_delay', 0.5)))
         self.remove_ai_artifacts = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
         print(f"   🎨 Remove AI Artifacts: {'ENABLED' if self.remove_ai_artifacts else 'DISABLED'}")
         self.disable_chapter_merging_var = tk.BooleanVar(value=self.config.get('disable_chapter_merging', False))
@@ -1907,7 +1908,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.9.5 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.9.6 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def create_file_section(self):
@@ -1985,7 +1986,7 @@ Recent translations to summarize:
         
         # Optional: Add checkbox for enhanced functionality
         options_frame = tb.Frame(self.frame)
-        options_frame.grid(row=3, column=0, columnspan=1, sticky=tk.EW, padx=5, pady=5)
+        options_frame.grid(row=1, column=4, columnspan=1, sticky=tk.EW, padx=5, pady=5)
         
         # Deep scan option for folders
         self.deep_scan_var = tk.BooleanVar(value=False)
@@ -2214,81 +2215,90 @@ Recent translations to summarize:
         tb.Button(self.frame, text="Delete Profile", command=self.delete_profile, width=14).grid(row=2, column=3, sticky=tk.W, padx=5, pady=5)
     
     def _create_settings_section(self):
-            """Create all settings controls"""
-            # API delay (left side)
-            tb.Label(self.frame, text="API call delay (s):").grid(row=4, column=0, sticky=tk.W, padx=5, pady=5)
-            self.delay_entry = tb.Entry(self.frame, width=8)
-            self.delay_entry.insert(0, str(self.config.get('delay', 2)))
-            self.delay_entry.grid(row=4, column=1, sticky=tk.W, padx=5, pady=5)
-            
-            # Chapter Range
-            tb.Label(self.frame, text="Chapter range (e.g., 5-10):").grid(row=5, column=0, sticky=tk.W, padx=5, pady=5)
-            self.chapter_range_entry = tb.Entry(self.frame, width=12)
-            self.chapter_range_entry.insert(0, self.config.get('chapter_range', ''))
-            self.chapter_range_entry.grid(row=5, column=1, sticky=tk.W, padx=5, pady=5)
-            
-            # Token limit
-            tb.Label(self.frame, text="Input Token limit:").grid(row=6, column=0, sticky=tk.W, padx=5, pady=5)
-            self.token_limit_entry = tb.Entry(self.frame, width=8)
-            self.token_limit_entry.insert(0, str(self.config.get('token_limit', 200000)))
-            self.token_limit_entry.grid(row=6, column=1, sticky=tk.W, padx=5, pady=5)
-            
-            self.toggle_token_btn = tb.Button(self.frame, text="Disable Input Token Limit",
-                                             command=self.toggle_token_limit, bootstyle="danger-outline", width=21)
-            self.toggle_token_btn.grid(row=7, column=1, sticky=tk.W, padx=5, pady=5)
-            
-            # Contextual Translation (right side, row 3) - with extra padding on top
-            tb.Checkbutton(self.frame, text="Contextual Translation", variable=self.contextual_var,
-                          command=self._on_contextual_toggle).grid(
-                row=3, column=2, columnspan=2, sticky=tk.W, padx=5, pady=(25, 5))  # Added extra top padding
-            
-            # Translation History Limit (row 4)
-            self.trans_history_label = tb.Label(self.frame, text="Translation History Limit:")
-            self.trans_history_label.grid(row=4, column=2, sticky=tk.W, padx=5, pady=5)
-            self.trans_history = tb.Entry(self.frame, width=6)
-            self.trans_history.insert(0, str(self.config.get('translation_history_limit', 2)))
-            self.trans_history.grid(row=4, column=3, sticky=tk.W, padx=5, pady=5)
-            
-            # Rolling History (row 5)
-            self.rolling_checkbox = tb.Checkbutton(self.frame, text="Rolling History Window", variable=self.translation_history_rolling_var,
-                          bootstyle="round-toggle")
-            self.rolling_checkbox.grid(row=5, column=2, sticky=tk.W, padx=5, pady=5)
-            self.rolling_history_desc = tk.Label(self.frame, text="(Keep recent history instead of purging)",
-                    font=('TkDefaultFont', 11), fg='gray')
-            self.rolling_history_desc.grid(row=5, column=3, sticky=tk.W, padx=5, pady=5)
-            
-            # Temperature (row 6)
-            tb.Label(self.frame, text="Temperature:").grid(row=6, column=2, sticky=tk.W, padx=5, pady=5)
-            self.trans_temp = tb.Entry(self.frame, width=6)
-            self.trans_temp.insert(0, str(self.config.get('translation_temperature', 0.3)))
-            self.trans_temp.grid(row=6, column=3, sticky=tk.W, padx=5, pady=5)
-            
-            # Batch Translation (row 7)
-            self.batch_checkbox = tb.Checkbutton(self.frame, text="Batch Translation", variable=self.batch_translation_var,
-                          bootstyle="round-toggle")
-            self.batch_checkbox.grid(row=7, column=2, sticky=tk.W, padx=5, pady=5)
-            self.batch_size_entry = tb.Entry(self.frame, width=6, textvariable=self.batch_size_var)
-            self.batch_size_entry.grid(row=7, column=3, sticky=tk.W, padx=5, pady=5)
-            
-            # Set batch entry state
-            self.batch_size_entry.config(state=tk.NORMAL if self.batch_translation_var.get() else tk.DISABLED)
-            self.batch_translation_var.trace('w', lambda *args: self.batch_size_entry.config(
-                state=tk.NORMAL if self.batch_translation_var.get() else tk.DISABLED))
-            
-            # Hidden entries for compatibility
-            self.title_trim = tb.Entry(self.frame, width=6)
-            self.title_trim.insert(0, str(self.config.get('title_trim_count', 1)))
-            self.group_trim = tb.Entry(self.frame, width=6)
-            self.group_trim.insert(0, str(self.config.get('group_affiliation_trim_count', 1)))
-            self.traits_trim = tb.Entry(self.frame, width=6)
-            self.traits_trim.insert(0, str(self.config.get('traits_trim_count', 1)))
-            self.refer_trim = tb.Entry(self.frame, width=6)
-            self.refer_trim.insert(0, str(self.config.get('refer_trim_count', 1)))
-            self.loc_trim = tb.Entry(self.frame, width=6)
-            self.loc_trim.insert(0, str(self.config.get('locations_trim_count', 1)))
-            
-            # Set initial state based on contextual translation
-            self._on_contextual_toggle()
+        """Create all settings controls"""
+        # Threading delay (with extra spacing at top)
+        tb.Label(self.frame, text="Threading delay (s):").grid(row=3, column=0, sticky=tk.W, padx=5, pady=(15, 5))  # (top, bottom)
+        self.thread_delay_entry = tb.Entry(self.frame, textvariable=self.thread_delay_var, width=8)
+        self.thread_delay_entry.grid(row=3, column=1, sticky=tk.W, padx=5, pady=(15, 5))  # Match the label padding
+
+        # API delay (left side)
+        tb.Label(self.frame, text="API call delay (s):").grid(row=4, column=0, sticky=tk.W, padx=5, pady=5)
+        self.delay_entry = tb.Entry(self.frame, width=8)
+        self.delay_entry.insert(0, str(self.config.get('delay', 2)))
+        self.delay_entry.grid(row=4, column=1, sticky=tk.W, padx=5, pady=5)
+
+        # Optional help text (spanning both columns)
+        tb.Label(self.frame, text="(0 = simultaneous)", 
+                 font=('TkDefaultFont', 8), foreground='gray').grid(row=3, column=2, sticky=tk.W, padx=5, pady=(15, 5))
+        
+        # Chapter Range
+        tb.Label(self.frame, text="Chapter range (e.g., 5-10):").grid(row=5, column=0, sticky=tk.W, padx=5, pady=5)
+        self.chapter_range_entry = tb.Entry(self.frame, width=12)
+        self.chapter_range_entry.insert(0, self.config.get('chapter_range', ''))
+        self.chapter_range_entry.grid(row=5, column=1, sticky=tk.W, padx=5, pady=5)
+        
+        # Token limit
+        tb.Label(self.frame, text="Input Token limit:").grid(row=6, column=0, sticky=tk.W, padx=5, pady=5)
+        self.token_limit_entry = tb.Entry(self.frame, width=8)
+        self.token_limit_entry.insert(0, str(self.config.get('token_limit', 200000)))
+        self.token_limit_entry.grid(row=6, column=1, sticky=tk.W, padx=5, pady=5)
+        
+        self.toggle_token_btn = tb.Button(self.frame, text="Disable Input Token Limit",
+                                         command=self.toggle_token_limit, bootstyle="danger-outline", width=21)
+        self.toggle_token_btn.grid(row=7, column=1, sticky=tk.W, padx=5, pady=5)
+        
+        # Contextual Translation (right side, row 3) - with extra padding on top
+        tb.Checkbutton(self.frame, text="Contextual Translation", variable=self.contextual_var,
+                      command=self._on_contextual_toggle).grid(
+            row=3, column=2, columnspan=2, sticky=tk.W, padx=5, pady=(25, 5))  # Added extra top padding
+        
+        # Translation History Limit (row 4)
+        self.trans_history_label = tb.Label(self.frame, text="Translation History Limit:")
+        self.trans_history_label.grid(row=4, column=2, sticky=tk.W, padx=5, pady=5)
+        self.trans_history = tb.Entry(self.frame, width=6)
+        self.trans_history.insert(0, str(self.config.get('translation_history_limit', 2)))
+        self.trans_history.grid(row=4, column=3, sticky=tk.W, padx=5, pady=5)
+        
+        # Rolling History (row 5)
+        self.rolling_checkbox = tb.Checkbutton(self.frame, text="Rolling History Window", variable=self.translation_history_rolling_var,
+                      bootstyle="round-toggle")
+        self.rolling_checkbox.grid(row=5, column=2, sticky=tk.W, padx=5, pady=5)
+        self.rolling_history_desc = tk.Label(self.frame, text="(Keep recent history instead of purging)",
+                font=('TkDefaultFont', 11), fg='gray')
+        self.rolling_history_desc.grid(row=5, column=3, sticky=tk.W, padx=5, pady=5)
+        
+        # Temperature (row 6)
+        tb.Label(self.frame, text="Temperature:").grid(row=6, column=2, sticky=tk.W, padx=5, pady=5)
+        self.trans_temp = tb.Entry(self.frame, width=6)
+        self.trans_temp.insert(0, str(self.config.get('translation_temperature', 0.3)))
+        self.trans_temp.grid(row=6, column=3, sticky=tk.W, padx=5, pady=5)
+        
+        # Batch Translation (row 7)
+        self.batch_checkbox = tb.Checkbutton(self.frame, text="Batch Translation", variable=self.batch_translation_var,
+                      bootstyle="round-toggle")
+        self.batch_checkbox.grid(row=7, column=2, sticky=tk.W, padx=5, pady=5)
+        self.batch_size_entry = tb.Entry(self.frame, width=6, textvariable=self.batch_size_var)
+        self.batch_size_entry.grid(row=7, column=3, sticky=tk.W, padx=5, pady=5)
+        
+        # Set batch entry state
+        self.batch_size_entry.config(state=tk.NORMAL if self.batch_translation_var.get() else tk.DISABLED)
+        self.batch_translation_var.trace('w', lambda *args: self.batch_size_entry.config(
+            state=tk.NORMAL if self.batch_translation_var.get() else tk.DISABLED))
+        
+        # Hidden entries for compatibility
+        self.title_trim = tb.Entry(self.frame, width=6)
+        self.title_trim.insert(0, str(self.config.get('title_trim_count', 1)))
+        self.group_trim = tb.Entry(self.frame, width=6)
+        self.group_trim.insert(0, str(self.config.get('group_affiliation_trim_count', 1)))
+        self.traits_trim = tb.Entry(self.frame, width=6)
+        self.traits_trim.insert(0, str(self.config.get('traits_trim_count', 1)))
+        self.refer_trim = tb.Entry(self.frame, width=6)
+        self.refer_trim.insert(0, str(self.config.get('refer_trim_count', 1)))
+        self.loc_trim = tb.Entry(self.frame, width=6)
+        self.loc_trim.insert(0, str(self.config.get('locations_trim_count', 1)))
+        
+        # Set initial state based on contextual translation
+        self._on_contextual_toggle()
 
     def _on_contextual_toggle(self):
         """Handle contextual translation toggle - enable/disable related controls"""
@@ -7875,6 +7885,7 @@ Provide translations in the same numbered format."""
             'MODEL': self.model_var.get(),
             'CONTEXTUAL': '1' if self.contextual_var.get() else '0',
             'SEND_INTERVAL_SECONDS': str(self.delay_entry.get()),
+            'THREAD_SUBMISSION_DELAY_SECONDS': str(self.config.get('thread_submission_delay', 0.5)),
             'MAX_OUTPUT_TOKENS': str(self.max_output_tokens),
             'API_KEY': api_key,
             'OPENAI_API_KEY': api_key,
@@ -14441,6 +14452,12 @@ Important rules:
                 messagebox.showerror("Invalid Input", "Please enter a valid number for API call delay")
                 return
             self.config['delay'] = safe_float(delay_val, 2)
+
+            thread_delay_val = self.thread_delay_var.get().strip()
+            if not thread_delay_val.replace('.', '', 1).isdigit():
+                messagebox.showerror("Invalid Input", "Please enter a valid number for Threading Delay")
+                return
+            self.config['thread_submission_delay'] = safe_float(thread_delay_val, 0.5)
             
             trans_temp_val = self.trans_temp.get().strip()
             if trans_temp_val:
@@ -14662,7 +14679,7 @@ Important rules:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.9.5...")
+    print("🚀 Starting Glossarion v3.9.6...")
     
     # Initialize splash screen
     splash_manager = None
