@@ -957,6 +957,39 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
                                   client: UnifiedClient, temp: float, mtoks: int,
                                   stop_check_fn, chunk_timeout: int = None) -> Dict:
     """Process a single chapter API call with thread-safe payload handling"""
+    
+    # APPLY INTERRUPTIBLE THREADING DELAY FIRST
+    thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
+    if thread_delay > 0:
+        # Check if we need to wait (same logic as unified_api_client)
+        if hasattr(client, '_thread_submission_lock') and hasattr(client, '_last_thread_submission_time'):
+            with client._thread_submission_lock:
+                current_time = time.time()
+                time_since_last = current_time - client._last_thread_submission_time
+                
+                if time_since_last < thread_delay:
+                    sleep_time = thread_delay - time_since_last
+                    thread_name = threading.current_thread().name
+                    
+                    # PRINT BEFORE THE DELAY STARTS
+                    print(f"🧵 [{thread_name}] Applying thread delay: {sleep_time:.1f}s for Chapter {idx+1}")
+                    
+                    # Interruptible sleep - check stop flag every 0.1 seconds
+                    elapsed = 0
+                    check_interval = 0.1
+                    while elapsed < sleep_time:
+                        if stop_check_fn():
+                            print(f"🛑 Threading delay interrupted by stop flag")
+                            raise UnifiedClientError("Glossary extraction stopped by user during threading delay")
+                        
+                        sleep_chunk = min(check_interval, sleep_time - elapsed)
+                        time.sleep(sleep_chunk)
+                        elapsed += sleep_chunk
+                
+                client._last_thread_submission_time = time.time()
+                if not hasattr(client, '_thread_submission_count'):
+                    client._thread_submission_count = 0
+                client._thread_submission_count += 1
     start_time = time.time()
     print(f"[BATCH] Starting API call for Chapter {idx+1} at {time.strftime('%H:%M:%S')}")
     
