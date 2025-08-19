@@ -7885,7 +7885,7 @@ Provide translations in the same numbered format."""
             'MODEL': self.model_var.get(),
             'CONTEXTUAL': '1' if self.contextual_var.get() else '0',
             'SEND_INTERVAL_SECONDS': str(self.delay_entry.get()),
-            'THREAD_SUBMISSION_DELAY_SECONDS': str(self.config.get('thread_submission_delay', 0.5)),
+            'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_var.get().strip() or '0.5',
             'MAX_OUTPUT_TOKENS': str(self.max_output_tokens),
             'API_KEY': api_key,
             'OPENAI_API_KEY': api_key,
@@ -14051,6 +14051,7 @@ Important rules:
         prompt = self.prompt_profiles.get(name, "")
         self.prompt_text.delete("1.0", tk.END)
         self.prompt_text.insert("1.0", prompt)
+        self.config['active_profile'] = name
 
     def save_profile(self):
         """Save current prompt under selected profile and persist."""
