@@ -3551,46 +3551,46 @@ Recent translations to summarize:
             count = len(data['listbox'].curselection())
             data['selection_count_label'].config(text=f"Selected: {count}")
         
-    def remove_qa_failed_mark():
-        selected = data['listbox'].curselection()
-        if not selected:
-            messagebox.showwarning("No Selection", "Please select at least one chapter.")
-            return
-        
-        selected_chapters = [data['chapter_display_info'][i] for i in selected]
-        qa_failed_chapters = [ch for ch in selected_chapters if ch['status'] == 'qa_failed']
-        
-        if not qa_failed_chapters:
-            messagebox.showwarning("No QA Failed Chapters", 
-                                 "None of the selected chapters have 'qa_failed' status.")
-            return
-        
-        count = len(qa_failed_chapters)
-        if not messagebox.askyesno("Confirm Remove QA Failed Mark", 
-                                  f"Remove QA failed mark from {count} chapters?"):
-            return
-        
-        # Remove marks
-        cleared_count = 0
-        for info in qa_failed_chapters:
-            # Find chapter by actual_num
-            chapter_key = str(info['actual_num'])  # Convert to string since keys are strings
+        def remove_qa_failed_mark():
+            selected = data['listbox'].curselection()
+            if not selected:
+                messagebox.showwarning("No Selection", "Please select at least one chapter.")
+                return
             
-            if chapter_key in data['prog']["chapters"]:
-                data['prog']["chapters"][chapter_key]["status"] = "completed"
-                data['prog']["chapters"][chapter_key].pop("qa_issues", None)
-                data['prog']["chapters"][chapter_key].pop("qa_timestamp", None)
-                data['prog']["chapters"][chapter_key].pop("qa_issues_found", None)
-                data['prog']["chapters"][chapter_key].pop("duplicate_confidence", None)
-                cleared_count += 1
-        
-        # Save
-        with open(data['progress_file'], 'w', encoding='utf-8') as f:
-            json.dump(data['prog'], f, ensure_ascii=False, indent=2)
-        
-        messagebox.showinfo("Success", f"Removed QA failed mark from {cleared_count} chapters.")
-        if data.get('dialog'):
-            data['dialog'].destroy()
+            selected_chapters = [data['chapter_display_info'][i] for i in selected]
+            qa_failed_chapters = [ch for ch in selected_chapters if ch['status'] == 'qa_failed']
+            
+            if not qa_failed_chapters:
+                messagebox.showwarning("No QA Failed Chapters", 
+                                     "None of the selected chapters have 'qa_failed' status.")
+                return
+            
+            count = len(qa_failed_chapters)
+            if not messagebox.askyesno("Confirm Remove QA Failed Mark", 
+                                      f"Remove QA failed mark from {count} chapters?"):
+                return
+            
+            # Remove marks
+            cleared_count = 0
+            for info in qa_failed_chapters:
+                # Find chapter by actual_num
+                chapter_key = str(info['actual_num'])  # Convert to string since keys are strings
+                
+                if chapter_key in data['prog']["chapters"]:
+                    data['prog']["chapters"][chapter_key]["status"] = "completed"
+                    data['prog']["chapters"][chapter_key].pop("qa_issues", None)
+                    data['prog']["chapters"][chapter_key].pop("qa_timestamp", None)
+                    data['prog']["chapters"][chapter_key].pop("qa_issues_found", None)
+                    data['prog']["chapters"][chapter_key].pop("duplicate_confidence", None)
+                    cleared_count += 1
+            
+            # Save
+            with open(data['progress_file'], 'w', encoding='utf-8') as f:
+                json.dump(data['prog'], f, ensure_ascii=False, indent=2)
+            
+            messagebox.showinfo("Success", f"Removed QA failed mark from {cleared_count} chapters.")
+            if data.get('dialog'):
+                data['dialog'].destroy()
         
         def retranslate_selected():
             selected = data['listbox'].curselection()
