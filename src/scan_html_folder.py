@@ -2081,103 +2081,120 @@ def detect_duplicates(results, log, should_stop, config):
     return duplicate_groups, near_duplicate_groups, duplicate_confidence
 
 def process_deep_similarity_batch(args):
-    """Process a batch of deep similarity comparisons - MUST BE AT MODULE LEVEL"""
-    batch, data = args
-    batch_results = []
-    
-    text_samples = data['text_samples']
-    threshold = data['threshold']
-    
-    # Import what we need inside the worker
-    from difflib import SequenceMatcher
-    
-    # Local cache for this worker process
-    similarity_cache = {}
-    semantic_cache = {}
-    
-    for i, j, filename_i, filename_j in batch:
-        # Get text samples
-        sample_i = text_samples.get(i)
-        sample_j = text_samples.get(j)
+    """Process a batch of deep similarity comparisons with enhanced error handling"""
+    try:
+        batch, data = args
+        batch_results = []
         
-        if not sample_i or not sample_j:
-            continue
+        text_samples = data['text_samples']
+        threshold = data['threshold']
         
-        # Use hashes for similarity check with caching
-        hash1 = sample_i['hash_5k']
-        hash2 = sample_j['hash_5k']
+        # Import what we need inside the worker with error handling
+        try:
+            from difflib import SequenceMatcher
+        except ImportError as e:
+            return [{'error': f'Import error in worker: {e}'}]
         
-        # Create cache key (ensure consistent ordering)
-        cache_key = (min(hash1, hash2), max(hash1, hash2))
+        # Local cache for this worker process
+        similarity_cache = {}
+        semantic_cache = {}
         
-        # Check cache first
-        if cache_key in similarity_cache:
-            similarity = similarity_cache[cache_key]
-        else:
-            # Check if hashes are identical
-            if hash1 == hash2:
-                similarity = 1.0
-            else:
-                # Calculate text similarity
-                text1 = sample_i['sample_5k']
-                text2 = sample_j['sample_5k']
-                similarity = calculate_similarity_ratio(text1, text2)
-            
-            # Cache the result
-            similarity_cache[cache_key] = similarity
-        
-        if similarity >= threshold:
-            batch_results.append({
-                'filename1': filename_i,
-                'filename2': filename_j,
-                'similarity': similarity,
-                'is_variant': False,
-                'semantic_sim': None
-            })
-        # Check for translation variants if similarity is moderate
-        elif 0.5 <= similarity < threshold:
-            # Check semantic similarity with caching
-            hash1_10k = sample_i['hash_10k']
-            hash2_10k = sample_j['hash_10k']
-            
-            # Create semantic cache key
-            sem_cache_key = (min(hash1_10k, hash2_10k), max(hash1_10k, hash2_10k))
-            
-            if sem_cache_key in semantic_cache:
-                semantic_sim = semantic_cache[sem_cache_key]
-            else:
-                if hash1_10k == hash2_10k:
-                    semantic_sim = 1.0
+        for i, j, filename_i, filename_j in batch:
+            try:
+                # Get text samples
+                sample_i = text_samples.get(i)
+                sample_j = text_samples.get(j)
+                
+                if not sample_i or not sample_j:
+                    continue
+                
+                # Use hashes for similarity check with caching
+                hash1 = sample_i['hash_5k']
+                hash2 = sample_j['hash_5k']
+                
+                # Create cache key (ensure consistent ordering)
+                cache_key = (min(hash1, hash2), max(hash1, hash2))
+                
+                # Check cache first
+                if cache_key in similarity_cache:
+                    similarity = similarity_cache[cache_key]
                 else:
-                    text1_10k = sample_i['sample_10k']
-                    text2_10k = sample_j['sample_10k']
-                    semantic_sim = calculate_semantic_fingerprint_similarity(text1_10k, text2_10k)
+                    # Check if hashes are identical
+                    if hash1 == hash2:
+                        similarity = 1.0
+                    else:
+                        # Calculate text similarity
+                        text1 = sample_i['sample_5k']
+                        text2 = sample_j['sample_5k']
+                        similarity = calculate_similarity_ratio(text1, text2)
+                    
+                    # Cache the result
+                    similarity_cache[cache_key] = similarity
                 
-                # Cache the result
-                semantic_cache[sem_cache_key] = semantic_sim
-            
-            if semantic_sim >= 0.75:  # High semantic similarity threshold
-                combined_score = (similarity * 0.4 + semantic_sim * 0.6)
-                
-                if combined_score >= threshold:
+                if similarity >= threshold:
                     batch_results.append({
                         'filename1': filename_i,
                         'filename2': filename_j,
-                        'similarity': combined_score,
-                        'is_variant': True,
-                        'semantic_sim': semantic_sim,
-                        'base_sim': similarity
+                        'similarity': similarity,
+                        'is_variant': False,
+                        'semantic_sim': None
                     })
-    
-    return batch_results
+                # Check for translation variants if similarity is moderate
+                elif 0.5 <= similarity < threshold:
+                    # Check semantic similarity with caching
+                    hash1_10k = sample_i['hash_10k']
+                    hash2_10k = sample_j['hash_10k']
+                    
+                    # Create semantic cache key
+                    sem_cache_key = (min(hash1_10k, hash2_10k), max(hash1_10k, hash2_10k))
+                    
+                    if sem_cache_key in semantic_cache:
+                        semantic_sim = semantic_cache[sem_cache_key]
+                    else:
+                        if hash1_10k == hash2_10k:
+                            semantic_sim = 1.0
+                        else:
+                            text1_10k = sample_i['sample_10k']
+                            text2_10k = sample_j['sample_10k']
+                            semantic_sim = calculate_semantic_fingerprint_similarity(text1_10k, text2_10k)
+                        
+                        # Cache the result
+                        semantic_cache[sem_cache_key] = semantic_sim
+                    
+                    if semantic_sim >= 0.75:  # High semantic similarity threshold
+                        combined_score = (similarity * 0.4 + semantic_sim * 0.6)
+                        
+                        if combined_score >= threshold:
+                            batch_results.append({
+                                'filename1': filename_i,
+                                'filename2': filename_j,
+                                'similarity': combined_score,
+                                'is_variant': True,
+                                'semantic_sim': semantic_sim,
+                                'base_sim': similarity
+                            })
+                            
+            except Exception as e:
+                # Log individual comparison error but continue processing
+                import traceback
+                batch_results.append({
+                    'error': f'Error comparing {filename_i} vs {filename_j}: {str(e)}\n{traceback.format_exc()[:500]}'
+                })
+                continue
+        
+        return batch_results
+        
+    except Exception as e:
+        # Return error information for debugging
+        import traceback
+        return [{'error': f'{type(e).__name__}: {str(e)}\nTraceback:\n{traceback.format_exc()}'}]
 
 
 def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidence, 
                                 threshold, log, should_stop):
-    """Perform deep similarity analysis - PROCESSPOOLEXECUTOR VERSION"""
+    """Perform deep similarity analysis - PROCESSPOOLEXECUTOR VERSION with fallback"""
     
     log(f"🔍 Deep content similarity analysis (threshold: {int(threshold*100)}%)...")
-    log("⚡ PROCESSPOOLEXECUTOR ENABLED - MAXIMUM PERFORMANCE!")
     
     # Pre-cache text samples for all results
     text_samples = {}
@@ -2212,14 +2229,17 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
     except:
         max_workers_config = 0
     
-    if max_workers_config > 0:
+    # Determine if we should use parallel processing
+    use_parallel = True
+    parallel_error = None
+    
+    if max_workers_config == 1:
+        use_parallel = False
+        log("   📝 Using sequential processing (configured for 1 worker)")
+    elif max_workers_config > 0:
         max_workers = min(max_workers_config, cpu_count)
-        log(f"   🖥️ Using {max_workers} parallel processes (configured limit)")
     else:
         max_workers = cpu_count
-        log(f"   🚀 Using ALL {max_workers} CPU cores - MAXIMUM PERFORMANCE!")
-        if cpu_count > 8:
-            log(f"   💡 Tip: You can limit CPU cores in QA scanner settings")
     
     # Create comparison tasks with smart filtering
     comparison_tasks = []
@@ -2251,126 +2271,264 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
         log("   ✅ No comparisons needed!")
         return
     
-    # Progress tracking
-    comparisons_done = 0
-    last_progress = 0
-    start_time = time.time()
-    found_duplicates = []
-    
-    # Prepare data for workers
-    worker_data = {
-        'text_samples': text_samples,
-        'threshold': threshold
-    }
-    
-    # Optimal batch size for ProcessPoolExecutor
-    optimal_batch_size = max(1000, total_comparisons // (max_workers * 5))
-    optimal_batch_size = min(optimal_batch_size, 10000)
-    
-    batches = []
-    for i in range(0, len(comparison_tasks), optimal_batch_size):
-        batch = comparison_tasks[i:i + optimal_batch_size]
-        batches.append(batch)
-    
-    log(f"   📦 Split into {len(batches)} batches of ~{optimal_batch_size} comparisons each")
-    
-    # Prepare batch arguments
-    batch_args = [(batch, worker_data) for batch in batches]
-    
-    # Process with ProcessPoolExecutor
-    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all batches
-        futures = []
-        for args in batch_args:
-            if should_stop():
-                log("⛔ Deep similarity check interrupted by user.")
-                executor.shutdown(wait=True)
-                return
-            
-            future = executor.submit(process_deep_similarity_batch, args)
-            futures.append(future)
+    # Try parallel processing first
+    if use_parallel:
+        log("⚡ PROCESSPOOLEXECUTOR ENABLED - MAXIMUM PERFORMANCE!")
+        if max_workers_config > 0:
+            log(f"   🖥️ Using {max_workers} parallel processes (configured limit)")
+        else:
+            log(f"   🚀 Using ALL {max_workers} CPU cores - MAXIMUM PERFORMANCE!")
+            if cpu_count > 8:
+                log(f"   💡 Tip: You can limit CPU cores in QA scanner settings")
         
-        # Process results as they complete
-        for completed_future in concurrent.futures.as_completed(futures):
+        # Progress tracking
+        comparisons_done = 0
+        last_progress = 0
+        start_time = time.time()
+        found_duplicates = []
+        
+        # Prepare data for workers
+        worker_data = {
+            'text_samples': text_samples,
+            'threshold': threshold
+        }
+        
+        # Optimal batch size for ProcessPoolExecutor
+        optimal_batch_size = max(1000, total_comparisons // (max_workers * 5))
+        optimal_batch_size = min(optimal_batch_size, 10000)
+        
+        batches = []
+        for i in range(0, len(comparison_tasks), optimal_batch_size):
+            batch = comparison_tasks[i:i + optimal_batch_size]
+            batches.append(batch)
+        
+        log(f"   📦 Split into {len(batches)} batches of ~{optimal_batch_size} comparisons each")
+        
+        # Prepare batch arguments
+        batch_args = [(batch, worker_data) for batch in batches]
+        
+        try:
+            # Process with ProcessPoolExecutor
+            with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all batches
+                futures = []
+                for args in batch_args:
+                    if should_stop():
+                        log("⛔ Deep similarity check interrupted by user.")
+                        executor.shutdown(wait=True)
+                        return
+                    
+                    future = executor.submit(process_deep_similarity_batch, args)
+                    futures.append(future)
+                
+                # Process results as they complete
+                for completed_future in concurrent.futures.as_completed(futures):
+                    if should_stop():
+                        log("⛔ Deep similarity check interrupted by user.")
+                        executor.shutdown(wait=True)
+                        return
+                    
+                    try:
+                        # NO TIMEOUT - let it run as long as needed
+                        batch_results = completed_future.result()
+                        
+                        # Check for worker errors in results
+                        if batch_results and isinstance(batch_results, list):
+                            # Check if first result contains an error
+                            if batch_results and isinstance(batch_results[0], dict) and 'error' in batch_results[0]:
+                                error_msg = batch_results[0]['error']
+                                log(f"   ⚠️ Worker error detected: {error_msg}")
+                                raise Exception(f"Worker error: {error_msg}")
+                        
+                        # Batch all updates
+                        updates = []
+                        for result in batch_results:
+                            if 'error' not in result:  # Skip error entries
+                                updates.append((
+                                    result['filename1'],
+                                    result['filename2'],
+                                    result
+                                ))
+                        
+                        # Apply all updates in one lock
+                        if updates:
+                            with merge_lock:
+                                for file1, file2, result in updates:
+                                    pair = tuple(sorted([file1, file2]))
+                                    
+                                    merge_duplicate_groups(duplicate_groups, file1, file2)
+                                    duplicate_confidence[pair] = max(
+                                        duplicate_confidence.get(pair, 0), 
+                                        result['similarity']
+                                    )
+                                    
+                                    # Store messages for logging
+                                    if result.get('is_variant', False):
+                                        msg = (f"   └─ Translation variant detected: {file1} ≈ {file2} "
+                                              f"(base: {int(result.get('base_sim', 0)*100)}%, "
+                                              f"semantic: {int(result['semantic_sim']*100)}%, "
+                                              f"combined: {int(result['similarity']*100)}%)")
+                                    else:
+                                        msg = (f"   └─ Content similarity: {file1} ≈ {file2} "
+                                              f"({int(result['similarity']*100)}%)")
+                                    
+                                    found_duplicates.append(msg)
+                        
+                        # Update progress
+                        comparisons_done += optimal_batch_size
+                        if comparisons_done > total_comparisons:
+                            comparisons_done = total_comparisons
+                        
+                        progress = int((comparisons_done / total_comparisons) * 100)
+                        
+                        # Update every 10% for less overhead
+                        if progress >= last_progress + 10 or progress == 100:
+                            elapsed = time.time() - start_time
+                            rate = comparisons_done / elapsed if elapsed > 0 else 0
+                            remaining = (total_comparisons - comparisons_done) / rate if rate > 0 else 0
+                            
+                            log(f"   📊 Deep check progress: {comparisons_done:,}/{total_comparisons:,} "
+                                f"({progress}%) - ~{int(remaining)}s remaining - "
+                                f"Speed: {int(rate):,} comparisons/sec")
+                            
+                            # Log some found duplicates
+                            for dup_msg in found_duplicates[:5]:
+                                log(dup_msg)
+                            found_duplicates = found_duplicates[5:]
+                            
+                            last_progress = progress
+                        
+                    except Exception as e:
+                        log(f"   ⚠️ Error processing batch: {type(e).__name__}: {str(e)[:200]}")
+                        import traceback
+                        log(f"   Debug trace: {traceback.format_exc()[:500]}")
+                        parallel_error = f"{type(e).__name__}: {str(e)[:100]}"
+                        use_parallel = False
+                        executor.shutdown(wait=False)
+                        break
+                
+                # If we completed successfully
+                if use_parallel:
+                    # Final summary
+                    elapsed = time.time() - start_time
+                    log(f"✅ Deep similarity check complete! Processed {total_comparisons:,} comparisons in {elapsed:.1f}s")
+                    log(f"   ⚡ Speed: {int(total_comparisons/elapsed):,} comparisons/sec")
+                    log(f"   🚀 ProcessPoolExecutor: ENABLED")
+                    
+                    # Log remaining duplicates
+                    for dup_msg in found_duplicates[-10:]:
+                        log(dup_msg)
+                    return  # Success - exit function
+                    
+        except Exception as e:
+            log(f"   ⚠️ Parallel processing failed: {type(e).__name__}: {str(e)[:200]}")
+            parallel_error = f"{type(e).__name__}: {str(e)[:100]}"
+            use_parallel = False
+    
+    # Fallback to sequential processing
+    if not use_parallel:
+        log(f"\n   📝 FALLBACK: Using sequential processing")
+        if parallel_error:
+            log(f"      Reason: {parallel_error}")
+        log(f"      This will be slower but more reliable")
+        
+        # Reset progress tracking for sequential mode
+        comparisons_done = 0
+        last_progress = 0
+        start_time = time.time()
+        found_duplicates = []
+        
+        # Import what we need for sequential processing
+        from difflib import SequenceMatcher
+        
+        for idx, task in enumerate(comparison_tasks):
             if should_stop():
                 log("⛔ Deep similarity check interrupted by user.")
-                executor.shutdown(wait=True)
                 return
             
-            try:
-                batch_results = completed_future.result()
-                
-                # Batch all updates
-                updates = []
-                for result in batch_results:
-                    updates.append((
-                        result['filename1'],
-                        result['filename2'],
-                        result
-                    ))
-                
-                # Apply all updates in one lock
-                if updates:
-                    with merge_lock:
-                        for file1, file2, result in updates:
-                            pair = tuple(sorted([file1, file2]))
-                            
-                            merge_duplicate_groups(duplicate_groups, file1, file2)
-                            duplicate_confidence[pair] = max(
-                                duplicate_confidence.get(pair, 0), 
-                                result['similarity']
-                            )
-                            
-                            # Store messages for logging
-                            if result['is_variant']:
-                                msg = (f"   └─ Translation variant detected: {file1} ≈ {file2} "
-                                      f"(base: {int(result.get('base_sim', 0)*100)}%, "
-                                      f"semantic: {int(result['semantic_sim']*100)}%, "
-                                      f"combined: {int(result['similarity']*100)}%)")
-                            else:
-                                msg = (f"   └─ Content similarity: {file1} ≈ {file2} "
-                                      f"({int(result['similarity']*100)}%)")
-                            
-                            found_duplicates.append(msg)
-                
-                # Update progress
-                comparisons_done += optimal_batch_size
-                if comparisons_done > total_comparisons:
-                    comparisons_done = total_comparisons
-                
-                progress = int((comparisons_done / total_comparisons) * 100)
-                
-                # Update every 10% for less overhead
-                if progress >= last_progress + 10 or progress == 100:
+            i, j, filename_i, filename_j = task
+            comparisons_done += 1
+            
+            # Show progress every 5% or every 100 comparisons (whichever is less frequent)
+            progress = int((comparisons_done / total_comparisons) * 100)
+            if (comparisons_done % max(100, total_comparisons // 20) == 0 or 
+                comparisons_done == total_comparisons):
+                if progress >= last_progress + 5 or progress == 100:
                     elapsed = time.time() - start_time
                     rate = comparisons_done / elapsed if elapsed > 0 else 0
                     remaining = (total_comparisons - comparisons_done) / rate if rate > 0 else 0
                     
-                    log(f"   📊 Deep check progress: {comparisons_done:,}/{total_comparisons:,} "
+                    log(f"   📊 Sequential progress: {comparisons_done:,}/{total_comparisons:,} "
                         f"({progress}%) - ~{int(remaining)}s remaining - "
                         f"Speed: {int(rate):,} comparisons/sec")
                     
-                    # Log some found duplicates
-                    for dup_msg in found_duplicates[:5]:
+                    # Log found duplicates
+                    for dup_msg in found_duplicates[:3]:
                         log(dup_msg)
-                    found_duplicates = found_duplicates[5:]
+                    found_duplicates = found_duplicates[3:]
                     
                     last_progress = progress
+            
+            # Get text samples
+            sample_i = text_samples.get(i)
+            sample_j = text_samples.get(j)
+            
+            if not sample_i or not sample_j:
+                continue
+            
+            # Calculate similarity
+            if sample_i['hash_5k'] == sample_j['hash_5k']:
+                similarity = 1.0
+            else:
+                text1 = sample_i['sample_5k']
+                text2 = sample_j['sample_5k']
+                similarity = calculate_similarity_ratio(text1, text2)
+            
+            if similarity >= threshold:
+                merge_duplicate_groups(duplicate_groups, filename_i, filename_j)
+                pair = tuple(sorted([filename_i, filename_j]))
+                duplicate_confidence[pair] = max(
+                    duplicate_confidence.get(pair, 0), 
+                    similarity
+                )
+                msg = f"   └─ Content similarity: {filename_i} ≈ {filename_j} ({int(similarity*100)}%)"
+                found_duplicates.append(msg)
+                
+            elif 0.5 <= similarity < threshold:
+                # Check semantic similarity for translation variants
+                text1_10k = sample_i['sample_10k']
+                text2_10k = sample_j['sample_10k']
+                
+                if sample_i['hash_10k'] == sample_j['hash_10k']:
+                    semantic_sim = 1.0
+                else:
+                    semantic_sim = calculate_semantic_fingerprint_similarity(text1_10k, text2_10k)
+                
+                if semantic_sim >= 0.75:
+                    combined_score = (similarity * 0.4 + semantic_sim * 0.6)
                     
-            except Exception as e:
-                log(f"   ❌ Error in parallel processing: {e}")
-                import traceback
-                log(f"   Traceback: {traceback.format_exc()}")
-    
-    # Final summary
-    elapsed = time.time() - start_time
-    log(f"✅ Deep similarity check complete! Processed {total_comparisons:,} comparisons in {elapsed:.1f}s")
-    log(f"   ⚡ Speed: {int(total_comparisons/elapsed):,} comparisons/sec")
-    log(f"   🚀 ProcessPoolExecutor: ENABLED")
-    
-    # Log remaining duplicates
-    for dup_msg in found_duplicates[-10:]:
-        log(dup_msg)
+                    if combined_score >= threshold:
+                        merge_duplicate_groups(duplicate_groups, filename_i, filename_j)
+                        pair = tuple(sorted([filename_i, filename_j]))
+                        duplicate_confidence[pair] = max(
+                            duplicate_confidence.get(pair, 0), 
+                            combined_score
+                        )
+                        msg = (f"   └─ Translation variant detected: {filename_i} ≈ {filename_j} "
+                              f"(base: {int(similarity*100)}%, semantic: {int(semantic_sim*100)}%, "
+                              f"combined: {int(combined_score*100)}%)")
+                        found_duplicates.append(msg)
+        
+        # Final summary for sequential mode
+        elapsed = time.time() - start_time
+        log(f"✅ Deep similarity check complete! Processed {total_comparisons:,} comparisons in {elapsed:.1f}s")
+        if elapsed > 0:
+            log(f"   Speed: {int(total_comparisons/elapsed):,} comparisons/sec")
+        log(f"   Mode: Sequential (fallback)")
+        
+        # Log remaining duplicates
+        for dup_msg in found_duplicates[-10:]:
+            log(dup_msg)
         
 def check_consecutive_chapters(results, duplicate_groups, duplicate_confidence, config, log, should_stop=None):
     """Check for consecutive chapters with same title using fuzzy matching"""
