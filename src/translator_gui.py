@@ -3212,21 +3212,25 @@ Recent translations to summarize:
             base_name = os.path.splitext(filename)[0]
             expected_response = None
             
-            # Look for response file with exact base_name match
+            # Handle .htm.html -> .html conversion
+            stripped_base_name = base_name
+            if base_name.endswith('.htm'):
+                stripped_base_name = base_name[:-4]  # Remove .htm suffix
+
+            # Look for response file with exact match (both original and stripped versions)
             for file in os.listdir(output_dir):
                 if file.startswith('response_'):
-                    # Extract the base part between 'response_' and '.html'
                     match = re.match(r'response_(.+)\.html?$', file)
                     if match:
                         file_base = match.group(1)
-                        # Exact match (not substring)
-                        if file_base == base_name:
+                        # Try both original and stripped base names
+                        if file_base == base_name or file_base == stripped_base_name:
                             expected_response = file
                             break
-            
-            # Fallback if no file found
+
+            # Fallback - use stripped version for filename
             if not expected_response:
-                expected_response = f"response_{base_name}.html"
+                expected_response = f"response_{stripped_base_name}.html"
             
             response_path = os.path.join(output_dir, expected_response)
             
