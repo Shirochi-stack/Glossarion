@@ -751,15 +751,12 @@ class ProgressManager:
                         "timestamp": None
                     }
             
-            if "content_hashes" not in prog:
-                prog["content_hashes"] = {}
             if "chapter_chunks" not in prog:
                 prog["chapter_chunks"] = {}
                 
         else:
             prog = {
                 "chapters": {},
-                "content_hashes": {},
                 "chapter_chunks": {},
                 "image_chunks": {},
                 "version": "2.1"
@@ -832,272 +829,70 @@ class ProgressManager:
         
         self.prog["chapters"][chapter_key] = chapter_info
         
-        # Update content hash index
-        if content_hash and status == "completed":
-            self.prog["content_hashes"][content_hash] = {
-                "chapter_idx": idx,
-                "actual_num": actual_num,
-                "output_file": output_file
-            }
-        
     def check_chapter_status(self, chapter_idx, actual_num, content_hash, output_dir):
-        """Check if a chapter needs translation with fallback"""
+        """Check if a chapter needs translation - PURE PROGRESS TRACKING ONLY"""
         
-        # FIRST: Check if this chapter number exists and what its status is
-        found_chapter_num = False
-        for key, info in self.prog["chapters"].items():
-            if info.get("actual_num") == actual_num:
-                found_chapter_num = True
-                status = info.get("status")
-                
-                # If ANY entry for this chapter number has a failure status, it needs retranslation
-                if status in ["qa_failed", "file_deleted", "file_missing", "failed", "error"]:
-                    return True, f"Chapter {actual_num} needs retranslation ({status})", None
-                
-                # Only return "completed" if the file actually exists
-                if status == "completed":
-                    output_file = info.get("output_file")
-                    if output_file:
-                        output_path = os.path.join(output_dir, output_file)
-                        if os.path.exists(output_path):
-                            # Chapter is already completed with a file that exists
-                            return False, f"Chapter {actual_num} already translated: {output_file}", output_file
-                        else:
-                            # File missing - needs retranslation
-                            return True, f"Chapter {actual_num} file missing", None
+        chapter_key = str(chapter_idx)
         
-        # If no entry found for this chapter number, it's new and needs translation
-        if not found_chapter_num:
-            #print(f"📝 Chapter {actual_num} is new - will translate")
+        if chapter_key not in self.prog["chapters"]:
             return True, None, None
         
-        # THEN: Do the normal content hash check
-        chapter_key = content_hash
-        
-        if chapter_key in self.prog["chapters"]:
-            chapter_info = self.prog["chapters"][chapter_key]
-        else:
-            old_key = str(chapter_idx)
-            if old_key in self.prog["chapters"]:
-                #print(f"[PROGRESS] Using legacy index-based tracking for chapter {actual_num}")
-                chapter_info = self.prog["chapters"][old_key]
-                self.prog["chapters"][chapter_key] = chapter_info
-                chapter_info["content_hash"] = content_hash
-                if old_key in self.prog.get("chapter_chunks", {}):
-                    self.prog["chapter_chunks"][chapter_key] = self.prog["chapter_chunks"][old_key]
-                    del self.prog["chapter_chunks"][old_key]
-                del self.prog["chapters"][old_key]
-                self.save()
-            else:
-                return True, None, None
-        
+        chapter_info = self.prog["chapters"][chapter_key]
         status = chapter_info.get("status")
-        output_file = chapter_info.get("output_file")
+        output_file = chapter_info.get("output_file", "")
         
-        # Handle file_deleted status - always needs retranslation
-        if status == "file_deleted":
-            return True, None, None
-
-        if status == "qa_failed":
-            return True, f"Chapter {actual_num} needs retranslation (QA failed: API response failure)", None
-        
-        # Check various conditions for skipping
-        if status == "completed" and output_file:
-            output_path = os.path.join(output_dir, output_file)
-            if os.path.exists(output_path):
-                return False, f"Chapter {actual_num} already translated: {output_file}", output_file
+        # If status says completed but file doesn't exist - DELETE THE ENTRY AND RETRANSLATE
+        if status in ["completed", "completed_empty", "completed_image_only"]:
+            if output_file:
+                output_path = os.path.join(output_dir, output_file)
+                if os.path.exists(output_path):
+                    # File exists - skip translation
+                    return False, f"Chapter {actual_num} already translated: {output_file}", output_file
+                else:
+                    # FILE MISSING - DELETE ENTRY AND FORCE RETRANSLATION
+                    del self.prog["chapters"][chapter_key]
+                    if chapter_key in self.prog.get("chapter_chunks", {}):
+                        del self.prog["chapter_chunks"][chapter_key]
+                    self.save()
+                    return True, None, None
             else:
-                # File is missing but not yet marked - this shouldn't happen if cleanup_missing_files ran
-                print(f"⚠️ Chapter {actual_num} marked as completed but file missing: {output_file}")
-                # Mark it now
-                chapter_info["status"] = "file_deleted"
-                chapter_info["deletion_detected"] = time.time()
-                chapter_info["previous_status"] = "completed"
-                self.save()
+                # No output file recorded - retranslate
                 return True, None, None
         
-        if status == "completed_empty":
-            return False, f"Chapter {actual_num} is empty (no content to translate)", output_file
-        
-        if status == "completed_image_only":
-            return False, f"Chapter {actual_num} contains only images", output_file
-        
-        # Check for duplicate content
-        if content_hash and content_hash in self.prog.get("content_hashes", {}):
-            duplicate_info = self.prog["content_hashes"][content_hash]
-            duplicate_idx = duplicate_info.get("chapter_idx")
-            
-            if duplicate_idx != chapter_idx:
-                duplicate_output = duplicate_info.get("output_file")
-                if duplicate_output:
-                    duplicate_path = os.path.join(output_dir, duplicate_output)
-                    if os.path.exists(duplicate_path):
-                        # Only copy duplicate content if the current file also exists
-                        # If the file was deleted, respect the user's action and retranslate
-                        if output_file and os.path.exists(os.path.join(output_dir, output_file)):
-                            print(f"📋 Copying duplicate content from chapter {duplicate_info.get('actual_num')}")
-                            
-                            safe_title = f"Chapter_{actual_num}"
-                            if 'num' in chapter_info:
-                                if isinstance(chapter_info['num'], float):
-                                    fname = f"response_{chapter_info['num']:06.1f}_{safe_title}.html"
-                                else:
-                                    fname = f"response_{chapter_info['num']:03d}_{safe_title}.html"
-                            else:
-                                fname = f"response_{actual_num:03d}_{safe_title}.html"
-                            
-                            output_path = os.path.join(output_dir, fname)
-                            import shutil
-                            shutil.copy2(duplicate_path, output_path)
-                            
-                            self.update(chapter_idx, actual_num, content_hash, fname, status="completed")
-                            self.save()
-                            
-                            return False, f"Chapter {actual_num} has same content as chapter {duplicate_info.get('actual_num')} (already translated)", None
-                        else:
-                            # File was deleted - respect user's action and retranslate
-                            print(f"📝 Chapter {actual_num} was deleted - will retranslate")
-                            return True, None, None
-                    else:
-                        return True, None, None
-        
-        # FIXED: Add the missing return statement for when none of the above conditions are met
-        # This means the chapter needs translation
+        # Always retranslate anything not completed with existing file
         return True, None, None
     
     def cleanup_missing_files(self, output_dir):
-        """Scan progress tracking and clean up any references to missing files AND duplicate entries"""
+        """Remove missing files and duplicates - NO RESTORATION BULLSHIT"""
         cleaned_count = 0
-        marked_count = 0
         
-        # First, find all actual_num values and their entries
-        chapter_nums = {}
-        for chapter_key, chapter_info in self.prog["chapters"].items():
-            actual_num = chapter_info.get("actual_num")
-            if actual_num is not None:
-                if actual_num not in chapter_nums:
-                    chapter_nums[actual_num] = []
-                chapter_nums[actual_num].append((chapter_key, chapter_info))
-        
-        # Check for duplicates and clean them up
-        for actual_num, entries in chapter_nums.items():
-            if len(entries) > 1:
-                # Multiple entries for same chapter number - keep the best one
-                print(f"⚠️ Found {len(entries)} entries for chapter {actual_num}")
-                
-                # Sort by priority: completed > in_progress > failed > qa_failed > file_deleted
-                status_priority = {
-                    'completed': 5,
-                    'completed_empty': 4,
-                    'completed_image_only': 4,
-                    'in_progress': 3,
-                    'failed': 2,
-                    'qa_failed': 1,
-                    'file_deleted': 0
-                }
-                
-                entries_sorted = sorted(entries, 
-                                      key=lambda x: (status_priority.get(x[1].get('status', ''), 0),
-                                                   x[1].get('last_updated', 0)),
-                                      reverse=True)
-                
-                # Keep the best entry (first in sorted list)
-                keep_key, keep_info = entries_sorted[0]
-                
-                # Remove the others
-                for remove_key, remove_info in entries_sorted[1:]:
-                    print(f"  🗑️ Removing duplicate entry for chapter {actual_num}: status={remove_info.get('status')} (keeping {keep_info.get('status')})")
-                    
-                    # Remove the duplicate entry
-                    if remove_key in self.prog["chapters"]:
-                        del self.prog["chapters"][remove_key]
-                        cleaned_count += 1
-                    
-                    # Remove from content_hashes if it's there
-                    if remove_key in self.prog.get("content_hashes", {}):
-                        del self.prog["content_hashes"][remove_key]
-                    
-                    # Remove chunk data
-                    if remove_key in self.prog.get("chapter_chunks", {}):
-                        del self.prog["chapter_chunks"][remove_key]
-        
-        # Now do the original missing file check
+        # Remove entries for missing files
         for chapter_key, chapter_info in list(self.prog["chapters"].items()):
             output_file = chapter_info.get("output_file")
             
             if output_file:
                 output_path = os.path.join(output_dir, output_file)
                 if not os.path.exists(output_path):
-                    # Get the status to determine what to do
-                    current_status = chapter_info.get("status")
+                    print(f"🗑️ Removing entry for missing file: {output_file}")
                     
-                    # If already marked as file_deleted, check if it's been long enough to clean up
-                    if current_status == "file_deleted":
-                        deletion_time = chapter_info.get("deletion_detected", 0)
-                        # If marked as deleted more than 24 hours ago, remove from tracking
-                        if time.time() - deletion_time > 0:  # 0 seconds
-                            print(f"🗑️ Removing failed entry for chapter {chapter_info.get('actual_num', chapter_key)}: {output_file}")
-                            
-                            # Remove the chapter entry
-                            del self.prog["chapters"][chapter_key]
-                            
-                            # Remove from content_hashes
-                            content_hash = chapter_info.get("content_hash")
-                            if content_hash and content_hash in self.prog["content_hashes"]:
-                                del self.prog["content_hashes"][content_hash]
-                            
-                            # Remove chunk data
-                            if chapter_key in self.prog.get("chapter_chunks", {}):
-                                del self.prog["chapter_chunks"][chapter_key]
-                            
-                            cleaned_count += 1
-                        # Otherwise, leave it marked as file_deleted
-                    else:
-                        # First time detecting missing file - mark it
-                        print(f"🧹 Found missing file for chapter {chapter_info.get('actual_num', chapter_key)}: {output_file}")
-                        
-                        chapter_info["status"] = "file_deleted"
-                        chapter_info["deletion_detected"] = time.time()
-                        chapter_info["previous_status"] = current_status  # Save what it was before
-                        
-                        marked_count += 1
+                    # Delete the entry
+                    del self.prog["chapters"][chapter_key]
+                    
+                    # Remove chunk data
+                    if chapter_key in self.prog.get("chapter_chunks", {}):
+                        del self.prog["chapter_chunks"][chapter_key]
+                    
+                    cleaned_count += 1
         
         if cleaned_count > 0:
-            print(f"🔄 Removed {cleaned_count} stale entries from progress tracking")
-        if marked_count > 0:
-            print(f"📝 Marked {marked_count} chapters with missing files for re-translation")
+            print(f"🔄 Removed {cleaned_count} entries - will retranslate")
     
     def migrate_to_content_hash(self, chapters):
-        """Migrate old index-based progress to content-hash-based"""
-        if not self.prog.get("version") or self.prog["version"] < "3.0":
-            #print("🔄 Migrating progress tracking to content-hash-based system...")
-            
-            old_chapters = self.prog.get("chapters", {})
-            new_chapters = {}
-            old_chunks = self.prog.get("chapter_chunks", {})
-            new_chunks = {}
-            
-            idx_to_hash = {}
-            for idx, chapter in enumerate(chapters):
-                content_hash = chapter.get("content_hash") or get_content_hash(chapter["body"])
-                idx_to_hash[str(idx)] = content_hash
-            
-            for old_key, chapter_info in old_chapters.items():
-                if old_key in idx_to_hash:
-                    new_key = idx_to_hash[old_key]
-                    new_chapters[new_key] = chapter_info
-                    chapter_info["chapter_idx"] = int(old_key)
-            
-            for old_key, chunk_info in old_chunks.items():
-                if old_key in idx_to_hash:
-                    new_key = idx_to_hash[old_key]
-                    new_chunks[new_key] = chunk_info
-            
-            self.prog["chapters"] = new_chapters
-            self.prog["chapter_chunks"] = new_chunks
-            self.prog["version"] = "3.0"
-            
-            #print(f"✅ Migrated {len(new_chapters)} chapters to new system")
+            """Migration disabled - using index-based tracking only"""
+            # Update version to indicate migration complete (but we're staying index-based)
+            if not self.prog.get("version") or self.prog["version"] < "3.0":
+                self.prog["version"] = "3.0"
+            pass
     
     def get_stats(self, output_dir):
         """Get statistics about translation progress"""
@@ -6874,7 +6669,14 @@ def main(log_callback=None, stop_callback=None):
 
     os.environ["EPUB_OUTPUT_DIR"] = out
     payloads_dir = out
-    
+
+    # clear history if CONTEXTUAL is disabled
+    if not config.CONTEXTUAL:
+        history_file = os.path.join(payloads_dir, "translation_history.json")
+        if os.path.exists(history_file):
+            os.remove(history_file)
+            print("[DEBUG] CONTEXTUAL disabled - cleared translation history")
+            
     history_manager = HistoryManager(payloads_dir)
     chapter_splitter = ChapterSplitter(model_name=config.MODEL)
     chunk_context_manager = ChunkContextManager()
@@ -7457,15 +7259,10 @@ def main(log_callback=None, stop_callback=None):
             del progress_manager.prog["chapter_chunks"][old_key_str]
             #print(f"[PROGRESS] Migrated chunks for chapter {actual_num} to new tracking system")
 
-        if chapter_key_str in progress_manager.prog.get("chapter_chunks", {}):
-            completed_chunks = len(progress_manager.prog["chapter_chunks"][chapter_key_str].get("completed", []))
-            chunks_needed = len(chunks) - completed_chunks
-            chunks_per_chapter[idx] = max(0, chunks_needed)
-        else:
-            chunks_per_chapter[idx] = len(chunks)
-        
+        # Always count actual chunks - ignore "completed" tracking
+        chunks_per_chapter[idx] = len(chunks)
         total_chunks_needed += chunks_per_chapter[idx]
-    
+            
     terminology = "Sections" if is_text_file else "Chapters"
     print(f"📊 Total chunks to translate: {total_chunks_needed}")
     print(f"📚 {terminology} to process: {chapters_to_process}")
@@ -8156,15 +7953,7 @@ def main(log_callback=None, stop_callback=None):
                 chapter_info = progress_manager.prog["chapters"].get(chapter_key_str, {})
                 chapter_status = chapter_info.get("status")
 
-                # Check if chunk is completed AND chapter is not qa_failed
-                if (chunk_idx in progress_manager.prog["chapter_chunks"][chapter_key_str]["completed"] 
-                    and chapter_status != "qa_failed"):
-                    saved_chunk = progress_manager.prog["chapter_chunks"][chapter_key_str]["chunks"].get(str(chunk_idx))
-                    if saved_chunk:
-                        translated_chunks.append((saved_chunk, chunk_idx, total_chunks))
-                        print(f"  [SKIP] Chunk {chunk_idx}/{total_chunks} already translated")
-                        continue
-                elif chapter_status == "qa_failed":
+                if chapter_status == "qa_failed":
                     # Force retranslation of qa_failed chapters
                     print(f"  [RETRY] Chunk {chunk_idx}/{total_chunks} - retranslating due to QA failure")
                         
@@ -8256,14 +8045,12 @@ def main(log_callback=None, stop_callback=None):
                 else:
                     user_prompt = chunk_html
                 
-                history = history_manager.load_history()
-                
                 if config.CONTEXTUAL:
+                    history = history_manager.load_history()
                     trimmed = history[-config.HIST_LIMIT*2:]
-                    
                     chunk_context = chunk_context_manager.get_context_messages(limit=2)
-                    
                 else:
+                    history = []  # Set empty history when not contextual
                     trimmed = []
                     chunk_context = []
 
@@ -8483,8 +8270,6 @@ def main(log_callback=None, stop_callback=None):
                 final_title = c['title'] or make_safe_filename(c['title'], actual_num)
                 print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
                 
-                # Update progress with .txt filename
-                progress_manager.update(idx, actual_num, content_hash, fname_txt, status="completed")
             else:
                 # For EPUB files, keep original HTML behavior
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
