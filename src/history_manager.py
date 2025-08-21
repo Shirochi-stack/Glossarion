@@ -90,17 +90,22 @@ class HistoryManager:
         Args:
             user_content: User message content
             assistant_content: Assistant message content
-            hist_limit: Maximum number of exchanges to keep
+            hist_limit: Maximum number of exchanges to keep (0 = no history)
             reset_on_limit: Whether to reset when limit is reached (old behavior)
             rolling_window: Whether to use rolling window mode (new behavior)
         """
+        # CRITICAL FIX: If hist_limit is 0 or negative, don't maintain any history
+        if hist_limit <= 0:
+            # Don't load, save, or maintain any history when contextual is disabled
+            return []
+        
         history = self.load_history()
         
         # Count current exchanges (each exchange = 2 messages: user + assistant)
         current_exchanges = len(history) // 2
         
         # Handle limit reached
-        if hist_limit > 0 and current_exchanges >= hist_limit:
+        if current_exchanges >= hist_limit:
             if rolling_window:
                 # Rolling window mode: keep only the most recent (limit-1) exchanges
                 # We keep limit-1 to make room for the new exchange
