@@ -6715,10 +6715,6 @@ def main(log_callback=None, stop_callback=None):
                         if other_info.get("actual_num") == actual_num:
                             del progress_manager.prog["chapters"][other_key]
                 
-                content_hash = chapter_info.get("content_hash")
-                if content_hash and content_hash in progress_manager.prog["content_hashes"]:
-                    del progress_manager.prog["content_hashes"][content_hash]
-                
                 if chapter_key in progress_manager.prog.get("chapter_chunks", {}):
                     del progress_manager.prog["chapter_chunks"][chapter_key]
                     
