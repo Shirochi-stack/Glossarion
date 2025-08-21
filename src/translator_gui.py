@@ -1028,7 +1028,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.9.6"
+        __version__ = "3.9.7"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1908,7 +1908,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.9.6 - Ready to use!")
+        self.append_log("🚀 Glossarion v3.9.7 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def create_file_section(self):
@@ -3212,11 +3212,17 @@ Recent translations to summarize:
             base_name = os.path.splitext(filename)[0]
             expected_response = None
             
-            # Look for any response file that contains the base_name
+            # Look for response file with exact base_name match
             for file in os.listdir(output_dir):
-                if file.startswith('response_') and base_name in file:
-                    expected_response = file
-                    break
+                if file.startswith('response_'):
+                    # Extract the base part between 'response_' and '.html'
+                    match = re.match(r'response_(.+)\.html?$', file)
+                    if match:
+                        file_base = match.group(1)
+                        # Exact match (not substring)
+                        if file_base == base_name:
+                            expected_response = file
+                            break
             
             # Fallback if no file found
             if not expected_response:
@@ -7120,13 +7126,6 @@ Provide translations in the same numbered format."""
                             elif status == "error":
                                 # Previous error, retry
                                 return True, None, None
-                        
-                        # Check for duplicate content
-                        if content_hash in self.prog.get("content_hashes", {}):
-                            duplicate_info = self.prog["content_hashes"][content_hash]
-                            duplicate_output = duplicate_info.get("output_file")
-                            if duplicate_output and os.path.exists(duplicate_output):
-                                return False, f"Duplicate of {duplicate_info.get('original_name')}", duplicate_output
                         
                         return True, None, None
                     
@@ -14687,7 +14686,7 @@ Important rules:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.9.6...")
+    print("🚀 Starting Glossarion v3.9.7...")
     
     # Initialize splash screen
     splash_manager = None
