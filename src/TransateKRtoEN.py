@@ -686,7 +686,6 @@ class ProgressManager:
                     
                     prog = {
                         "chapters": {},
-                        "content_hashes": {},
                         "chapter_chunks": {},
                         "version": "2.0"
                     }
