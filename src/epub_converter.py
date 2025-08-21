@@ -1909,8 +1909,10 @@ class EPUBCompiler:
         # Try to get authoritative order from OPF/EPUB
         opf_order = self._get_chapter_order_from_opf()
         
+        # Add this right after getting opf_order (around line 15)
         if opf_order:
             self.log("✅ Using authoritative chapter order from OPF/EPUB")
+            self.log(f"[DEBUG] OPF entries (first 5): {list(opf_order.items())[:5]}")
             
             # Create mapping based on core filename (no extensions, no prefixes)
             ordered_files = []
@@ -1929,11 +1931,13 @@ class EPUBCompiler:
                 matched = False
                 for opf_name, chapter_order in opf_order.items():
                     # Get OPF core name - handle .htm.xhtml case
+                    # Get OPF core name - strip all extensions
                     opf_core = opf_name
-                    if opf_core.endswith('.xhtml'):
-                        opf_core = opf_core[:-6]  # Remove .xhtml
-                    if opf_core.endswith('.htm'):
-                        opf_core = opf_core[:-4]  # Remove .htm
+                    # Strip path if present
+                    if '/' in opf_core:
+                        opf_core = opf_core.split('/')[-1]
+                    # Strip extension
+                    opf_core = opf_core.rsplit('.', 1)[0]  # Remove any extension
                     
                     if core_name == opf_core:
                         ordered_files.append((chapter_order, output_file))
