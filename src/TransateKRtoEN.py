@@ -474,20 +474,7 @@ class FileUtilities:
     
     @staticmethod
     def extract_actual_chapter_number(chapter, patterns=None, config=None):
-        """Extract actual chapter number from filename
-        
-        Args:
-            chapter: Chapter dict containing metadata
-            patterns: Optional list of regex patterns to use
-            config: Optional config object to check DISABLE_ZERO_DETECTION
-        
-        Returns:
-            int or float: The actual chapter number (raw from file, no adjustments)
-        """
-        if patterns is None:
-            patterns = PatternManager.FILENAME_EXTRACT_PATTERNS
-        
-        actual_num = None
+        """Extract actual chapter number from filename using improved logic"""
         
         # IMPORTANT: Check if this is a pre-split TEXT FILE chunk first
         if (chapter.get('is_chunk', False) and 
@@ -497,87 +484,41 @@ class FileUtilities:
             # For text file chunks only, preserve the decimal number
             return chapter['num']  # This will be 1.1, 1.2, etc.
         
+        # Get filename for extraction
+        filename = chapter.get('original_basename') or chapter.get('filename', '')
+        
+        # Use our improved extraction function
+        # Note: We don't have opf_spine_position here, so pass None
+        actual_num, method = extract_chapter_number_from_filename(filename, opf_spine_position=None)
+        
+        # If extraction succeeded, return the result
+        if actual_num is not None:
+            print(f"[DEBUG] Extracted {actual_num} from '{filename}' using method: {method}")
+            return actual_num
+        
+        # Fallback to original complex logic for edge cases
+        actual_num = None
+        
+        if patterns is None:
+            patterns = PatternManager.FILENAME_EXTRACT_PATTERNS
+        
         # Try to extract from original basename first
         if chapter.get('original_basename'):
             basename = chapter['original_basename']
             
-            #print(f"[DEBUG] Checking basename: {basename}")
-            
             # Check if decimal chapters are enabled for EPUBs
             enable_decimal = os.getenv('ENABLE_DECIMAL_CHAPTERS', '0') == '1'
-            #print(f"[DEBUG] Decimal detection enabled: {enable_decimal}")
             
             # For EPUBs, only check decimal patterns if the toggle is enabled
             if enable_decimal:
                 # Check for standard decimal chapter numbers (e.g., Chapter_1.1, 1.2.html)
                 decimal_match = re.search(r'(\d+)\.(\d+)', basename)
                 if decimal_match:
-                    # Return as float for decimal chapters
                     actual_num = float(f"{decimal_match.group(1)}.{decimal_match.group(2)}")
-                    #print(f"[DEBUG] DECIMAL pattern matched: {decimal_match.group(0)} -> extracted {actual_num}")
                     return actual_num
                 
                 # Check for the XXXX_YY pattern where it represents X.YY decimal chapters
-                # This matches files like "0002_33_" or "0002_33_.xhtml" as chapter 2.33
                 decimal_prefix_match = re.match(r'^(\d{4})_(\d{1,2})(?:_|\.)?(?:x?html?)?$', basename)
-                if decimal_prefix_match:
-                    # Check if the second group could be a decimal part
-                    first_part = decimal_prefix_match.group(1)
-                    second_part = decimal_prefix_match.group(2)
-                    
-                    # If second part is 2 digits and > 9, treat as decimal
-                    # e.g., 0002_33 -> 2.33, 0005_66 -> 5.66
-                    if len(second_part) == 2 and int(second_part) > 9:
-                        # Extract the last digit from first part as chapter number
-                        chapter_num = int(first_part[-1])  # Last digit of 0002 is 2
-                        decimal_part = second_part          # The 33
-                        actual_num = float(f"{chapter_num}.{decimal_part}")
-                        #print(f"[DEBUG] DECIMAL PREFIX pattern matched: {basename} -> extracted {actual_num}")
-                        return actual_num
-            
-            # Standard XXXX_Y format handling
-            # When decimal is OFF: always extract number after underscore
-            # When decimal is ON: only for single digits or double digits <= 9
-            prefix_suffix_match = re.match(r'^(\d+)_(\d+)', basename)
-            if prefix_suffix_match:
-                second_part = prefix_suffix_match.group(2)
-                
-                # If decimal detection is OFF, always use standard extraction
-                if not enable_decimal:
-                    actual_num = int(second_part)
-                    #print(f"[DEBUG] PREFIX_SUFFIX pattern matched: {prefix_suffix_match.group(0)} -> extracted {actual_num} (after underscore)")
-                    return actual_num
-                else:
-                    # Decimal detection is ON - only use standard for non-decimal cases
-                    if len(second_part) == 1 or (len(second_part) == 2 and int(second_part) <= 9):
-                        actual_num = int(second_part)
-                        #print(f"[DEBUG] PREFIX_SUFFIX pattern matched (non-decimal): {prefix_suffix_match.group(0)} -> extracted {actual_num}")
-                        return actual_num
-                    # Otherwise fall through for decimal handling
-            
-            # Check other patterns if no match yet
-            for pattern in patterns:
-                # Skip patterns that would incorrectly match our XXXX_Y format
-                if pattern in [r'^(\d+)[_\.]', r'(\d{3,5})[_\.]', r'^(\d+)_']:
-                    continue
-                    
-                match = re.search(pattern, basename, re.IGNORECASE)
-                if match:
-                    actual_num = int(match.group(1))
-                    #print(f"[DEBUG] Pattern matched in basename -> extracted {actual_num}")
-                    break
-        
-        # If not found in basename, try filename
-        if actual_num is None and 'filename' in chapter:
-            filename = chapter['filename']
-            #print(f"[DEBUG] Checking filename: {filename}")
-            
-            # Re-check the enable_decimal setting for filename section
-            enable_decimal = os.getenv('ENABLE_DECIMAL_CHAPTERS', '0') == '1'
-            
-            # Check decimal prefix pattern in filename (only if toggle is enabled)
-            if enable_decimal:
-                decimal_prefix_match = re.match(r'^(\d{4})_(\d{1,2})(?:_|\.)?(?:x?html?)?$', filename)
                 if decimal_prefix_match:
                     first_part = decimal_prefix_match.group(1)
                     second_part = decimal_prefix_match.group(2)
@@ -586,27 +527,35 @@ class FileUtilities:
                         chapter_num = int(first_part[-1])
                         decimal_part = second_part
                         actual_num = float(f"{chapter_num}.{decimal_part}")
-                        #print(f"[DEBUG] DECIMAL PREFIX pattern matched in filename: {filename} -> extracted {actual_num}")
                         return actual_num
             
-            # Standard pattern matching for filename
+            # Standard XXXX_Y format handling (existing logic)
+            prefix_suffix_match = re.match(r'^(\d+)_(\d+)', basename)
+            if prefix_suffix_match:
+                second_part = prefix_suffix_match.group(2)
+                
+                if not enable_decimal:
+                    actual_num = int(second_part)
+                    return actual_num
+                else:
+                    if len(second_part) == 1 or (len(second_part) == 2 and int(second_part) <= 9):
+                        actual_num = int(second_part)
+                        return actual_num
+            
+            # Check other patterns if no match yet
             for pattern in patterns:
-                # Skip the XXXX_Y patterns for filename
-                if pattern in [r'^\d{4}_(\d+)\.x?html?$', r'^\d+_(\d+)[_\.]', r'(\d{3,5})[_\.]', r'^(\d+)_']:
+                if pattern in [r'^(\d+)[_\.]', r'(\d{3,5})[_\.]', r'^(\d+)_']:
                     continue
-                    
-                match = re.search(pattern, filename, re.IGNORECASE)
+                match = re.search(pattern, basename, re.IGNORECASE)
                 if match:
                     actual_num = int(match.group(1))
-                    #print(f"[DEBUG] Pattern matched in filename -> extracted {actual_num}")
                     break
         
         # Final fallback to chapter num
         if actual_num is None:
             actual_num = chapter.get("num", 0)
-            #print(f"[DEBUG] No pattern matched, using chapter num: {actual_num}")
+            print(f"[DEBUG] No pattern matched, using chapter num: {actual_num}")
         
-        # Return raw number - adjustments should be done by caller
         return actual_num
     
     @staticmethod
@@ -844,13 +793,20 @@ class ProgressManager:
         # If status says completed but file doesn't exist - DELETE THE ENTRY AND RETRANSLATE
         if status in ["completed", "completed_empty", "completed_image_only"]:
             if output_file:
+                # Try both original and stripped filenames
                 output_path = os.path.join(output_dir, output_file)
-                if os.path.exists(output_path):
-                    # File exists - skip translation
+                
+                # Also try stripped version if original has .htm.html
+                stripped_output = output_file.replace('.htm.html', '.html') if '.htm.html' in output_file else output_file
+                stripped_path = os.path.join(output_dir, stripped_output)
+                
+                if os.path.exists(output_path) or os.path.exists(stripped_path):
+                    # File exists (either version) - skip translation
                     return False, f"Chapter {actual_num} already translated: {output_file}", output_file
                 else:
-                    # FILE MISSING - DELETE ENTRY AND FORCE RETRANSLATION
-                    del self.prog["chapters"][chapter_key]
+                    # File missing (both versions) - delete entry and force retranslation
+                    if chapter_key in self.prog["chapters"]:
+                        del self.prog["chapters"][chapter_key]
                     if chapter_key in self.prog.get("chapter_chunks", {}):
                         del self.prog["chapter_chunks"][chapter_key]
                     self.save()
@@ -861,7 +817,7 @@ class ProgressManager:
         
         # Always retranslate anything not completed with existing file
         return True, None, None
-    
+        
     def cleanup_missing_files(self, output_dir):
         """Remove missing files and duplicates - NO RESTORATION BULLSHIT"""
         cleaned_count = 0
@@ -5374,27 +5330,73 @@ def set_output_redirect(log_callback=None):
 # =====================================================
 # EPUB AND FILE PROCESSING
 # =====================================================
-def extract_chapter_number_from_filename(filename):
-    """Extract chapter number from filename, handling various formats"""
+def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_spine_data=None):
+    """Extract chapter number from filename, prioritizing OPF spine order"""
+    
+    # Priority 1: Use OPF spine position if available
+    if opf_spine_position is not None:
+        # Handle special non-chapter files (always chapter 0)
+        filename_lower = filename.lower()
+        name_without_ext = os.path.splitext(filename)[0].lower()
+        
+        # Check for special keywords OR no numbers present
+        special_keywords = ['title', 'toc', 'cover', 'index', 'copyright', 'preface', 'nav']
+        has_special_keyword = any(name in filename_lower for name in special_keywords)
+        has_no_numbers = not re.search(r'\d', name_without_ext)
+        
+        if has_special_keyword or has_no_numbers:
+            return 0, 'opf_special_file'
+        
+        # Use spine position for regular chapters (0, 1, 2, 3...)
+        return opf_spine_position, 'opf_spine_order'
+    
+    # Priority 2: Check if this looks like a special file (even without OPF)
+    name_without_ext = os.path.splitext(filename)[0].lower()
+    special_keywords = ['title', 'toc', 'cover', 'index', 'copyright', 'preface']
+    has_special_keyword = any(name in name_without_ext for name in special_keywords)
+    has_no_numbers = not re.search(r'\d', name_without_ext)
+    
+    if has_special_keyword or has_no_numbers:
+        return 0, 'special_file'
+    
+    # Priority 3: Try to extract sequential numbers (000, 001, 002...)
     name_without_ext = os.path.splitext(filename)[0]
+    
+    # Look for simple sequential patterns first
+    # Priority 3: Try to extract sequential numbers and decimals
+    sequential_patterns = [
+        (r'^(\d+)\.(\d+)$', 'decimal_number'),      # 1.5, 2.3 (NEW!)
+        (r'^(\d{3,4})$', 'sequential_number'),      # 000, 001, 0001
+        (r'^(\d+)$', 'direct_number'),              # 0, 1, 2
+    ]
 
-    patterns = [
-        (r'^(\d+)[_\.]', 'direct_number'),
+    for pattern, method in sequential_patterns:
+        match = re.search(pattern, name_without_ext)
+        if match:
+            if method == 'decimal_number':
+                # Return as float for decimal chapters
+                return float(f"{match.group(1)}.{match.group(2)}"), method
+            else:
+                return int(match.group(1)), method
+    
+    # Priority 4: Fall back to existing filename parsing patterns
+    fallback_patterns = [
         (r'^response_(\d+)[_\.]', 'response_prefix'),
         (r'[Cc]hapter[_\s]*(\d+)', 'chapter_word'),
         (r'[Cc]h[_\s]*(\d+)', 'ch_abbreviation'),
         (r'No(\d+)', 'no_prefix'),
         (r'第(\d+)[章话回]', 'chinese_chapter'),
+        (r'-h-(\d+)', 'h_suffix'),              # For your -h-16 pattern
         (r'_(\d+)', 'underscore_suffix'),
         (r'-(\d+)', 'dash_suffix'),
         (r'(\d+)', 'trailing_number'),
     ]
-
-    for pattern, method in patterns:
+    
+    for pattern, method in fallback_patterns:
         match = re.search(pattern, name_without_ext, re.IGNORECASE)
         if match:
             return int(match.group(1)), method
-
+    
     return None, None
 
 def process_chapter_images(chapter_html: str, actual_num: int, image_translator: ImageTranslator, 
@@ -6693,6 +6695,7 @@ def main(log_callback=None, stop_callback=None):
     progress_manager.cleanup_missing_files(out)
     progress_manager.save()
 
+    # Reset failed chapters logic
     if os.getenv("RESET_FAILED_CHAPTERS", "1") == "1":
         reset_count = 0
         for chapter_key, chapter_info in list(progress_manager.prog["chapters"].items()):
@@ -6700,8 +6703,9 @@ def main(log_callback=None, stop_callback=None):
             
             # Include all failure states for reset
             if status in ["failed", "qa_failed", "file_missing", "error", "file_deleted", "in_progress"]:
-                # Delete the chapter entry completely
-                del progress_manager.prog["chapters"][chapter_key]
+                # Delete the chapter entry completely (with safety check)
+                if chapter_key in progress_manager.prog["chapters"]:  # ← ADD THIS CHECK
+                    del progress_manager.prog["chapters"][chapter_key]
                 
                 # Also delete by actual_num to ensure it's really gone
                 actual_num = chapter_info.get("actual_num")
