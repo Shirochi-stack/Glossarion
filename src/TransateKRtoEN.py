@@ -745,13 +745,12 @@ class ProgressManager:
                 except:
                     pass
     
-    def update(self, idx, actual_num, content_hash, output_file, status="in_progress", ai_features=None, raw_num=None):
+    def update(self, idx, actual_num, output_file, status="in_progress", ai_features=None, raw_num=None):
         """Update progress for a chapter"""
         chapter_key = str(idx)
         
         chapter_info = {
             "actual_num": actual_num,
-            "content_hash": content_hash,
             "output_file": output_file,
             "status": status,
             "last_updated": time.time()
