@@ -3573,18 +3573,32 @@ Recent translations to summarize:
             # Remove marks
             cleared_count = 0
             for info in qa_failed_chapters:
-                # Find chapter by actual_num
-                chapter_key = str(info['actual_num'])  # Convert to string since keys are strings
+                # Find the actual numeric key in progress by matching output_file
+                target_output_file = info['output_file']
+                chapter_key = None
                 
-                if chapter_key in data['prog']["chapters"]:
+                # Search through all chapters to find the one with matching output_file
+                for key, ch_info in data['prog']["chapters"].items():
+                    if ch_info.get('output_file') == target_output_file:
+                        chapter_key = key
+                        break
+                
+                # Update the chapter status if we found the key
+                if chapter_key and chapter_key in data['prog']["chapters"]:
+                    print(f"Updating chapter key {chapter_key} (output file: {target_output_file})")
                     data['prog']["chapters"][chapter_key]["status"] = "completed"
-                    data['prog']["chapters"][chapter_key].pop("qa_issues", None)
-                    data['prog']["chapters"][chapter_key].pop("qa_timestamp", None)
-                    data['prog']["chapters"][chapter_key].pop("qa_issues_found", None)
-                    data['prog']["chapters"][chapter_key].pop("duplicate_confidence", None)
+                    
+                    # Remove all QA-related fields
+                    fields_to_remove = ["qa_issues", "qa_timestamp", "qa_issues_found", "duplicate_confidence"]
+                    for field in fields_to_remove:
+                        if field in data['prog']["chapters"][chapter_key]:
+                            del data['prog']["chapters"][chapter_key][field]
+                    
                     cleared_count += 1
+                else:
+                    print(f"WARNING: Could not find chapter key for output file: {target_output_file}")
             
-            # Save
+            # Save the updated progress
             with open(data['progress_file'], 'w', encoding='utf-8') as f:
                 json.dump(data['prog'], f, ensure_ascii=False, indent=2)
             
