@@ -1028,7 +1028,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "3.9.8"
+        __version__ = "4.0.0"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1908,7 +1908,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v3.9.8 - Ready to use!")
+        self.append_log("🚀 Glossarion v4.0.0 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def create_file_section(self):
@@ -8889,6 +8889,7 @@ Important rules:
                     'DISABLE_GEMINI_SAFETY': str(self.config.get('disable_gemini_safety', False)).lower(),
                     'GLOSSARY_DUPLICATE_KEY_MODE': 'skip',  # Always use skip mode for new format
                     'SEND_INTERVAL_SECONDS': str(self.delay_entry.get()),
+                    'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_var.get().strip() or '0.5',
                     'CONTEXTUAL': '1' if self.contextual_var.get() else '0',
                     'GOOGLE_APPLICATION_CREDENTIALS': os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),
                     
@@ -8908,6 +8909,7 @@ Important rules:
                     'GLOSSARY_FUZZY_THRESHOLD': str(self.config.get('glossary_fuzzy_threshold', 0.90)),
                     'MANUAL_GLOSSARY': self.manual_glossary_path if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path else '',
                     'GLOSSARY_FORMAT_INSTRUCTIONS': self.glossary_format_instructions if hasattr(self, 'glossary_format_instructions') else '',
+                    
 
                 }
                 
@@ -14698,7 +14700,7 @@ Important rules:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v3.9.8...")
+    print("🚀 Starting Glossarion v4.0.0...")
     
     # Initialize splash screen
     splash_manager = None
