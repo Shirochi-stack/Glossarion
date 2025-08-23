@@ -4016,7 +4016,7 @@ class GlossaryManager:
             print(f"📑 Text exceeds {chapter_split_threshold:,} chars, processing in chunks...")
             
             # Process chapters individually and merge results
-            all_glossary_entries = {}
+            all_glossary_entries = []
             chunk_size = 0
             chunk_chapters = []
             chunks_to_process = []
@@ -4062,13 +4062,15 @@ class GlossaryManager:
                     if thread_delay > 0:
                         print(f"📑 Thread submission delay: {thread_delay}s between parallel submissions")
                     
-                    # Create progress bar
-                    progress_bar = tqdm(total=len(chunks_to_process), desc="📑 Parallel Extraction", unit="chunk",
-                                       bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
+                    # Progress tracking variables
+                    completed_chunks = 0
+                    total_chunks = len(chunks_to_process)
                     
                     with ThreadPoolExecutor(max_workers=extraction_workers) as executor:
                         futures = {}
                         last_submission_time = 0
+                        
+                        print(f"📑 Starting parallel extraction: 0/{total_chunks} chunks")
                         
                         for chunk_idx, chunk_text in chunks_to_process:
                             if is_stop_requested():
@@ -4079,9 +4081,8 @@ class GlossaryManager:
                                 time_since_last = time.time() - last_submission_time
                                 if time_since_last < thread_delay:
                                     sleep_time = thread_delay - time_since_last
-                                    progress_bar.set_description(f"📑 Parallel Extraction (thread delay {sleep_time:.1f}s)")
+                                    print(f"🧵 Thread delay: {sleep_time:.1f}s")
                                     time.sleep(sleep_time)
-                                    progress_bar.set_description("📑 Parallel Extraction")
                             
                             future = executor.submit(
                                 self._process_single_chunk,
@@ -4095,21 +4096,30 @@ class GlossaryManager:
                         # Collect results
                         for future in as_completed(futures):
                             if is_stop_requested():
-                                progress_bar.close()
                                 print("📑 ❌ Stopping chunk processing...")
                                 break
                             
                             try:
                                 chunk_glossary = future.result()
-                                all_glossary_entries.update(chunk_glossary)
-                                progress_bar.update(1)
-                                progress_bar.set_description(f"📑 Parallel Extraction ({len(all_glossary_entries)} entries)")
+                                if isinstance(chunk_glossary, dict):
+                                    all_glossary_entries.update(chunk_glossary)
+                                elif isinstance(chunk_glossary, list):
+                                    # It's CSV lines, need to convert back to dict for now
+                                    for line in chunk_glossary[1:]:  # Skip header
+                                        parts = line.split(',')
+                                        if len(parts) >= 3:
+                                            all_glossary_entries[parts[1]] = parts[2]
+                                completed_chunks += 1
+                                
+                                # Print progress for GUI
+                                progress_percent = (completed_chunks / total_chunks) * 100
+                                print(f"📑 Progress: {completed_chunks}/{total_chunks} chunks ({progress_percent:.0f}%) - {len(all_glossary_entries)} entries found")
                                 print(f"📑 Chunk {futures[future]} completed: {len(chunk_glossary)} entries")
                             except Exception as e:
                                 print(f"⚠️ Chunk {futures[future]} failed: {e}")
-                                progress_bar.update(1)
-                    
-                    progress_bar.close()
+                                completed_chunks += 1
+                                progress_percent = (completed_chunks / total_chunks) * 100
+                                print(f"📑 Progress: {completed_chunks}/{total_chunks} chunks ({progress_percent:.0f}%)")
             else:
                 # Sequential processing
                 for chunk_idx, chunk_text in chunks_to_process:
@@ -4134,7 +4144,13 @@ class GlossaryManager:
                         )
                     
                     # Merge chunk results
-                    all_glossary_entries.update(chunk_glossary)
+                    # chunk_glossary is now CSV lines, just extend
+                    if isinstance(chunk_glossary, list):
+                        all_glossary_entries.extend(chunk_glossary[1:])  # Skip header
+                    else:
+                        # Old dictionary format, convert
+                        for raw_name, translated_name in chunk_glossary.items():
+                            all_glossary_entries.append(f"term,{raw_name},{translated_name}")
             
             # Now merge with existing glossary if present
             if existing_glossary:
@@ -4166,19 +4182,38 @@ class GlossaryManager:
             # Convert to CSV format
             if filtered_entries:
                 csv_lines = ["type,raw_name,translated_name"]
+                
+                # When processing chunks, we lose the type information since all_glossary_entries is a dict
+                # We need to preserve types from the original extraction
                 for raw_name, translated_name in filtered_entries.items():
-                    # Determine type based on content/mode
+                    # For filter mode "only_with_honorifics", everything should be character
                     if filter_mode == "only_with_honorifics":
                         entry_type = "character"
-                    elif self._has_honorific(raw_name):
-                        entry_type = "character"
-                    else:
-                        entry_type = "term"
+                    elif filter_mode == "only_without_honorifics":
+                        # This mode includes both characters without honorifics AND terms
+                        # We can't distinguish them here, so default to term
+                        # unless we can detect it's clearly a name
+                        if self._looks_like_name(raw_name):
+                            entry_type = "character"
+                        else:
+                            entry_type = "term"
+                    else:  # "all" mode
+                        # Try to determine if it's a character or term
+                        # Characters typically have honorifics or look like names
+                        if self._has_honorific(raw_name) or self._looks_like_name(raw_name):
+                            entry_type = "character"
+                        else:
+                            entry_type = "term"
+                    
                     csv_lines.append(f"{entry_type},{raw_name},{translated_name}")
                 
                 # Apply fuzzy deduplication
                 print(f"📑 Applying fuzzy deduplication (threshold: {fuzzy_threshold})...")
+                original_count = len(csv_lines) - 1
                 csv_lines = self._deduplicate_glossary_with_fuzzy(csv_lines, fuzzy_threshold)
+                deduped_count = len(csv_lines) - 1
+                if original_count > deduped_count:
+                    print(f"📑 Removed {original_count - deduped_count} duplicate entries")
                 
                 # Sort by type and name
                 print(f"📑 Sorting glossary by type and name...")
@@ -4212,8 +4247,11 @@ class GlossaryManager:
                 print(f"📑 Character entries: {sum(1 for line in csv_lines[1:] if line.startswith('character,'))}")
                 print(f"📑 Term entries: {sum(1 for line in csv_lines[1:] if line.startswith('term,'))}")
                 print(f"📑 Total entries: {len(csv_lines) - 1}")
-            
-            return self._parse_csv_to_dict(csv_content if 'csv_content' in locals() else '')
+                
+                return self._parse_csv_to_dict(csv_content)
+            else:
+                # No entries found
+                return {}
         
         # Original single-text processing
         if custom_prompt:
@@ -4231,7 +4269,7 @@ class GlossaryManager:
                                   min_frequency, max_names, max_titles, 
                                   output_dir, strip_honorifics, fuzzy_threshold, 
                                   filter_mode, api_batch_size, extraction_workers):
-        """Process chunks using batch API calls for AI extraction with thread delay and progress bar"""
+        """Process chunks using batch API calls for AI extraction with thread delay"""
         
         print(f"📑 Using batch API mode with {api_batch_size} chunks per batch")
         
@@ -4240,28 +4278,19 @@ class GlossaryManager:
         if thread_delay > 0:
             print(f"📑 Thread submission delay: {thread_delay}s between parallel calls")
         
-        all_glossary_entries = {}
-        
-        # Create overall progress bar for all chunks
+        all_glossary_entries = []
         total_chunks = len(chunks_to_process)
-        overall_progress = tqdm(total=total_chunks, desc="📑 Glossary Extraction", unit="chunk", 
-                               bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} chunks [{elapsed}<{remaining}]')
+        completed_chunks = 0
         
         # Process in API batches
         for batch_start in range(0, len(chunks_to_process), api_batch_size):
             if is_stop_requested():
-                overall_progress.close()
                 break
             
             batch_end = min(batch_start + api_batch_size, len(chunks_to_process))
             batch_chunks = chunks_to_process[batch_start:batch_end]
             
             print(f"📑 Processing API batch {batch_start//api_batch_size + 1}: chunks {batch_start+1}-{batch_end}")
-            
-            # Create progress bar for this batch
-            batch_progress = tqdm(total=len(batch_chunks), desc=f"  Batch {batch_start//api_batch_size + 1}", 
-                                 unit="call", leave=False,
-                                 bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}]')
             
             # Use ThreadPoolExecutor for parallel API calls within batch
             with ThreadPoolExecutor(max_workers=min(extraction_workers, len(batch_chunks))) as executor:
@@ -4277,10 +4306,8 @@ class GlossaryManager:
                         time_since_last = time.time() - last_submission_time
                         if time_since_last < thread_delay:
                             sleep_time = thread_delay - time_since_last
-                            # Update progress bar description during wait
-                            batch_progress.set_description(f"  Batch {batch_start//api_batch_size + 1} (waiting {sleep_time:.1f}s)")
+                            print(f"🧵 Thread delay: {sleep_time:.1f}s for chunk {chunk_idx}")
                             time.sleep(sleep_time)
-                            batch_progress.set_description(f"  Batch {batch_start//api_batch_size + 1}")
                     
                     future = executor.submit(
                         self._extract_with_custom_prompt,
@@ -4299,28 +4326,33 @@ class GlossaryManager:
                     
                     try:
                         chunk_glossary = future.result()
-                        all_glossary_entries.update(chunk_glossary)
-                        batch_progress.update(1)
-                        overall_progress.update(1)
+                        if isinstance(chunk_glossary, dict):
+                            all_glossary_entries.update(chunk_glossary)
+                        elif isinstance(chunk_glossary, list):
+                            # It's CSV lines, need to convert back to dict for now
+                            for line in chunk_glossary[1:]:  # Skip header
+                                parts = line.split(',')
+                                if len(parts) >= 3:
+                                    all_glossary_entries[parts[1]] = parts[2]
+                        completed_chunks += 1
                         
-                        # Update description with entry count
-                        overall_progress.set_description(f"📑 Glossary Extraction ({len(all_glossary_entries)} entries found)")
+                        # Print progress for GUI
+                        progress_percent = (completed_chunks / total_chunks) * 100
+                        print(f"📑 Progress: {completed_chunks}/{total_chunks} chunks ({progress_percent:.0f}%) - {len(all_glossary_entries)} entries found")
+                        print(f"📑 Chunk {futures[future]} completed via API: {len(chunk_glossary)} entries")
                         
                     except Exception as e:
                         print(f"⚠️ API call for chunk {futures[future]} failed: {e}")
-                        batch_progress.update(1)
-                        overall_progress.update(1)
-            
-            batch_progress.close()
+                        completed_chunks += 1
+                        progress_percent = (completed_chunks / total_chunks) * 100
+                        print(f"📑 Progress: {completed_chunks}/{total_chunks} chunks ({progress_percent:.0f}%)")
             
             # Add delay between API batches
             if batch_end < len(chunks_to_process):
                 api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
-                overall_progress.set_description(f"📑 Glossary Extraction (waiting {api_delay}s)")
+                print(f"⏱️ Waiting {api_delay}s before next API batch...")
                 time.sleep(api_delay)
-                overall_progress.set_description(f"📑 Glossary Extraction ({len(all_glossary_entries)} entries found)")
         
-        overall_progress.close()
         return all_glossary_entries
     
     def _process_single_chunk(self, chunk_idx, chunk_text, custom_prompt, language,
@@ -4365,15 +4397,52 @@ class GlossaryManager:
             return filtered
         else:
             return entries
+
+    def _looks_like_name(self, text):
+        """Check if text looks like a character name"""
+        if not text:
+            return False
+        
+        # Check for various name patterns
+        # Korean names (2-4 hangul characters)
+        if all(0xAC00 <= ord(char) <= 0xD7AF for char in text) and 2 <= len(text) <= 4:
+            return True
+        
+        # Japanese names (mix of kanji/kana, 2-6 chars)
+        has_kanji = any(0x4E00 <= ord(char) <= 0x9FFF for char in text)
+        has_kana = any((0x3040 <= ord(char) <= 0x309F) or (0x30A0 <= ord(char) <= 0x30FF) for char in text)
+        if (has_kanji or has_kana) and 2 <= len(text) <= 6:
+            return True
+        
+        # Chinese names (2-4 Chinese characters)
+        if all(0x4E00 <= ord(char) <= 0x9FFF for char in text) and 2 <= len(text) <= 4:
+            return True
+        
+        # English names (starts with capital, mostly letters)
+        if text[0].isupper() and sum(1 for c in text if c.isalpha()) >= len(text) * 0.8:
+            return True
+        
+        return False
     
     def _has_honorific(self, term):
-        """Check if a term contains an honorific"""
-        # Check for common honorifics in various languages
-        honorifics = ['님', '씨', '君', 'くん', 'さん', '様', '氏', '先生', '-san', '-kun', '-sama', '-sensei', 'Mr.', 'Ms.', 'Mrs.', 'Dr.']
+        """Check if a term contains an honorific using PatternManager's comprehensive list"""
+        if not term:
+            return False
+        
         term_lower = term.lower()
-        for honorific in honorifics:
-            if honorific.lower() in term_lower:
-                return True
+        
+        # Check all language honorifics from PatternManager
+        for language, honorifics_list in self.pattern_manager.CJK_HONORIFICS.items():
+            for honorific in honorifics_list:
+                # For romanized/English honorifics with spaces or dashes
+                if honorific.startswith(' ') or honorific.startswith('-'):
+                    if term_lower.endswith(honorific.lower()):
+                        return True
+                # For CJK honorifics (no separator)
+                else:
+                    if honorific in term:
+                        return True
+        
         return False
     
     def _convert_to_csv_format(self, data):
