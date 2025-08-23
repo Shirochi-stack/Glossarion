@@ -494,7 +494,7 @@ class FileUtilities:
         
         # If extraction succeeded, return the result
         if actual_num is not None:
-            print(f"[DEBUG] Extracted {actual_num} from '{filename}' using method: {method}")
+            #print(f"[DEBUG] Extracted {actual_num} from '{filename}' using method: {method}")
             return actual_num
         
         # Fallback to original complex logic for edge cases
@@ -4278,7 +4278,8 @@ class GlossaryManager:
         if thread_delay > 0:
             print(f"📑 Thread submission delay: {thread_delay}s between parallel calls")
         
-        all_glossary_entries = {}
+        # CHANGE: Collect raw CSV lines instead of dictionary
+        all_csv_lines = []  # Collect all entries as CSV lines
         total_chunks = len(chunks_to_process)
         completed_chunks = 0
         
@@ -4326,20 +4327,28 @@ class GlossaryManager:
                     
                     try:
                         chunk_glossary = future.result()
+                        entries_added = 0
+                        
+                        # CHANGE: Just collect all entries as CSV lines
                         if isinstance(chunk_glossary, dict):
-                            all_glossary_entries.update(chunk_glossary)
+                            for raw_name, translated_name in chunk_glossary.items():
+                                # Determine type based on content
+                                entry_type = "character" if self._has_honorific(raw_name) else "term"
+                                all_csv_lines.append(f"{entry_type},{raw_name},{translated_name}")
+                                entries_added += 1
                         elif isinstance(chunk_glossary, list):
-                            # It's CSV lines, need to convert back to dict for now
-                            for line in chunk_glossary[1:]:  # Skip header
-                                parts = line.split(',')
-                                if len(parts) >= 3:
-                                    all_glossary_entries[parts[1]] = parts[2]
+                            # Already CSV lines, just add them (skip header)
+                            for line in chunk_glossary:
+                                if line and not line.startswith('type,'):
+                                    all_csv_lines.append(line)
+                                    entries_added += 1
+                        
                         completed_chunks += 1
                         
                         # Print progress for GUI
                         progress_percent = (completed_chunks / total_chunks) * 100
-                        print(f"📑 Progress: {completed_chunks}/{total_chunks} chunks ({progress_percent:.0f}%) - {len(all_glossary_entries)} entries found")
-                        print(f"📑 Chunk {futures[future]} completed via API: {len(chunk_glossary)} entries")
+                        print(f"📑 Progress: {completed_chunks}/{total_chunks} chunks ({progress_percent:.0f}%) - {len(all_csv_lines)} total entries collected")
+                        print(f"📑 Chunk {futures[future]} completed via API: {entries_added} entries")
                         
                     except Exception as e:
                         print(f"⚠️ API call for chunk {futures[future]} failed: {e}")
@@ -4353,7 +4362,8 @@ class GlossaryManager:
                 print(f"⏱️ Waiting {api_delay}s before next API batch...")
                 time.sleep(api_delay)
         
-        return all_glossary_entries
+        # CHANGE: Return CSV lines instead of dictionary
+        return all_csv_lines
     
     def _process_single_chunk(self, chunk_idx, chunk_text, custom_prompt, language,
                              min_frequency, max_names, max_titles, batch_size,
