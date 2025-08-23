@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 from collections import Counter
 from unified_api_client import UnifiedClient, UnifiedClientError
 import hashlib
+import tempfile
 import unicodedata
 from difflib import SequenceMatcher
 import unicodedata
@@ -3864,7 +3865,52 @@ class GlossaryManager:
     
     def __init__(self):
         self.pattern_manager = PatternManager()
-    
+        self._results_lock = threading.Lock()  # Thread lock for collecting results
+        self._file_write_lock = threading.Lock()  # Thread lock for file operations
+
+    def _atomic_write_file(self, filepath, content, encoding='utf-8'):
+        """Atomically write to a file to prevent corruption from concurrent writes"""
+        
+        # Create temp file in same directory to ensure same filesystem
+        dir_path = os.path.dirname(filepath)
+        
+        with self._file_write_lock:
+            try:
+                # Write to temporary file first
+                with tempfile.NamedTemporaryFile(mode='w', encoding=encoding, 
+                                                dir=dir_path, delete=False) as tmp_file:
+                    tmp_file.write(content)
+                    tmp_path = tmp_file.name
+                
+                # Atomic rename (on same filesystem)
+                if os.name == 'nt':  # Windows
+                    # Windows doesn't support atomic rename if target exists
+                    if os.path.exists(filepath):
+                        os.remove(filepath)
+                    os.rename(tmp_path, filepath)
+                else:  # Unix/Linux/Mac
+                    os.rename(tmp_path, filepath)
+                
+                return True
+                
+            except Exception as e:
+                print(f"⚠️ Atomic write failed: {e}")
+                # Cleanup temp file if it exists
+                if 'tmp_path' in locals() and os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except:
+                        pass
+                
+                # Fallback to direct write with lock
+                try:
+                    with open(filepath, 'w', encoding=encoding) as f:
+                        f.write(content)
+                    return True
+                except Exception as e2:
+                    print(f"⚠️ Fallback write also failed: {e2}")
+                    return False
+   
     def save_glossary(self, output_dir, chapters, instructions, language="korean"):
         """Targeted glossary generator with true CSV format output and parallel processing"""
         print("📑 Targeted Glossary Generator v6.0 (CSV Format + Parallel)")
@@ -3896,8 +3942,7 @@ class GlossaryManager:
                             # Convert old JSON to new CSV format
                             csv_content = self._convert_to_csv_format(data)
                             # Save as CSV for next time
-                            with open(glossary_path, 'w', encoding='utf-8') as f:
-                                f.write(csv_content)
+                            self._atomic_write_file(glossary_path, csv_content)
                             return self._parse_csv_to_dict(csv_content)
                         except:
                             # Not JSON either, treat as CSV
@@ -4084,8 +4129,7 @@ class GlossaryManager:
                         # Save
                         csv_content = '\n'.join(all_csv_lines)
                         glossary_path = os.path.join(output_dir, "glossary.json")
-                        with open(glossary_path, 'w', encoding='utf-8') as f:
-                            f.write(csv_content)
+                        self._atomic_write_file(glossary_path, csv_content)
                         
                         print(f"\n📑 ✅ GLOSSARY SAVED!")
                         print(f"📑 Character entries: {sum(1 for line in all_csv_lines[1:] if line.startswith('character,'))}")
@@ -4208,8 +4252,7 @@ class GlossaryManager:
                 
                 # Save and return
                 glossary_path = os.path.join(output_dir, "glossary.json")
-                with open(glossary_path, 'w', encoding='utf-8') as f:
-                    f.write(csv_content)
+                self._atomic_write_file(glossary_path, csv_content)
                 
                 print(f"\n📑 ✅ CHUNKED GLOSSARY SAVED!")
                 print(f"📑 File: {glossary_path}")
@@ -4280,8 +4323,7 @@ class GlossaryManager:
                 
                 # Save glossary
                 glossary_path = os.path.join(output_dir, "glossary.json")
-                with open(glossary_path, 'w', encoding='utf-8') as f:
-                    f.write(csv_content)
+                self._atomic_write_file(glossary_path, csv_content)
                 
                 print(f"\n📑 ✅ GLOSSARY SAVED!")
                 print(f"📑 File: {glossary_path}")
@@ -4748,8 +4790,7 @@ Text to analyze:
                     
                     # Save glossary as CSV (with .json extension for compatibility)
                     glossary_path = os.path.join(output_dir, "glossary.json")
-                    with open(glossary_path, 'w', encoding='utf-8') as f:
-                        f.write(csv_content)
+                    self._atomic_write_file(glossary_path, csv_content)
                     
                     print(f"\n📑 ✅ AI-ASSISTED GLOSSARY SAVED!")
                     print(f"📑 File: {glossary_path}")
@@ -5385,8 +5426,7 @@ Text to analyze:
             # Still save what we have
             csv_content = '\n'.join(csv_lines)
             glossary_path = os.path.join(output_dir, "glossary.json")
-            with open(glossary_path, 'w', encoding='utf-8') as f:
-                f.write(csv_content)
+            self._atomic_write_file(glossary_path, csv_content)
             return self._parse_csv_to_dict(csv_content)
         
         # Merge with existing glossary
@@ -5398,8 +5438,7 @@ Text to analyze:
             print("📑 ❌ Extraction stopped before deduplication")
             csv_content = '\n'.join(csv_lines)
             glossary_path = os.path.join(output_dir, "glossary.json")
-            with open(glossary_path, 'w', encoding='utf-8') as f:
-                f.write(csv_content)
+            self._atomic_write_file(glossary_path, csv_content)
             return self._parse_csv_to_dict(csv_content)
         
         # Fuzzy matching deduplication
@@ -5410,8 +5449,7 @@ Text to analyze:
         
         # Save glossary as CSV (with .json extension for compatibility)
         glossary_path = os.path.join(output_dir, "glossary.json")
-        with open(glossary_path, 'w', encoding='utf-8') as f:
-            f.write(csv_content)
+        self._atomic_write_file(glossary_path, csv_content)
         
         print(f"\n📑 ✅ TARGETED GLOSSARY SAVED!")
         print(f"📑 File: {glossary_path}")
