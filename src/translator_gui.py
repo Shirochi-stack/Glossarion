@@ -682,17 +682,18 @@ class WindowManager:
                     
                     if scrollable_frame and scrollable_frame.winfo_exists():
                         content_width = scrollable_frame.winfo_reqwidth()
-                        window_width = content_width + 120
+                        # Add 5% more space to content width, plus scrollbar space
+                        window_width = int(content_width * 1.15) + 120
                     else:
-                        window_width = dialog.winfo_reqwidth()
+                        window_width = int(dialog.winfo_reqwidth() * 1.15)
                 else:
-                    window_width = dialog.winfo_reqwidth()
+                    window_width = int(dialog.winfo_reqwidth() * 1.15)
                 
                 window_width = int(window_width / dpi_scale)
                 
                 max_width = int(screen_width * max_width_ratio)
                 final_width = min(window_width, max_width)
-                final_width = max(final_width, 400)
+                final_width = max(final_width, 600)
                 
                 x = (screen_width - final_width) // 2
                 y = max(20, (screen_height - final_height) // 2)
@@ -1174,6 +1175,8 @@ class TranslatorGUI:
         self.glossary_max_titles_var = tk.StringVar(value=str(self.config.get('glossary_max_titles', 30)))
         self.glossary_batch_size_var = tk.StringVar(value=str(self.config.get('glossary_batch_size', 50)))
         self.glossary_max_text_size_var = tk.StringVar(value=str(self.config.get('glossary_max_text_size', 50000)))
+        self.glossary_chapter_split_threshold_var = tk.StringVar(value=self.config.get('glossary_chapter_split_threshold', '100000'))
+        self.glossary_filter_mode_var = tk.StringVar(value=self.config.get('glossary_filter_mode', 'all'))
 
         
         # NEW: Additional glossary settings
@@ -5039,25 +5042,82 @@ Rules:
         tk.Label(extraction_grid, text="Translation batch:").grid(row=1, column=2, sticky=tk.W, padx=(0, 5), pady=(5, 0))
         tb.Entry(extraction_grid, textvariable=self.glossary_batch_size_var, width=10).grid(row=1, column=3, sticky=tk.W, pady=(5, 0))
         
-        # Row 3 - Max text size
+        # Row 3 - Max text size and chapter split
         tk.Label(extraction_grid, text="Max text size:").grid(row=3, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
         tb.Entry(extraction_grid, textvariable=self.glossary_max_text_size_var, width=10).grid(row=3, column=1, sticky=tk.W, padx=(0, 20), pady=(5, 0))
 
-        tk.Label(extraction_grid, text="(0 = analyze entire text)").grid(row=3, column=2, columnspan=2, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        tk.Label(extraction_grid, text="Chapter split threshold:").grid(row=3, column=2, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        tb.Entry(extraction_grid, textvariable=self.glossary_chapter_split_threshold_var, width=10).grid(row=3, column=3, sticky=tk.W, pady=(5, 0))
+        
+        # Row 4 - Filter mode
+        tk.Label(extraction_grid, text="Filter mode:").grid(row=4, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        filter_frame = tk.Frame(extraction_grid)
+        filter_frame.grid(row=4, column=1, columnspan=3, sticky=tk.W, pady=(5, 0))
+        
+        tb.Radiobutton(filter_frame, text="All names & terms", variable=self.glossary_filter_mode_var, 
+                      value="all", bootstyle="info").pack(side=tk.LEFT, padx=(0, 10))
+        tb.Radiobutton(filter_frame, text="Names with honorifics only", variable=self.glossary_filter_mode_var, 
+                      value="only_with_honorifics", bootstyle="info").pack(side=tk.LEFT, padx=(0, 10))
+        tb.Radiobutton(filter_frame, text="Names without honorifics & terms", variable=self.glossary_filter_mode_var, 
+                      value="only_without_honorifics", bootstyle="info").pack(side=tk.LEFT)
 
-        # Move honorifics to Row 4 (was Row 2)
-        tk.Label(extraction_grid, text="Strip honorifics:").grid(row=4, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        # Row 5 - Strip honorifics
+        tk.Label(extraction_grid, text="Strip honorifics:").grid(row=5, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
         tb.Checkbutton(extraction_grid, text="Remove honorifics from extracted names", 
                       variable=self.strip_honorifics_var,
-                      bootstyle="round-toggle").grid(row=4, column=1, columnspan=3, sticky=tk.W, pady=(5, 0))
+                      bootstyle="round-toggle").grid(row=5, column=1, columnspan=3, sticky=tk.W, pady=(5, 0))
+        
+        # Row 6 - Fuzzy matching threshold (reuse existing variable)
+        tk.Label(extraction_grid, text="Fuzzy threshold:").grid(row=6, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        
+        fuzzy_frame = tk.Frame(extraction_grid)
+        fuzzy_frame.grid(row=6, column=1, columnspan=3, sticky=tk.W, pady=(5, 0))
+        
+        # Reuse the existing fuzzy_threshold_var that's already initialized elsewhere
+        fuzzy_slider = tb.Scale(
+            fuzzy_frame,
+            from_=0.5,
+            to=1.0,
+            orient=tk.HORIZONTAL,
+            variable=self.fuzzy_threshold_var,
+            length=200,
+            bootstyle="info"
+        )
+        fuzzy_slider.pack(side=tk.LEFT, padx=(0, 10))
+        
+        fuzzy_value_label = tk.Label(fuzzy_frame, text=f"{self.fuzzy_threshold_var.get():.2f}")
+        fuzzy_value_label.pack(side=tk.LEFT, padx=(0, 10))
+        
+        fuzzy_desc_label = tk.Label(fuzzy_frame, text="", font=('TkDefaultFont', 9), fg='gray')
+        fuzzy_desc_label.pack(side=tk.LEFT)
+        
+        # Reuse the exact same update function logic
+        def update_fuzzy_label(*args):
+            value = self.fuzzy_threshold_var.get()
+            fuzzy_value_label.config(text=f"{value:.2f}")
+            
+            # Show description
+            if value >= 0.95:
+                desc = "Exact match only (strict)"
+            elif value >= 0.85:
+                desc = "Very similar names (recommended)"
+            elif value >= 0.75:
+                desc = "Moderately similar names"
+            elif value >= 0.65:
+                desc = "Loosely similar names"
+            else:
+                desc = "Very loose matching (may over-merge)"
+            
+            fuzzy_desc_label.config(text=desc)
+        
+        # Set up the trace AFTER creating the label
+        self.fuzzy_threshold_var.trace('w', update_fuzzy_label)
+        # Initialize description by calling the function
+        update_fuzzy_label()
                 
         # Initialize the variable if not exists
         if not hasattr(self, 'strip_honorifics_var'):
             self.strip_honorifics_var = tk.BooleanVar(value=True)
-        
-        tb.Checkbutton(extraction_grid, text="Remove honorifics from extracted names", 
-                      variable=self.strip_honorifics_var,
-                      bootstyle="round-toggle").grid(row=2, column=1, columnspan=3, sticky=tk.W, pady=(5, 0))
         
         # Help text
         help_frame = tk.Frame(extraction_tab)
@@ -5069,7 +5129,13 @@ Rules:
             "• Max names/titles: Limits to prevent huge glossaries",
             "• Translation batch: Terms per API call (larger = faster but may reduce quality)",
             "• Max text size: Characters to analyze (0 = entire text, 50000 = first 50k chars)",
-            "• Strip honorifics: Extract clean names without suffixes (e.g., '김' instead of '김님')"
+            "• Chapter split: Split large texts into chunks (0 = no splitting, 100000 = split at 100k chars)",
+            "• Filter mode:",
+            "  - All names & terms: Extract character names (with/without honorifics) + titles/terms",
+            "  - Names with honorifics only: ONLY character names with honorifics (no titles/terms)",
+            "  - Names without honorifics & terms: Character names without honorifics + titles/terms",
+            "• Strip honorifics: Remove suffixes from extracted names (e.g., '김' instead of '김님')",
+            "• Fuzzy threshold: How similar terms must be to match (0.9 = 90% match, 1.0 = exact match)"
         ]
         for txt in help_texts:
             tk.Label(help_frame, text=txt, font=('TkDefaultFont', 11), fg='gray').pack(anchor=tk.W, padx=20)
@@ -5235,6 +5301,11 @@ Provide translations in the same numbered format."""
                 for widget in extraction_grid.winfo_children():
                     if isinstance(widget, (tb.Entry, ttk.Entry, tb.Checkbutton, ttk.Checkbutton)):
                         widget.config(state=state)
+                    # Handle frames that contain radio buttons or scales
+                    elif isinstance(widget, tk.Frame):
+                        for child in widget.winfo_children():
+                            if isinstance(child, (tb.Radiobutton, ttk.Radiobutton, tb.Scale, ttk.Scale)):
+                                child.config(state=state)
                 if self.auto_prompt_text.winfo_exists():
                     self.auto_prompt_text.config(state=state)
                 if hasattr(self, 'format_instructions_text') and self.format_instructions_text.winfo_exists():
@@ -7939,6 +8010,8 @@ Provide translations in the same numbered format."""
             'GLOSSARY_MAX_TITLES': self.glossary_max_titles_var.get(),
             'GLOSSARY_BATCH_SIZE': self.glossary_batch_size_var.get(),
             'GLOSSARY_STRIP_HONORIFICS': "1" if self.strip_honorifics_var.get() else "0",
+            'GLOSSARY_CHAPTER_SPLIT_THRESHOLD': self.glossary_chapter_split_threshold_var.get(),
+            'GLOSSARY_FILTER_MODE': self.glossary_filter_mode_var.get(),
             'ENABLE_AUTO_GLOSSARY': "1" if self.enable_auto_glossary_var.get() else "0",
             'AUTO_GLOSSARY_PROMPT': self.auto_glossary_prompt if hasattr(self, 'auto_glossary_prompt') else '',
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') else '',
@@ -14569,6 +14642,8 @@ Important rules:
             self.config['enable_parallel_extraction'] = self.enable_parallel_extraction_var.get()
             self.config['extraction_workers'] = self.extraction_workers_var.get()
             self.config['glossary_max_text_size'] = self.glossary_max_text_size_var.get()
+            self.config['glossary_chapter_split_threshold'] = self.glossary_chapter_split_threshold_var.get()
+            self.config['glossary_filter_mode'] = self.glossary_filter_mode_var.get()
 
 
             # NEW: Save strip honorifics setting
