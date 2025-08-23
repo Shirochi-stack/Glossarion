@@ -7684,19 +7684,27 @@ class UnifiedClient:
                             print(f"   ⚠️ Could not access response.text: {e}")
                     
                     # If that didn't work or returned empty, try extracting from candidates
-                    if not text_content and hasattr(response, 'candidates') and response.candidates:
-                        print(f"   🔍 Extracting from candidates...")
-                        for candidate in response.candidates:
-                            if hasattr(candidate, 'content') and candidate.content:
-                                if hasattr(candidate.content, 'parts'):
-                                    for part in candidate.content.parts:
-                                        if hasattr(part, 'text'):
-                                            text_content += part.text
-                                elif hasattr(candidate.content, 'text'):
-                                    text_content += candidate.content.text
-                        
-                        if text_content:
-                            print(f"   ✅ Extracted {len(text_content)} chars from candidates")
+                    if not text_content:
+                        # CRITICAL FIX: Check if candidates exists AND is not None before iterating
+                        if hasattr(response, 'candidates') and response.candidates is not None:
+                            print(f"   🔍 Extracting from candidates...")
+                            try:
+                                for candidate in response.candidates:
+                                    if hasattr(candidate, 'content') and candidate.content:
+                                        if hasattr(candidate.content, 'parts') and candidate.content.parts:
+                                            for part in candidate.content.parts:
+                                                if hasattr(part, 'text') and part.text:
+                                                    text_content += part.text
+                                        elif hasattr(candidate.content, 'text') and candidate.content.text:
+                                            text_content += candidate.content.text
+                                
+                                if text_content:
+                                    print(f"   ✅ Extracted {len(text_content)} chars from candidates")
+                            except TypeError as e:
+                                print(f"   ⚠️ Error iterating candidates: {e}")
+                                print(f"   🔍 Candidates type: {type(response.candidates)}")
+                        else:
+                            print(f"   ⚠️ No candidates found in response or candidates is None")
                     
                     # Log if we still have no content
                     if not text_content:
@@ -9388,32 +9396,40 @@ class UnifiedClient:
                     print(f"   ⚠️ Could not access response.text: {e}")
             
             # If that didn't work or returned empty, try extracting from candidates
-            if not text_content and hasattr(response, 'candidates') and response.candidates:
-                print(f"   🔍 Extracting from candidates...")
-                for candidate in response.candidates:
-                    # Check finish reason
-                    if hasattr(candidate, 'finish_reason'):
-                        finish_reason_str = str(candidate.finish_reason)
-                        if 'PROHIBITED_CONTENT' in finish_reason_str:
-                            finish_reason = 'prohibited_content'
-                        elif 'MAX_TOKENS' in finish_reason_str:
-                            finish_reason = 'length'
-                        elif 'SAFETY' in finish_reason_str:
-                            finish_reason = 'safety'
-                        elif 'STOP' in finish_reason_str:
-                            finish_reason = 'stop'
-                    
-                    # Extract content
-                    if hasattr(candidate, 'content') and candidate.content:
-                        if hasattr(candidate.content, 'parts'):
-                            for part in candidate.content.parts:
-                                if hasattr(part, 'text'):
-                                    text_content += part.text
-                        elif hasattr(candidate.content, 'text'):
-                            text_content += candidate.content.text
-                
-                if text_content:
-                    print(f"   ✅ Extracted {len(text_content)} chars from candidates")
+            if not text_content:
+                # CRITICAL FIX: Check if candidates exists AND is not None before iterating
+                if hasattr(response, 'candidates') and response.candidates is not None:
+                    print(f"   🔍 Extracting from candidates...")
+                    try:
+                        for candidate in response.candidates:
+                            # Check finish reason
+                            if hasattr(candidate, 'finish_reason'):
+                                finish_reason_str = str(candidate.finish_reason)
+                                if 'PROHIBITED_CONTENT' in finish_reason_str:
+                                    finish_reason = 'prohibited_content'
+                                elif 'MAX_TOKENS' in finish_reason_str:
+                                    finish_reason = 'length'
+                                elif 'SAFETY' in finish_reason_str:
+                                    finish_reason = 'safety'
+                                elif 'STOP' in finish_reason_str:
+                                    finish_reason = 'stop'
+                            
+                            # Extract content
+                            if hasattr(candidate, 'content') and candidate.content:
+                                if hasattr(candidate.content, 'parts') and candidate.content.parts:
+                                    for part in candidate.content.parts:
+                                        if hasattr(part, 'text') and part.text:
+                                            text_content += part.text
+                                elif hasattr(candidate.content, 'text') and candidate.content.text:
+                                    text_content += candidate.content.text
+                        
+                        if text_content:
+                            print(f"   ✅ Extracted {len(text_content)} chars from candidates")
+                    except TypeError as e:
+                        print(f"   ⚠️ Error iterating candidates: {e}")
+                        print(f"   🔍 Candidates type: {type(response.candidates)}")
+                else:
+                    print(f"   ⚠️ No candidates found in response or candidates is None")
             
             # Check usage metadata for debugging
             if hasattr(response, 'usage_metadata'):
