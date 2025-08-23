@@ -3991,19 +3991,94 @@ class GlossaryManager:
             print("📑 ❌ Glossary generation stopped by user")
             return {}
         
+        # Get chapter split threshold
+        chapter_split_threshold = int(os.getenv("GLOSSARY_CHAPTER_SPLIT_THRESHOLD", "100000"))
+        filter_mode = os.getenv("GLOSSARY_FILTER_MODE", "all")  # all, only_with_honorifics, only_without_honorifics
+        
         all_text = ' '.join(clean_html(chapter["body"]) for chapter in chapters)
         print(f"📑 Processing {len(all_text):,} characters of text")
+        print(f"📑 Filter mode: {filter_mode}")
         
+        # Check if we need to split into chunks
+        if chapter_split_threshold > 0 and len(all_text) > chapter_split_threshold:
+            print(f"📑 Text exceeds {chapter_split_threshold:,} chars, processing in chunks...")
+            
+            # Process chapters individually and merge results
+            all_glossary_entries = {}
+            chunk_size = 0
+            chunk_chapters = []
+            
+            for idx, chapter in enumerate(chapters):
+                if is_stop_requested():
+                    print("📑 ❌ Glossary generation stopped by user")
+                    return all_glossary_entries
+                
+                chapter_text = clean_html(chapter["body"])
+                chunk_size += len(chapter_text)
+                chunk_chapters.append(chapter)
+                
+                # Process chunk when it reaches threshold or last chapter
+                if chunk_size >= chapter_split_threshold or idx == len(chapters) - 1:
+                    chunk_text = ' '.join(clean_html(ch["body"]) for ch in chunk_chapters)
+                    print(f"📑 Processing chunk {idx + 1}/{len(chapters)} ({len(chunk_text):,} chars)...")
+                    
+                    if custom_prompt:
+                        chunk_glossary = self._extract_with_custom_prompt(
+                            custom_prompt, chunk_text, language, 
+                            min_frequency, max_names, max_titles, 
+                            None, output_dir,  # Don't pass existing glossary to chunks
+                            strip_honorifics, fuzzy_threshold, filter_mode
+                        )
+                    else:
+                        chunk_glossary = self._extract_with_patterns(
+                            chunk_text, language, min_frequency, 
+                            max_names, max_titles, batch_size, 
+                            None, output_dir,  # Don't pass existing glossary to chunks
+                            strip_honorifics, fuzzy_threshold, filter_mode
+                        )
+                    
+                    # Merge chunk results
+                    all_glossary_entries.update(chunk_glossary)
+                    
+                    # Reset for next chunk
+                    chunk_size = 0
+                    chunk_chapters = []
+            
+            # Now merge with existing glossary if present
+            if existing_glossary:
+                print(f"📑 Merging with existing glossary...")
+                # Convert merged results to CSV format for merging
+                csv_lines = ["type,raw_name,translated_name"]
+                for raw_name, translated_name in all_glossary_entries.items():
+                    csv_lines.append(f"term,{raw_name},{translated_name}")
+                
+                csv_lines = self._merge_csv_entries(csv_lines, existing_glossary, strip_honorifics, language)
+                csv_content = '\n'.join(csv_lines)
+                
+                # Save and return
+                glossary_path = os.path.join(output_dir, "glossary.json")
+                with open(glossary_path, 'w', encoding='utf-8') as f:
+                    f.write(csv_content)
+                
+                print(f"\n📑 ✅ CHUNKED GLOSSARY SAVED!")
+                print(f"📑 File: {glossary_path}")
+                print(f"📑 Total entries: {len(csv_lines) - 1}")
+                
+                return self._parse_csv_to_dict(csv_content)
+            
+            return all_glossary_entries
+        
+        # Original single-text processing
         if custom_prompt:
             return self._extract_with_custom_prompt(custom_prompt, all_text, language, 
                                                    min_frequency, max_names, max_titles, 
                                                    existing_glossary, output_dir, 
-                                                   strip_honorifics, fuzzy_threshold)
+                                                   strip_honorifics, fuzzy_threshold, filter_mode)
         else:
             return self._extract_with_patterns(all_text, language, min_frequency, 
                                              max_names, max_titles, batch_size, 
                                              existing_glossary, output_dir, 
-                                             strip_honorifics, fuzzy_threshold)
+                                             strip_honorifics, fuzzy_threshold, filter_mode)
     
     def _convert_to_csv_format(self, data):
         """Convert various glossary formats to CSV string format"""
@@ -4134,7 +4209,7 @@ class GlossaryManager:
     def _extract_with_custom_prompt(self, custom_prompt, all_text, language, 
                                    min_frequency, max_names, max_titles, 
                                    existing_glossary, output_dir, 
-                                   strip_honorifics=True, fuzzy_threshold=0.90):
+                                   strip_honorifics=True, fuzzy_threshold=0.90, filter_mode='all'):
         """Extract glossary using custom AI prompt with PROPER CSV handling"""
         print("📑 Using custom automatic glossary prompt")
         
@@ -4155,7 +4230,7 @@ class GlossaryManager:
                 return self._extract_with_patterns(all_text, language, min_frequency, 
                                                  max_names, max_titles, 50,
                                                  existing_glossary, output_dir, 
-                                                 strip_honorifics, fuzzy_threshold)
+                                                 strip_honorifics, fuzzy_threshold, filter_mode)
             else:
                 print(f"📑 Using AI-assisted extraction with custom prompt")
                 
@@ -4406,18 +4481,18 @@ class GlossaryManager:
                         print(f"⚠️ AI extraction failed: {e}")
                         print("📑 Falling back to pattern-based extraction")
                         return self._extract_with_patterns(all_text, language, min_frequency, 
-                                                         max_names, max_titles, 50, 
-                                                         existing_glossary, output_dir, 
-                                                         strip_honorifics, fuzzy_threshold)
+                                                 max_names, max_titles, 50,
+                                                 existing_glossary, output_dir, 
+                                                 strip_honorifics, fuzzy_threshold, filter_mode)
                 except Exception as e:
                     print(f"⚠️ AI extraction failed: {e}")
                     import traceback
                     traceback.print_exc()
                     print("📑 Falling back to pattern-based extraction")
                     return self._extract_with_patterns(all_text, language, min_frequency, 
-                                                     max_names, max_titles, 50, 
-                                                     existing_glossary, output_dir, 
-                                                     strip_honorifics, fuzzy_threshold)
+                                                 max_names, max_titles, 50,
+                                                 existing_glossary, output_dir, 
+                                                 strip_honorifics, fuzzy_threshold, filter_mode)
                     
         except Exception as e:
             print(f"⚠️ Custom prompt processing failed: {e}")
@@ -4587,7 +4662,7 @@ class GlossaryManager:
     def _extract_with_patterns(self, all_text, language, min_frequency, 
                               max_names, max_titles, batch_size, 
                               existing_glossary, output_dir, 
-                              strip_honorifics=True, fuzzy_threshold=0.90):
+                              strip_honorifics=True, fuzzy_threshold=0.90, filter_mode='all'):
         """Extract glossary using pattern matching with true CSV format output and stop flag checks"""
         print("📑 Using pattern-based extraction")
         
@@ -4697,12 +4772,44 @@ class GlossaryManager:
             print("📑 ❌ Extraction stopped before processing terms")
             return {}
         
+        # Apply filter mode
+        filtered_names = {}
+        if filter_mode == 'only_with_honorifics':
+            # Only keep names that have honorifics (no standalone names)
+            filtered_names = names_with_honorifics.copy()
+            print(f"📑 Filter: Keeping only names with honorifics ({len(filtered_names)} names)")
+        elif filter_mode == 'only_without_honorifics':
+            # Keep standalone names that were NOT found with honorifics
+            for name, count in standalone_names.items():
+                # Check if this name also appears with honorifics
+                appears_with_honorific = False
+                for honorific_name in names_with_honorifics.keys():
+                    if self._strip_honorific(honorific_name, language_hint) == name:
+                        appears_with_honorific = True
+                        break
+                
+                # Only add if it doesn't appear with honorifics
+                if not appears_with_honorific:
+                    filtered_names[name] = count
+            
+            print(f"📑 Filter: Keeping only names without honorifics ({len(filtered_names)} names)")
+        else:  # 'all' mode
+            # Keep all names (both with and without honorifics)
+            filtered_names = names_with_honorifics.copy()
+            # Also add standalone names
+            for name, count in standalone_names.items():
+                if name not in filtered_names and not any(
+                    self._strip_honorific(n, language_hint) == name for n in filtered_names.keys()
+                ):
+                    filtered_names[name] = count
+            print(f"📑 Filter: Keeping all names ({len(filtered_names)} names)")
+        
         # Process extracted terms
         final_terms = {}
         
         term_count = 0
-        total_terms = len(names_with_honorifics)
-        for term, count in names_with_honorifics.items():
+        total_terms = len(filtered_names)
+        for term, count in filtered_names.items():
             term_count += 1
             
             # Check stop flag every 20 terms
@@ -4725,56 +4832,65 @@ class GlossaryManager:
             print("📑 ❌ Extraction stopped before finding titles")
             return {}
         
-        # Find titles
+        # Find titles (but respect filter mode)
         print("📑 Scanning for titles...")
         found_titles = {}
         
-        title_patterns_to_use = []
-        if language_hint in self.pattern_manager.TITLE_PATTERNS:
-            title_patterns_to_use.extend(self.pattern_manager.TITLE_PATTERNS[language_hint])
-        title_patterns_to_use.extend(self.pattern_manager.TITLE_PATTERNS.get('english', []))
-        
-        total_patterns = len(title_patterns_to_use)
-        for pattern_idx, pattern in enumerate(title_patterns_to_use):
-            # Check stop flag before each pattern
-            if is_stop_requested():
-                print(f"📑 ❌ Title extraction stopped at pattern {pattern_idx}/{total_patterns}")
-                return {}
+        # Extract titles for all modes EXCEPT "only_with_honorifics"
+        # (titles are included in "only_without_honorifics" since titles typically don't have honorifics)
+        if filter_mode != 'only_with_honorifics':
+            title_patterns_to_use = []
+            if language_hint in self.pattern_manager.TITLE_PATTERNS:
+                title_patterns_to_use.extend(self.pattern_manager.TITLE_PATTERNS[language_hint])
+            title_patterns_to_use.extend(self.pattern_manager.TITLE_PATTERNS.get('english', []))
             
-            print(f"📑 Processing title pattern {pattern_idx + 1}/{total_patterns}")
-            
-            matches = list(re.finditer(pattern, all_text, re.IGNORECASE if 'english' in pattern else 0))
-            
-            for match_idx, match in enumerate(matches):
-                # Check stop flag every 50 matches
-                if match_idx > 0 and match_idx % 50 == 0:
-                    if is_stop_requested():
-                        print(f"📑 ❌ Title extraction stopped at match {match_idx}")
-                        return {}
-                
-                title = match.group(0)
-                
-                if title in names_with_honorifics:
-                    continue
-                    
-                count = self._find_fuzzy_matches(title, all_text, fuzzy_threshold)
-                
-                # Check if stopped during fuzzy matching
+            total_patterns = len(title_patterns_to_use)
+            for pattern_idx, pattern in enumerate(title_patterns_to_use):
+                # Check stop flag before each pattern
                 if is_stop_requested():
-                    print(f"📑 ❌ Title extraction stopped during fuzzy matching")
+                    print(f"📑 ❌ Title extraction stopped at pattern {pattern_idx}/{total_patterns}")
                     return {}
                 
-                if count >= min_frequency:
-                    if re.match(r'[A-Za-z]', title):
-                        title = title.title()
+                print(f"📑 Processing title pattern {pattern_idx + 1}/{total_patterns}")
+                
+                matches = list(re.finditer(pattern, all_text, re.IGNORECASE if 'english' in pattern else 0))
+                
+                for match_idx, match in enumerate(matches):
+                    # Check stop flag every 50 matches
+                    if match_idx > 0 and match_idx % 50 == 0:
+                        if is_stop_requested():
+                            print(f"📑 ❌ Title extraction stopped at match {match_idx}")
+                            return {}
                     
-                    if strip_honorifics:
-                        title = self._strip_honorific(title, language_hint)
+                    title = match.group(0)
                     
-                    if title not in found_titles:
-                        found_titles[title] = count
-        
-        print(f"📑 Found {len(found_titles)} unique titles")
+                    # Skip if this title is already in names
+                    if title in filtered_names or title in names_with_honorifics:
+                        continue
+                        
+                    count = self._find_fuzzy_matches(title, all_text, fuzzy_threshold)
+                    
+                    # Check if stopped during fuzzy matching
+                    if is_stop_requested():
+                        print(f"📑 ❌ Title extraction stopped during fuzzy matching")
+                        return {}
+                    
+                    if count >= min_frequency:
+                        if re.match(r'[A-Za-z]', title):
+                            title = title.title()
+                        
+                        if strip_honorifics:
+                            title = self._strip_honorific(title, language_hint)
+                        
+                        if title not in found_titles:
+                            found_titles[title] = count
+            
+            if filter_mode == 'only_without_honorifics':
+                print(f"📑 Found {len(found_titles)} titles (included in 'without honorifics' mode)")
+            else:
+                print(f"📑 Found {len(found_titles)} unique titles")
+        else:
+            print(f"📑 Skipping title extraction (filter mode: only_with_honorifics)")
         
         # Check stop flag before sorting and translation
         if is_stop_requested():
