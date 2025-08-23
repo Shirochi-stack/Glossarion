@@ -30,7 +30,15 @@ class MetadataBatchTranslatorUI:
     
     def _initialize_default_prompts(self):
         """Initialize all default prompts in config if not present"""
-        # Batch header prompt
+        # Batch header system prompt (NEW)
+        if 'batch_header_system_prompt' not in self.gui.config:
+            self.gui.config['batch_header_system_prompt'] = (
+                "You are a professional translator specializing in novel chapter titles. "
+                "Respond with only the translated JSON, nothing else. "
+                "Maintain the original tone and style while making titles natural in the target language."
+            )
+        
+        # Batch header user prompt (existing)
         if 'batch_header_prompt' not in self.gui.config:
             self.gui.config['batch_header_prompt'] = (
                 "Translate these chapter titles to English.\n"
@@ -53,12 +61,13 @@ class MetadataBatchTranslatorUI:
         if 'metadata_field_prompts' not in self.gui.config:
             self.gui.config['metadata_field_prompts'] = {
                 'creator': "Romanize this author name. Do not output anything other than the romanized text.",
-                'publisher': "Romanize this publisher name name. Do not output anything other than the romanized text.",
+                'publisher': "Romanize this publisher name. Do not output anything other than the romanized text.",
                 'subject': "Translate this book genre/subject to English. Do not output anything other than the translated text:",
                 'description': "Translate this book description to English. Do not output anything other than the translated text:",
                 'series': "Translate this series name to English. Do not output anything other than the translated text:",
                 '_default': "Translate this text to English. Do not output anything other than the translated text:"
             }
+
             
     def configure_metadata_fields(self):
             """Configure which metadata fields to translate"""
@@ -338,10 +347,26 @@ class MetadataBatchTranslatorUI:
     
     def _create_header_prompts_tab(self, parent):
         """Create tab for chapter header prompts"""
-        tk.Label(parent, text="Batch Chapter Header Translation Prompt", 
+        
+        # System prompt for batch headers (NEW)
+        tk.Label(parent, text="System Prompt (AI Instructions)", 
                 font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W, padx=20, pady=(20, 5))
         
-        tk.Label(parent, text="Used when translating multiple chapter headers at once:",
+        tk.Label(parent, text="Defines how the AI should behave when translating chapter headers:",
+                font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, padx=20, pady=(0, 10))
+        
+        self.header_batch_system_text = self.ui.setup_scrollable_text(parent, height=4, wrap=tk.WORD)
+        self.header_batch_system_text.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 15))
+        self.header_batch_system_text.insert('1.0', self.gui.config.get('batch_header_system_prompt',
+            "You are a professional translator specializing in novel chapter titles. "
+            "Respond with only the translated JSON, nothing else. "
+            "Maintain the original tone and style while making titles natural in the target language."))
+        
+        # User prompt for batch headers (existing, but with better label)
+        tk.Label(parent, text="User Prompt (Translation Request)", 
+                font=('TkDefaultFont', 12, 'bold')).pack(anchor=tk.W, padx=20, pady=(10, 5))
+        
+        tk.Label(parent, text="Instructions for how to translate the chapter headers:",
                 font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, padx=20, pady=(0, 10))
         
         self.header_batch_text = self.ui.setup_scrollable_text(parent, height=6, wrap=tk.WORD)
@@ -470,8 +495,11 @@ class MetadataBatchTranslatorUI:
         self.gui.config['book_title_prompt'] = self.title_user_text.get('1.0', tk.END).strip()
         self.gui.book_title_prompt = self.gui.config['book_title_prompt']
         
-        # Batch prompts
+        # Batch header prompts (UPDATED - now includes system prompt)
+        self.gui.config['batch_header_system_prompt'] = self.header_batch_system_text.get('1.0', tk.END).strip()
         self.gui.config['batch_header_prompt'] = self.header_batch_text.get('1.0', tk.END).strip()
+        
+        # Metadata prompts
         self.gui.config['metadata_batch_prompt'] = self.metadata_batch_text.get('1.0', tk.END).strip()
         
         # Field-specific prompts
@@ -490,6 +518,7 @@ class MetadataBatchTranslatorUI:
         # Remove prompt-related keys from config
         prompt_keys = [
             'book_title_system_prompt', 'book_title_prompt',
+            'batch_header_system_prompt',  # NEW
             'batch_header_prompt', 'metadata_batch_prompt',
             'metadata_field_prompts', 'lang_prompt_behavior',
             'forced_source_lang', 'output_language'
@@ -586,11 +615,16 @@ class BatchHeaderTranslator:
         self.client = client
         self.config = config or {}
         self.stop_flag = False
+        
+        # Use the batch_header_system_prompt, with fallback to env var or default
         self.system_prompt = (
-            self.config.get('book_title_system_prompt') or
-            os.getenv('BOOK_TITLE_SYSTEM_PROMPT') or
-            "You are a translator. Respond with only the translated text, nothing else."
+            self.config.get('batch_header_system_prompt') or  # CHANGED: Use correct config key
+            os.getenv('BATCH_HEADER_SYSTEM_PROMPT') or  # CHANGED: Use specific env var
+            "You are a professional translator specializing in novel chapter titles. "
+            "Respond with only the translated JSON, nothing else. "
+            "Maintain the original tone and style while making titles natural in the target language."
         )
+        
         # Get default batch size from config or environment
         self.default_batch_size = int(os.getenv('HEADERS_PER_BATCH', 
                                       self.config.get('headers_per_batch', '350')))
