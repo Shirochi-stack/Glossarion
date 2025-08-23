@@ -4048,12 +4048,53 @@ class GlossaryManager:
                 # Process chunks based on batch mode
                 if batch_translation and custom_prompt:
                     # Use batch API calls for AI extraction
-                    all_glossary_entries = self._process_chunks_batch_api(
+                    all_csv_lines = self._process_chunks_batch_api(
                         chunks_to_process, custom_prompt, language, 
                         min_frequency, max_names, max_titles, 
                         output_dir, strip_honorifics, fuzzy_threshold, 
                         filter_mode, api_batch_size, extraction_workers
                     )
+                    
+                    # Process all collected entries at once
+                    if all_csv_lines:
+                        # Add header
+                        all_csv_lines.insert(0, "type,raw_name,translated_name")
+                        
+                        # Apply filter mode if needed
+                        if filter_mode == "only_with_honorifics":
+                            filtered = [all_csv_lines[0]]  # Keep header
+                            for line in all_csv_lines[1:]:
+                                parts = line.split(',', 2)
+                                if len(parts) >= 3 and parts[0] == "character":
+                                    filtered.append(line)
+                            all_csv_lines = filtered
+                            print(f"📑 Filter applied: {len(all_csv_lines)-1} character entries with honorifics kept")
+                        
+                        # Apply fuzzy deduplication
+                        print(f"📑 Applying fuzzy deduplication (threshold: {fuzzy_threshold})...")
+                        all_csv_lines = self._deduplicate_glossary_with_fuzzy(all_csv_lines, fuzzy_threshold)
+                        
+                        # Sort by type and name
+                        print(f"📑 Sorting glossary by type and name...")
+                        header = all_csv_lines[0]
+                        entries = all_csv_lines[1:]
+                        entries.sort(key=lambda x: (0 if x.startswith('character,') else 1, x.split(',')[1].lower()))
+                        all_csv_lines = [header] + entries
+                        
+                        # Save
+                        csv_content = '\n'.join(all_csv_lines)
+                        glossary_path = os.path.join(output_dir, "glossary.json")
+                        with open(glossary_path, 'w', encoding='utf-8') as f:
+                            f.write(csv_content)
+                        
+                        print(f"\n📑 ✅ GLOSSARY SAVED!")
+                        print(f"📑 Character entries: {sum(1 for line in all_csv_lines[1:] if line.startswith('character,'))}")
+                        print(f"📑 Term entries: {sum(1 for line in all_csv_lines[1:] if line.startswith('term,'))}")
+                        print(f"📑 Total entries: {len(all_csv_lines) - 1}")
+                        
+                        return self._parse_csv_to_dict(csv_content)
+                    
+                    return {}
                 else:
                     # Use parallel workers for pattern extraction
                     
