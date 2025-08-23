@@ -1029,7 +1029,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "4.0.0"
+        __version__ = "4.0.1"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1911,7 +1911,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v4.0.0 - Ready to use!")
+        self.append_log("🚀 Glossarion v4.0.1 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def create_file_section(self):
@@ -4835,28 +4835,53 @@ Recent translations to summarize:
 
         # Update label when slider moves - DEFINE AFTER CREATING THE LABEL
         def update_fuzzy_label(*args):
-            value = self.fuzzy_threshold_var.get()
-            self.fuzzy_value_label.config(text=f"{value:.2f}")
-            
-            # Show description
-            if value >= 0.95:
-                desc = "Exact match only (strict)"
-            elif value >= 0.85:
-                desc = "Very similar names (recommended)"
-            elif value >= 0.75:
-                desc = "Moderately similar names"
-            elif value >= 0.65:
-                desc = "Loosely similar names"
-            else:
-                desc = "Very loose matching (may over-merge)"
-            
-            fuzzy_desc_label.config(text=desc)
+            try:
+                # Check if widgets still exist before updating
+                if not fuzzy_desc_label.winfo_exists():
+                    return
+                if not self.fuzzy_value_label.winfo_exists():
+                    return
+                    
+                value = self.fuzzy_threshold_var.get()
+                self.fuzzy_value_label.config(text=f"{value:.2f}")
+                
+                # Show description
+                if value >= 0.95:
+                    desc = "Exact match only (strict)"
+                elif value >= 0.85:
+                    desc = "Very similar names (recommended)"
+                elif value >= 0.75:
+                    desc = "Moderately similar names"
+                elif value >= 0.65:
+                    desc = "Loosely similar names"
+                else:
+                    desc = "Very loose matching (may over-merge)"
+                
+                fuzzy_desc_label.config(text=desc)
+            except tk.TclError:
+                # Widget was destroyed, ignore
+                pass
+            except Exception as e:
+                # Catch any other unexpected errors
+                print(f"Error updating fuzzy label: {e}")
+                pass
 
-        # Set up the trace AFTER creating the label
-        self.fuzzy_threshold_var.trace('w', update_fuzzy_label)
-
+        # Remove any existing trace before adding a new one
+        if hasattr(self, 'manual_fuzzy_trace_id'):
+            try:
+                self.fuzzy_threshold_var.trace_remove('write', self.manual_fuzzy_trace_id)
+            except:
+                pass
+        
+        # Set up the trace AFTER creating the label and store the trace ID
+        self.manual_fuzzy_trace_id = self.fuzzy_threshold_var.trace('w', update_fuzzy_label)
+        
         # Initialize description by calling the function
-        update_fuzzy_label()
+        try:
+            update_fuzzy_label()
+        except:
+            # If initialization fails, just continue
+            pass
         
         # Prompt section (continues as before)
         prompt_frame = tk.LabelFrame(manual_container, text="Extraction Prompt", padx=10, pady=10)
@@ -5093,27 +5118,53 @@ Rules:
         
         # Reuse the exact same update function logic
         def update_fuzzy_label(*args):
-            value = self.fuzzy_threshold_var.get()
-            fuzzy_value_label.config(text=f"{value:.2f}")
-            
-            # Show description
-            if value >= 0.95:
-                desc = "Exact match only (strict)"
-            elif value >= 0.85:
-                desc = "Very similar names (recommended)"
-            elif value >= 0.75:
-                desc = "Moderately similar names"
-            elif value >= 0.65:
-                desc = "Loosely similar names"
-            else:
-                desc = "Very loose matching (may over-merge)"
-            
-            fuzzy_desc_label.config(text=desc)
+            try:
+                # Check if widgets still exist before updating
+                if not fuzzy_desc_label.winfo_exists():
+                    return
+                if not fuzzy_value_label.winfo_exists():
+                    return
+                    
+                value = self.fuzzy_threshold_var.get()
+                fuzzy_value_label.config(text=f"{value:.2f}")
+                
+                # Show description
+                if value >= 0.95:
+                    desc = "Exact match only (strict)"
+                elif value >= 0.85:
+                    desc = "Very similar names (recommended)"
+                elif value >= 0.75:
+                    desc = "Moderately similar names"
+                elif value >= 0.65:
+                    desc = "Loosely similar names"
+                else:
+                    desc = "Very loose matching (may over-merge)"
+                
+                fuzzy_desc_label.config(text=desc)
+            except tk.TclError:
+                # Widget was destroyed, ignore
+                pass
+            except Exception as e:
+                # Catch any other unexpected errors
+                print(f"Error updating auto fuzzy label: {e}")
+                pass
         
-        # Set up the trace AFTER creating the label
-        self.fuzzy_threshold_var.trace('w', update_fuzzy_label)
+        # Remove any existing auto trace before adding a new one
+        if hasattr(self, 'auto_fuzzy_trace_id'):
+            try:
+                self.fuzzy_threshold_var.trace_remove('write', self.auto_fuzzy_trace_id)
+            except:
+                pass
+        
+        # Set up the trace AFTER creating the label and store the trace ID
+        self.auto_fuzzy_trace_id = self.fuzzy_threshold_var.trace('w', update_fuzzy_label)
+        
         # Initialize description by calling the function
-        update_fuzzy_label()
+        try:
+            update_fuzzy_label()
+        except:
+            # If initialization fails, just continue
+            pass
                 
         # Initialize the variable if not exists
         if not hasattr(self, 'strip_honorifics_var'):
@@ -14775,7 +14826,7 @@ Important rules:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v4.0.0...")
+    print("🚀 Starting Glossarion v4.0.1...")
     
     # Initialize splash screen
     splash_manager = None
