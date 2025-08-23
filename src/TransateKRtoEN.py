@@ -4016,7 +4016,7 @@ class GlossaryManager:
             print(f"📑 Text exceeds {chapter_split_threshold:,} chars, processing in chunks...")
             
             # Process chapters individually and merge results
-            all_glossary_entries = []
+            all_glossary_entries = {}
             chunk_size = 0
             chunk_chapters = []
             chunks_to_process = []
@@ -4278,7 +4278,7 @@ class GlossaryManager:
         if thread_delay > 0:
             print(f"📑 Thread submission delay: {thread_delay}s between parallel calls")
         
-        all_glossary_entries = []
+        all_glossary_entries = {}
         total_chunks = len(chunks_to_process)
         completed_chunks = 0
         
