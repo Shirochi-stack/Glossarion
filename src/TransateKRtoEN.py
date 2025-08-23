@@ -26,6 +26,7 @@ from txt_processor import TextFileProcessor
 from ai_hunter_enhanced import ImprovedAIHunterDetection
 import csv
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 
 
 def get_chapter_terminology(is_text_file, chapter_data=None):
@@ -3859,14 +3860,14 @@ class BatchTranslationProcessor:
 # =====================================================
 
 class GlossaryManager:
-    """Unified glossary management with true CSV format and fuzzy matching"""
+    """Unified glossary management with true CSV format, fuzzy matching, and parallel processing"""
     
     def __init__(self):
         self.pattern_manager = PatternManager()
     
     def save_glossary(self, output_dir, chapters, instructions, language="korean"):
-        """Targeted glossary generator with true CSV format output"""
-        print("📑 Targeted Glossary Generator v5.0 (CSV Format)")
+        """Targeted glossary generator with true CSV format output and parallel processing"""
+        print("📑 Targeted Glossary Generator v6.0 (CSV Format + Parallel)")
         
         # Check stop flag at start
         if is_stop_requested():
@@ -3991,13 +3992,24 @@ class GlossaryManager:
             print("📑 ❌ Glossary generation stopped by user")
             return {}
         
-        # Get chapter split threshold
+        # Get chapter split threshold and filter mode
         chapter_split_threshold = int(os.getenv("GLOSSARY_CHAPTER_SPLIT_THRESHOLD", "100000"))
         filter_mode = os.getenv("GLOSSARY_FILTER_MODE", "all")  # all, only_with_honorifics, only_without_honorifics
         
+        # Check if parallel extraction is enabled for automatic glossary
+        extraction_workers = int(os.getenv("EXTRACTION_WORKERS", "1"))
+        batch_translation = os.getenv("BATCH_TRANSLATION", "0") == "1"
+        api_batch_size = int(os.getenv("BATCH_SIZE", "5"))
+        
+        # Log the settings
+        print(f"📑 Filter mode: {filter_mode}")
+        if extraction_workers > 1:
+            print(f"📑 Parallel extraction enabled: {extraction_workers} workers")
+        if batch_translation:
+            print(f"📑 Batch API calls enabled: {api_batch_size} chunks per batch")
+        
         all_text = ' '.join(clean_html(chapter["body"]) for chapter in chapters)
         print(f"📑 Processing {len(all_text):,} characters of text")
-        print(f"📑 Filter mode: {filter_mode}")
         
         # Check if we need to split into chunks
         if chapter_split_threshold > 0 and len(all_text) > chapter_split_threshold:
@@ -4007,6 +4019,7 @@ class GlossaryManager:
             all_glossary_entries = {}
             chunk_size = 0
             chunk_chapters = []
+            chunks_to_process = []
             
             for idx, chapter in enumerate(chapters):
                 if is_stop_requested():
@@ -4020,7 +4033,90 @@ class GlossaryManager:
                 # Process chunk when it reaches threshold or last chapter
                 if chunk_size >= chapter_split_threshold or idx == len(chapters) - 1:
                     chunk_text = ' '.join(clean_html(ch["body"]) for ch in chunk_chapters)
-                    print(f"📑 Processing chunk {idx + 1}/{len(chapters)} ({len(chunk_text):,} chars)...")
+                    chunks_to_process.append((len(chunks_to_process) + 1, chunk_text))
+                    
+                    # Reset for next chunk
+                    chunk_size = 0
+                    chunk_chapters = []
+            
+            print(f"📑 Split into {len(chunks_to_process)} chunks for processing")
+            
+            # Process chunks with parallel extraction if enabled
+            if extraction_workers > 1 and len(chunks_to_process) > 1:
+                print(f"📑 Processing chunks in parallel with {extraction_workers} workers...")
+                
+                # Process chunks based on batch mode
+                if batch_translation and custom_prompt:
+                    # Use batch API calls for AI extraction
+                    all_glossary_entries = self._process_chunks_batch_api(
+                        chunks_to_process, custom_prompt, language, 
+                        min_frequency, max_names, max_titles, 
+                        output_dir, strip_honorifics, fuzzy_threshold, 
+                        filter_mode, api_batch_size, extraction_workers
+                    )
+                else:
+                    # Use parallel workers for pattern extraction
+                    
+                    # Get thread submission delay
+                    thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
+                    if thread_delay > 0:
+                        print(f"📑 Thread submission delay: {thread_delay}s between parallel submissions")
+                    
+                    # Create progress bar
+                    progress_bar = tqdm(total=len(chunks_to_process), desc="📑 Parallel Extraction", unit="chunk",
+                                       bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]')
+                    
+                    with ThreadPoolExecutor(max_workers=extraction_workers) as executor:
+                        futures = {}
+                        last_submission_time = 0
+                        
+                        for chunk_idx, chunk_text in chunks_to_process:
+                            if is_stop_requested():
+                                break
+                            
+                            # Apply thread submission delay
+                            if thread_delay > 0 and last_submission_time > 0:
+                                time_since_last = time.time() - last_submission_time
+                                if time_since_last < thread_delay:
+                                    sleep_time = thread_delay - time_since_last
+                                    progress_bar.set_description(f"📑 Parallel Extraction (thread delay {sleep_time:.1f}s)")
+                                    time.sleep(sleep_time)
+                                    progress_bar.set_description("📑 Parallel Extraction")
+                            
+                            future = executor.submit(
+                                self._process_single_chunk,
+                                chunk_idx, chunk_text, custom_prompt, language,
+                                min_frequency, max_names, max_titles, batch_size,
+                                output_dir, strip_honorifics, fuzzy_threshold, filter_mode
+                            )
+                            futures[future] = chunk_idx
+                            last_submission_time = time.time()
+                        
+                        # Collect results
+                        for future in as_completed(futures):
+                            if is_stop_requested():
+                                progress_bar.close()
+                                print("📑 ❌ Stopping chunk processing...")
+                                break
+                            
+                            try:
+                                chunk_glossary = future.result()
+                                all_glossary_entries.update(chunk_glossary)
+                                progress_bar.update(1)
+                                progress_bar.set_description(f"📑 Parallel Extraction ({len(all_glossary_entries)} entries)")
+                                print(f"📑 Chunk {futures[future]} completed: {len(chunk_glossary)} entries")
+                            except Exception as e:
+                                print(f"⚠️ Chunk {futures[future]} failed: {e}")
+                                progress_bar.update(1)
+                    
+                    progress_bar.close()
+            else:
+                # Sequential processing
+                for chunk_idx, chunk_text in chunks_to_process:
+                    if is_stop_requested():
+                        break
+                    
+                    print(f"📑 Processing chunk {chunk_idx}/{len(chunks_to_process)} ({len(chunk_text):,} chars)...")
                     
                     if custom_prompt:
                         chunk_glossary = self._extract_with_custom_prompt(
@@ -4039,10 +4135,6 @@ class GlossaryManager:
                     
                     # Merge chunk results
                     all_glossary_entries.update(chunk_glossary)
-                    
-                    # Reset for next chunk
-                    chunk_size = 0
-                    chunk_chapters = []
             
             # Now merge with existing glossary if present
             if existing_glossary:
@@ -4050,7 +4142,9 @@ class GlossaryManager:
                 # Convert merged results to CSV format for merging
                 csv_lines = ["type,raw_name,translated_name"]
                 for raw_name, translated_name in all_glossary_entries.items():
-                    csv_lines.append(f"term,{raw_name},{translated_name}")
+                    # Determine type based on filter mode
+                    entry_type = "character" if filter_mode == "only_with_honorifics" else "term"
+                    csv_lines.append(f"{entry_type},{raw_name},{translated_name}")
                 
                 csv_lines = self._merge_csv_entries(csv_lines, existing_glossary, strip_honorifics, language)
                 csv_content = '\n'.join(csv_lines)
@@ -4066,7 +4160,60 @@ class GlossaryManager:
                 
                 return self._parse_csv_to_dict(csv_content)
             
-            return all_glossary_entries
+            # Apply final filtering based on mode
+            filtered_entries = self._apply_final_filter(all_glossary_entries, filter_mode)
+            
+            # Convert to CSV format
+            if filtered_entries:
+                csv_lines = ["type,raw_name,translated_name"]
+                for raw_name, translated_name in filtered_entries.items():
+                    # Determine type based on content/mode
+                    if filter_mode == "only_with_honorifics":
+                        entry_type = "character"
+                    elif self._has_honorific(raw_name):
+                        entry_type = "character"
+                    else:
+                        entry_type = "term"
+                    csv_lines.append(f"{entry_type},{raw_name},{translated_name}")
+                
+                # Apply fuzzy deduplication
+                print(f"📑 Applying fuzzy deduplication (threshold: {fuzzy_threshold})...")
+                csv_lines = self._deduplicate_glossary_with_fuzzy(csv_lines, fuzzy_threshold)
+                
+                # Sort by type and name
+                print(f"📑 Sorting glossary by type and name...")
+                header = csv_lines[0]
+                entries = csv_lines[1:]
+                
+                # Sort entries
+                def sort_key(line):
+                    parts = line.split(',')
+                    if len(parts) >= 3:
+                        entry_type = parts[0]
+                        raw_name = parts[1]
+                        # Character entries first, then terms
+                        type_order = 0 if entry_type == "character" else 1
+                        return (type_order, raw_name.lower())
+                    return (999, "")
+                
+                sorted_entries = sorted(entries, key=sort_key)
+                csv_lines = [header] + sorted_entries
+                
+                # Create final CSV content
+                csv_content = '\n'.join(csv_lines)
+                
+                # Save glossary
+                glossary_path = os.path.join(output_dir, "glossary.json")
+                with open(glossary_path, 'w', encoding='utf-8') as f:
+                    f.write(csv_content)
+                
+                print(f"\n📑 ✅ GLOSSARY SAVED!")
+                print(f"📑 File: {glossary_path}")
+                print(f"📑 Character entries: {sum(1 for line in csv_lines[1:] if line.startswith('character,'))}")
+                print(f"📑 Term entries: {sum(1 for line in csv_lines[1:] if line.startswith('term,'))}")
+                print(f"📑 Total entries: {len(csv_lines) - 1}")
+            
+            return self._parse_csv_to_dict(csv_content if 'csv_content' in locals() else '')
         
         # Original single-text processing
         if custom_prompt:
@@ -4079,6 +4226,155 @@ class GlossaryManager:
                                              max_names, max_titles, batch_size, 
                                              existing_glossary, output_dir, 
                                              strip_honorifics, fuzzy_threshold, filter_mode)
+    
+    def _process_chunks_batch_api(self, chunks_to_process, custom_prompt, language, 
+                                  min_frequency, max_names, max_titles, 
+                                  output_dir, strip_honorifics, fuzzy_threshold, 
+                                  filter_mode, api_batch_size, extraction_workers):
+        """Process chunks using batch API calls for AI extraction with thread delay and progress bar"""
+        
+        print(f"📑 Using batch API mode with {api_batch_size} chunks per batch")
+        
+        # Get thread submission delay
+        thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
+        if thread_delay > 0:
+            print(f"📑 Thread submission delay: {thread_delay}s between parallel calls")
+        
+        all_glossary_entries = {}
+        
+        # Create overall progress bar for all chunks
+        total_chunks = len(chunks_to_process)
+        overall_progress = tqdm(total=total_chunks, desc="📑 Glossary Extraction", unit="chunk", 
+                               bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} chunks [{elapsed}<{remaining}]')
+        
+        # Process in API batches
+        for batch_start in range(0, len(chunks_to_process), api_batch_size):
+            if is_stop_requested():
+                overall_progress.close()
+                break
+            
+            batch_end = min(batch_start + api_batch_size, len(chunks_to_process))
+            batch_chunks = chunks_to_process[batch_start:batch_end]
+            
+            print(f"📑 Processing API batch {batch_start//api_batch_size + 1}: chunks {batch_start+1}-{batch_end}")
+            
+            # Create progress bar for this batch
+            batch_progress = tqdm(total=len(batch_chunks), desc=f"  Batch {batch_start//api_batch_size + 1}", 
+                                 unit="call", leave=False,
+                                 bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}]')
+            
+            # Use ThreadPoolExecutor for parallel API calls within batch
+            with ThreadPoolExecutor(max_workers=min(extraction_workers, len(batch_chunks))) as executor:
+                futures = {}
+                last_submission_time = 0
+                
+                for chunk_idx, chunk_text in batch_chunks:
+                    if is_stop_requested():
+                        break
+                    
+                    # Apply thread submission delay
+                    if thread_delay > 0 and last_submission_time > 0:
+                        time_since_last = time.time() - last_submission_time
+                        if time_since_last < thread_delay:
+                            sleep_time = thread_delay - time_since_last
+                            # Update progress bar description during wait
+                            batch_progress.set_description(f"  Batch {batch_start//api_batch_size + 1} (waiting {sleep_time:.1f}s)")
+                            time.sleep(sleep_time)
+                            batch_progress.set_description(f"  Batch {batch_start//api_batch_size + 1}")
+                    
+                    future = executor.submit(
+                        self._extract_with_custom_prompt,
+                        custom_prompt, chunk_text, language,
+                        min_frequency, max_names, max_titles,
+                        None, output_dir, strip_honorifics,
+                        fuzzy_threshold, filter_mode
+                    )
+                    futures[future] = chunk_idx
+                    last_submission_time = time.time()
+                
+                # Collect results
+                for future in as_completed(futures):
+                    if is_stop_requested():
+                        break
+                    
+                    try:
+                        chunk_glossary = future.result()
+                        all_glossary_entries.update(chunk_glossary)
+                        batch_progress.update(1)
+                        overall_progress.update(1)
+                        
+                        # Update description with entry count
+                        overall_progress.set_description(f"📑 Glossary Extraction ({len(all_glossary_entries)} entries found)")
+                        
+                    except Exception as e:
+                        print(f"⚠️ API call for chunk {futures[future]} failed: {e}")
+                        batch_progress.update(1)
+                        overall_progress.update(1)
+            
+            batch_progress.close()
+            
+            # Add delay between API batches
+            if batch_end < len(chunks_to_process):
+                api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+                overall_progress.set_description(f"📑 Glossary Extraction (waiting {api_delay}s)")
+                time.sleep(api_delay)
+                overall_progress.set_description(f"📑 Glossary Extraction ({len(all_glossary_entries)} entries found)")
+        
+        overall_progress.close()
+        return all_glossary_entries
+    
+    def _process_single_chunk(self, chunk_idx, chunk_text, custom_prompt, language,
+                             min_frequency, max_names, max_titles, batch_size,
+                             output_dir, strip_honorifics, fuzzy_threshold, filter_mode):
+        """Process a single chunk - wrapper for parallel execution"""
+        print(f"📑 Worker processing chunk {chunk_idx} ({len(chunk_text):,} chars)...")
+        
+        if custom_prompt:
+            return self._extract_with_custom_prompt(
+                custom_prompt, chunk_text, language, 
+                min_frequency, max_names, max_titles, 
+                None, output_dir,
+                strip_honorifics, fuzzy_threshold, filter_mode
+            )
+        else:
+            return self._extract_with_patterns(
+                chunk_text, language, min_frequency, 
+                max_names, max_titles, batch_size, 
+                None, output_dir,
+                strip_honorifics, fuzzy_threshold, filter_mode
+            )
+    
+    def _apply_final_filter(self, entries, filter_mode):
+        """Apply final filtering based on mode to ensure only requested types are included"""
+        if filter_mode == "only_with_honorifics":
+            # Filter to keep only entries that look like they have honorifics
+            filtered = {}
+            for key, value in entries.items():
+                # Check if the key contains known honorific patterns
+                if self._has_honorific(key):
+                    filtered[key] = value
+            print(f"📑 Final filter: Kept {len(filtered)} entries with honorifics (from {len(entries)} total)")
+            return filtered
+        elif filter_mode == "only_without_honorifics":
+            # Filter to keep only entries without honorifics
+            filtered = {}
+            for key, value in entries.items():
+                if not self._has_honorific(key):
+                    filtered[key] = value
+            print(f"📑 Final filter: Kept {len(filtered)} entries without honorifics (from {len(entries)} total)")
+            return filtered
+        else:
+            return entries
+    
+    def _has_honorific(self, term):
+        """Check if a term contains an honorific"""
+        # Check for common honorifics in various languages
+        honorifics = ['님', '씨', '君', 'くん', 'さん', '様', '氏', '先生', '-san', '-kun', '-sama', '-sensei', 'Mr.', 'Ms.', 'Mrs.', 'Dr.']
+        term_lower = term.lower()
+        for honorific in honorifics:
+            if honorific.lower() in term_lower:
+                return True
+        return False
     
     def _convert_to_csv_format(self, data):
         """Convert various glossary formats to CSV string format"""
@@ -4154,7 +4450,6 @@ class GlossaryManager:
         
         # If exact matches are low and fuzzy threshold is below 1.0, do fuzzy matching
         if matches_count == 0 and threshold < 1.0:
-            print(f"📑 [DEBUG]     Starting fuzzy matching for '{term}' (text size: {len(text):,} chars)...")
             # For efficiency, only check every N characters
             step = max(1, term_len // 2)
             total_windows = (len(text) - term_len + 1) // step
@@ -4163,17 +4458,6 @@ class GlossaryManager:
                 # Check stop flag frequently in long loops
                 if i > 0 and i % (step * 100) == 0:
                     if is_stop_requested():
-                        print(f"📑 ❌ Fuzzy matching stopped by user at position {i}")
-                        return matches_count
-                
-                # Show progress for long texts
-                if total_windows > 1000 and (i // step) % 1000 == 0:
-                    progress = (i // step) / total_windows * 100
-                    print(f"📑 [DEBUG]       Fuzzy match progress: {progress:.1f}%")
-                    
-                    # Another stop check at progress updates
-                    if is_stop_requested():
-                        print(f"📑 ❌ Fuzzy matching stopped by user at {progress:.1f}%")
                         return matches_count
                 
                 window = text_lower[i:i + term_len]
@@ -4210,13 +4494,21 @@ class GlossaryManager:
                                    min_frequency, max_names, max_titles, 
                                    existing_glossary, output_dir, 
                                    strip_honorifics=True, fuzzy_threshold=0.90, filter_mode='all'):
-        """Extract glossary using custom AI prompt with PROPER CSV handling"""
+        """Extract glossary using custom AI prompt with proper filtering"""
         print("📑 Using custom automatic glossary prompt")
         
         # Check stop flag
         if is_stop_requested():
             print("📑 ❌ Glossary extraction stopped by user")
             return {}
+        
+        # Add filter mode instructions to the prompt if needed
+        if filter_mode == "only_with_honorifics":
+            filter_instruction = "\nIMPORTANT: Only extract character names that appear with honorifics (님, 씨, さん, 様, Mr., Ms., etc.). Do NOT extract any terms, titles, or names without honorifics."
+            custom_prompt = custom_prompt + filter_instruction
+        elif filter_mode == "only_without_honorifics":
+            filter_instruction = "\nIMPORTANT: Extract character names without honorifics AND terms/titles. Do NOT extract names that have honorifics attached."
+            custom_prompt = custom_prompt + filter_instruction
         
         try:
             MODEL = os.getenv("MODEL", "gemini-1.5-flash")
@@ -4254,19 +4546,19 @@ class GlossaryManager:
                 # If no format instructions are provided, use a default
                 if not format_instructions:
                     format_instructions = """
-    Return the results in EXACT CSV format with this header:
-    type,raw_name,translated_name
+Return the results in EXACT CSV format with this header:
+type,raw_name,translated_name
 
-    For example:
-    character,김상현,Kim Sang-hyu
-    character,갈편제,Gale Hardest  
-    character,디히릿 아데,Dihirit Ade
+For example:
+character,김상현,Kim Sang-hyu
+character,갈편제,Gale Hardest  
+character,디히릿 아데,Dihirit Ade
 
-    Only include terms that actually appear in the text.
-    Do not use quotes around values unless they contain commas.
+Only include entries that actually appear in the text.
+Do not use quotes around values unless they contain commas.
 
-    Text to analyze:
-    {text_sample}"""
+Text to analyze:
+{text_sample}"""
                 
                 # Replace placeholders in format instructions
                 format_instructions = format_instructions.replace('{text_sample}', text_sample)
@@ -4307,136 +4599,10 @@ class GlossaryManager:
                     else:
                         response_text = str(response)
                     
-                    # CRITICAL FIX: Remove string representation artifacts
-                    response_text = response_text.strip()
-                    
-                    # Remove outer quotes and parentheses if they wrap the entire response
-                    if response_text.startswith('("') and response_text.endswith('")'):
-                        response_text = response_text[2:-2]
-                    elif response_text.startswith('"') and response_text.endswith('"'):
-                        response_text = response_text[1:-1]
-                    elif response_text.startswith('(') and response_text.endswith(')'):
-                        response_text = response_text[1:-1]
-                    
-                    # Unescape the string if it was escaped
-                    response_text = response_text.replace('\\n', '\n')
-                    response_text = response_text.replace('\\r', '')
-                    response_text = response_text.replace('\\t', '\t')
-                    response_text = response_text.replace('\\"', '"')
-                    response_text = response_text.replace("\\'", "'")
-                    response_text = response_text.replace('\\\\', '\\')
-                    
-                    print(f"📑 [DEBUG] Got cleaned response: {len(response_text)} characters")
-                    
-                    # Clean up markdown code blocks if present
-                    if '```' in response_text:
-                        parts = response_text.split('```')
-                        for part in parts:
-                            if 'csv' in part[:10].lower():
-                                response_text = part[part.find('\n')+1:]
-                                break
-                            elif part.strip() and ('type,raw_name' in part or 'character,' in part or 'term,' in part):
-                                response_text = part
-                                break
-                    
-                    # Normalize line endings and split properly
-                    response_text = response_text.replace('\r\n', '\n').replace('\r', '\n')
-                    lines = [line.strip() for line in response_text.strip().split('\n') if line.strip()]
-                    
-                    print(f"📑 [DEBUG] Parsed {len(lines)} non-empty lines from response")
-                    if lines:
-                        print(f"📑 [DEBUG] First 3 lines:")
-                        for i, line in enumerate(lines[:3]):
-                            print(f"📑 [DEBUG]   Line {i+1}: {line[:100]}")
-                    
-                    # Build CSV content WITHOUT verification for now (to debug)
-                    # Skip frequency checking if GLOSSARY_SKIP_FREQUENCY_CHECK is set
-                    skip_frequency_check = os.getenv("GLOSSARY_SKIP_FREQUENCY_CHECK", "0") == "1"
-                    
-                    csv_lines = []
-                    header_found = False
-                    
-                    print(f"📑 [DEBUG] Processing {len(lines)} extracted terms...")
-                    if skip_frequency_check:
-                        print(f"📑 [DEBUG] Frequency checking DISABLED - keeping all terms")
-
-                    for line_num, line in enumerate(lines, 1):
-                        # Check stop flag periodically
-                        if line_num % 10 == 0 and is_stop_requested():
-                            print(f"📑 ❌ Glossary processing stopped at line {line_num}")
-                            return {}
-                        
-                        # Check for header
-                        if not header_found and 'type' in line.lower() and 'raw_name' in line.lower():
-                            csv_lines.append("type,raw_name,translated_name")
-                            header_found = True
-                            print(f"📑 [DEBUG] Found header at line {line_num}")
-                            continue
-                        
-                        # Parse CSV line
-                        parts = [p.strip().strip('"\'') for p in line.split(',')]
-                        
-                        if len(parts) >= 3:
-                            entry_type = parts[0].lower()
-                            raw_name = parts[1]
-                            translated_name = parts[2]
-                            
-                            if not raw_name or not translated_name:
-                                print(f"📑 [DEBUG] Skipping line {line_num}: empty name")
-                                continue
-                            
-                            if skip_frequency_check:
-                                # Skip all frequency checking
-                                csv_line = f"{entry_type},{raw_name},{translated_name}"
-                                if len(parts) > 3 and parts[3]:
-                                    csv_line += f",{parts[3]}"
-                                csv_lines.append(csv_line)
-                                if line_num <= 10:
-                                    print(f"📑 [DEBUG]   Added (no check): {entry_type},{raw_name},{translated_name}")
-                            else:
-                                # Original frequency checking code
-                                original_raw = raw_name
-                                if strip_honorifics:
-                                    raw_name = self._strip_honorific(raw_name, language)
-                                
-                                # Show progress every 10 terms
-                                if line_num % 10 == 0:
-                                    print(f"📑 [DEBUG] Verifying term {line_num}/{len(lines)}...")
-                                
-                                # Verify frequency using fuzzy matching
-                                count = self._find_fuzzy_matches(raw_name, all_text, fuzzy_threshold)
-                                
-                                # Also check with honorifics if stripped
-                                if strip_honorifics and count < min_frequency:
-                                    count += self._find_fuzzy_matches(original_raw, all_text, fuzzy_threshold)
-                                    
-                                    # Check with common honorifics
-                                    if language in self.pattern_manager.CJK_HONORIFICS:
-                                        for honorific in self.pattern_manager.CJK_HONORIFICS[language][:3]:
-                                            if is_stop_requested():
-                                                print(f"📑 ❌ Verification stopped during honorific checking")
-                                                return {}
-                                            count += self._find_fuzzy_matches(raw_name + honorific, all_text, fuzzy_threshold)
-                                            if count >= min_frequency:
-                                                break
-                                
-                                if count >= min_frequency:
-                                    csv_line = f"{entry_type},{raw_name},{translated_name}"
-                                    if len(parts) > 3 and parts[3]:
-                                        csv_line += f",{parts[3]}"
-                                    csv_lines.append(csv_line)
-                                    if line_num <= 10:
-                                        print(f"📑 [DEBUG]   ✓ Added: {entry_type},{raw_name},{translated_name} (count: {count})")
-                                else:
-                                    if line_num <= 10:
-                                        print(f"📑 [DEBUG]   ✗ Skipped: {raw_name} (count: {count} < {min_frequency})")
-                        else:
-                            print(f"📑 [DEBUG] Line {line_num} has {len(parts)} parts (need 3+): {line[:50]}")
-
-                    # Ensure header exists
-                    if not header_found:
-                        csv_lines.insert(0, "type,raw_name,translated_name")
-                        print(f"📑 [DEBUG] Added default header")
+                    # Process response and build CSV
+                    csv_lines = self._process_ai_response(response_text, all_text, min_frequency, 
+                                                         strip_honorifics, fuzzy_threshold, 
+                                                         language, filter_mode)
                     
                     print(f"📑 AI extracted {len(csv_lines) - 1} valid terms (header excluded)")
                     
@@ -4450,9 +4616,13 @@ class GlossaryManager:
                         csv_lines = self._merge_csv_entries(csv_lines, existing_glossary, strip_honorifics, language)
 
                     # Fuzzy matching deduplication
+                    skip_frequency_check = os.getenv("GLOSSARY_SKIP_FREQUENCY_CHECK", "0") == "1"
                     if not skip_frequency_check:  # Only dedupe if we're checking frequencies
                         csv_lines = self._deduplicate_glossary_with_fuzzy(csv_lines, fuzzy_threshold)
-                                
+                    
+                    # Apply filter mode to final results
+                    csv_lines = self._filter_csv_by_mode(csv_lines, filter_mode)
+                    
                     # Create final CSV content
                     csv_content = '\n'.join(csv_lines)
                     
@@ -4465,12 +4635,6 @@ class GlossaryManager:
                     print(f"📑 File: {glossary_path}")
                     print(f"📑 Total entries: {len(csv_lines) - 1}")  # Exclude header
                     
-                    # Show first few entries for debugging
-                    if len(csv_lines) > 1:
-                        print(f"📑 First few entries:")
-                        for line in csv_lines[1:min(6, len(csv_lines))]:
-                            print(f"📑   {line}")
-                    
                     return self._parse_csv_to_dict(csv_content)
                     
                 except UnifiedClientError as e:
@@ -4481,18 +4645,18 @@ class GlossaryManager:
                         print(f"⚠️ AI extraction failed: {e}")
                         print("📑 Falling back to pattern-based extraction")
                         return self._extract_with_patterns(all_text, language, min_frequency, 
-                                                 max_names, max_titles, 50,
-                                                 existing_glossary, output_dir, 
-                                                 strip_honorifics, fuzzy_threshold, filter_mode)
+                                                         max_names, max_titles, 50,
+                                                         existing_glossary, output_dir, 
+                                                         strip_honorifics, fuzzy_threshold, filter_mode)
                 except Exception as e:
                     print(f"⚠️ AI extraction failed: {e}")
                     import traceback
                     traceback.print_exc()
                     print("📑 Falling back to pattern-based extraction")
                     return self._extract_with_patterns(all_text, language, min_frequency, 
-                                                 max_names, max_titles, 50,
-                                                 existing_glossary, output_dir, 
-                                                 strip_honorifics, fuzzy_threshold, filter_mode)
+                                                     max_names, max_titles, 50,
+                                                     existing_glossary, output_dir, 
+                                                     strip_honorifics, fuzzy_threshold, filter_mode)
                     
         except Exception as e:
             print(f"⚠️ Custom prompt processing failed: {e}")
@@ -4501,7 +4665,164 @@ class GlossaryManager:
             return self._extract_with_patterns(all_text, language, min_frequency, 
                                              max_names, max_titles, 50, 
                                              existing_glossary, output_dir, 
-                                             strip_honorifics, fuzzy_threshold)
+                                             strip_honorifics, fuzzy_threshold, filter_mode)
+    
+    def _filter_csv_by_mode(self, csv_lines, filter_mode):
+        """Filter CSV lines based on the filter mode"""
+        if filter_mode == "all":
+            return csv_lines
+        
+        filtered = [csv_lines[0]]  # Keep header
+        
+        for line in csv_lines[1:]:
+            if not line.strip():
+                continue
+            
+            parts = [p.strip() for p in line.split(',')]
+            if len(parts) < 3:
+                continue
+            
+            entry_type = parts[0].lower()
+            raw_name = parts[1]
+            
+            if filter_mode == "only_with_honorifics":
+                # Only keep character entries with honorifics
+                if entry_type == "character" and self._has_honorific(raw_name):
+                    filtered.append(line)
+            elif filter_mode == "only_without_honorifics":
+                # Keep terms and characters without honorifics
+                if entry_type == "term" or (entry_type == "character" and not self._has_honorific(raw_name)):
+                    filtered.append(line)
+        
+        print(f"📑 Filter '{filter_mode}': {len(filtered)-1} entries kept from {len(csv_lines)-1}")
+        return filtered
+    
+    def _process_ai_response(self, response_text, all_text, min_frequency, 
+                           strip_honorifics, fuzzy_threshold, language, filter_mode):
+        """Process AI response and return CSV lines"""
+        
+        # Clean response text
+        response_text = response_text.strip()
+        
+        # Remove string representation artifacts if they wrap the entire response
+        if response_text.startswith('("') and response_text.endswith('")'):
+            response_text = response_text[2:-2]
+        elif response_text.startswith('"') and response_text.endswith('"'):
+            response_text = response_text[1:-1]
+        elif response_text.startswith('(') and response_text.endswith(')'):
+            response_text = response_text[1:-1]
+        
+        # Unescape the string
+        response_text = response_text.replace('\\n', '\n')
+        response_text = response_text.replace('\\r', '')
+        response_text = response_text.replace('\\t', '\t')
+        response_text = response_text.replace('\\"', '"')
+        response_text = response_text.replace("\\'", "'")
+        response_text = response_text.replace('\\\\', '\\')
+        
+        # Clean up markdown code blocks if present
+        if '```' in response_text:
+            parts = response_text.split('```')
+            for part in parts:
+                if 'csv' in part[:10].lower():
+                    response_text = part[part.find('\n')+1:]
+                    break
+                elif part.strip() and ('type,raw_name' in part or 'character,' in part or 'term,' in part):
+                    response_text = part
+                    break
+        
+        # Normalize line endings
+        response_text = response_text.replace('\r\n', '\n').replace('\r', '\n')
+        lines = [line.strip() for line in response_text.strip().split('\n') if line.strip()]
+        
+        csv_lines = []
+        header_found = False
+        
+        # Check if we should skip frequency check
+        skip_frequency_check = os.getenv("GLOSSARY_SKIP_FREQUENCY_CHECK", "0") == "1"
+        
+        # For "only_with_honorifics" mode, ALWAYS skip frequency check
+        if filter_mode == "only_with_honorifics":
+            skip_frequency_check = True
+            print("📑 Filter mode 'only_with_honorifics': Bypassing frequency checks")
+        
+        print(f"📑 Processing {len(lines)} lines from AI response...")
+        
+        for line_num, line in enumerate(lines, 1):
+            # Check stop flag periodically
+            if line_num % 10 == 0 and is_stop_requested():
+                return csv_lines
+            
+            # Check for header
+            if not header_found and 'type' in line.lower() and 'raw_name' in line.lower():
+                csv_lines.append("type,raw_name,translated_name")
+                header_found = True
+                continue
+            
+            # Parse CSV line
+            parts = [p.strip().strip('"\'') for p in line.split(',')]
+            
+            if len(parts) >= 3:
+                entry_type = parts[0].lower()
+                raw_name = parts[1]
+                translated_name = parts[2]
+                
+                if not raw_name or not translated_name:
+                    continue
+                
+                # For "only_with_honorifics" mode with AI, trust the AI's filtering
+                if filter_mode == "only_with_honorifics":
+                    # Just add it - AI already filtered for honorifics
+                    csv_line = f"{entry_type},{raw_name},{translated_name}"
+                    if len(parts) > 3 and parts[3]:
+                        csv_line += f",{parts[3]}"
+                    csv_lines.append(csv_line)
+                    if line_num <= 5:  # Log first few entries
+                        print(f"📑   Added (honorifics mode): {entry_type},{raw_name},{translated_name}")
+                elif skip_frequency_check:
+                    # Skip all frequency checking
+                    csv_line = f"{entry_type},{raw_name},{translated_name}"
+                    if len(parts) > 3 and parts[3]:
+                        csv_line += f",{parts[3]}"
+                    csv_lines.append(csv_line)
+                else:
+                    # Normal frequency checking for other modes
+                    original_raw = raw_name
+                    if strip_honorifics:
+                        raw_name = self._strip_honorific(raw_name, language)
+                    
+                    # Verify frequency using fuzzy matching
+                    count = self._find_fuzzy_matches(raw_name, all_text, fuzzy_threshold)
+                    
+                    # Also check with honorifics if stripped
+                    if strip_honorifics and count < min_frequency:
+                        count += self._find_fuzzy_matches(original_raw, all_text, fuzzy_threshold)
+                        
+                        # Check with common honorifics
+                        if language in self.pattern_manager.CJK_HONORIFICS:
+                            for honorific in self.pattern_manager.CJK_HONORIFICS[language][:3]:
+                                if is_stop_requested():
+                                    return csv_lines
+                                count += self._find_fuzzy_matches(raw_name + honorific, all_text, fuzzy_threshold)
+                                if count >= min_frequency:
+                                    break
+                    
+                    if count >= min_frequency:
+                        csv_line = f"{entry_type},{raw_name},{translated_name}"
+                        if len(parts) > 3 and parts[3]:
+                            csv_line += f",{parts[3]}"
+                        csv_lines.append(csv_line)
+                        if line_num <= 10:
+                            print(f"📑   ✓ Added: {entry_type},{raw_name},{translated_name} (count: {count})")
+                    else:
+                        if line_num <= 10:
+                            print(f"📑   ✗ Skipped: {raw_name} (count: {count} < {min_frequency})")
+        
+        # Ensure header exists
+        if not header_found:
+            csv_lines.insert(0, "type,raw_name,translated_name")
+        
+        return csv_lines
     
     def _deduplicate_glossary_with_fuzzy(self, csv_lines, fuzzy_threshold):
         """Apply fuzzy matching to remove duplicate entries from the glossary with stop flag checks"""
