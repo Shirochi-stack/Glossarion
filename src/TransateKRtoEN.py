@@ -4231,8 +4231,8 @@ class GlossaryManager:
                                 
                                 # Print progress for GUI
                                 progress_percent = (completed_chunks / total_chunks) * 100
-                                print(f"📑 Progress: {completed_chunks}/{total_chunks} chunks ({progress_percent:.0f}%) - {len(all_glossary_entries)} entries found")
-                                print(f"📑 Chunk {futures[future]} completed: {len(chunk_glossary)} entries")
+                                print(f"📑 Progress: {completed_chunks}/{total_chunks} chunks ({progress_percent:.0f}%)")
+                                print(f"📑 Chunk {futures[future]} completed and saved to file")
                             except Exception as e:
                                 print(f"⚠️ Chunk {futures[future]} failed: {e}")
                                 completed_chunks += 1
@@ -4358,19 +4358,42 @@ class GlossaryManager:
                     # Convert to token-efficient format
                     csv_lines = self._convert_to_token_efficient_format(csv_lines)
 
-                # Create CSV content
+                # Create final CSV content
                 csv_content = '\n'.join(csv_lines)
 
                 # Save glossary as CSV (with .json extension for compatibility)
                 glossary_path = os.path.join(output_dir, "glossary.json")
                 self._atomic_write_file(glossary_path, csv_content)
-                
+
                 print(f"\n📑 ✅ GLOSSARY SAVED!")
                 print(f"📑 File: {glossary_path}")
-                print(f"📑 Character entries: {sum(1 for line in csv_lines[1:] if line.startswith('character,'))}")
-                print(f"📑 Term entries: {sum(1 for line in csv_lines[1:] if line.startswith('term,'))}")
-                print(f"📑 Total entries: {len(csv_lines) - 1}")
-                
+
+                # Count entries differently based on format
+                if use_legacy_format:
+                    print(f"📑 Character entries: {sum(1 for line in csv_lines[1:] if line.startswith('character,'))}")
+                    print(f"📑 Term entries: {sum(1 for line in csv_lines[1:] if line.startswith('term,'))}")
+                    print(f"📑 Total entries: {len(csv_lines) - 1}")
+                else:
+                    # For token-efficient format, count by section headers
+                    char_count = 0
+                    term_count = 0
+                    current_section = None
+                    
+                    for line in csv_lines:
+                        if '=== CHARACTERS ===' in line:
+                            current_section = 'character'
+                        elif '=== TERMS ===' in line:
+                            current_section = 'term'
+                        elif line.startswith('* '):
+                            if current_section == 'character':
+                                char_count += 1
+                            elif current_section == 'term':
+                                term_count += 1
+                    
+                    print(f"📑 Character entries: {char_count}")
+                    print(f"📑 Term entries: {term_count}")
+                    print(f"📑 Total entries: {char_count + term_count}")
+
                 return self._parse_csv_to_dict(csv_content)
             else:
                 # No entries found
@@ -4387,6 +4410,19 @@ class GlossaryManager:
                                              max_names, max_titles, batch_size, 
                                              existing_glossary, output_dir, 
                                              strip_honorifics, fuzzy_threshold, filter_mode)
+
+        total_time = time.time() - total_start_time
+        print(f"\n📑 ========== GLOSSARY GENERATION COMPLETE ==========")
+        print(f"📑 Total time: {total_time:.1f}s")
+        print(f"📑 Performance breakdown:")
+        print(f"📑   - Extraction: {getattr(self, '_extraction_time', 0):.1f}s")
+        print(f"📑   - API calls: {getattr(self, '_api_time', 0):.1f}s")
+        print(f"📑   - Frequency checking: {getattr(self, '_freq_check_time', 0):.1f}s")
+        print(f"📑   - Deduplication: {getattr(self, '_dedup_time', 0):.1f}s")
+        print(f"📑   - File I/O: {getattr(self, '_io_time', 0):.1f}s")
+        print(f"📑 ================================================")
+        
+        return result  # This is the existing return statement
 
     def _convert_to_token_efficient_format(self, csv_lines):
         """Convert CSV lines to token-efficient format with sections and asterisks"""
@@ -4514,9 +4550,13 @@ class GlossaryManager:
                     try:
                         chunk_glossary = future.result()
                         entries_added = 0
-                        
+                        chunk_glossary = future.result()
+                        print(f"📑 DEBUG: Chunk {futures[future]} returned type={type(chunk_glossary)}, len={len(chunk_glossary)}")
+
+                        entries_added = 0                        
                         # CHANGE: Just collect all entries as CSV lines
                         if isinstance(chunk_glossary, dict):
+                            print(f"📑 DEBUG: Dict keys: {list(chunk_glossary.keys())[:5]}")  # Show first 5 keys
                             for raw_name, translated_name in chunk_glossary.items():
                                 # Determine type based on content
                                 entry_type = "character" if self._has_honorific(raw_name) else "term"
@@ -4533,8 +4573,8 @@ class GlossaryManager:
                         
                         # Print progress for GUI
                         progress_percent = (completed_chunks / total_chunks) * 100
-                        print(f"📑 Progress: {completed_chunks}/{total_chunks} chunks ({progress_percent:.0f}%) - {len(all_csv_lines)} total entries collected")
-                        print(f"📑 Chunk {futures[future]} completed via API: {entries_added} entries")
+                        print(f"📑 Progress: {completed_chunks}/{total_chunks} chunks ({progress_percent:.0f}%)")
+                        print(f"📑 Chunk {futures[future]} completed and saved to file")
                         
                     except Exception as e:
                         print(f"⚠️ API call for chunk {futures[future]} failed: {e}")
@@ -4705,29 +4745,64 @@ class GlossaryManager:
     
     def _find_fuzzy_matches(self, term, text, threshold=0.90):
         """Find fuzzy matches of a term in text using efficient method with stop flag checks"""
+        start_time = time.time()
+        
         term_lower = term.lower()
         text_lower = text.lower()
         term_len = len(term)
         matches_count = 0
         
+        # Log what we're searching for
+        if len(text) > 100000:  # Only log for large texts
+            print(f"📑     Searching for '{term}' in {len(text):,} chars (threshold: {threshold})")
+        
         # Use exact matching first for efficiency
+        exact_start = time.time()
         matches_count = text_lower.count(term_lower)
+        exact_time = time.time() - exact_start
+        
+        if matches_count > 0:
+            if len(text) > 100000:
+                print(f"📑     Found {matches_count} exact matches in {exact_time:.3f}s")
+            return matches_count
         
         # If exact matches are low and fuzzy threshold is below 1.0, do fuzzy matching
         if matches_count == 0 and threshold < 1.0:
+            print(f"📑     No exact matches, starting fuzzy search (this may be slow)...")
+            fuzzy_start = time.time()
+            
             # For efficiency, only check every N characters
             step = max(1, term_len // 2)
             total_windows = (len(text) - term_len + 1) // step
             
+            print(f"📑     Checking ~{total_windows} windows with step size {step}")
+            
+            windows_checked = 0
             for i in range(0, len(text) - term_len + 1, step):
                 # Check stop flag frequently in long loops
                 if i > 0 and i % (step * 100) == 0:
                     if is_stop_requested():
                         return matches_count
+                    
+                    # Progress log for very long operations
+                    if windows_checked % 1000 == 0 and windows_checked > 0:
+                        elapsed = time.time() - fuzzy_start
+                        rate = windows_checked / elapsed if elapsed > 0 else 0
+                        eta = (total_windows - windows_checked) / rate if rate > 0 else 0
+                        print(f"📑     Fuzzy progress: {windows_checked}/{total_windows} windows, {rate:.0f} w/s, ETA: {eta:.1f}s")
                 
                 window = text_lower[i:i + term_len]
                 if self._fuzzy_match(term_lower, window, threshold):
                     matches_count += 1
+                
+                windows_checked += 1
+            
+            fuzzy_time = time.time() - fuzzy_start
+            print(f"📑     Fuzzy search completed in {fuzzy_time:.2f}s, found {matches_count} matches")
+        
+        total_time = time.time() - start_time
+        if total_time > 1.0:  # Log slow searches
+            print(f"📑     ⚠️ Slow search: '{term}' took {total_time:.2f}s total")
         
         return matches_count
     
@@ -4761,6 +4836,7 @@ class GlossaryManager:
                                    strip_honorifics=True, fuzzy_threshold=0.90, filter_mode='all'):
         """Extract glossary using custom AI prompt with proper filtering"""
         print("📑 Using custom automatic glossary prompt")
+        extraction_start = time.time()
         
         # Check stop flag
         if is_stop_requested():
@@ -4859,6 +4935,11 @@ Text to analyze:
                     chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "900"))  # 15 minute default for glossary
                     print(f"📑 Sending AI extraction request (timeout: {chunk_timeout}s, interruptible)...")
                     
+                    # Before API call
+                    api_start = time.time()
+                    print(f"📑 Preparing API request (text size: {len(text_sample):,} chars)...")
+                    print(f"📑 ⏳ Processing {len(text_sample):,} characters... Please wait, this may take 5-10 minutes")
+
                     response = send_with_interrupt(
                         messages=messages,
                         client=client,
@@ -4867,19 +4948,28 @@ Text to analyze:
                         stop_check_fn=is_stop_requested,
                         chunk_timeout=chunk_timeout
                     )
-                    
+                    api_time = time.time() - api_start
+                    print(f"📑 API call completed in {api_time:.1f}s")
+    
                     # Get the actual text from the response
                     if hasattr(response, 'content'):
                         response_text = response.content
                     else:
                         response_text = str(response)
-                    
+
+                    # Before processing response
+                    process_start = time.time()
+                    print(f"📑 Processing AI response...")
+                  
                     # Process response and build CSV
                     csv_lines = self._process_ai_response(response_text, all_text, min_frequency, 
                                                          strip_honorifics, fuzzy_threshold, 
                                                          language, filter_mode)
                     
                     print(f"📑 AI extracted {len(csv_lines) - 1} valid terms (header excluded)")
+
+                    process_time = time.time() - process_start
+                    print(f"📑 Response processing took {process_time:.1f}s")
                     
                     # Check stop before merging
                     if is_stop_requested():
@@ -4893,7 +4983,25 @@ Text to analyze:
                     # Fuzzy matching deduplication
                     skip_frequency_check = os.getenv("GLOSSARY_SKIP_FREQUENCY_CHECK", "0") == "1"
                     if not skip_frequency_check:  # Only dedupe if we're checking frequencies
+                        # Time the deduplication
+                        dedup_start = time.time()
+                        original_count = len(csv_lines) - 1  # Exclude header
+                        
                         csv_lines = self._deduplicate_glossary_with_fuzzy(csv_lines, fuzzy_threshold)
+                        
+                        dedup_time = time.time() - dedup_start
+                        final_count = len(csv_lines) - 1  # Exclude header
+                        removed_count = original_count - final_count
+                        
+                        print(f"📑 Deduplication completed in {dedup_time:.1f}s")
+                        print(f"📑   - Original entries: {original_count}")
+                        print(f"📑   - Duplicates removed: {removed_count}")
+                        print(f"📑   - Final entries: {final_count}")
+                        
+                        # Store for summary statistics
+                        self._dedup_time = getattr(self, '_dedup_time', 0) + dedup_time
+                    else:
+                        print(f"📑 Skipping deduplication (frequency check disabled)")
                     
                     # Apply filter mode to final results
                     csv_lines = self._filter_csv_by_mode(csv_lines, filter_mode)
@@ -4915,7 +5023,8 @@ Text to analyze:
                     print(f"\n📑 ✅ AI-ASSISTED GLOSSARY SAVED!")
                     print(f"📑 File: {glossary_path}")
                     print(f"📑 Total entries: {len(csv_lines) - 1}")  # Exclude header
-                    
+                    total_time = time.time() - extraction_start
+                    print(f"📑 Total extraction time: {total_time:.1f}s")
                     return self._parse_csv_to_dict(csv_content)
                     
                 except UnifiedClientError as e:
@@ -4981,7 +5090,13 @@ Text to analyze:
     def _process_ai_response(self, response_text, all_text, min_frequency, 
                            strip_honorifics, fuzzy_threshold, language, filter_mode):
         """Process AI response and return CSV lines"""
-        
+
+        # option to completely skip frequency validation for speed
+        skip_all_validation = os.getenv("GLOSSARY_SKIP_ALL_VALIDATION", "0") == "1"
+
+        if skip_all_validation:
+            print("📑 ⚡ FAST MODE: Skipping all frequency validation (accepting all AI results)")
+    
         # Clean response text
         response_text = response_text.strip()
         
@@ -5021,6 +5136,39 @@ Text to analyze:
         
         # Check if we should skip frequency check
         skip_frequency_check = os.getenv("GLOSSARY_SKIP_FREQUENCY_CHECK", "0") == "1"
+
+        # Add option to completely skip ALL validation for maximum speed
+        skip_all_validation = os.getenv("GLOSSARY_SKIP_ALL_VALIDATION", "0") == "1"
+        
+        if skip_all_validation:
+            print("📑 ⚡ FAST MODE: Skipping all frequency validation (accepting all AI results)")
+            
+            # Add header
+            csv_lines.append("type,raw_name,translated_name")
+            
+            # Just accept everything the AI returns
+            for line in lines:
+                # Skip header lines
+                if 'type' in line.lower() and 'raw_name' in line.lower():
+                    continue
+                    
+                # Parse CSV line
+                parts = [p.strip().strip('"\'') for p in line.split(',')]
+                
+                if len(parts) >= 3:
+                    entry_type = parts[0].lower()
+                    raw_name = parts[1]
+                    translated_name = parts[2]
+                    
+                    if raw_name and translated_name:
+                        csv_line = f"{entry_type},{raw_name},{translated_name}"
+                        # Add gender if present
+                        if len(parts) > 3 and parts[3]:
+                            csv_line += f",{parts[3]}"
+                        csv_lines.append(csv_line)
+            
+            print(f"📑 Fast mode: Accepted {len(csv_lines) - 1} entries without validation")
+            return csv_lines
         
         # For "only_with_honorifics" mode, ALWAYS skip frequency check
         if filter_mode == "only_with_honorifics":
@@ -5028,6 +5176,13 @@ Text to analyze:
             print("📑 Filter mode 'only_with_honorifics': Bypassing frequency checks")
         
         print(f"📑 Processing {len(lines)} lines from AI response...")
+        print(f"📑 Text corpus size: {len(all_text):,} chars")
+        print(f"📑 Frequency checking: {'DISABLED' if skip_frequency_check else f'ENABLED (min: {min_frequency})'}")
+        print(f"📑 Fuzzy threshold: {fuzzy_threshold}")
+
+        entries_processed = 0
+        entries_accepted = 0
+        frequency_check_time = 0
         
         for line_num, line in enumerate(lines, 1):
             # Check stop flag periodically
