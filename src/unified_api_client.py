@@ -262,6 +262,9 @@ class UnifiedClient:
     # Thread-local storage for clients and key assignments
     _thread_local = threading.local()
     
+    # global stop flag
+    _global_cancelled = False
+    
     # Legacy tracking (for compatibility)
     _key_assignments = {}  # thread_id -> (key_index, key_identifier)
     _assignment_lock = threading.Lock()
@@ -1202,9 +1205,14 @@ class UnifiedClient:
                 if not is_rate_limited and not is_cooling:
                     count += 1
         return count
-    
+        
     def _mark_key_success(self):
         """Mark the current key as successful (thread-safe)"""
+        # Check both instance and class-level cancellation
+        if (hasattr(self, '_cancelled') and self._cancelled) or self.__class__._global_cancelled:
+            # Don't mark success if we're cancelled
+            return
+            
         if not self._multi_key_mode:
             return
         
@@ -1222,6 +1230,11 @@ class UnifiedClient:
     
     def _mark_key_error(self, error_code: int = None):
         """Mark current key as having an error and apply cooldown if rate limited (thread-safe)"""
+        # Check both instance and class-level cancellation
+        if (hasattr(self, '_cancelled') and self._cancelled) or self.__class__._global_cancelled:
+            # Don't mark error if we're cancelled
+            return
+            
         if not self._multi_key_mode:
             return
         
