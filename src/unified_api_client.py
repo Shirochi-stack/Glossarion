@@ -4962,24 +4962,26 @@ class UnifiedClient:
         
         # Handle UnifiedResponse objects
         if isinstance(response, UnifiedResponse):
-            # Check if content exists and is not empty
-            if response.content and isinstance(response.content, str) and len(response.content) > 0:
-                print(f"   ✅ Got text from UnifiedResponse.content: {len(response.content)} chars")
+            # Check if content is a string (even if empty)
+            if response.content is not None and isinstance(response.content, str):
+                # Always return the content from UnifiedResponse
+                if len(response.content) > 0:
+                    print(f"   ✅ Got text from UnifiedResponse.content: {len(response.content)} chars")
+                else:
+                    print(f"   ⚠️ UnifiedResponse has empty content (finish_reason: {response.finish_reason})")
                 return response.content, response.finish_reason or 'stop'
             elif response.error_details:
-                # Handle error responses
                 print(f"   ⚠️ UnifiedResponse has error_details: {response.error_details}")
                 return "", response.finish_reason or 'error'
             else:
-                # Content is None or empty, try to extract from raw_response if available
-                print(f"   ⚠️ UnifiedResponse.content is empty or None, checking raw_response...")
+                # Only try to extract from raw_response if content is actually None
+                print(f"   ⚠️ UnifiedResponse.content is None, checking raw_response...")
                 if hasattr(response, 'raw_response') and response.raw_response:
                     print(f"   🔍 Found raw_response, attempting extraction...")
-                    # Continue to provider-specific extraction using raw_response
                     response = response.raw_response
                 else:
-                    print(f"   ⚠️ No raw_response found in UnifiedResponse")
-                    # Continue with the UnifiedResponse object itself
+                    print(f"   ⚠️ No raw_response found")
+                    return "", 'error'
         
         # ========== GEMINI-SPECIFIC HANDLING ==========
         if provider == 'gemini':
@@ -5022,6 +5024,12 @@ class UnifiedClient:
                                 result = ''.join(text_parts)
                                 print(f"   ✅ [Gemini] Extracted from parts: {len(result)} chars")
                                 return result, finish_reason
+                                
+                            else:
+                                # NEW: Handle case where parts exist but contain no text
+                                print(f"   ⚠️ [Gemini] Parts found but no text extracted from {len(content.parts)} parts")           
+                                return "", finish_reason                                
+                            
                         
                         # Try direct text access on content
                         elif hasattr(content, 'text'):
