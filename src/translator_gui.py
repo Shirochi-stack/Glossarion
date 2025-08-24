@@ -11087,17 +11087,19 @@ Important rules:
         os.environ['TRANSLATION_CANCELLED'] = '1'
         
         self.stop_requested = True
-        if translation_stop_flag:
+        
+        # Use the imported translation_stop_flag function from TransateKRtoEN
+        # This was imported during lazy loading as: translation_stop_flag = TransateKRtoEN.set_stop_flag
+        if 'translation_stop_flag' in globals() and translation_stop_flag:
             translation_stop_flag(True)
         
-        # Use your existing set_stop_flag function
-        globals()['set_stop_flag'](True) 
-        
+        # Also try to call it directly on the module if imported
         try:
             import TransateKRtoEN
             if hasattr(TransateKRtoEN, 'set_stop_flag'):
                 TransateKRtoEN.set_stop_flag(True)
-        except: pass
+        except: 
+            pass
         
         try:
             import unified_api_client
