@@ -1020,8 +1020,18 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             stop_check_fn=stop_check_fn,
             chunk_timeout=chunk_timeout
         )
-        
+
         # Handle the response - it might be a tuple or a string
+        if raw is None:
+            print(f"⚠️ API returned None for chapter {idx+1}")
+            return {
+                'idx': idx,
+                'data': [],
+                'resp': "",
+                'chap': chap,
+                'error': "API returned None"
+            }
+
         if isinstance(raw, tuple):
             resp = raw[0] if raw[0] is not None else ""
         elif isinstance(raw, str):
@@ -1032,6 +1042,10 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             resp = raw.text if raw.text is not None else ""
         else:
             resp = str(raw) if raw is not None else ""
+
+        # Ensure resp is never None
+        if resp is None:
+            resp = ""
         
         # Save the raw response in thread-safe location
         response_file = os.path.join(thread_dir, f"chapter_{idx+1}_response.txt")
@@ -1803,6 +1817,11 @@ def main(log_callback=None, stop_callback=None):
                     if not isinstance(resp, str):
                         print(f"⚠️ Converting non-string response to string for chapter {idx+1}")
                         resp = str(resp) if resp is not None else ""
+
+                    # NULL CHECK before checking if response is empty
+                    if resp is None:
+                        print(f"⚠️ Response is None for chapter {idx+1}, skipping...")
+                        continue
 
                     # Check if response is empty
                     if not resp or resp.strip() == "":
