@@ -2787,6 +2787,7 @@ class UnifiedClient:
                         tls = self._get_thread_local_client()
                         if tls.key_index is not None:
                             self._api_key_pool.mark_key_success(tls.key_index)
+                    self.reset_cleanup_state()
                     
                     logger.info(f"[{thread_name}] ✓ Request completed with {self.key_identifier}")
                     successful_response = result
@@ -3798,6 +3799,7 @@ class UnifiedClient:
                         tls = self._get_thread_local_client()
                         if tls.key_index is not None:
                             self._api_key_pool.mark_key_success(tls.key_index)
+                    self.reset_cleanup_state()
                     
                     logger.info(f"[{thread_name}] ✓ Image request completed with {self.key_identifier}")
                     successful_response = result
@@ -5571,7 +5573,7 @@ class UnifiedClient:
         IMPORTANT: Called by send_with_interrupt when timeout occurs
         """
         self._cancelled = True
-        self._in_cleanup = False  # Set cleanup flag
+        self._in_cleanup = True  # Set cleanup flag correctly
         print("🛑 Operation cancelled (timeout or user stop)")
         print("🛑 API operation cancelled")
 
