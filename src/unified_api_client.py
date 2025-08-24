@@ -2664,6 +2664,7 @@ class UnifiedClient:
     def send(self, messages, temperature=None, max_tokens=None, 
              max_completion_tokens=None, context=None) -> Tuple[str, Optional[str]]:
         """Thread-safe send with proper key management and deduplication for batch translation"""
+        self.reset_cleanup_state()
         self._apply_thread_submission_delay()
         thread_name = threading.current_thread().name
         
@@ -3653,6 +3654,7 @@ class UnifiedClient:
                   max_completion_tokens: Optional[int] = None,
                   context: str = 'image_translation') -> Tuple[str, str]:
         """Thread-safe image send with proper key management and deduplication for batch translation"""
+        self.reset_cleanup_state()
         self._apply_thread_submission_delay()
         thread_name = threading.current_thread().name
         
