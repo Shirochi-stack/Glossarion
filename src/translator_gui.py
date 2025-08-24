@@ -1140,6 +1140,7 @@ class TranslatorGUI:
         # Initialize fuzzy threshold variable
         if not hasattr(self, 'fuzzy_threshold_var'):
             self.fuzzy_threshold_var = tk.DoubleVar(value=self.config.get('glossary_fuzzy_threshold', 0.90))
+        self.use_legacy_csv_var = tk.BooleanVar(value=self.config.get('glossary_use_legacy_csv', False))
 
         
         # Initialize the variables with default values
@@ -4510,6 +4511,10 @@ Recent translations to summarize:
                 if hasattr(self, 'disable_honorifics_var'):
                     self.config['glossary_disable_honorifics_filter'] = self.disable_honorifics_var.get()
                 
+                # Save format preference
+                if hasattr(self, 'use_legacy_csv_var'):
+                    self.config['glossary_use_legacy_csv'] = self.use_legacy_csv_var.get()
+                    
                 # Temperature and context limit
                 try:
                     self.config['manual_glossary_temperature'] = float(self.manual_temp_var.get())
@@ -4536,6 +4541,7 @@ Recent translations to summarize:
                 os.environ['GLOSSARY_FUZZY_THRESHOLD'] = str(self.fuzzy_threshold_var.get())
                 os.environ['GLOSSARY_TRANSLATION_PROMPT'] = getattr(self, 'glossary_translation_prompt', '')
                 os.environ['GLOSSARY_FORMAT_INSTRUCTIONS'] = getattr(self, 'glossary_format_instructions', '')
+                os.environ['GLOSSARY_USE_LEGACY_CSV'] = '1' if self.use_legacy_csv_var.get() else '0'
                 
                 # Set custom entry types and fields as environment variables
                 os.environ['GLOSSARY_CUSTOM_ENTRY_TYPES'] = json.dumps(self.custom_entry_types)
@@ -4835,6 +4841,24 @@ Recent translations to summarize:
         fuzzy_desc_label = tk.Label(fuzzy_frame, text="", font=('TkDefaultFont', 9), fg='blue')
         fuzzy_desc_label.pack(anchor=tk.W, pady=(5, 0))
 
+        # Token-efficient format toggle
+        format_frame = tk.LabelFrame(manual_container, text="Output Format", padx=10, pady=10)
+        format_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # Initialize variable if not exists
+        if not hasattr(self, 'use_legacy_csv_var'):
+            self.use_legacy_csv_var = tk.BooleanVar(value=self.config.get('glossary_use_legacy_csv', False))
+
+        tb.Checkbutton(format_frame, text="Use legacy CSV format", 
+                      variable=self.use_legacy_csv_var,
+                      bootstyle="round-toggle").pack(anchor=tk.W)
+
+        tk.Label(format_frame, text="When disabled (default): Uses token-efficient format with sections (=== CHARACTERS ===)",
+                font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, padx=20, pady=(0, 5))
+
+        tk.Label(format_frame, text="When enabled: Uses traditional CSV format with repeated type columns",
+                font=('TkDefaultFont', 9), fg='gray').pack(anchor=tk.W, padx=20)
+        
         # Update label when slider moves - DEFINE AFTER CREATING THE LABEL
         def update_fuzzy_label(*args):
             try:
@@ -8070,6 +8094,7 @@ Provide translations in the same numbered format."""
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') else '',
             'GLOSSARY_TRANSLATION_PROMPT': self.glossary_translation_prompt if hasattr(self, 'glossary_translation_prompt') else '',
             'GLOSSARY_FORMAT_INSTRUCTIONS': self.glossary_format_instructions if hasattr(self, 'glossary_format_instructions') else '',
+            'GLOSSARY_USE_LEGACY_CSV': '1' if self.use_legacy_csv_var.get() else '0',
             'ENABLE_IMAGE_TRANSLATION': "1" if self.enable_image_translation_var.get() else "0",
             'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var.get() else "0",
             'WEBNOVEL_MIN_HEIGHT': self.webnovel_min_height_var.get(),
@@ -14656,7 +14681,11 @@ Important rules:
                     self.config['glossary_fuzzy_threshold'] = fuzzy_val
                 else:
                     self.config['glossary_fuzzy_threshold'] = 0.90  # default
-                    
+
+            # Add glossary format preference
+            if hasattr(self, 'use_legacy_csv_var'):
+                self.config['glossary_use_legacy_csv'] = self.use_legacy_csv_var.get()
+    
              # Add after saving translation_prompt_text:
             if hasattr(self, 'format_instructions_text'):
                 try:
