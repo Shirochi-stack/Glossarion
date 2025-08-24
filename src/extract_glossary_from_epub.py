@@ -35,13 +35,13 @@ def interruptible_sleep(duration, check_stop_fn, interval=0.1):
     """Sleep that can be interrupted by stop request"""
     elapsed = 0
     while elapsed < duration:
-        if check_stop_fn():
+        if check_stop_fn and check_stop_fn():  # Add safety check for None
             return False  # Interrupted
         sleep_time = min(interval, duration - elapsed)
         time.sleep(sleep_time)
         elapsed += sleep_time
     return True  # Completed normally
-
+    
 def cancel_all_futures(futures):
     """Cancel all pending futures immediately"""
     cancelled_count = 0
@@ -165,6 +165,18 @@ def set_stop_flag(value):
     """Set the global stop flag"""
     global _stop_requested
     _stop_requested = value
+    
+    # When clearing the stop flag, also clear the multi-key environment variable
+    if not value:
+        os.environ['TRANSLATION_CANCELLED'] = '0'
+        
+        # Also clear UnifiedClient global flag
+        try:
+            import unified_api_client
+            if hasattr(unified_api_client, 'UnifiedClient'):
+                unified_api_client.UnifiedClient._global_cancelled = False
+        except:
+            pass
 
 def is_stop_requested():
     """Check if stop was requested"""
