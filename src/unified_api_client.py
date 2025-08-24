@@ -1956,19 +1956,6 @@ class UnifiedClient:
         Ensure all thread safety structures are properly initialized.
         Call this during __init__ or before parallel processing.
         """
-        # Request deduplication structures
-        #if not hasattr(self, '_request_cache'):
-        #    self._request_cache = {}
-        #if not hasattr(self, '_request_cache_lock'):
-        #    self._request_cache_lock = RLock()
-        #if not hasattr(self, '_cache_expiry_seconds'):
-        #    self._cache_expiry_seconds = 300  # 5 minutes
-        
-        # Active request tracking
-        #if not hasattr(self, '_active_requests'):
-        #    self._active_requests = {}  # {request_hash: threading.Event}
-        #if not hasattr(self, '_active_requests_lock'):
-        #    self._active_requests_lock = RLock()
         
         # Thread-local storage
         if not hasattr(self, '_thread_local'):
