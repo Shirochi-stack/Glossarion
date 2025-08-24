@@ -371,7 +371,7 @@ def save_glossary_json(glossary: List[Dict], output_path: str):
         json.dump(sorted_glossary, f, ensure_ascii=False, indent=2)
 
 def save_glossary_csv(glossary: List[Dict], output_path: str):
-    """Save glossary in CSV format with header row and automatic sorting by type"""
+    """Save glossary in CSV or token-efficient format based on environment variable"""
     import csv
     
     csv_path = output_path.replace('.json', '.csv')
@@ -391,50 +391,138 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
         x.get('raw_name', '').lower()
     ))
     
-    with open(csv_path, 'w', encoding='utf-8', newline='') as f:
-        writer = csv.writer(f)
+    # Check if we should use legacy CSV format
+    use_legacy_format = os.getenv('GLOSSARY_USE_LEGACY_CSV', '0') == '1'
+    
+    if use_legacy_format:
+        # LEGACY CSV FORMAT
+        with open(csv_path, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.writer(f)
+            
+            # Build header row
+            header = ['type', 'raw_name', 'translated_name', 'gender']
+            
+            # Add any custom fields to header
+            custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
+            try:
+                custom_fields = json.loads(custom_fields_json)
+                header.extend(custom_fields)
+            except:
+                custom_fields = []
+            
+            # Write header row
+            writer.writerow(header)
+            
+            # Write data rows
+            for entry in sorted_glossary:
+                entry_type = entry.get('type', 'term')
+                type_config = custom_types.get(entry_type, {})
+                
+                # Base row: type, raw_name, translated_name
+                row = [entry_type, entry.get('raw_name', ''), entry.get('translated_name', '')]
+                
+                # Add gender only if type supports it
+                if type_config.get('has_gender', False):
+                    row.append(entry.get('gender', ''))
+                
+                # Add custom field values
+                for field in custom_fields:
+                    row.append(entry.get(field, ''))
+                
+                # Count how many fields we SHOULD have
+                expected_fields = 4 + len(custom_fields)  # type, raw_name, translated_name, gender + custom fields
+                
+                # Only trim if we have MORE than expected (extra trailing empties)
+                while len(row) > expected_fields and row[-1] == '':
+                    row.pop()
+                
+                # Ensure minimum required fields (type, raw_name, translated_name)
+                while len(row) < 3:
+                    row.append('')
+                
+                # Write row
+                writer.writerow(row)
         
-        # Build header row
-        header = ['type', 'raw_name', 'translated_name', 'gender']
+        print(f"✅ Saved legacy CSV format: {csv_path}")
+    
+    else:
+        # NEW TOKEN-EFFICIENT FORMAT (DEFAULT)
+        # Group entries by type
+        grouped_entries = {}
+        for entry in sorted_glossary:
+            entry_type = entry.get('type', 'term')
+            if entry_type not in grouped_entries:
+                grouped_entries[entry_type] = []
+            grouped_entries[entry_type].append(entry)
         
-        # Add any custom fields to header
+        # Get custom fields configuration
         custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
         try:
             custom_fields = json.loads(custom_fields_json)
-            header.extend(custom_fields)
         except:
             custom_fields = []
         
-        # Write header row
-        writer.writerow(header)
+        # Write as plain text format for token efficiency
+        with open(csv_path, 'w', encoding='utf-8') as f:
+            # Write header
+            f.write("Glossary: Characters, Terms, and Important Elements\n\n")
+            
+            # Process each type group
+            for entry_type in sorted(grouped_entries.keys(), key=lambda x: type_order.get(x, 999)):
+                entries = grouped_entries[entry_type]
+                type_config = custom_types.get(entry_type, {})
+                
+                # Write section header
+                section_name = entry_type.upper() + 'S' if not entry_type.upper().endswith('S') else entry_type.upper()
+                f.write(f"=== {section_name} ===\n")
+                
+                # Write entries for this type with indentation
+                for entry in entries:
+                    # Build the entry line
+                    raw_name = entry.get('raw_name', '')
+                    translated_name = entry.get('translated_name', '')
+                    
+                    # Start with asterisk and name
+                    line = f"* {translated_name} ({raw_name})"
+                    
+                    # Add gender if applicable and not Unknown
+                    if type_config.get('has_gender', False):
+                        gender = entry.get('gender', '')
+                        if gender and gender != 'Unknown':
+                            line += f" [{gender}]"
+                    
+                    # Add custom field values if they exist
+                    custom_field_parts = []
+                    for field in custom_fields:
+                        value = entry.get(field, '').strip()
+                        if value:
+                            # For description fields, add as continuation
+                            if field.lower() in ['description', 'notes', 'details']:
+                                line += f": {value}"
+                            else:
+                                custom_field_parts.append(f"{field}: {value}")
+                    
+                    # Add other custom fields in parentheses
+                    if custom_field_parts:
+                        line += f" ({', '.join(custom_field_parts)})"
+                    
+                    # Write the line
+                    f.write(line + "\n")
+                
+                # Add blank line between sections
+                f.write("\n")
         
-        # Write data rows
-        for entry in sorted_glossary:
-            entry_type = entry.get('type', 'term')
-            type_config = custom_types.get(entry_type, {})
+        print(f"✅ Saved token-efficient glossary: {csv_path}")
+        
+        # Print summary for both formats
+        type_counts = {}
+        for entry_type in grouped_entries:
+            type_counts[entry_type] = len(grouped_entries[entry_type])
+        total = sum(type_counts.values())
+        print(f"   Total entries: {total}")
+        for entry_type, count in type_counts.items():
+            print(f"   - {entry_type}: {count} entries")
             
-            # Base row: type, raw_name, translated_name
-            row = [entry_type, entry.get('raw_name', ''), entry.get('translated_name', '')]
-            
-            # Add gender
-            if type_config.get('has_gender', False):
-                row.append(entry.get('gender', ''))  # Empty gender field for types that don't have gender
-            
-            # Add custom field values
-            for field in custom_fields:
-                row.append(entry.get(field, ''))
-            
-            # Remove trailing empty values to avoid unnecessary commas
-            while row and row[-1] == '':
-                row.pop()
-            
-            # Ensure minimum required fields (type, raw_name, translated_name)
-            while len(row) < 3:
-                row.append('')
-            
-            # Write row
-            writer.writerow(row)
-
 def extract_chapters_from_epub(epub_path: str) -> List[str]:
     chapters = []
     items = []
