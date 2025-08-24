@@ -4152,6 +4152,14 @@ class GlossaryManager:
                         all_csv_lines = [header] + entries
                         
                         # Save
+                        # Check format preference
+                        use_legacy_format = os.getenv('GLOSSARY_USE_LEGACY_CSV', '0') == '1'
+
+                        if not use_legacy_format:
+                            # Convert to token-efficient format
+                            all_csv_lines = self._convert_to_token_efficient_format(all_csv_lines)
+
+                        # Save
                         csv_content = '\n'.join(all_csv_lines)
                         glossary_path = os.path.join(output_dir, "glossary.json")
                         self._atomic_write_file(glossary_path, csv_content)
@@ -4343,10 +4351,17 @@ class GlossaryManager:
                 sorted_entries = sorted(entries, key=sort_key)
                 csv_lines = [header] + sorted_entries
                 
-                # Create final CSV content
+                # Check if we should use token-efficient format
+                use_legacy_format = os.getenv('GLOSSARY_USE_LEGACY_CSV', '0') == '1'
+
+                if not use_legacy_format:
+                    # Convert to token-efficient format
+                    csv_lines = self._convert_to_token_efficient_format(csv_lines)
+
+                # Create CSV content
                 csv_content = '\n'.join(csv_lines)
-                
-                # Save glossary
+
+                # Save glossary as CSV (with .json extension for compatibility)
                 glossary_path = os.path.join(output_dir, "glossary.json")
                 self._atomic_write_file(glossary_path, csv_content)
                 
@@ -4372,6 +4387,69 @@ class GlossaryManager:
                                              max_names, max_titles, batch_size, 
                                              existing_glossary, output_dir, 
                                              strip_honorifics, fuzzy_threshold, filter_mode)
+
+    def _convert_to_token_efficient_format(self, csv_lines):
+        """Convert CSV lines to token-efficient format with sections and asterisks"""
+        if len(csv_lines) <= 1:
+            return csv_lines
+        
+        header = csv_lines[0]
+        entries = csv_lines[1:]
+        
+        # Group by type
+        grouped = {}
+        for line in entries:
+            if not line.strip():
+                continue
+            parts = line.split(',', 1)
+            if len(parts) >= 2:
+                entry_type = parts[0]
+                if entry_type not in grouped:
+                    grouped[entry_type] = []
+                grouped[entry_type].append(line)
+        
+        # Rebuild with token-efficient format
+        result = []
+        result.append("Glossary: Characters, Terms, and Important Elements\n")
+        
+        # Process in order: character first, then term, then others
+        type_order = ['character', 'term'] + [t for t in grouped.keys() if t not in ['character', 'term']]
+        
+        for entry_type in type_order:
+            if entry_type not in grouped:
+                continue
+                
+            entries = grouped[entry_type]
+            
+            # Add section header
+            section_name = entry_type.upper() + 'S' if not entry_type.upper().endswith('S') else entry_type.upper()
+            result.append(f"=== {section_name} ===")
+            
+            # Add entries in new format
+            for line in entries:
+                parts = [p.strip() for p in line.split(',')]
+                if len(parts) >= 3:
+                    raw_name = parts[1]
+                    translated_name = parts[2]
+                    
+                    # Format: * TranslatedName (RawName)
+                    entry_line = f"* {translated_name} ({raw_name})"
+                    
+                    # Add gender if present and not Unknown
+                    if len(parts) > 3 and parts[3] and parts[3] != 'Unknown':
+                        entry_line += f" [{parts[3]}]"
+                    
+                    # Add any additional fields as description
+                    if len(parts) > 4:
+                        description = ', '.join(parts[4:])
+                        if description.strip():
+                            entry_line += f": {description}"
+                    
+                    result.append(entry_line)
+            
+            result.append("")  # Blank line between sections
+        
+        return result
     
     def _process_chunks_batch_api(self, chunks_to_process, custom_prompt, language, 
                                   min_frequency, max_names, max_titles, 
@@ -4820,9 +4898,16 @@ Text to analyze:
                     # Apply filter mode to final results
                     csv_lines = self._filter_csv_by_mode(csv_lines, filter_mode)
                     
+                    # Check if we should use token-efficient format
+                    use_legacy_format = os.getenv('GLOSSARY_USE_LEGACY_CSV', '0') == '1'
+
+                    if not use_legacy_format:
+                        # Convert to token-efficient format
+                        csv_lines = self._convert_to_token_efficient_format(csv_lines)
+
                     # Create final CSV content
                     csv_content = '\n'.join(csv_lines)
-                    
+
                     # Save glossary as CSV (with .json extension for compatibility)
                     glossary_path = os.path.join(output_dir, "glossary.json")
                     self._atomic_write_file(glossary_path, csv_content)
