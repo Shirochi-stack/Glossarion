@@ -555,15 +555,15 @@ class ImageTranslator:
 
     def _process_image_chunks_single_api(self, img, width, height, context, check_stop_fn):
             """Process all image chunks in a single API call with compression support"""
-            import queue
-            import threading
             
             num_chunks = (height + self.chunk_height - 1) // self.chunk_height
-            overlap = int(self.chunk_height * 0.05)  # 5% overlap
+            overlap_percentage = float(os.getenv('IMAGE_CHUNK_OVERLAP_PERCENT', '1'))
+            overlap = int(self.chunk_height * (overlap_percentage / 100))
             
             print("   🚀 Using SINGLE API CALL mode for " + str(num_chunks) + " chunks")
-            print("   📊 This is more efficient and produces better translations")
-            print("   ⏳ Estimated time: 30-90 seconds total")
+            print(f"   📐 Chunk overlap: {overlap_percentage}% ({overlap} pixels)")
+            #print("   📊 This is more efficient and produces better translations")
+            #print("   ⏳ Estimated time: 30-90 seconds total")
             
             # Check for stop at the very beginning
             if check_stop_fn and check_stop_fn():
