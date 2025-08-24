@@ -2049,20 +2049,24 @@ def detect_duplicates(results, log, should_stop, config):
 
     # THIS CODE SHOULD BE OUTSIDE ALL THE IF/ELSE BLOCKS - IT RUNS AFTER DUPLICATE DETECTION
     # 5. Deep similarity check (content-based) - Now uses cached function
-    perform_deep_similarity_check(results, duplicate_groups, duplicate_confidence, 
-                                config.get_threshold('similarity'), log, should_stop)
+    if config.mode != 'quick-scan':
+        perform_deep_similarity_check(results, duplicate_groups, duplicate_confidence, 
+                                    config.get_threshold('similarity'), log, should_stop)
+    else:
+        log("   ⚡ Skipping deep similarity check for quick scan mode")
 
-    # 6. Consecutive chapter check with fuzzy matching
-    check_consecutive_chapters(results, duplicate_groups, duplicate_confidence, config, log, should_stop)
-    
-    # 7. Split chapter detection
-    split_candidates = detect_split_chapters(results)
-    if split_candidates:
-        log(f"🔍 Found {len(split_candidates)} potential split chapters")
-        check_split_chapters(split_candidates, results, duplicate_groups, duplicate_confidence, log, should_stop)
-    
-    # 8. Specific pattern detection
-    check_specific_patterns(results, duplicate_groups, duplicate_confidence, log, should_stop)
+    # 6. Consecutive chapter check with fuzzy matching - SKIP IN QUICK SCAN
+    if config.mode != 'quick-scan':
+        check_consecutive_chapters(results, duplicate_groups, duplicate_confidence, config, log, should_stop)
+        
+        # 7. Split chapter detection
+        split_candidates = detect_split_chapters(results)
+        if split_candidates:
+            log(f"🔍 Found {len(split_candidates)} potential split chapters")
+            check_split_chapters(split_candidates, results, duplicate_groups, duplicate_confidence, log, should_stop)
+        
+        # 8. Specific pattern detection
+        check_specific_patterns(results, duplicate_groups, duplicate_confidence, log, should_stop)
     
     # Clear local caches
     compare_texts_cached.cache_clear()
