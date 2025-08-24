@@ -4684,21 +4684,6 @@ class GlossaryManager:
         """Extract glossary using custom AI prompt with proper filtering"""
         print("📑 Using custom automatic glossary prompt")
         
-        # CRITICAL FIX: Apply thread submission delay HERE, inside the worker
-        thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
-        if thread_delay > 0:
-            with GlossaryManager._api_submission_lock:
-                current_time = time.time()
-                time_since_last = current_time - GlossaryManager._last_api_submission_time
-                
-                if time_since_last < thread_delay:
-                    sleep_time = thread_delay - time_since_last
-                    thread_name = threading.current_thread().name
-                    print(f"🧵 [{thread_name}] Applying API submission delay: {sleep_time:.1f}s")
-                    time.sleep(sleep_time)
-                
-                GlossaryManager._last_api_submission_time = time.time()
-        
         # Check stop flag
         if is_stop_requested():
             print("📑 ❌ Glossary extraction stopped by user")
@@ -4731,7 +4716,17 @@ class GlossaryManager:
                 from unified_api_client import UnifiedClient, UnifiedClientError
                 client = UnifiedClient(model=MODEL, api_key=API_KEY, output_dir=output_dir)
                 if hasattr(client, 'reset_cleanup_state'):
-                    client.reset_cleanup_state()  
+                    client.reset_cleanup_state()
+                
+                # Apply thread submission delay using the client's method
+                thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
+                if thread_delay > 0:
+                    client._apply_thread_submission_delay()
+                    
+                    # Check if cancelled during delay
+                    if hasattr(client, '_cancelled') and client._cancelled:
+                        print("📑 ❌ Glossary extraction stopped during delay")
+                        return {}
                     
                 max_text_size = int(os.getenv("GLOSSARY_MAX_TEXT_SIZE", "50000"))
                 text_sample = all_text[:max_text_size] if len(all_text) > max_text_size and max_text_size > 0 else all_text
