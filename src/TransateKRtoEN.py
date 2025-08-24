@@ -5,6 +5,8 @@ import logging
 import shutil
 import threading
 import queue
+import uuid
+import inspect
 import os, sys, io, zipfile, time, re, mimetypes, subprocess, tiktoken
 import builtins
 import ebooklib
@@ -3394,6 +3396,18 @@ class TranslationProcessor:
     
     def translate_with_retry(self, msgs, chunk_html, c, chunk_idx, total_chunks):
         """Handle translation with retry logic"""
+        
+        # CRITICAL FIX: Reset client state for each chunk
+        if hasattr(self.client, 'reset_cleanup_state'):
+            self.client.reset_cleanup_state()
+        
+        # Also ensure we're not in cleanup mode from previous operations
+        if hasattr(self.client, '_in_cleanup'):
+            self.client._in_cleanup = False
+        if hasattr(self.client, '_cancelled'):
+            self.client._cancelled = False
+    
+
         retry_count = 0
         max_retries = 3
         duplicate_retry_count = 0
@@ -3443,13 +3457,20 @@ class TranslationProcessor:
                     # Not a chunk - use regular naming
                     fname = FileUtilities.create_chapter_filename(c, c.get('actual_chapter_num', c['num']))
 
+                # Set output filename BEFORE the API call
+                if hasattr(self.client, 'set_output_filename'):
+                    self.client.set_output_filename(fname)
+                
                 # Track the filename so truncation logs know which file this is
                 if hasattr(self.client, '_current_output_file'):
                     self.client._current_output_file = fname
 
+                # Generate unique request ID for this chunk
+                request_id = f"{c['num']:03d}_chunk{chunk_idx}_{uuid.uuid4().hex[:8]}"
+
                 result, finish_reason = send_with_interrupt(
                     msgs, self.client, current_temp, current_max_tokens, 
-                    self.check_stop, chunk_timeout
+                    self.check_stop, chunk_timeout, request_id=request_id
                 )
                 if result and c.get("enhanced_extraction", False):
                     print(f"🔄 Converting enhanced mode plain text back to HTML...")
@@ -3862,6 +3883,10 @@ class BatchTranslationProcessor:
 
 class GlossaryManager:
     """Unified glossary management with true CSV format, fuzzy matching, and parallel processing"""
+    
+    # Class-level shared lock for API submission timing
+    _api_submission_lock = threading.Lock()
+    _last_api_submission_time = 0
     
     def __init__(self):
         self.pattern_manager = PatternManager()
@@ -4658,6 +4683,21 @@ class GlossaryManager:
                                    strip_honorifics=True, fuzzy_threshold=0.90, filter_mode='all'):
         """Extract glossary using custom AI prompt with proper filtering"""
         print("📑 Using custom automatic glossary prompt")
+        
+        # CRITICAL FIX: Apply thread submission delay HERE, inside the worker
+        thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
+        if thread_delay > 0:
+            with GlossaryManager._api_submission_lock:
+                current_time = time.time()
+                time_since_last = current_time - GlossaryManager._last_api_submission_time
+                
+                if time_since_last < thread_delay:
+                    sleep_time = thread_delay - time_since_last
+                    thread_name = threading.current_thread().name
+                    print(f"🧵 [{thread_name}] Applying API submission delay: {sleep_time:.1f}s")
+                    time.sleep(sleep_time)
+                
+                GlossaryManager._last_api_submission_time = time.time()
         
         # Check stop flag
         if is_stop_requested():
@@ -6620,15 +6660,33 @@ def cleanup_previous_extraction(output_dir):
 # =====================================================
 # API AND TRANSLATION UTILITIES
 # =====================================================
-def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None):
+def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None, request_id=None):
     """Send API request with interrupt capability and optional timeout retry"""
     # The client.send() call will handle multi-key rotation automatically
+    
+    # Generate request_id if not provided
+    if request_id is None:
+        request_id = str(uuid.uuid4())[:8]
+    
     result_queue = queue.Queue()
     
     def api_call():
         try:
             start_time = time.time()
-            result = client.send(messages, temperature=temperature, max_tokens=max_tokens)
+            
+            # Check if client.send accepts request_id parameter
+            send_params = {
+                'messages': messages,
+                'temperature': temperature,
+                'max_tokens': max_tokens
+            }
+            
+            # Add request_id if the client supports it
+            sig = inspect.signature(client.send)
+            if 'request_id' in sig.parameters:
+                send_params['request_id'] = request_id
+            
+            result = client.send(**send_params)
             elapsed = time.time() - start_time
             result_queue.put((result, elapsed))
         except Exception as e:
