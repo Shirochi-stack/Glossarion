@@ -1168,6 +1168,8 @@ class TranslatorGUI:
         self.optimize_for_ocr_var = tk.BooleanVar(value=self.config.get('optimize_for_ocr', True))
         self.progressive_encoding_var = tk.BooleanVar(value=self.config.get('progressive_encoding', True))
         self.save_compressed_images_var = tk.BooleanVar(value=self.config.get('save_compressed_images', False))
+        self.image_chunk_overlap_var = tk.StringVar(value=str(self.config.get('image_chunk_overlap', '1')))
+
         # Glossary-related variables (existing)
         self.append_glossary_var = tk.BooleanVar(value=self.config.get('append_glossary', False))
         self.glossary_min_frequency_var = tk.StringVar(value=str(self.config.get('glossary_min_frequency', 2)))
@@ -8135,6 +8137,8 @@ Provide translations in the same numbered format."""
             'OPTIMIZE_FOR_OCR': "1" if self.config.get('optimize_for_ocr', True) else "0",
             'PROGRESSIVE_ENCODING': "1" if self.config.get('progressive_encoding', True) else "0",
             'SAVE_COMPRESSED_IMAGES': "1" if self.config.get('save_compressed_images', False) else "0",
+            'IMAGE_CHUNK_OVERLAP_PERCENT': self.image_chunk_overlap_var.get(),
+
 
             # Metadata and batch header translation settings
             'TRANSLATE_METADATA_FIELDS': json.dumps(self.translate_metadata_fields),
@@ -13248,7 +13252,7 @@ Important rules:
         tk.Label(left_column, text="Use FFT-based pattern detection for stubborn watermarks",
                 font=('TkDefaultFont', 10), fg='gray').pack(anchor=tk.W, padx=40)
         
-        # Right column - existing settings
+        # Right column
         settings_frame = tk.Frame(right_column)
         settings_frame.pack(fill=tk.X)
 
@@ -13257,22 +13261,29 @@ Important rules:
         settings = [
             ("Min Image height (px):", self.webnovel_min_height_var),
             ("Max Images per chapter:", self.max_images_per_chapter_var),
-            ("Chunk height:", self.image_chunk_height_var)
+            ("Chunk height:", self.image_chunk_height_var),
+            ("Chunk overlap (%):", self.image_chunk_overlap_var)  # Add this new setting
         ]
 
         for row, (label, var) in enumerate(settings):
             tk.Label(settings_frame, text=label).grid(row=row, column=0, sticky=tk.W, pady=3)
-            tb.Entry(settings_frame, width=10, textvariable=var).grid(row=row, column=1, sticky=tk.W, pady=3)
+            entry = tb.Entry(settings_frame, width=10, textvariable=var)
+            entry.grid(row=row, column=1, sticky=tk.W, pady=3)
+            
+            # Add tooltip for the overlap setting
+            if "overlap" in label.lower():
+                tk.Label(settings_frame, text="1-10% recommended", 
+                        font=('TkDefaultFont', 8), fg='gray').grid(row=row, column=2, sticky=tk.W, padx=(5, 0))
 
         # Buttons for prompts and compression
         tb.Button(settings_frame, text="Image Chunk Prompt", 
                  command=self.configure_image_chunk_prompt,
-                 bootstyle="info-outline", width=20).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(10, 0))
+                 bootstyle="info-outline", width=20).grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(10, 0))
         
         # Add Image Compression button
         tb.Button(settings_frame, text="🗜️ Image Compression", 
                  command=self.configure_image_compression,
-                 bootstyle="info-outline", width=25).grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+                 bootstyle="info-outline", width=25).grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
 
         # Add the toggle here in the right column with some spacing
         tk.Frame(right_column, height=15).pack()  # Add some spacing
@@ -13288,6 +13299,7 @@ Important rules:
                 "• Gemini 1.5 Pro/Flash, 2.0 Flash\n"
                 "• GPT-4V, GPT-4o, o4-mini",
                 font=('TkDefaultFont', 10), fg='#666', justify=tk.LEFT).pack(anchor=tk.W, pady=(10, 0))
+            
                 
         # Set up the dependency logic
         def toggle_watermark_options(*args):
@@ -13954,6 +13966,10 @@ Important rules:
                 def safe_int(value, default):
                     try: return int(value)
                     except (ValueError, TypeError): return default
+                    
+                def safe_float(value, default):
+                    try: return float(value)
+                    except (ValueError, TypeError): return default                    
                 
                 # Save all settings
                 self.config.update({
@@ -14000,6 +14016,7 @@ Important rules:
                     'enhanced_filtering': self.file_filtering_level_var.get() if self.text_extraction_method_var.get() == 'enhanced' else 'smart', 
                     'use_gemini_openai_endpoint': self.use_gemini_openai_endpoint_var.get(),
                     'gemini_openai_endpoint': self.gemini_openai_endpoint_var.get(),
+                    'image_chunk_overlap': safe_float(self.image_chunk_overlap_var.get(), 1.0),
                                         
                     # ALL Anti-duplicate parameters (moved below other settings)
                     'enable_anti_duplicate': getattr(self, 'enable_anti_duplicate_var', type('', (), {'get': lambda: False})).get(),
@@ -14104,6 +14121,7 @@ Important rules:
                     'OPTIMIZE_FOR_OCR': "1" if self.config.get('optimize_for_ocr', True) else "0",
                     'PROGRESSIVE_ENCODING': "1" if self.config.get('progressive_encoding', True) else "0",
                     'SAVE_COMPRESSED_IMAGES': "1" if self.config.get('save_compressed_images', False) else "0",
+                    'IMAGE_CHUNK_OVERLAP_PERCENT': self.image_chunk_overlap_var.get(),
                     
                     # Metadata and batch header settings
                     'TRANSLATE_METADATA_FIELDS': json.dumps(self.translate_metadata_fields),
@@ -14708,6 +14726,8 @@ Important rules:
             self.config['glossary_max_text_size'] = self.glossary_max_text_size_var.get()
             self.config['glossary_chapter_split_threshold'] = self.glossary_chapter_split_threshold_var.get()
             self.config['glossary_filter_mode'] = self.glossary_filter_mode_var.get()
+            self.config['image_chunk_overlap'] = safe_float(self.image_chunk_overlap_var.get(), 1.0)
+
 
 
             # NEW: Save strip honorifics setting
