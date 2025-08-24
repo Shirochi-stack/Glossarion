@@ -11091,7 +11091,7 @@ Important rules:
             translation_stop_flag(True)
         
         # Use your existing set_stop_flag function
-        set_stop_flag(True)
+        globals()['set_stop_flag'](True) 
         
         try:
             import TransateKRtoEN
