@@ -11083,9 +11083,15 @@ Important rules:
         """Stop translation while preserving loaded file"""
         current_file = self.entry_epub.get() if hasattr(self, 'entry_epub') else None
         
+        # Set environment variable to suppress multi-key logging
+        os.environ['TRANSLATION_CANCELLED'] = '1'
+        
         self.stop_requested = True
         if translation_stop_flag:
             translation_stop_flag(True)
+        
+        # Use your existing set_stop_flag function
+        set_stop_flag(True)
         
         try:
             import TransateKRtoEN
@@ -11100,8 +11106,13 @@ Important rules:
             # If there's a global client instance, stop it too
             if hasattr(unified_api_client, 'global_stop_flag'):
                 unified_api_client.global_stop_flag = True
-        except:
-            pass        
+            
+            # Set the _cancelled flag on the UnifiedClient class itself
+            if hasattr(unified_api_client, 'UnifiedClient'):
+                unified_api_client.UnifiedClient._global_cancelled = True
+                
+        except Exception as e:
+            print(f"Error setting stop flags: {e}")
         
         # Save and encrypt config when stopping
         try:
