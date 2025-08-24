@@ -418,9 +418,7 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
             
             # Add gender
             if type_config.get('has_gender', False):
-                row.append(entry.get('gender', ''))
-            else:
-                row.append('')  # Empty gender field for types that don't have gender
+                row.append(entry.get('gender', ''))  # Empty gender field for types that don't have gender
             
             # Add custom field values
             for field in custom_fields:
@@ -674,10 +672,12 @@ def parse_api_response(response_text: str) -> List[Dict]:
             custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
             try:
                 custom_fields = json.loads(custom_fields_json)
-                start_idx = 4 if type_config.get('has_gender', False) else 3
+                start_idx = 4  # Always 4, not conditional
                 for i, field in enumerate(custom_fields):
                     if len(parts) > start_idx + i:
-                        entry[field] = parts[start_idx + i]
+                        field_value = parts[start_idx + i]
+                        if field_value:  # Only add if not empty
+                            entry[field] = field_value
             except:
                 pass
             
