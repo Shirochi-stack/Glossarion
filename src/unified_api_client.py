@@ -3496,15 +3496,14 @@ class UnifiedClient:
         """
         fallback_keys = []
         
-        # FIRST: Always add the "main key" as the first fallback
-        main_key = getattr(self.__class__, '_main_fallback_key', self.original_api_key)
-        main_model = getattr(self.__class__, '_main_fallback_model', self.original_model)
-        
+        # FIRST: Always add the MAIN GUI KEY as the first fallback
+        # This is the key from the main GUI, NOT from multi-key rotation
         fallback_keys.append({
-            'api_key': main_key, 
-            'model': main_model,
-            'label': 'MAIN KEY'
+            'api_key': self.original_api_key,  # The key from main GUI
+            'model': self.original_model,      # The model from main GUI
+            'label': 'MAIN GUI KEY'
         })
+        print(f"[MAIN KEY RETRY] Using main GUI key with model: {self.original_model}")
         
         # THEN: Add any additional configured fallback keys
         if hasattr(self, 'translator_config'):
@@ -3518,15 +3517,16 @@ class UnifiedClient:
                         'label': 'ADDITIONAL FALLBACK'
                     })
         
-        print(f"[MAIN KEY RETRY] Trying {len(fallback_keys)} fallback keys (main key first)")
+        print(f"[MAIN KEY RETRY] Trying {len(fallback_keys)} fallback keys (main GUI key first)")
         
-        # Try each fallback key in the list - NO CHECKS, JUST TRY EVERYTHING
+        # Try each fallback key in the list
         for idx, fallback_data in enumerate(fallback_keys):
             label = fallback_data.get('label', 'Fallback')
             fallback_key = fallback_data.get('api_key')
             fallback_model = fallback_data.get('model')
             
             print(f"[{label} {idx+1}/{len(fallback_keys)}] Trying {fallback_model}")
+            print(f"[{label} {idx+1}] Failed multi-key model was: {self.model}")
             
             try:
                 # Create a new temporary UnifiedClient instance with the fallback key
@@ -4586,15 +4586,14 @@ class UnifiedClient:
         """
         fallback_keys = []
         
-        # FIRST: Always add the "main key" as the first fallback
-        main_key = getattr(self.__class__, '_main_fallback_key', self.original_api_key)
-        main_model = getattr(self.__class__, '_main_fallback_model', self.original_model)
-        
+        # FIRST: Always add the MAIN GUI KEY as the first fallback
+        # This is the key from the main GUI, NOT from multi-key rotation
         fallback_keys.append({
-            'api_key': main_key, 
-            'model': main_model,
-            'label': 'MAIN KEY'
+            'api_key': self.original_api_key,  # The key from main GUI
+            'model': self.original_model,      # The model from main GUI
+            'label': 'MAIN GUI KEY'
         })
+        print(f"[IMAGE MAIN KEY RETRY] Using main GUI key with model: {self.original_model}")
         
         # THEN: Add any additional configured fallback keys
         if hasattr(self, 'translator_config'):
@@ -4608,15 +4607,16 @@ class UnifiedClient:
                         'label': 'ADDITIONAL FALLBACK'
                     })
         
-        print(f"[IMAGE MAIN KEY RETRY] Trying {len(fallback_keys)} fallback keys (main key first)")
+        print(f"[IMAGE MAIN KEY RETRY] Trying {len(fallback_keys)} fallback keys (main GUI key first)")
         
-        # Try each fallback key in the list - NO CHECKS, JUST TRY EVERYTHING
+        # Try each fallback key in the list
         for idx, fallback_data in enumerate(fallback_keys):
             label = fallback_data.get('label', 'Fallback')
             fallback_key = fallback_data.get('api_key')
             fallback_model = fallback_data.get('model')
             
             print(f"[IMAGE {label} {idx+1}/{len(fallback_keys)}] Trying {fallback_model}")
+            print(f"[IMAGE {label} {idx+1}] Failed multi-key model was: {self.model}")
             
             try:
                 # Create a new temporary UnifiedClient instance with the fallback key
