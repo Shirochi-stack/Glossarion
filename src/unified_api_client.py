@@ -1038,7 +1038,6 @@ class UnifiedClient:
         # Wait with cancellation check
         wait_start = time.time()
         while time.time() - wait_start < wait_time:
-            # ← ADD THIS CHECK
             if self._cancelled:
                 print(f"[Thread-{thread_name}] Wait cancelled by user")
                 raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
@@ -7645,11 +7644,24 @@ class UnifiedClient:
                         generation_config.safety_settings = safety_settings
 
                     # Make the native API call
-                    response = self.gemini_client.models.generate_content(
-                        model=self.model,
-                        contents=formatted_prompt,
-                        config=generation_config
-                    )
+                    # Make the native API call with proper error handling
+                    try:
+                        # Check if gemini_client exists and is not None
+                        if not hasattr(self, 'gemini_client') or self.gemini_client is None:
+                            print("⚠️ Gemini client is None. This typically happens when stop was requested.")
+                            raise UnifiedClientError("Gemini client not initialized - operation may have been cancelled", error_type="cancelled")
+                        
+                        response = self.gemini_client.models.generate_content(
+                            model=self.model,
+                            contents=formatted_prompt,
+                            config=generation_config
+                        )
+                    except AttributeError as e:
+                        if "'NoneType' object has no attribute 'models'" in str(e):
+                            print("⚠️ Gemini client is None or invalid. This typically happens when stop was requested.")
+                            raise UnifiedClientError("Gemini client not initialized - operation may have been cancelled", error_type="cancelled")
+                        else:
+                            raise
                     
                     # Check for blocked content in prompt_feedback
                     if hasattr(response, 'prompt_feedback'):
@@ -9404,12 +9416,24 @@ class UnifiedClient:
                 #print(f"   🧠 Model does not support thinking parameter")
                 pass
             
-            # Make the API call
-            response = self.gemini_client.models.generate_content(
-                model=self.model,
-                contents=contents,
-                config=generation_config
-            )
+            # Make the API call with proper error handling
+            try:
+                # Check if gemini_client exists and is not None
+                if not hasattr(self, 'gemini_client') or self.gemini_client is None:
+                    print("⚠️ Gemini client is None. This typically happens when stop was requested.")
+                    raise UnifiedClientError("Gemini client not initialized - operation may have been cancelled", error_type="cancelled")
+                
+                response = self.gemini_client.models.generate_content(
+                    model=self.model,
+                    contents=contents,
+                    config=generation_config
+                )
+            except AttributeError as e:
+                if "'NoneType' object has no attribute 'models'" in str(e):
+                    print("⚠️ Gemini client is None or invalid. This typically happens when stop was requested.")
+                    raise UnifiedClientError("Gemini client not initialized - operation may have been cancelled", error_type="cancelled")
+                else:
+                    raise
             print(f"   🔍 Raw response type: {type(response)}")
             
             # Check prompt feedback first
