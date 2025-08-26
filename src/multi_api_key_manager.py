@@ -641,6 +641,7 @@ class MultiAPIKeyDialog:
         self.fallback_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         scrollbar.config(command=self.fallback_tree.yview)
+        self.fallback_tree.bind('<Button-3>', self._show_fallback_context_menu)
         
         # Configure columns
         self.fallback_tree.heading('#0', text='API Key', anchor='w')
@@ -659,7 +660,11 @@ class MultiAPIKeyDialog:
         tb.Button(self.fallback_action_frame, text="Test Selected", 
                  command=self._test_selected_fallback,
                  bootstyle="warning").pack(side=tk.LEFT, padx=(0, 5))
-        
+
+        tb.Button(self.fallback_action_frame, text="Test All", 
+                 command=self._test_all_fallbacks,
+                 bootstyle="warning").pack(side=tk.LEFT, padx=5)
+    
         tb.Button(self.fallback_action_frame, text="Remove Selected", 
                  command=self._remove_selected_fallback,
                  bootstyle="danger").pack(side=tk.LEFT, padx=5)
@@ -670,6 +675,225 @@ class MultiAPIKeyDialog:
         
         # Load existing fallback keys
         self._load_fallback_keys()
+
+    def _test_all_fallbacks(self):
+        """Test all fallback keys"""
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        
+        if not fallback_keys:
+            messagebox.showwarning("Warning", "No fallback keys to test")
+            return
+        
+        # Update UI to show testing status for all keys
+        items = self.fallback_tree.get_children()
+        for item in items:
+            values = list(self.fallback_tree.item(item, 'values'))
+            values[1] = "⏳ Testing..."
+            self.fallback_tree.item(item, values=values)
+        
+        # Run tests in thread for all fallback keys
+        thread = threading.Thread(target=self._test_all_fallback_keys_batch)
+        thread.daemon = True
+        thread.start()
+
+
+    def _test_all_fallback_keys_batch(self):
+        """Test all fallback keys in batch"""
+        from unified_api_client import UnifiedClient
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        
+        def test_single_key(index, key_data):
+            """Test a single fallback key"""
+            api_key = key_data.get('api_key', '')
+            model = key_data.get('model', '')
+            
+            try:
+                client = UnifiedClient(
+                    api_key=api_key,
+                    model=model,
+                    output_dir=None
+                )
+                
+                messages = [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "Say 'API test successful' and nothing else."}
+                ]
+                
+                response = client.send(
+                    messages,
+                    temperature=0.7,
+                    max_tokens=100
+                )
+                
+                if response and isinstance(response, tuple):
+                    content, _ = response
+                    if content and "test successful" in content.lower():
+                        return (index, True, "Passed")
+            except Exception as e:
+                print(f"Fallback key test failed: {e}")
+                return (index, False, str(e)[:30])
+            
+            return (index, False, "Failed")
+        
+        # Test all keys in parallel
+        with ThreadPoolExecutor(max_workers=min(5, len(fallback_keys))) as executor:
+            futures = []
+            for i, key_data in enumerate(fallback_keys):
+                future = executor.submit(test_single_key, i, key_data)
+                futures.append(future)
+            
+            # Process results as they complete
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    index, success, message = result
+                    # Update UI in main thread
+                    self.dialog.after(0, lambda idx=index, s=success: 
+                                     self._update_fallback_test_result(idx, s))
+        
+        # Show completion message
+        successful = sum(1 for future in futures if future.result() and future.result()[1])
+        total = len(fallback_keys)
+        self.dialog.after(0, lambda: self._show_status(
+            f"Fallback test complete: {successful}/{total} passed"))
+
+    def _show_fallback_context_menu(self, event):
+        """Show context menu for fallback keys - includes model name editing"""
+        # Select item under cursor
+        item = self.fallback_tree.identify_row(event.y)
+        if item:
+            # If the clicked item is not in selection, select only it
+            if item not in self.fallback_tree.selection():
+                self.fallback_tree.selection_set(item)
+            
+            # Create context menu
+            menu = tk.Menu(self.dialog, tearoff=0)
+            
+            # Get index for position info
+            index = self.fallback_tree.index(item)
+            fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+            total = len(fallback_keys)
+            
+            # Reorder submenu
+            if total > 1:  # Only show reorder if there's more than one key
+                reorder_menu = tk.Menu(menu, tearoff=0)
+                if index > 0:
+                    reorder_menu.add_command(label="Move Up", 
+                                            command=lambda: self._move_fallback_key('up'))
+                if index < total - 1:
+                    reorder_menu.add_command(label="Move Down", 
+                                            command=lambda: self._move_fallback_key('down'))
+                menu.add_cascade(label="Reorder", menu=reorder_menu)
+                menu.add_separator()
+            
+            # Add Change Model option
+            selected_count = len(self.fallback_tree.selection())
+            if selected_count > 1:
+                menu.add_command(label=f"Change Model ({selected_count} selected)", 
+                               command=self._change_fallback_model_for_selected)
+            else:
+                menu.add_command(label="Change Model", 
+                               command=self._change_fallback_model_for_selected)
+            
+            menu.add_separator()
+            
+            # Test and Remove options
+            menu.add_command(label="Test", command=self._test_selected_fallback)
+            menu.add_separator()
+            menu.add_command(label="Remove", command=self._remove_selected_fallback)
+            
+            if total > 1:
+                menu.add_command(label="Clear All", command=self._clear_all_fallbacks)
+            
+            # Show menu
+            menu.post(event.x_root, event.y_root)
+
+
+    def _change_fallback_model_for_selected(self):
+        """Change model name for selected fallback keys"""
+        selected = self.fallback_tree.selection()
+        if not selected:
+            return
+        
+        # Get fallback keys
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        
+        # Create simple dialog (same style as main tree)
+        dialog = tk.Toplevel(self.dialog)
+        dialog.title(f"Change Model for {len(selected)} Fallback Keys")
+        dialog.geometry("400x120")
+        dialog.transient(self.dialog)
+        
+        # Center the dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
+        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f"+{x}+{y}")
+        
+        # Main frame
+        main_frame = tk.Frame(dialog, padx=20, pady=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Label
+        tk.Label(main_frame, text="Enter new model name (press Enter to apply):",
+                font=('TkDefaultFont', 10)).pack(pady=(0, 10))
+        
+        # Model entry with dropdown
+        model_var = tk.StringVar()
+        
+        # Common models for quick selection
+        common_models = [
+            "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash",
+            "gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4.1-mini",
+            "claude-3-5-sonnet", "claude-3-opus", "claude-3-haiku",
+            "claude-opus-4-20250514", "claude-sonnet-4-20250514"
+        ]
+        
+        model_combo = ttk.Combobox(main_frame, values=common_models, 
+                                   textvariable=model_var, width=35)
+        model_combo.pack(pady=(0, 10))
+        
+        # Get current model from first selected item as default
+        selected_indices = [self.fallback_tree.index(item) for item in selected]
+        if selected_indices and selected_indices[0] < len(fallback_keys):
+            current_model = fallback_keys[selected_indices[0]].get('model', '')
+            model_var.set(current_model)
+            model_combo.select_range(0, tk.END)  # Select all text for easy replacement
+        
+        # Cancel button only
+        tb.Button(main_frame, text="Cancel", command=dialog.destroy,
+                 bootstyle="secondary", width=10).pack()
+        
+        def apply_change(event=None):
+            new_model = model_var.get().strip()
+            if new_model:
+                # Update all selected fallback keys
+                for item in selected:
+                    index = self.fallback_tree.index(item)
+                    if index < len(fallback_keys):
+                        fallback_keys[index]['model'] = new_model
+                
+                # Save to config
+                self.translator_gui.config['fallback_keys'] = fallback_keys
+                self.translator_gui.save_config(show_message=False)
+                
+                # Reload the list
+                self._load_fallback_keys()
+                
+                # Show status
+                self._show_status(f"Changed model to '{new_model}' for {len(selected)} fallback keys")
+                
+                dialog.destroy()
+        
+        # Focus on the combobox
+        model_combo.focus()
+        
+        # Bind Enter key to apply
+        dialog.bind('<Return>', apply_change)
+        model_combo.bind('<Return>', apply_change)
+        dialog.bind('<Escape>', lambda e: dialog.destroy())
 
     def _load_fallback_keys(self):
         """Load fallback keys from config"""
@@ -1651,7 +1875,12 @@ class MultiAPIKeyDialog:
         
         # Show/hide fallback section
         if enabled:
-            self.fallback_container.pack(fill=tk.X, pady=(10, 0), before=self.button_frame)
+            # Only reference button_frame if it exists
+            if hasattr(self, 'button_frame'):
+                self.fallback_container.pack(fill=tk.X, pady=(10, 0), before=self.button_frame)
+            else:
+                # If button_frame doesn't exist yet, just pack normally
+                self.fallback_container.pack(fill=tk.X, pady=(10, 0))
         else:
             self.fallback_container.pack_forget()
         
@@ -1663,15 +1892,22 @@ class MultiAPIKeyDialog:
         # Handle Treeview separately - it doesn't support state property
         if self.tree:
             if enabled:
-                # Re-enable tree interactions
-                self.tree.bind('<Button-1>', lambda e: 'break' if not self.enabled_var.get() else None)
+                # Re-enable tree interactions by restoring original bindings
+                self.tree.bind('<Button-1>', self._on_click)
                 self.tree.bind('<Button-3>', self._show_context_menu)
-                #self.tree.bind('<Double-Button-1>', self._on_double_click)
+                self.tree.bind('<<TreeviewSelect>>', self._on_selection_change)
+                
+                # Re-enable drag and drop
+                self.tree.bind('<Button-1>', self._on_drag_start, add='+')
+                self.tree.bind('<B1-Motion>', self._on_drag_motion)
+                self.tree.bind('<ButtonRelease-1>', self._on_drag_release)
             else:
                 # Disable tree interactions
-                self.tree.bind('<Button-1>', lambda e: 'break')
-                self.tree.bind('<Button-3>', lambda e: 'break')
-                self.tree.bind('<Double-Button-1>', lambda e: 'break')
+                self.tree.unbind('<Button-1>')
+                self.tree.unbind('<Button-3>')
+                self.tree.unbind('<<TreeviewSelect>>')
+                self.tree.unbind('<B1-Motion>')
+                self.tree.unbind('<ButtonRelease-1>')
         
         # Update action buttons state
         for child in self.dialog.winfo_children():
