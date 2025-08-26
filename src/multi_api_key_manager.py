@@ -379,6 +379,12 @@ class MultiAPIKeyDialog:
         # Create and show dialog
         self._create_dialog()
         
+        # Auto-resize to fit content if WindowManager is available
+        if hasattr(self.translator_gui, 'wm') and hasattr(self, 'canvas'):
+            self.translator_gui.wm.auto_resize_dialog(self.dialog, self.canvas, 
+                                                      max_width_ratio=0.9, 
+                                                      max_height_ratio=1.55)
+        
     def _load_keys_from_config(self):
         """Load API keys from translator GUI config"""
         if hasattr(self.translator_gui, 'config'):
@@ -405,7 +411,11 @@ class MultiAPIKeyDialog:
             key_list = [key.to_dict() for key in self.key_pool.get_all_keys()]
             self.translator_gui.config['multi_api_keys'] = key_list
             
-            # Use the current state of the toggle instead of always setting to True
+            # Save fallback settings
+            self.translator_gui.config['use_fallback_keys'] = self.use_fallback_var.get()
+            # Fallback keys are already saved when added/removed
+            
+            # Use the current state of the toggle
             self.translator_gui.config['use_multi_api_keys'] = self.enabled_var.get()
             
             # Save rotation settings
@@ -416,26 +426,32 @@ class MultiAPIKeyDialog:
             self.translator_gui.save_config(show_message=False)
     
     def _create_dialog(self):
-        """Create the main dialog"""
-        # Use WindowManager if available
+        """Create the main dialog using WindowManager"""
+        # Use WindowManager to create scrollable dialog
         if hasattr(self.translator_gui, 'wm'):
-            self.dialog, scrollable_frame, canvas = self.translator_gui.wm.setup_scrollable(
+            self.dialog, scrollable_frame, self.canvas = self.translator_gui.wm.setup_scrollable(
                 self.parent,
                 "Multi API Key Manager",
-                width=None,
-                height=None,
+                width=900,
+                height=700,
                 max_width_ratio=0.9,
-                max_height_ratio=0.99
+                max_height_ratio=1.45
             )
         else:
+            # Fallback to regular dialog
             self.dialog = tk.Toplevel(self.parent)
             self.dialog.title("Multi API Key Manager")
-            self.dialog.geometry("900x600")
+            self.dialog.geometry("900x700")
             scrollable_frame = self.dialog
+            self.canvas = None
         
-        # Main container
+        # Main container with consistent padding
         main_frame = tk.Frame(scrollable_frame, padx=20, pady=20)
         main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Store references
+        self.main_frame = main_frame
+        self.scrollable_frame = scrollable_frame
         
         # Title and description
         title_frame = tk.Frame(main_frame)
@@ -496,18 +512,444 @@ class MultiAPIKeyDialog:
         # Key list section
         self._create_key_list_section(main_frame)
         
-        # Button bar
+        # Create fallback container (hidden by default)
+        self._create_fallback_section(main_frame)
+        
+        # Button bar at the bottom
         self._create_button_bar(main_frame)
         
         # Load existing keys into tree
         self._refresh_key_list()
         
+        # Apply initial visibility state
+        if not self.enabled_var.get():
+            self.fallback_container.pack_forget()
+        
         # Center dialog
         self.dialog.transient(self.parent)
-        #self.dialog.grab_set()
         
         # Handle window close
         self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _create_fallback_section(self, parent):
+        """Create the fallback keys section at the bottom"""
+        # Container that can be hidden
+        self.fallback_container = tk.Frame(parent)
+        
+        # Only show if multi-key mode is enabled
+        if self.enabled_var.get():
+            self.fallback_container.pack(fill=tk.X, pady=(10, 0))
+        
+        # Separator
+        ttk.Separator(self.fallback_container, orient='horizontal').pack(fill=tk.X, pady=(0, 10))
+        
+        # Main fallback frame
+        fallback_frame = tk.LabelFrame(self.fallback_container, 
+                                       text="Fallback Keys (For Prohibited Content)", 
+                                       padx=15, pady=15)
+        fallback_frame.pack(fill=tk.X)
+        
+        # Description
+        tk.Label(fallback_frame, 
+                text="Configure fallback keys that will be used when content is blocked.\n"
+                     "These should use different API keys or models that are less restrictive.\n"
+                     "Fallback keys are tried in order when the main rotation encounters prohibited content.",
+                font=('TkDefaultFont', 10), fg='gray', justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 10))
+        
+        # Enable fallback checkbox
+        self.use_fallback_var = tk.BooleanVar(value=self.translator_gui.config.get('use_fallback_keys', False))
+        tb.Checkbutton(fallback_frame, text="Enable Fallback Keys", 
+                      variable=self.use_fallback_var,
+                      bootstyle="round-toggle",
+                      command=self._toggle_fallback_section).pack(anchor=tk.W, pady=(0, 10))
+        
+        # Add fallback key section
+        add_fallback_frame = tk.Frame(fallback_frame)
+        add_fallback_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Configure grid
+        add_fallback_frame.columnconfigure(1, weight=1)
+        add_fallback_frame.columnconfigure(3, weight=1)
+        
+        # Fallback API Key
+        tk.Label(add_fallback_frame, text="Fallback API Key:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10), pady=5)
+        self.fallback_key_var = tk.StringVar()
+        self.fallback_key_entry = tb.Entry(add_fallback_frame, textvariable=self.fallback_key_var, show='*')
+        self.fallback_key_entry.grid(row=0, column=1, sticky=tk.EW, pady=5)
+        
+        # Toggle fallback visibility
+        self.show_fallback_btn = tb.Button(add_fallback_frame, text="👁", width=3,
+                                          command=self._toggle_fallback_visibility)
+        self.show_fallback_btn.grid(row=0, column=2, padx=5, pady=5)
+        
+        # Fallback Model
+        tk.Label(add_fallback_frame, text="Model:").grid(row=0, column=3, sticky=tk.W, padx=(20, 10), pady=5)
+        self.fallback_model_var = tk.StringVar()
+        self.fallback_model_entry = tb.Entry(add_fallback_frame, textvariable=self.fallback_model_var)
+        self.fallback_model_entry.grid(row=0, column=4, sticky=tk.EW, pady=5)
+        
+        # Add fallback button
+        tb.Button(add_fallback_frame, text="Add Fallback Key", 
+                 command=self._add_fallback_key,
+                 bootstyle="info").grid(row=0, column=5, sticky=tk.E, padx=(10, 0), pady=5)
+        
+        # Fallback keys list
+        self._create_fallback_list(fallback_frame)
+        
+        # Initially disable if checkbox is unchecked
+        self._toggle_fallback_section()
+
+    def _create_fallback_list(self, parent):
+        """Create the fallback keys list"""
+        list_frame = tk.Frame(parent)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Label
+        tk.Label(list_frame, text="Fallback Keys (tried in order):", 
+                font=('TkDefaultFont', 10, 'bold')).pack(anchor=tk.W, pady=(10, 5))
+        
+        # Container for tree and buttons
+        container = tk.Frame(list_frame)
+        container.pack(fill=tk.BOTH, expand=True)
+        
+        # Left side: Move buttons
+        move_frame = tk.Frame(container)
+        move_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 5))
+        
+        tk.Label(move_frame, text="Order", font=('TkDefaultFont', 9, 'bold')).pack(pady=(0, 5))
+        
+        tb.Button(move_frame, text="↑", width=3,
+                 command=lambda: self._move_fallback_key('up'),
+                 bootstyle="secondary-outline").pack(pady=2)
+        
+        tb.Button(move_frame, text="↓", width=3,
+                 command=lambda: self._move_fallback_key('down'),
+                 bootstyle="secondary-outline").pack(pady=2)
+        
+        # Right side: Treeview
+        tree_container = tk.Frame(container)
+        tree_container.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Scrollbar
+        scrollbar = ttk.Scrollbar(tree_container, orient=tk.VERTICAL)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Treeview for fallback keys
+        columns = ('Model', 'Status')
+        self.fallback_tree = ttk.Treeview(tree_container, columns=columns, show='tree headings',
+                                          yscrollcommand=scrollbar.set, height=5)
+        self.fallback_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        scrollbar.config(command=self.fallback_tree.yview)
+        
+        # Configure columns
+        self.fallback_tree.heading('#0', text='API Key', anchor='w')
+        self.fallback_tree.column('#0', width=200, minwidth=150, anchor='w')
+        
+        self.fallback_tree.heading('Model', text='Model', anchor='w')
+        self.fallback_tree.column('Model', width=150, minwidth=100, anchor='w')
+        
+        self.fallback_tree.heading('Status', text='Status', anchor='center')
+        self.fallback_tree.column('Status', width=100, minwidth=80, anchor='center')
+        
+        # Action buttons - store reference for toggling
+        self.fallback_action_frame = tk.Frame(list_frame)
+        self.fallback_action_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        tb.Button(self.fallback_action_frame, text="Test Selected", 
+                 command=self._test_selected_fallback,
+                 bootstyle="warning").pack(side=tk.LEFT, padx=(0, 5))
+        
+        tb.Button(self.fallback_action_frame, text="Remove Selected", 
+                 command=self._remove_selected_fallback,
+                 bootstyle="danger").pack(side=tk.LEFT, padx=5)
+        
+        tb.Button(self.fallback_action_frame, text="Clear All", 
+                 command=self._clear_all_fallbacks,
+                 bootstyle="danger-outline").pack(side=tk.LEFT, padx=5)
+        
+        # Load existing fallback keys
+        self._load_fallback_keys()
+
+    def _load_fallback_keys(self):
+        """Load fallback keys from config"""
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        
+        # Clear tree
+        for item in self.fallback_tree.get_children():
+            self.fallback_tree.delete(item)
+        
+        # Add keys to tree
+        for key_data in fallback_keys:
+            api_key = key_data.get('api_key', '')
+            model = key_data.get('model', '')
+            
+            # Mask API key
+            masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
+            
+            # Insert into tree
+            self.fallback_tree.insert('', 'end',
+                                     text=masked_key,
+                                     values=(model, "Not tested"),
+                                     tags=('untested',))
+        
+        # Configure tags
+        self.fallback_tree.tag_configure('untested', foreground='gray')
+        self.fallback_tree.tag_configure('passed', foreground='green')
+        self.fallback_tree.tag_configure('failed', foreground='red')
+
+    def _add_fallback_key(self):
+        """Add a new fallback key"""
+        api_key = self.fallback_key_var.get().strip()
+        model = self.fallback_model_var.get().strip()
+        
+        if not api_key or not model:
+            messagebox.showerror("Error", "Please enter both API key and model name")
+            return
+        
+        # Get current fallback keys
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        
+        # Add new key
+        fallback_keys.append({
+            'api_key': api_key,
+            'model': model
+        })
+        
+        # Save to config
+        self.translator_gui.config['fallback_keys'] = fallback_keys
+        self.translator_gui.save_config(show_message=False)
+        
+        # Clear inputs
+        self.fallback_key_var.set("")
+        self.fallback_model_var.set("")
+        
+        # Reload list
+        self._load_fallback_keys()
+        
+        # Show success
+        self._show_status(f"Added fallback key for model: {model}")
+
+    def _move_fallback_key(self, direction):
+        """Move selected fallback key up or down"""
+        selected = self.fallback_tree.selection()
+        if not selected:
+            return
+        
+        item = selected[0]
+        index = self.fallback_tree.index(item)
+        
+        # Get current fallback keys
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        
+        if index >= len(fallback_keys):
+            return
+        
+        new_index = index
+        if direction == 'up' and index > 0:
+            new_index = index - 1
+        elif direction == 'down' and index < len(fallback_keys) - 1:
+            new_index = index + 1
+        
+        if new_index != index:
+            # Swap keys
+            fallback_keys[index], fallback_keys[new_index] = fallback_keys[new_index], fallback_keys[index]
+            
+            # Save to config
+            self.translator_gui.config['fallback_keys'] = fallback_keys
+            self.translator_gui.save_config(show_message=False)
+            
+            # Reload list
+            self._load_fallback_keys()
+            
+            # Reselect item
+            items = self.fallback_tree.get_children()
+            if new_index < len(items):
+                self.fallback_tree.selection_set(items[new_index])
+                self.fallback_tree.focus(items[new_index])
+
+    def _test_selected_fallback(self):
+        """Test selected fallback key"""
+        selected = self.fallback_tree.selection()
+        if not selected:
+            messagebox.showwarning("Warning", "Please select a fallback key to test")
+            return
+        
+        index = self.fallback_tree.index(selected[0])
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        
+        if index >= len(fallback_keys):
+            return
+        
+        key_data = fallback_keys[index]
+        
+        # Run test in thread
+        thread = threading.Thread(target=self._test_single_fallback_key, args=(key_data, index))
+        thread.daemon = True
+        thread.start()
+
+    def _test_single_fallback_key(self, key_data, index):
+        """Test a single fallback key"""
+        from unified_api_client import UnifiedClient
+        
+        api_key = key_data.get('api_key', '')
+        model = key_data.get('model', '')
+        
+        try:
+            client = UnifiedClient(
+                api_key=api_key,
+                model=model,
+                output_dir=None
+            )
+            
+            messages = [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "Say 'API test successful' and nothing else."}
+            ]
+            
+            response = client.send(
+                messages,
+                temperature=0.7,
+                max_tokens=100
+            )
+            
+            if response and isinstance(response, tuple):
+                content, _ = response
+                if content and "test successful" in content.lower():
+                    # Update tree item to show success
+                    self.dialog.after(0, lambda: self._update_fallback_test_result(index, True))
+                    return
+        except Exception as e:
+            print(f"Fallback key test failed: {e}")
+        
+        # Update tree item to show failure
+        self.dialog.after(0, lambda: self._update_fallback_test_result(index, False))
+
+    def _update_fallback_test_result(self, index, success):
+        """Update fallback tree item with test result"""
+        items = self.fallback_tree.get_children()
+        if index < len(items):
+            item = items[index]
+            values = list(self.fallback_tree.item(item, 'values'))
+            values[1] = "✅ Passed" if success else "❌ Failed"
+            self.fallback_tree.item(item, values=values, tags=('passed' if success else 'failed',))
+
+    def _remove_selected_fallback(self):
+        """Remove selected fallback key"""
+        selected = self.fallback_tree.selection()
+        if not selected:
+            return
+        
+        if messagebox.askyesno("Confirm", "Remove selected fallback key?"):
+            index = self.fallback_tree.index(selected[0])
+            
+            # Get current fallback keys
+            fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+            
+            if index < len(fallback_keys):
+                del fallback_keys[index]
+                
+                # Save to config
+                self.translator_gui.config['fallback_keys'] = fallback_keys
+                self.translator_gui.save_config(show_message=False)
+                
+                # Reload list
+                self._load_fallback_keys()
+                
+                self._show_status("Removed fallback key")
+
+    def _clear_all_fallbacks(self):
+        """Clear all fallback keys"""
+        if not self.fallback_tree.get_children():
+            return
+        
+        if messagebox.askyesno("Confirm", "Remove ALL fallback keys?"):
+            # Clear fallback keys
+            self.translator_gui.config['fallback_keys'] = []
+            self.translator_gui.save_config(show_message=False)
+            
+            # Reload list
+            self._load_fallback_keys()
+            
+            self._show_status("Cleared all fallback keys")
+
+    def _toggle_fallback_section(self):
+        """Enable/disable fallback section based on checkbox"""
+        enabled = self.use_fallback_var.get()
+        
+        if enabled:
+            # Show and enable all fallback widgets
+            state = tk.NORMAL
+            
+            # Enable input widgets
+            self.fallback_key_entry.config(state=state)
+            self.fallback_model_entry.config(state=state)
+            self.show_fallback_btn.config(state=state)
+            
+            # Enable add button
+            for widget in self.fallback_key_entry.master.winfo_children():
+                if isinstance(widget, tb.Button) and "Add Fallback" in str(widget.cget('text')):
+                    widget.config(state=state)
+            
+            # Show the tree container
+            self.fallback_tree.master.master.pack(fill=tk.BOTH, expand=True)
+            
+            # Show the action buttons frame
+            if hasattr(self, 'fallback_action_frame'):
+                self.fallback_action_frame.pack(fill=tk.X, pady=(10, 0))
+            
+        else:
+            # Hide and disable all fallback widgets
+            state = tk.DISABLED
+            
+            # Disable input widgets
+            self.fallback_key_entry.config(state=state)
+            self.fallback_model_entry.config(state=state)
+            self.show_fallback_btn.config(state=state)
+            
+            # Disable add button
+            for widget in self.fallback_key_entry.master.winfo_children():
+                if isinstance(widget, tb.Button) and "Add Fallback" in str(widget.cget('text')):
+                    widget.config(state=state)
+            
+            # Hide the tree container
+            self.fallback_tree.master.master.pack_forget()
+            
+            # Hide the action buttons frame
+            if hasattr(self, 'fallback_action_frame'):
+                self.fallback_action_frame.pack_forget()
+            
+            # Clear selection
+            self.fallback_tree.selection_remove(*self.fallback_tree.selection())
+
+    def _toggle_fallback_visibility(self):
+        """Toggle fallback key visibility"""
+        if self.fallback_key_entry.cget('show') == '*':
+            self.fallback_key_entry.config(show='')
+            self.show_fallback_btn.config(text='🔒')
+        else:
+            self.fallback_key_entry.config(show='*')
+            self.show_fallback_btn.config(text='👁')
+
+    def _create_button_bar(self, parent):
+        """Create the bottom button bar"""
+        self.button_frame = tk.Frame(parent)
+        self.button_frame.pack(fill=tk.X, pady=(20, 0))
+        
+        # Save button
+        tb.Button(self.button_frame, text="Save & Close", command=self._save_and_close,
+                 bootstyle="success").pack(side=tk.RIGHT, padx=(5, 0))
+        
+        # Cancel button  
+        tb.Button(self.button_frame, text="Cancel", command=self._on_close,
+                 bootstyle="secondary").pack(side=tk.RIGHT)
+        
+        # Import/Export
+        tb.Button(self.button_frame, text="Import", command=self._import_keys,
+                 bootstyle="info-outline").pack(side=tk.LEFT, padx=(0, 5))
+        
+        tb.Button(self.button_frame, text="Export", command=self._export_keys,
+                 bootstyle="info-outline").pack(side=tk.LEFT)
  
     def _create_key_list_section(self, parent):
         """Create the key list section with inline editing and rearrangement controls"""
@@ -944,9 +1386,13 @@ class MultiAPIKeyDialog:
         # Get the bounding box of the cell
         x, y, width, height = self.tree.bbox(item, column)
         
+        # Expand the width to show more text (make it wider than the column)
+        expanded_width = max(width + 100, 250)  # At least 250 pixels wide
+        expanded_height = height + 2  # Add some padding to the height
+        
         # Create entry widget
         edit_var = tk.StringVar(value=key.model)
-        self.edit_widget = tb.Entry(self.tree, textvariable=edit_var)
+        self.edit_widget = tb.Entry(self.tree, textvariable=edit_var, font=('TkDefaultFont', 16))
         
         def save_edit():
             new_value = edit_var.get().strip()
@@ -963,10 +1409,14 @@ class MultiAPIKeyDialog:
                 self.edit_widget.destroy()
                 self.edit_widget = None
         
-        # Place and configure the entry
-        self.edit_widget.place(x=x, y=y, width=width, height=height)
+        # Place and configure the entry with expanded dimensions
+        # Adjust y position slightly to center it better
+        self.edit_widget.place(x=x, y=y-2, width=expanded_width, height=expanded_height)
         self.edit_widget.focus()
         self.edit_widget.select_range(0, tk.END)
+        
+        # Make sure the widget appears on top
+        self.edit_widget.lift()
         
         # Bind events
         self.edit_widget.bind('<Return>', lambda e: save_edit())
@@ -1018,7 +1468,9 @@ class MultiAPIKeyDialog:
         # Select item under cursor
         item = self.tree.identify_row(event.y)
         if item:
-            self.tree.selection_set(item)
+            # If the clicked item is not in selection, select only it
+            if item not in self.tree.selection():
+                self.tree.selection_set(item)
             
             # Create context menu
             menu = tk.Menu(self.dialog, tearoff=0)
@@ -1032,6 +1484,17 @@ class MultiAPIKeyDialog:
             menu.add_cascade(label="Reorder", menu=reorder_menu)
             
             menu.add_separator()
+            
+            # Add change model option
+            selected_count = len(self.tree.selection())
+            if selected_count > 1:
+                menu.add_command(label=f"Change Model ({selected_count} selected)", 
+                               command=self._change_model_for_selected)
+            else:
+                menu.add_command(label="Change Model", 
+                               command=self._change_model_for_selected)
+            
+            menu.add_separator()
             menu.add_command(label="Test", command=self._test_selected)
             menu.add_command(label="Enable", command=self._enable_selected)
             menu.add_command(label="Disable", command=self._disable_selected)
@@ -1040,6 +1503,83 @@ class MultiAPIKeyDialog:
             
             # Show menu
             menu.post(event.x_root, event.y_root)
+
+    def _change_model_for_selected(self):
+        """Change model for all selected entries"""
+        selected = self.tree.selection()
+        if not selected:
+            return
+        
+        # Create simple dialog
+        dialog = tk.Toplevel(self.dialog)
+        dialog.title(f"Change Model for {len(selected)} Keys")
+        dialog.geometry("400x120")
+        dialog.transient(self.dialog)
+        
+        # Center the dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
+        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f"+{x}+{y}")
+        
+        # Main frame
+        main_frame = tk.Frame(dialog, padx=20, pady=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Label
+        tk.Label(main_frame, text="Enter new model name (press Enter to apply):",
+                font=('TkDefaultFont', 10)).pack(pady=(0, 10))
+        
+        # Model entry with dropdown
+        model_var = tk.StringVar()
+        
+        # Common models for quick selection
+        common_models = [
+            "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash",
+            "gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4.1-mini",
+            "claude-3-5-sonnet", "claude-3-opus", "claude-3-haiku",
+            "claude-opus-4-20250514", "claude-sonnet-4-20250514"
+        ]
+        
+        model_combo = ttk.Combobox(main_frame, values=common_models, 
+                                   textvariable=model_var, width=35)
+        model_combo.pack(pady=(0, 10))
+        
+        # Get current model from first selected item as default
+        selected_indices = [self.tree.index(item) for item in selected]
+        if selected_indices and selected_indices[0] < len(self.key_pool.keys):
+            current_model = self.key_pool.keys[selected_indices[0]].model
+            model_var.set(current_model)
+            model_combo.select_range(0, tk.END)  # Select all text for easy replacement
+        
+        # Cancel button only
+        tb.Button(main_frame, text="Cancel", command=dialog.destroy,
+                 bootstyle="secondary", width=10).pack()
+        
+        def apply_change(event=None):
+            new_model = model_var.get().strip()
+            if new_model:
+                # Update all selected keys
+                for item in selected:
+                    index = self.tree.index(item)
+                    if index < len(self.key_pool.keys):
+                        self.key_pool.keys[index].model = new_model
+                
+                # Refresh the display
+                self._refresh_key_list()
+                
+                # Show status
+                self._show_status(f"Changed model to '{new_model}' for {len(selected)} keys")
+                
+                dialog.destroy()
+        
+        # Focus on the combobox
+        model_combo.focus()
+        
+        # Bind Enter key to apply
+        dialog.bind('<Return>', apply_change)
+        model_combo.bind('<Return>', apply_change)
+        dialog.bind('<Escape>', lambda e: dialog.destroy())
 
     # Additional helper method to swap keys programmatically
     def swap_keys(self, index1: int, index2: int):
@@ -1100,7 +1640,13 @@ class MultiAPIKeyDialog:
         # Save the config immediately
         self.translator_gui.save_config(show_message=False)
         
-        # Update UI state
+        # Show/hide fallback section
+        if enabled:
+            self.fallback_container.pack(fill=tk.X, pady=(10, 0), before=self.button_frame)
+        else:
+            self.fallback_container.pack_forget()
+        
+        # Update other UI elements
         for widget in [self.api_key_entry, self.model_entry]:
             if widget:
                 widget.config(state=tk.NORMAL if enabled else tk.DISABLED)
