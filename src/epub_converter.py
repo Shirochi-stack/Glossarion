@@ -2133,8 +2133,11 @@ class EPUBCompiler:
             # Use the actual filename from the input
             safe_fn = os.path.basename(filename)
             
+            # Pre-decode the title - when ebooklib escapes it for NCX, it'll be correct
+            import html
+            decoded_title = html.unescape(title)  # Use Python's built-in html.unescape
             chapter = epub.EpubHtml(
-                title=title,
+                title=decoded_title,
                 file_name=safe_fn,
                 lang=metadata.get("language", "en")
             )
