@@ -3497,20 +3497,14 @@ class UnifiedClient:
         fallback_keys = []
         
         # FIRST: Always add the "main key" as the first fallback
-        # This should be your primary, most reliable key
         main_key = getattr(self.__class__, '_main_fallback_key', self.original_api_key)
         main_model = getattr(self.__class__, '_main_fallback_model', self.original_model)
         
-        # Add main key as first fallback (only check MODEL, not key!)
-        if main_model != self.model:  # ONLY CHECK MODEL!
-            fallback_keys.append({
-                'api_key': main_key, 
-                'model': main_model,
-                'label': 'MAIN KEY'
-            })
-            print(f"[MAIN KEY RETRY] Added main key as first fallback: {main_model}")
-        else:
-            print(f"[MAIN KEY RETRY] Current failing model ({self.model}) is same as main model ({main_model}), skipping main key")
+        fallback_keys.append({
+            'api_key': main_key, 
+            'model': main_model,
+            'label': 'MAIN KEY'
+        })
         
         # THEN: Add any additional configured fallback keys
         if hasattr(self, 'translator_config'):
@@ -3518,39 +3512,21 @@ class UnifiedClient:
             if use_fallback:
                 configured_fallbacks = self.translator_config.get('fallback_keys', [])
                 for fb in configured_fallbacks:
-                    fb_model = fb.get('model')
-                    
-                    # Skip if it's the same MODEL as current (don't check key!)
-                    if fb_model == self.model:
-                        print(f"[MAIN KEY RETRY] Skipping fallback {fb_model} - same model as current")
-                        continue
-                        
-                    # Skip if it's a duplicate of the main model we already added
-                    if fb_model == main_model:
-                        print(f"[MAIN KEY RETRY] Skipping fallback {fb_model} - duplicate of main model")
-                        continue
-                        
                     fallback_keys.append({
                         'api_key': fb.get('api_key'),
-                        'model': fb_model,
+                        'model': fb.get('model'),
                         'label': 'ADDITIONAL FALLBACK'
                     })
         
-        if not fallback_keys:
-            print(f"[MAIN KEY RETRY] No fallback keys available")
-            return None
-        
         print(f"[MAIN KEY RETRY] Trying {len(fallback_keys)} fallback keys (main key first)")
         
-        # Try each fallback key in the list
+        # Try each fallback key in the list - NO CHECKS, JUST TRY EVERYTHING
         for idx, fallback_data in enumerate(fallback_keys):
             label = fallback_data.get('label', 'Fallback')
             fallback_key = fallback_data.get('api_key')
             fallback_model = fallback_data.get('model')
             
             print(f"[{label} {idx+1}/{len(fallback_keys)}] Trying {fallback_model}")
-            print(f"[{label} {idx+1}] Current failing model: {self.model}")
-            print(f"[{label} {idx+1}] Fallback model: {fallback_model}")
             
             try:
                 # Create a new temporary UnifiedClient instance with the fallback key
@@ -3581,9 +3557,7 @@ class UnifiedClient:
                 temp_client.request_timeout = self.request_timeout
                 
                 print(f"[{label} {idx+1}] Created temp client with model: {temp_client.model}")
-                print(f"[{label} {idx+1}] Temp client type: {getattr(temp_client, 'client_type', 'NOT SET')}")
                 print(f"[{label} {idx+1}] Multi-key mode: {temp_client._multi_key_mode}")
-                print(f"[{label} {idx+1}] Cancelled flag: {temp_client._cancelled}")
                 
                 # Get file names for response tracking
                 payload_name, response_name = self._get_file_names(messages, context=context)
@@ -3623,40 +3597,11 @@ class UnifiedClient:
                     print(f"[{label} {idx+1}] Operation was cancelled during retry")
                     return None
                 
-                print(f"[{label} {idx+1}] ❌ UnifiedClientError: {type(e).__name__}: {str(e)[:200]}")
-                
-                # Check if it's a content filter error
-                error_str = str(e).lower()
-                content_filter_indicators = [
-                    "content_filter", "content was blocked", "response was blocked",
-                    "safety filter", "content policy", "harmful content",
-                    "blocked by safety", "harm_category", "content_policy_violation",
-                    "unsafe content", "violates our usage policies",
-                    "prohibited_content", "blockedreason", "content blocked"
-                ]
-                
-                if any(indicator in error_str for indicator in content_filter_indicators):
-                    print(f"[{label} {idx+1}] Content filter hit, trying next fallback...")
-                else:
-                    print(f"[{label} {idx+1}] Non-filter error, trying next fallback...")
+                print(f"[{label} {idx+1}] ❌ UnifiedClientError: {str(e)[:200]}")
                 continue
                 
             except Exception as e:
-                print(f"[{label} {idx+1}] ❌ Exception: {type(e).__name__}: {str(e)[:200]}")
-                
-                error_str = str(e).lower()
-                content_filter_indicators = [
-                    "content_filter", "content was blocked", "response was blocked",
-                    "safety filter", "content policy", "harmful content",
-                    "blocked by safety", "harm_category", "content_policy_violation",
-                    "unsafe content", "violates our usage policies",
-                    "prohibited_content", "blockedreason", "content blocked"
-                ]
-                
-                if any(indicator in error_str for indicator in content_filter_indicators):
-                    print(f"[{label} {idx+1}] Content filter hit, trying next fallback...")
-                else:
-                    print(f"[{label} {idx+1}] Other error, trying next fallback...")
+                print(f"[{label} {idx+1}] ❌ Exception: {str(e)[:200]}")
                 continue
         
         # If we get here, all fallback keys failed
@@ -4642,20 +4587,14 @@ class UnifiedClient:
         fallback_keys = []
         
         # FIRST: Always add the "main key" as the first fallback
-        # This should be your primary, most reliable key
         main_key = getattr(self.__class__, '_main_fallback_key', self.original_api_key)
         main_model = getattr(self.__class__, '_main_fallback_model', self.original_model)
         
-        # Add main key as first fallback (only check MODEL, not key!)
-        if main_model != self.model:  # ONLY CHECK MODEL!
-            fallback_keys.append({
-                'api_key': main_key, 
-                'model': main_model,
-                'label': 'MAIN KEY'
-            })
-            print(f"[IMAGE MAIN KEY RETRY] Added main key as first fallback: {main_model}")
-        else:
-            print(f"[IMAGE MAIN KEY RETRY] Current failing model ({self.model}) is same as main model ({main_model}), skipping main key")
+        fallback_keys.append({
+            'api_key': main_key, 
+            'model': main_model,
+            'label': 'MAIN KEY'
+        })
         
         # THEN: Add any additional configured fallback keys
         if hasattr(self, 'translator_config'):
@@ -4663,39 +4602,21 @@ class UnifiedClient:
             if use_fallback:
                 configured_fallbacks = self.translator_config.get('fallback_keys', [])
                 for fb in configured_fallbacks:
-                    fb_model = fb.get('model')
-                    
-                    # Skip if it's the same MODEL as current (don't check key!)
-                    if fb_model == self.model:
-                        print(f"[IMAGE MAIN KEY RETRY] Skipping fallback {fb_model} - same model as current")
-                        continue
-                        
-                    # Skip if it's a duplicate of the main model we already added
-                    if fb_model == main_model:
-                        print(f"[IMAGE MAIN KEY RETRY] Skipping fallback {fb_model} - duplicate of main model")
-                        continue
-                        
                     fallback_keys.append({
                         'api_key': fb.get('api_key'),
-                        'model': fb_model,
+                        'model': fb.get('model'),
                         'label': 'ADDITIONAL FALLBACK'
                     })
         
-        if not fallback_keys:
-            print(f"[IMAGE MAIN KEY RETRY] No fallback keys available")
-            return None
-        
         print(f"[IMAGE MAIN KEY RETRY] Trying {len(fallback_keys)} fallback keys (main key first)")
         
-        # Try each fallback key in the list
+        # Try each fallback key in the list - NO CHECKS, JUST TRY EVERYTHING
         for idx, fallback_data in enumerate(fallback_keys):
             label = fallback_data.get('label', 'Fallback')
             fallback_key = fallback_data.get('api_key')
             fallback_model = fallback_data.get('model')
             
             print(f"[IMAGE {label} {idx+1}/{len(fallback_keys)}] Trying {fallback_model}")
-            print(f"[IMAGE {label} {idx+1}] Current failing model: {self.model}")
-            print(f"[IMAGE {label} {idx+1}] Fallback model: {fallback_model}")
             
             try:
                 # Create a new temporary UnifiedClient instance with the fallback key
@@ -4730,9 +4651,7 @@ class UnifiedClient:
                 temp_client.request_timeout = self.request_timeout
                 
                 print(f"[IMAGE {label} {idx+1}] Created temp client with model: {temp_client.model}")
-                print(f"[IMAGE {label} {idx+1}] Temp client type: {getattr(temp_client, 'client_type', 'NOT SET')}")
                 print(f"[IMAGE {label} {idx+1}] Multi-key mode: {temp_client._multi_key_mode}")
-                print(f"[IMAGE {label} {idx+1}] Cancelled flag: {temp_client._cancelled}")
                 
                 # Get file names for response tracking
                 payload_name, response_name = self._get_file_names(messages, context=context)
@@ -4773,42 +4692,11 @@ class UnifiedClient:
                     print(f"[IMAGE {label} {idx+1}] Operation was cancelled during retry")
                     return None
                     
-                print(f"[IMAGE {label} {idx+1}] ❌ UnifiedClientError: {type(e).__name__}: {str(e)[:200]}")
-                
-                # Check if it's a content filter error
-                error_str = str(e).lower()
-                content_filter_indicators = [
-                    "content_filter", "content was blocked", "response was blocked",
-                    "safety filter", "content policy", "harmful content",
-                    "blocked by safety", "harm_category", "content_policy_violation",
-                    "unsafe content", "violates our usage policies",
-                    "prohibited_content", "blockedreason", "content blocked",
-                    "inappropriate image", "inappropriate content"
-                ]
-                
-                if any(indicator in error_str for indicator in content_filter_indicators):
-                    print(f"[IMAGE {label} {idx+1}] Content filter hit, trying next fallback...")
-                else:
-                    print(f"[IMAGE {label} {idx+1}] Non-filter error, trying next fallback...")
+                print(f"[IMAGE {label} {idx+1}] ❌ UnifiedClientError: {str(e)[:200]}")
                 continue
                 
             except Exception as e:
-                print(f"[IMAGE {label} {idx+1}] ❌ Exception: {type(e).__name__}: {str(e)[:200]}")
-                
-                error_str = str(e).lower()
-                content_filter_indicators = [
-                    "content_filter", "content was blocked", "response was blocked",
-                    "safety filter", "content policy", "harmful content",
-                    "blocked by safety", "harm_category", "content_policy_violation",
-                    "unsafe content", "violates our usage policies",
-                    "prohibited_content", "blockedreason", "content blocked",
-                    "inappropriate image", "inappropriate content"
-                ]
-                
-                if any(indicator in error_str for indicator in content_filter_indicators):
-                    print(f"[IMAGE {label} {idx+1}] Content filter hit, trying next fallback...")
-                else:
-                    print(f"[IMAGE {label} {idx+1}] Other error, trying next fallback...")
+                print(f"[IMAGE {label} {idx+1}] ❌ Exception: {str(e)[:200]}")
                 continue
         
         # If we get here, all fallback keys failed
