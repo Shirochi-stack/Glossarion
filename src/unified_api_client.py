@@ -1099,6 +1099,9 @@ class UnifiedClient:
         """Ensure we have a key selected for this thread"""
         if not self.use_multi_keys:
             return
+            
+        # Threading delay
+        self._apply_key_assignment_delay()
         
         thread_name = threading.current_thread().name
         
@@ -10604,3 +10607,4 @@ class UnifiedClient:
             print(f"  Thread-local key_index: {getattr(tls, 'key_index', None)}")
         
         print("[DEBUG] End of Multi-Key State\n")
+
