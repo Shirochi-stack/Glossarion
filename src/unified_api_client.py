@@ -1101,7 +1101,7 @@ class UnifiedClient:
             return
             
         # Threading delay
-        self._apply_key_assignment_delay()
+        self._apply_thread_submission_delay()
         
         thread_name = threading.current_thread().name
         
@@ -10607,4 +10607,5 @@ class UnifiedClient:
             print(f"  Thread-local key_index: {getattr(tls, 'key_index', None)}")
         
         print("[DEBUG] End of Multi-Key State\n")
+
 
