@@ -695,6 +695,7 @@ class MultiAPIKeyDialog:
         
         # Configure tags
         self.fallback_tree.tag_configure('untested', foreground='gray')
+        self.fallback_tree.tag_configure('testing', foreground='blue', font=('TkDefaultFont', 10, 'bold'))
         self.fallback_tree.tag_configure('passed', foreground='green')
         self.fallback_tree.tag_configure('failed', foreground='red')
 
@@ -781,12 +782,29 @@ class MultiAPIKeyDialog:
         if index >= len(fallback_keys):
             return
         
+        # Update UI to show testing status immediately
+        items = self.fallback_tree.get_children()
+        if index < len(items):
+            item = items[index]
+            values = list(self.fallback_tree.item(item, 'values'))
+            values[1] = "⏳ Testing..."
+            self.fallback_tree.item(item, values=values)
+        
         key_data = fallback_keys[index]
         
         # Run test in thread
         thread = threading.Thread(target=self._test_single_fallback_key, args=(key_data, index))
         thread.daemon = True
         thread.start()
+
+    def _update_fallback_test_result(self, index, success):
+        """Update fallback tree item with test result"""
+        items = self.fallback_tree.get_children()
+        if index < len(items):
+            item = items[index]
+            values = list(self.fallback_tree.item(item, 'values'))
+            values[1] = "✅ Passed" if success else "❌ Failed"
+            self.fallback_tree.item(item, values=values)
 
     def _test_single_fallback_key(self, key_data, index):
         """Test a single fallback key"""
@@ -824,15 +842,6 @@ class MultiAPIKeyDialog:
         
         # Update tree item to show failure
         self.dialog.after(0, lambda: self._update_fallback_test_result(index, False))
-
-    def _update_fallback_test_result(self, index, success):
-        """Update fallback tree item with test result"""
-        items = self.fallback_tree.get_children()
-        if index < len(items):
-            item = items[index]
-            values = list(self.fallback_tree.item(item, 'values'))
-            values[1] = "✅ Passed" if success else "❌ Failed"
-            self.fallback_tree.item(item, values=values, tags=('passed' if success else 'failed',))
 
     def _remove_selected_fallback(self):
         """Remove selected fallback key"""
