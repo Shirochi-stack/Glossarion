@@ -3494,18 +3494,34 @@ class UnifiedClient:
         Create a temporary client with the main key and retry the request.
         This is used for prohibited content errors in multi-key mode.
         """
-        # Use the class-level fallback key if available, otherwise use original
-        fallback_key = getattr(self.__class__, '_main_fallback_key', self.original_api_key)
-        fallback_model = getattr(self.__class__, '_main_fallback_model', self.original_model)
+        # Get fallback keys from config if available
+        fallback_keys = []
+        if hasattr(self, 'translator_config'):
+            use_fallback = self.translator_config.get('use_fallback_keys', False)
+            if use_fallback:
+                fallback_keys = self.translator_config.get('fallback_keys', [])
         
-        # Don't retry with the same key that just failed
-        if fallback_model == self.model and fallback_key == self.api_key:
-            print(f"[MAIN KEY RETRY] Fallback is same as current key ({self.model}), skipping retry")
-            return None
+        # If no fallback keys configured, use the original key as fallback
+        if not fallback_keys:
+            fallback_key = getattr(self.__class__, '_main_fallback_key', self.original_api_key)
+            fallback_model = getattr(self.__class__, '_main_fallback_model', self.original_model)
+            fallback_keys = [{'api_key': fallback_key, 'model': fallback_model}]
         
-        print(f"[MAIN KEY RETRY] Starting retry with main key")
-        print(f"[MAIN KEY RETRY] Current failing model: {self.model}")
-        print(f"[MAIN KEY RETRY] Fallback model if main key retry fails: {fallback_model}")
+        print(f"[MAIN KEY RETRY] Trying {len(fallback_keys)} fallback keys")
+        
+        # Try each fallback key in the list
+        for idx, fallback_data in enumerate(fallback_keys):
+            fallback_key = fallback_data.get('api_key')
+            fallback_model = fallback_data.get('model')
+            
+            # Skip if it's the exact same key AND model combination
+            if fallback_model == self.model and fallback_key == self.api_key:
+                print(f"[FALLBACK {idx+1}/{len(fallback_keys)}] Skipping {fallback_model} - same as current failing key")
+                continue
+            
+            print(f"[FALLBACK {idx+1}/{len(fallback_keys)}] Trying {fallback_model}")
+            print(f"[FALLBACK {idx+1}] Current failing model: {self.model}")
+            print(f"[FALLBACK {idx+1}] Fallback model: {fallback_model}")
         
         try:
             # Create a new temporary UnifiedClient instance with the fallback key
@@ -4596,18 +4612,34 @@ class UnifiedClient:
         Create a temporary client with the main key and retry the image request.
         This is used for prohibited content errors in multi-key mode.
         """
-        # Use the class-level fallback key if available, otherwise use original
-        fallback_key = getattr(self.__class__, '_main_fallback_key', self.original_api_key)
-        fallback_model = getattr(self.__class__, '_main_fallback_model', self.original_model)
+        # Get fallback keys from config if available
+        fallback_keys = []
+        if hasattr(self, 'translator_config'):
+            use_fallback = self.translator_config.get('use_fallback_keys', False)
+            if use_fallback:
+                fallback_keys = self.translator_config.get('fallback_keys', [])
         
-        # Don't retry with the same key that just failed
-        if fallback_model == self.model and fallback_key == self.api_key:
-            print(f"[MAIN KEY IMAGE RETRY] Fallback is same as current key ({self.model}), skipping retry")
-            return None
+        # If no fallback keys configured, use the original key as fallback
+        if not fallback_keys:
+            fallback_key = getattr(self.__class__, '_main_fallback_key', self.original_api_key)
+            fallback_model = getattr(self.__class__, '_main_fallback_model', self.original_model)
+            fallback_keys = [{'api_key': fallback_key, 'model': fallback_model}]
         
-        print(f"[MAIN KEY IMAGE RETRY] Starting image retry with main key")
-        print(f"[MAIN KEY IMAGE RETRY] Current failing model: {self.model}")
-        print(f"[MAIN KEY RETRY] Fallback model if main key retry fails: {fallback_model}")
+        print(f"[MAIN KEY IMAGE RETRY] Trying {len(fallback_keys)} fallback keys")
+        
+        # Try each fallback key in the list
+        for idx, fallback_data in enumerate(fallback_keys):
+            fallback_key = fallback_data.get('api_key')
+            fallback_model = fallback_data.get('model')
+            
+            # Skip if it's the exact same key AND model combination
+            if fallback_model == self.model and fallback_key == self.api_key:
+                print(f"[IMAGE FALLBACK {idx+1}/{len(fallback_keys)}] Skipping {fallback_model} - same as current failing key")
+                continue
+            
+            print(f"[IMAGE FALLBACK {idx+1}/{len(fallback_keys)}] Trying {fallback_model}")
+            print(f"[IMAGE FALLBACK {idx+1}] Current failing model: {self.model}")
+            print(f"[IMAGE FALLBACK {idx+1}] Fallback model: {fallback_model}")
         
         try:
             # Create a new temporary UnifiedClient instance with the fallback key
