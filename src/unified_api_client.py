@@ -3501,8 +3501,8 @@ class UnifiedClient:
         main_key = getattr(self.__class__, '_main_fallback_key', self.original_api_key)
         main_model = getattr(self.__class__, '_main_fallback_model', self.original_model)
         
-        # Add main key as first fallback (if it's different from current)
-        if not (main_model == self.model and main_key == self.api_key):
+        # Add main key as first fallback (only check MODEL, not key!)
+        if main_model != self.model:  # ONLY CHECK MODEL!
             fallback_keys.append({
                 'api_key': main_key, 
                 'model': main_model,
@@ -3510,7 +3510,7 @@ class UnifiedClient:
             })
             print(f"[MAIN KEY RETRY] Added main key as first fallback: {main_model}")
         else:
-            print(f"[MAIN KEY RETRY] Current failing key IS the main key, skipping main key retry")
+            print(f"[MAIN KEY RETRY] Current failing model ({self.model}) is same as main model ({main_model}), skipping main key")
         
         # THEN: Add any additional configured fallback keys
         if hasattr(self, 'translator_config'):
@@ -3518,20 +3518,20 @@ class UnifiedClient:
             if use_fallback:
                 configured_fallbacks = self.translator_config.get('fallback_keys', [])
                 for fb in configured_fallbacks:
-                    # Don't add duplicates of main key or current key
-                    fb_key = fb.get('api_key')
                     fb_model = fb.get('model')
                     
-                    # Skip if it's the same as current failing key
-                    if fb_model == self.model and fb_key == self.api_key:
+                    # Skip if it's the same MODEL as current (don't check key!)
+                    if fb_model == self.model:
+                        print(f"[MAIN KEY RETRY] Skipping fallback {fb_model} - same model as current")
                         continue
                         
-                    # Skip if it's a duplicate of the main key we already added
-                    if fb_model == main_model and fb_key == main_key:
+                    # Skip if it's a duplicate of the main model we already added
+                    if fb_model == main_model:
+                        print(f"[MAIN KEY RETRY] Skipping fallback {fb_model} - duplicate of main model")
                         continue
                         
                     fallback_keys.append({
-                        'api_key': fb_key,
+                        'api_key': fb.get('api_key'),
                         'model': fb_model,
                         'label': 'ADDITIONAL FALLBACK'
                     })
@@ -4646,8 +4646,8 @@ class UnifiedClient:
         main_key = getattr(self.__class__, '_main_fallback_key', self.original_api_key)
         main_model = getattr(self.__class__, '_main_fallback_model', self.original_model)
         
-        # Add main key as first fallback (if it's different from current)
-        if not (main_model == self.model and main_key == self.api_key):
+        # Add main key as first fallback (only check MODEL, not key!)
+        if main_model != self.model:  # ONLY CHECK MODEL!
             fallback_keys.append({
                 'api_key': main_key, 
                 'model': main_model,
@@ -4655,7 +4655,7 @@ class UnifiedClient:
             })
             print(f"[IMAGE MAIN KEY RETRY] Added main key as first fallback: {main_model}")
         else:
-            print(f"[IMAGE MAIN KEY RETRY] Current failing key IS the main key, skipping main key retry")
+            print(f"[IMAGE MAIN KEY RETRY] Current failing model ({self.model}) is same as main model ({main_model}), skipping main key")
         
         # THEN: Add any additional configured fallback keys
         if hasattr(self, 'translator_config'):
@@ -4663,20 +4663,20 @@ class UnifiedClient:
             if use_fallback:
                 configured_fallbacks = self.translator_config.get('fallback_keys', [])
                 for fb in configured_fallbacks:
-                    # Don't add duplicates of main key or current key
-                    fb_key = fb.get('api_key')
                     fb_model = fb.get('model')
                     
-                    # Skip if it's the same as current failing key
-                    if fb_model == self.model and fb_key == self.api_key:
+                    # Skip if it's the same MODEL as current (don't check key!)
+                    if fb_model == self.model:
+                        print(f"[IMAGE MAIN KEY RETRY] Skipping fallback {fb_model} - same model as current")
                         continue
                         
-                    # Skip if it's a duplicate of the main key we already added
-                    if fb_model == main_model and fb_key == main_key:
+                    # Skip if it's a duplicate of the main model we already added
+                    if fb_model == main_model:
+                        print(f"[IMAGE MAIN KEY RETRY] Skipping fallback {fb_model} - duplicate of main model")
                         continue
                         
                     fallback_keys.append({
-                        'api_key': fb_key,
+                        'api_key': fb.get('api_key'),
                         'model': fb_model,
                         'label': 'ADDITIONAL FALLBACK'
                     })
