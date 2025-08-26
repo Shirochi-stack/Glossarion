@@ -1095,23 +1095,6 @@ class UnifiedClient:
         
         return False
 
-    def _ensure_key_selection(self):
-        """Ensure we have a key selected for this thread"""
-        if not self.use_multi_keys:
-            return
-            
-        # Threading delay
-        self._apply_thread_submission_delay()
-        
-        thread_name = threading.current_thread().name
-        
-        # Assign or rotate key for this thread
-        self._assign_thread_key()
-        
-        # Clear any expired rate limits
-        if self._rate_limit_cache:
-            self._rate_limit_cache.clear_expired()
-
     def _handle_rate_limit_for_thread(self):
         """Handle rate limit by marking current thread's key and getting a new one (thread-safe)"""
         if not self._multi_key_mode:  # Check INSTANCE variable
@@ -1277,18 +1260,6 @@ class UnifiedClient:
         if cached_result:
             print(f"[{thread_name}] Using cached response for {request_hash[:8]}")
             return cached_result
-        
-        # Check if another thread is processing this request
-        #with self._active_requests_lock:
-        #    if request_hash in self._active_requests:
-                # Another thread is processing, get the event
-        #        event = self._active_requests[request_hash]
-        #        print(f"[{thread_name}] Waiting for another thread to complete request {request_hash[:8]}")
-        #    else:
-        #        # We're the first, create an event for others to wait on
-        #        event = threading.Event()
-        #        self._active_requests[request_hash] = event
-        #        return None  # We should process this request
         
         # Wait for the other thread to complete (outside the lock)
         if event.wait(timeout=300):  # 5 minute timeout
@@ -6169,6 +6140,39 @@ class UnifiedClient:
                 })
         
         return converted
+
+    def _apply_api_call_stagger(self):
+        """Stagger API calls to prevent simultaneous requests"""
+        api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
+        
+        if api_delay <= 0:
+            return
+        
+        thread_name = threading.current_thread().name
+        
+        # Initialize class-level tracking if needed
+        if not hasattr(self.__class__, '_last_api_call_start'):
+            self.__class__._last_api_call_start = 0
+            self.__class__._api_stagger_lock = threading.Lock()
+        
+        with self.__class__._api_stagger_lock:
+            current_time = time.time()
+            
+            # Calculate next available slot (ensures exact intervals)
+            next_available = self.__class__._last_api_call_start + api_delay
+            
+            if current_time < next_available:
+                sleep_time = next_available - current_time
+                # Reserve this slot
+                self.__class__._last_api_call_start = next_available
+                
+                print(f"⏳ [{thread_name}] Staggering API call by {sleep_time:.1f}s")
+                
+                # Sleep outside lock
+                time.sleep(sleep_time)
+            else:
+                # This thread gets to go immediately
+                self.__class__._last_api_call_start = current_time
  
     def _get_response(self, messages, temperature, max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
         """
@@ -6181,6 +6185,8 @@ class UnifiedClient:
             max_completion_tokens: Maximum completion tokens (for o-series models)
             response_name: Name for saving response
         """
+        self._apply_api_call_stagger()
+
         # FIX: Ensure max_tokens has a value before passing to handlers
         if max_tokens is None and max_completion_tokens is None:
             # Use instance default or standard default
@@ -10607,5 +10613,3 @@ class UnifiedClient:
             print(f"  Thread-local key_index: {getattr(tls, 'key_index', None)}")
         
         print("[DEBUG] End of Multi-Key State\n")
-
-
