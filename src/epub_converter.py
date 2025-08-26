@@ -1932,12 +1932,20 @@ class EPUBCompiler:
                 for opf_name, chapter_order in opf_order.items():
                     # Get OPF core name - handle .htm.xhtml case
                     # Get OPF core name - strip all extensions
+                    # Get OPF core name - strip ALL extensions (handles .htm.xhtml case)
                     opf_core = opf_name
                     # Strip path if present
                     if '/' in opf_core:
                         opf_core = opf_core.split('/')[-1]
-                    # Strip extension
-                    opf_core = opf_core.rsplit('.', 1)[0]  # Remove any extension
+
+                    # Strip ALL extensions, not just the last one
+                    while '.' in opf_core:
+                        parts = opf_core.rsplit('.', 1)
+                        # Check if what follows the dot looks like an extension
+                        if len(parts) == 2 and len(parts[1]) <= 5 and parts[1].lower() in ['html', 'htm', 'xhtml', 'xml']:
+                            opf_core = parts[0]  # Remove this extension and continue
+                        else:
+                            break  # Not an extension, stop here
                     
                     if core_name == opf_core:
                         ordered_files.append((chapter_order, output_file))
