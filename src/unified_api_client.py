@@ -3348,7 +3348,9 @@ class UnifiedClient:
                     else:
                         # Only print this if we're NOT trying the main key
                         if not self._multi_key_mode:
-                            print(f"❌ Not in multi-key mode, cannot retry")
+                            # Don't print confusing message if this is a retry client
+                            if not getattr(self, '_is_retry_client', False):
+                                print(f"❌ Not in multi-key mode, cannot retry")
                         elif main_key_attempted:
                             print(f"❌ Already attempted main key")
                         else:
@@ -3542,6 +3544,9 @@ class UnifiedClient:
                 temp_client._multi_key_mode = False
                 temp_client.use_multi_keys = False
                 temp_client.key_identifier = f"{label} ({fallback_model})"
+
+                # FLAG to indicate this is a retry client
+                temp_client._is_retry_client = True
                 
                 # The client should already be set up from __init__, but verify
                 if not hasattr(temp_client, 'client_type') or temp_client.client_type is None:
@@ -4492,11 +4497,13 @@ class UnifiedClient:
                     else:
                         # Only print this if we're NOT trying the main key
                         if not self._multi_key_mode:
-                            print(f"❌ Not in multi-key mode, cannot retry image")
+                            # Don't print confusing message if this is a retry client
+                            if not getattr(self, '_is_retry_client', False):
+                                print(f"❌ Not in multi-key mode, cannot retry image")
                         elif main_key_attempted:
-                            print(f"❌ Already attempted main key for image")
+                            print(f"❌ Already attempted main key")
                         else:
-                            print(f"❌ Main key not available for image retry")
+                            print(f"❌ Main key not available for retry")
                     
                     # Only reach here if main key wasn't tried or failed
                     print(f"❌ Image content prohibited - cannot continue")
@@ -4684,7 +4691,10 @@ class UnifiedClient:
                 temp_client._multi_key_mode = False
                 temp_client.use_multi_keys = False
                 temp_client.key_identifier = f"{label} ({fallback_model})"
-                
+ 
+                # FLAG to indicate this is a retry client
+                temp_client._is_retry_client = True
+ 
                 # The client should already be set up from __init__, but verify
                 if not hasattr(temp_client, 'client_type') or temp_client.client_type is None:
                     # Force setup if needed - USE FALLBACK VALUES
