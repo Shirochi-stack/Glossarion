@@ -2699,7 +2699,10 @@ class UnifiedClient:
                 "safety filter", "content policy", "harmful content",
                 "blocked by safety", "harm_category", "content_policy_violation",
                 "unsafe content", "violates our usage policies",
-                "prohibited_content", "blockedreason", "content blocked"
+                "prohibited_content", "blockedreason", "content blocked",
+                "responsibleaipolicyviolation", "content management policy",
+                "the response was filtered", "content filtering",
+                "responsible ai", "azure openai's content management"
             ]
             
             try:
@@ -2759,6 +2762,13 @@ class UnifiedClient:
                         last_error = e
                         error_str = str(e)
                         print(f"[{thread_name}] ✗ {self.key_identifier} error: {error_str[:100]}")
+                        
+                        # Check for ANY Azure error with these specific error codes
+                        is_azure_content_filter = False
+                        if "azure" in error_str.lower():
+                            if "400" in error_str and any(indicator in error_str.lower() for indicator in ["responsibleaipolicyviolation", "content_filter", "content management policy"]):
+                                is_azure_content_filter = True
+                                print(f"[Thread-{thread_name}] Azure content filter detected (400 error)")                        
                         
                         # Check for prohibited content FIRST
                         if any(indicator in error_str.lower() for indicator in content_filter_indicators):
@@ -2972,7 +2982,10 @@ class UnifiedClient:
             "safety filter", "content policy", "harmful content",
             "blocked by safety", "harm_category", "content_policy_violation",
             "unsafe content", "violates our usage policies",
-            "prohibited_content", "blockedreason", "content blocked"
+            "prohibited_content", "blockedreason", "content blocked",
+            "responsibleaipolicyviolation", "content management policy",
+            "the response was filtered", "content filtering",
+            "responsible ai", "azure openai's content management"
         ]
         
         for attempt in range(internal_retries):
@@ -3738,7 +3751,10 @@ class UnifiedClient:
                 "blocked by safety", "harm_category", "content_policy_violation",
                 "unsafe content", "violates our usage policies",
                 "prohibited_content", "blockedreason", "content blocked",
-                "inappropriate image", "inappropriate content"
+                "inappropriate image", "inappropriate content",
+                "responsibleaipolicyviolation", "content management policy",
+                "the response was filtered", "content filtering",
+                "responsible ai", "azure openai's content management"
             ]
             
             try:
@@ -3799,6 +3815,14 @@ class UnifiedClient:
                         last_error = e
                         error_str = str(e)
                         print(f"[{thread_name}] ✗ {self.key_identifier} image error: {error_str[:100]}")
+                        
+                        # Check for ANY Azure error with these specific error codes
+                        is_azure_content_filter = False
+                        if "azure" in error_str.lower():
+                            # Azure error detected, check if it's a 400 with content filter
+                            if "400" in error_str and any(indicator in error_str.lower() for indicator in ["responsibleaipolicyviolation", "content_filter", "content management policy"]):
+                                is_azure_content_filter = True
+                                print(f"[Thread-{thread_name}] Azure image content filter detected (400 error)")
                         
                         # Check for prohibited content FIRST (before rate limit check)
                         if any(indicator in error_str.lower() for indicator in content_filter_indicators):
@@ -4040,7 +4064,10 @@ class UnifiedClient:
             "blocked by safety", "harm_category", "content_policy_violation",
             "unsafe content", "violates our usage policies",
             "prohibited_content", "blockedreason", "content blocked",
-            "inappropriate image", "inappropriate content"
+            "inappropriate image", "inappropriate content",
+            "responsibleaipolicyviolation", "content management policy",
+            "the response was filtered", "content filtering",
+            "responsible ai", "azure openai's content management"
         ]
         
         # Use GUI values if not explicitly overridden
