@@ -262,10 +262,24 @@ class MangaTranslator:
             
             # Get confidence threshold
             confidence = self.main_gui.config.get('manga_settings', {}).get('ocr', {}).get('bubble_confidence', 0.5)
+
+            # DEBUG: Add this
+            self._log(f"🔍 DEBUG: Bubble Detection Confidence = {confidence:.2f}", "info")
+            self._log(f"   (Slider value from settings)", "info")
             
             # Detect bubbles
             self._log(f"🎯 Detecting speech bubbles...")
             bubbles = self.bubble_detector.detect_bubbles(image_path, confidence)
+
+            # DEBUG: Add detailed results
+            if bubbles:
+                self._log(f"✅ Detected {len(bubbles)} speech bubbles at confidence >= {confidence:.2f}", "success")
+                for i, (x, y, w, h) in enumerate(bubbles[:5]):  # Show first 5
+                    self._log(f"   Bubble {i+1}: position=({x},{y}) size=({w}x{h})", "info")
+                if len(bubbles) > 5:
+                    self._log(f"   ... and {len(bubbles)-5} more", "info")
+            else:
+                self._log(f"⚠️ No bubbles detected at confidence >= {confidence:.2f}", "warning")
             
             if not bubbles:
                 self._log("⚠️ No bubbles detected, falling back to traditional merging", "warning")
