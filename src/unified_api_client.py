@@ -3327,15 +3327,16 @@ class UnifiedClient:
                         try:
                             # Create temporary client with main key
                             main_response = self._retry_with_main_key(
-                                messages, temperature, max_tokens, max_completion_tokens, context
+                                messages, temperature, max_tokens, max_completion_tokens, context, request_id
                             )
                             
                             if main_response:
                                 content, finish_reason = main_response
                                 print(f"✅ Main key succeeded! Returning response")
-                                return content, finish_reason
+                                return content, finish_reason  # <-- RETURN HERE, DON'T CONTINUE
                             else:
                                 print(f"❌ Main key returned None")
+                                # Fall through to error handling
                                 
                         except Exception as main_error:
                             print(f"❌ Main key error: {str(main_error)[:200]}")
@@ -3343,10 +3344,18 @@ class UnifiedClient:
                             main_error_str = str(main_error).lower()
                             if any(indicator in main_error_str for indicator in content_filter_indicators):
                                 print(f"❌ Main key also hit content filter")
-                            # Continue to normal error handling
+                            # Fall through to error handling
+                    else:
+                        # Only print this if we're NOT trying the main key
+                        if not self._multi_key_mode:
+                            print(f"❌ Not in multi-key mode, cannot retry")
+                        elif main_key_attempted:
+                            print(f"❌ Already attempted main key")
+                        else:
+                            print(f"❌ Main key not available for retry")
                     
-                    # Normal prohibited content handling
-                    print(f"❌ Content prohibited - not retrying further")
+                    # Only reach here if main key wasn't tried or failed
+                    print(f"❌ Content prohibited - cannot continue")
                     self._save_failed_request(messages, e, context)
                     self._track_stats(context, False, type(e).__name__, time.time() - start_time)
                     fallback_content = self._handle_empty_result(messages, context, str(e))
@@ -4462,15 +4471,16 @@ class UnifiedClient:
                         try:
                             # Create temporary client with main key for image
                             main_response = self._retry_image_with_main_key(
-                                messages, image_data, temperature, max_tokens, max_completion_tokens, context
+                                messages, image_data, temperature, max_tokens, max_completion_tokens, context, request_id
                             )
                             
                             if main_response:
                                 content, finish_reason = main_response
                                 print(f"✅ Main key succeeded for image! Returning response")
-                                return content, finish_reason
+                                return content, finish_reason  # <-- RETURN HERE, DON'T CONTINUE
                             else:
                                 print(f"❌ Main key returned None for image")
+                                # Fall through to error handling
                                 
                         except Exception as main_error:
                             print(f"❌ Main key image error: {str(main_error)[:200]}")
@@ -4478,10 +4488,18 @@ class UnifiedClient:
                             main_error_str = str(main_error).lower()
                             if any(indicator in main_error_str for indicator in content_filter_indicators):
                                 print(f"❌ Main key also hit content filter for image")
-                            # Continue to normal error handling
+                            # Fall through to error handling
+                    else:
+                        # Only print this if we're NOT trying the main key
+                        if not self._multi_key_mode:
+                            print(f"❌ Not in multi-key mode, cannot retry image")
+                        elif main_key_attempted:
+                            print(f"❌ Already attempted main key for image")
+                        else:
+                            print(f"❌ Main key not available for image retry")
                     
-                    # Normal prohibited content handling
-                    print(f"❌ Image content prohibited - not retrying further")
+                    # Only reach here if main key wasn't tried or failed
+                    print(f"❌ Image content prohibited - cannot continue")
                     self._save_failed_request(messages, e, context)
                     self._track_stats(context, False, type(e).__name__, time.time() - start_time)
                     fallback_content = self._handle_empty_result(messages, context, str(e))
