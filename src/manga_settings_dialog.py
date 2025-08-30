@@ -54,7 +54,7 @@ class MangaSettingsDialog:
                 'enable_rotation_correction': True,
                 'bubble_detection_enabled': False,
                 'bubble_model_path': '',
-                'bubble_confidence': 0.5
+                'bubble_confidence': 0.8
             },
             'advanced': {
                 'format_detection': True,
