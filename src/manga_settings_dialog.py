@@ -49,12 +49,12 @@ class MangaSettingsDialog:
                 'language_hints': ['ja', 'ko', 'zh'],
                 'confidence_threshold': 0.8,
                 'merge_nearby_threshold': 20,
-                'azure_merge_multiplier': 2.0,
+                'azure_merge_multiplier': 3.0,
                 'text_detection_mode': 'document',
                 'enable_rotation_correction': True,
                 'bubble_detection_enabled': False,
                 'bubble_model_path': '',
-                'bubble_confidence': 0.1
+                'bubble_confidence': 0.5
             },
             'advanced': {
                 'format_detection': True,
