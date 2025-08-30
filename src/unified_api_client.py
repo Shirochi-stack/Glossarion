@@ -7058,6 +7058,17 @@ class UnifiedClient:
     
     def _send_openai(self, messages, temperature, max_tokens, max_completion_tokens, response_name) -> UnifiedResponse:
         """Send request to OpenAI API with o-series model support"""
+        # Check if this is actually Azure
+        if os.getenv('IS_AZURE_ENDPOINT') == '1':
+            # Route to Azure-compatible handler
+            base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
+            return self._send_openai_compatible(
+                messages, temperature, max_tokens,
+                base_url=base_url,
+                response_name=response_name,
+                provider="azure"
+            )
+        
         max_retries = 7
         api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
         
