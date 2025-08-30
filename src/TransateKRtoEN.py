@@ -31,7 +31,10 @@ import csv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
-
+def is_traditional_translation_api(model: str) -> bool:
+    """Check if the model is a traditional translation API"""
+    return model in ['deepl', 'google-translate'] or model.startswith('deepl/') or model.startswith('google-translate/')
+    
 def get_chapter_terminology(is_text_file, chapter_data=None):
     """Get appropriate terminology (Chapter/Section) based on source type"""
     if is_text_file:
@@ -4742,21 +4745,51 @@ class GlossaryManager:
         """Check if two terms match using fuzzy matching"""
         ratio = SequenceMatcher(None, term1.lower(), term2.lower()).ratio()
         return ratio >= threshold
+
+    def _fuzzy_match_rapidfuzz(self, term_lower, text_lower, threshold, term_len):
+        """Use rapidfuzz library for MUCH faster fuzzy matching"""
+        from rapidfuzz import fuzz
+        
+        print(f"📑     Using RapidFuzz (C++ speed)...")
+        start_time = time.time()
+        
+        matches_count = 0
+        threshold_percent = threshold * 100  # rapidfuzz uses 0-100 scale
+        
+        # Can use smaller step because rapidfuzz is so fast
+        step = 1  # Check every position - rapidfuzz can handle it
+        
+        # Process text
+        for i in range(0, len(text_lower) - term_len + 1, step):
+            # Check stop flag every 10000 positions
+            if i > 0 and i % 10000 == 0:
+                if is_stop_requested():
+                    print(f"📑     RapidFuzz stopped at position {i}")
+                    return matches_count
+            
+            window = text_lower[i:i + term_len]
+            
+            # rapidfuzz is fast enough we can check every position
+            if fuzz.ratio(term_lower, window) >= threshold_percent:
+                matches_count += 1
+        
+        elapsed = time.time() - start_time
+        print(f"📑     RapidFuzz found {matches_count} matches in {elapsed:.2f}s")
+        return matches_count
     
     def _find_fuzzy_matches(self, term, text, threshold=0.90):
-        """Find fuzzy matches of a term in text using efficient method with stop flag checks"""
+        """Find fuzzy matches of a term in text using efficient method with parallel processing"""
         start_time = time.time()
         
         term_lower = term.lower()
         text_lower = text.lower()
         term_len = len(term)
-        matches_count = 0
         
-        # Log what we're searching for
-        if len(text) > 100000:  # Only log for large texts
+        # Log what we're searching for (only for large texts)
+        if len(text) > 100000:
             print(f"📑     Searching for '{term}' in {len(text):,} chars (threshold: {threshold})")
         
-        # Use exact matching first for efficiency
+        # Strategy 1: Use exact matching first for efficiency
         exact_start = time.time()
         matches_count = text_lower.count(term_lower)
         exact_time = time.time() - exact_start
@@ -4766,45 +4799,146 @@ class GlossaryManager:
                 print(f"📑     Found {matches_count} exact matches in {exact_time:.3f}s")
             return matches_count
         
-        # If exact matches are low and fuzzy threshold is below 1.0, do fuzzy matching
+        # Strategy 2: Try rapidfuzz if available (much faster)
         if matches_count == 0 and threshold < 1.0:
-            print(f"📑     No exact matches, starting fuzzy search (this may be slow)...")
-            fuzzy_start = time.time()
+            try:
+                from rapidfuzz import fuzz
+                return self._fuzzy_match_rapidfuzz(term_lower, text_lower, threshold, term_len)
+            except ImportError:
+                pass  # Fall back to parallel/sequential
             
-            # For efficiency, only check every N characters
-            step = max(1, term_len // 2)
-            total_windows = (len(text) - term_len + 1) // step
+            # Strategy 3: Fall back to parallel/sequential if rapidfuzz not available
+            # Check if parallel processing is enabled
+            extraction_workers = int(os.getenv("EXTRACTION_WORKERS", "1"))
             
-            print(f"📑     Checking ~{total_windows} windows with step size {step}")
+            if extraction_workers > 1 and len(text) > 50000:  # Use parallel for large texts
+                return self._parallel_fuzzy_search(term_lower, text_lower, threshold, term_len, extraction_workers)
+            else:
+                return self._sequential_fuzzy_search(term_lower, text_lower, threshold, term_len)
+            # Check if parallel processing is enabled
+            extraction_workers = int(os.getenv("EXTRACTION_WORKERS", "1"))
             
-            windows_checked = 0
-            for i in range(0, len(text) - term_len + 1, step):
-                # Check stop flag frequently in long loops
-                if i > 0 and i % (step * 100) == 0:
-                    if is_stop_requested():
-                        return matches_count
-                    
-                    # Progress log for very long operations
-                    if windows_checked % 1000 == 0 and windows_checked > 0:
-                        elapsed = time.time() - fuzzy_start
-                        rate = windows_checked / elapsed if elapsed > 0 else 0
-                        eta = (total_windows - windows_checked) / rate if rate > 0 else 0
-                        print(f"📑     Fuzzy progress: {windows_checked}/{total_windows} windows, {rate:.0f} w/s, ETA: {eta:.1f}s")
-                
-                window = text_lower[i:i + term_len]
-                if self._fuzzy_match(term_lower, window, threshold):
-                    matches_count += 1
-                
-                windows_checked += 1
-            
-            fuzzy_time = time.time() - fuzzy_start
-            print(f"📑     Fuzzy search completed in {fuzzy_time:.2f}s, found {matches_count} matches")
-        
-        total_time = time.time() - start_time
-        if total_time > 1.0:  # Log slow searches
-            print(f"📑     ⚠️ Slow search: '{term}' took {total_time:.2f}s total")
+            if extraction_workers > 1 and len(text) > 50000:  # Use parallel for large texts
+                return self._parallel_fuzzy_search(term_lower, text_lower, threshold, term_len, extraction_workers)
+            else:
+                return self._sequential_fuzzy_search(term_lower, text_lower, threshold, term_len)
         
         return matches_count
+    
+    def _parallel_fuzzy_search(self, term_lower, text_lower, threshold, term_len, num_workers):
+        """Parallel fuzzy search using ThreadPoolExecutor"""
+        print(f"📑     Starting parallel fuzzy search with {num_workers} workers...")
+        
+        text_len = len(text_lower)
+        matches_count = 0
+        
+        # Split text into overlapping chunks for parallel processing
+        chunk_size = max(text_len // num_workers, term_len * 100)
+        chunks = []
+        
+        for i in range(0, text_len, chunk_size):
+            # Add overlap to avoid missing matches at boundaries
+            end = min(i + chunk_size + term_len - 1, text_len)
+            chunks.append((i, text_lower[i:end]))
+        
+        print(f"📑     Split into {len(chunks)} chunks of ~{chunk_size:,} chars each")
+        
+        # Process chunks in parallel
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = []
+            
+            for chunk_idx, (start_pos, chunk_text) in enumerate(chunks):
+                if is_stop_requested():
+                    return matches_count
+                
+                future = executor.submit(
+                    self._fuzzy_search_chunk,
+                    term_lower, chunk_text, threshold, term_len, chunk_idx, len(chunks)
+                )
+                futures.append(future)
+            
+            # Collect results
+            for future in as_completed(futures):
+                if is_stop_requested():
+                    executor.shutdown(wait=False)
+                    return matches_count
+                
+                try:
+                    chunk_matches = future.result()
+                    matches_count += chunk_matches
+                except Exception as e:
+                    print(f"📑     ⚠️ Chunk processing error: {e}")
+        
+        print(f"📑     Parallel fuzzy search found {matches_count} matches")
+        return matches_count
+    
+    def _fuzzy_search_chunk(self, term_lower, chunk_text, threshold, term_len, chunk_idx, total_chunks):
+        """Process a single chunk for fuzzy matches"""
+        chunk_matches = 0
+        
+        # Use a more efficient step size - no need to check every position
+        step = max(1, term_len // 3)  # Check every third of term length
+        
+        for i in range(0, len(chunk_text) - term_len + 1, step):
+            # Check stop flag periodically
+            if i > 0 and i % 1000 == 0:
+                if is_stop_requested():
+                    return chunk_matches
+            
+            window = chunk_text[i:i + term_len]
+            
+            # Use SequenceMatcher for fuzzy matching
+            if SequenceMatcher(None, term_lower, window).ratio() >= threshold:
+                chunk_matches += 1
+        
+        # Log progress for this chunk
+        if total_chunks > 1:
+            print(f"📑     Chunk {chunk_idx + 1}/{total_chunks} completed: {chunk_matches} matches")
+        
+        return chunk_matches
+    
+    def _sequential_fuzzy_search(self, term_lower, text_lower, threshold, term_len):
+        """Sequential fuzzy search (fallback for small texts or single worker)"""
+        print(f"📑     Starting sequential fuzzy search...")
+        fuzzy_start = time.time()
+        
+        matches_count = 0
+        
+        # More efficient step size
+        step = max(1, term_len // 3)
+        total_windows = (len(text_lower) - term_len + 1) // step
+        
+        print(f"📑     Checking ~{total_windows:,} windows with step size {step}")
+        
+        windows_checked = 0
+        for i in range(0, len(text_lower) - term_len + 1, step):
+            # Check stop flag frequently
+            if i > 0 and i % (step * 100) == 0:
+                if is_stop_requested():
+                    return matches_count
+                
+                # Progress log for very long operations
+                if windows_checked % 1000 == 0 and windows_checked > 0:
+                    elapsed = time.time() - fuzzy_start
+                    rate = windows_checked / elapsed if elapsed > 0 else 0
+                    eta = (total_windows - windows_checked) / rate if rate > 0 else 0
+                    print(f"📑     Progress: {windows_checked}/{total_windows} windows, {rate:.0f} w/s, ETA: {eta:.1f}s")
+            
+            window = text_lower[i:i + term_len]
+            if SequenceMatcher(None, term_lower, window).ratio() >= threshold:
+                matches_count += 1
+            
+            windows_checked += 1
+        
+        fuzzy_time = time.time() - fuzzy_start
+        print(f"📑     Sequential fuzzy search completed in {fuzzy_time:.2f}s, found {matches_count} matches")
+        
+        return matches_count
+    
+    def _fuzzy_match(self, term1, term2, threshold=0.90):
+        """Check if two terms match using fuzzy matching (unchanged)"""
+        ratio = SequenceMatcher(None, term1.lower(), term2.lower()).ratio()
+        return ratio >= threshold
     
     def _strip_honorific(self, term, language_hint='unknown'):
         """Strip honorific from a term if present"""
@@ -4829,6 +4963,86 @@ class GlossaryManager:
                     return term[:-len(honorific)]
         
         return term
+
+    def _translate_chunk_traditional(self, chunk_text, chunk_index, total_chunks, chapter_title=""):
+        """Simplified translation for traditional APIs (DeepL, Google Translate)"""
+        
+        print(f"📝 Using traditional translation API for chunk {chunk_index}/{total_chunks}")
+        
+        # Traditional APIs don't use complex prompts, just need the text
+        messages = []
+        
+        # Add minimal system context for language detection
+        profile = self.active_profile
+        if profile == 'korean':
+            lang_hint = "Translating from Korean to English"
+        elif profile == 'japanese':
+            lang_hint = "Translating from Japanese to English"
+        elif profile == 'chinese':
+            lang_hint = "Translating from Chinese to English"
+        else:
+            lang_hint = "Translating to English"
+        
+        messages.append({
+            "role": "system",
+            "content": lang_hint
+        })
+        
+        # For traditional APIs, we need to handle glossary differently
+        # Apply glossary terms as preprocessing if available
+        processed_text = chunk_text
+        
+        if hasattr(self, 'glossary_manager') and self.glossary_manager and self.glossary_manager.entries:
+            # Pre-process: Mark glossary terms with placeholders
+            glossary_placeholders = {}
+            placeholder_index = 0
+            
+            for entry in self.glossary_manager.entries:
+                source = entry.get('source', '')
+                target = entry.get('target', '')
+                
+                if source and target and source in processed_text:
+                    # Create unique placeholder
+                    placeholder = f"[[GLOSS_{placeholder_index}]]"
+                    glossary_placeholders[placeholder] = target
+                    processed_text = processed_text.replace(source, placeholder)
+                    placeholder_index += 1
+            
+            print(f"📚 Applied {len(glossary_placeholders)} glossary placeholders")
+        
+        # Add the text to translate
+        messages.append({
+            "role": "user",
+            "content": processed_text
+        })
+        
+        # Send to API
+        try:
+            response = self.client.send(messages)
+            
+            if response and response.content:
+                translated_text = response.content
+                
+                # Post-process: Replace placeholders with glossary terms
+                if 'glossary_placeholders' in locals():
+                    for placeholder, target in glossary_placeholders.items():
+                        translated_text = translated_text.replace(placeholder, target)
+                    print(f"✅ Restored {len(glossary_placeholders)} glossary terms")
+                
+                # Log detected language if available
+                if hasattr(response, 'usage') and response.usage:
+                    detected_lang = response.usage.get('detected_source_lang')
+                    if detected_lang:
+                        print(f"🔍 Detected source language: {detected_lang}")
+                
+                return translated_text
+            else:
+                print("❌ No translation received from traditional API")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Traditional API translation error: {e}")
+            return None
     
     def _extract_with_custom_prompt(self, custom_prompt, all_text, language, 
                                    min_frequency, max_names, max_titles, 
@@ -4852,13 +5066,16 @@ class GlossaryManager:
             custom_prompt = custom_prompt + filter_instruction
         
         try:
-            MODEL = os.getenv("MODEL", "gemini-1.5-flash")
+            MODEL = os.getenv("MODEL", "gemini-2.0-flash")
             API_KEY = (os.getenv("API_KEY") or 
                        os.getenv("OPENAI_API_KEY") or 
                        os.getenv("OPENAI_OR_Gemini_API_KEY") or
                        os.getenv("GEMINI_API_KEY"))
             
-            if not API_KEY:
+            if is_traditional_translation_api(MODEL):
+                return self._translate_chunk_traditional(chunk_text, chunk_index, total_chunks, chapter_title)
+            
+            elif not API_KEY:
                 print(f"📑 No API key found, falling back to pattern-based extraction")
                 return self._extract_with_patterns(all_text, language, min_frequency, 
                                                  max_names, max_titles, 50,
@@ -5508,21 +5725,107 @@ Text to analyze:
         names_with_honorifics = {}
         standalone_names = {}
         
-        print("📑 Scanning for names with honorifics...")
+        # Check if parallel processing is enabled
+        extraction_workers = int(os.getenv("EXTRACTION_WORKERS", "1"))
         
-        # Extract names with honorifics
-        total_honorifics = len(honorifics_to_use)
-        for idx, honorific in enumerate(honorifics_to_use):
-            # Check stop flag before each honorific
-            if is_stop_requested():
-                print(f"📑 ❌ Extraction stopped at honorific {idx}/{total_honorifics}")
-                return {}
+        # PARALLEL HONORIFIC PROCESSING
+        if extraction_workers > 1 and len(honorifics_to_use) > 3:
+            print(f"📑 Scanning for names with honorifics (parallel with {extraction_workers} workers)...")
             
-            print(f"📑 Processing honorific {idx + 1}/{total_honorifics}: '{honorific}'")
+            # Create a wrapper function that can be called in parallel
+            def process_honorific(args):
+                """Process a single honorific in a worker thread"""
+                honorific, idx, total = args
+                
+                # Check stop flag
+                if is_stop_requested():
+                    return None, None
+                
+                print(f"📑 Worker processing honorific {idx}/{total}: '{honorific}'")
+                
+                # Local dictionaries for this worker
+                local_names_with = {}
+                local_standalone = {}
+                
+                # Call the extraction method
+                self._extract_names_for_honorific(
+                    honorific, all_text, language_hint,
+                    min_frequency, local_names_with,
+                    local_standalone, is_valid_name, fuzzy_threshold
+                )
+                
+                return local_names_with, local_standalone
             
-            self._extract_names_for_honorific(honorific, all_text, language_hint, 
-                                            min_frequency, names_with_honorifics, 
-                                            standalone_names, is_valid_name, fuzzy_threshold)
+            # Prepare arguments for parallel processing
+            honorific_args = [
+                (honorific, idx + 1, len(honorifics_to_use))
+                for idx, honorific in enumerate(honorifics_to_use)
+            ]
+            
+            # Process honorifics in parallel
+            with ThreadPoolExecutor(max_workers=min(extraction_workers, len(honorifics_to_use))) as executor:
+                futures = []
+                
+                for args in honorific_args:
+                    if is_stop_requested():
+                        executor.shutdown(wait=False)
+                        return {}
+                    
+                    future = executor.submit(process_honorific, args)
+                    futures.append(future)
+                
+                # Collect results as they complete
+                completed = 0
+                for future in as_completed(futures):
+                    if is_stop_requested():
+                        executor.shutdown(wait=False)
+                        return {}
+                    
+                    try:
+                        result = future.result()
+                        if result and result[0] is not None:
+                            local_names_with, local_standalone = result
+                            
+                            # Merge results (thread-safe since we're in main thread)
+                            for name, count in local_names_with.items():
+                                if name not in names_with_honorifics:
+                                    names_with_honorifics[name] = count
+                                else:
+                                    names_with_honorifics[name] = max(names_with_honorifics[name], count)
+                            
+                            for name, count in local_standalone.items():
+                                if name not in standalone_names:
+                                    standalone_names[name] = count
+                                else:
+                                    standalone_names[name] = max(standalone_names[name], count)
+                        
+                        completed += 1
+                        if completed % 5 == 0 or completed == len(honorifics_to_use):
+                            print(f"📑 Honorific processing: {completed}/{len(honorifics_to_use)} completed")
+                            
+                    except Exception as e:
+                        print(f"⚠️ Failed to process honorific: {e}")
+                        completed += 1
+            
+            print(f"📑 Parallel honorific processing completed: found {len(names_with_honorifics)} names")
+            
+        else:
+            # SEQUENTIAL PROCESSING (fallback)
+            print("📑 Scanning for names with honorifics...")
+            
+            # Extract names with honorifics
+            total_honorifics = len(honorifics_to_use)
+            for idx, honorific in enumerate(honorifics_to_use):
+                # Check stop flag before each honorific
+                if is_stop_requested():
+                    print(f"📑 ❌ Extraction stopped at honorific {idx}/{total_honorifics}")
+                    return {}
+                
+                print(f"📑 Processing honorific {idx + 1}/{total_honorifics}: '{honorific}'")
+                
+                self._extract_names_for_honorific(honorific, all_text, language_hint, 
+                                                min_frequency, names_with_honorifics, 
+                                                standalone_names, is_valid_name, fuzzy_threshold)
         
         # Check stop flag before processing terms
         if is_stop_requested():
@@ -5749,6 +6052,9 @@ Text to analyze:
                        os.getenv("OPENAI_API_KEY") or 
                        os.getenv("OPENAI_OR_Gemini_API_KEY") or
                        os.getenv("GEMINI_API_KEY"))
+
+            if is_traditional_translation_api(MODEL):
+                return
             
             if not API_KEY:
                 print(f"📑 No API key found, skipping translation")
@@ -7874,67 +8180,72 @@ def main(log_callback=None, stop_callback=None):
         else:
             print("📑 Using existing glossary:", config.MANUAL_GLOSSARY)
     elif os.getenv("ENABLE_AUTO_GLOSSARY", "0") == "1":
-        print("📑 Starting automatic glossary generation...")
-        
-        try:
-            instructions = ""
-            glossary_manager.save_glossary(out, chapters, instructions)
-            print("✅ Automatic glossary generation COMPLETED")
-            
-            # Handle deferred glossary appending
-            if os.getenv('DEFER_GLOSSARY_APPEND') == '1':
-                print("📑 Processing deferred glossary append to system prompt...")
+        model = os.getenv("MODEL", "gpt-4")
+        if is_traditional_translation_api(model):
+            print("📑 Automatic glossary generation disabled")
+            print(f"   {model} does not support glossary extraction")
+            print("   Traditional translation APIs cannot identify character names/terms")
+        else:
+            print("📑 Starting automatic glossary generation...")
+            try:
+                instructions = ""
+                glossary_manager.save_glossary(out, chapters, instructions)
+                print("✅ Automatic glossary generation COMPLETED")
                 
-                glossary_path = os.path.join(out, "glossary.json")
-                if os.path.exists(glossary_path):
-                    try:
-                        with open(glossary_path, 'r', encoding='utf-8') as f:
-                            glossary_data = json.load(f)
-                        
-                        # Format glossary for prompt
-                        formatted_entries = {}
-                        
-                        if isinstance(glossary_data, dict) and 'entries' in glossary_data:
-                            formatted_entries = glossary_data['entries']
-                        elif isinstance(glossary_data, dict):
-                            formatted_entries = {k: v for k, v in glossary_data.items() if k != "metadata"}
-                        
-                        if formatted_entries:
-                            glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
+                # Handle deferred glossary appending
+                if os.getenv('DEFER_GLOSSARY_APPEND') == '1':
+                    print("📑 Processing deferred glossary append to system prompt...")
+                    
+                    glossary_path = os.path.join(out, "glossary.json")
+                    if os.path.exists(glossary_path):
+                        try:
+                            with open(glossary_path, 'r', encoding='utf-8') as f:
+                                glossary_data = json.load(f)
                             
-                            # Get the stored append prompt
-                            glossary_prompt = os.getenv('GLOSSARY_APPEND_PROMPT', 
-                                "Character/Term Glossary (use these translations consistently):")
+                            # Format glossary for prompt
+                            formatted_entries = {}
                             
-                            # Update the system prompt in config
-                            current_prompt = config.PROMPT
-                            if current_prompt:
-                                current_prompt += "\n\n"
-                            current_prompt += f"{glossary_prompt}\n{glossary_block}"
+                            if isinstance(glossary_data, dict) and 'entries' in glossary_data:
+                                formatted_entries = glossary_data['entries']
+                            elif isinstance(glossary_data, dict):
+                                formatted_entries = {k: v for k, v in glossary_data.items() if k != "metadata"}
                             
-                            # Update the config with the new prompt
-                            config.PROMPT = current_prompt
-                            
-                            print(f"✅ Added {len(formatted_entries)} auto-generated glossary entries to system prompt")
-                            
-                            # Clear the deferred flag
-                            del os.environ['DEFER_GLOSSARY_APPEND']
-                            if 'GLOSSARY_APPEND_PROMPT' in os.environ:
-                                del os.environ['GLOSSARY_APPEND_PROMPT']
-                        else:
-                            print("⚠️ Auto-generated glossary has no entries - skipping append")
-                            # Still clear the deferred flag even if we don't append
-                            if 'DEFER_GLOSSARY_APPEND' in os.environ:
+                            if formatted_entries:
+                                glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
+                                
+                                # Get the stored append prompt
+                                glossary_prompt = os.getenv('GLOSSARY_APPEND_PROMPT', 
+                                    "Character/Term Glossary (use these translations consistently):")
+                                
+                                # Update the system prompt in config
+                                current_prompt = config.PROMPT
+                                if current_prompt:
+                                    current_prompt += "\n\n"
+                                current_prompt += f"{glossary_prompt}\n{glossary_block}"
+                                
+                                # Update the config with the new prompt
+                                config.PROMPT = current_prompt
+                                
+                                print(f"✅ Added {len(formatted_entries)} auto-generated glossary entries to system prompt")
+                                
+                                # Clear the deferred flag
                                 del os.environ['DEFER_GLOSSARY_APPEND']
-                            if 'GLOSSARY_APPEND_PROMPT' in os.environ:
-                                del os.environ['GLOSSARY_APPEND_PROMPT']
-                    except Exception as e:
-                        print(f"⚠️ Failed to append auto-generated glossary: {e}")
-                else:
-                    print("⚠️ No glossary file found after automatic generation")
-            
-        except Exception as e:
-            print(f"❌ Glossary generation failed: {e}")
+                                if 'GLOSSARY_APPEND_PROMPT' in os.environ:
+                                    del os.environ['GLOSSARY_APPEND_PROMPT']
+                            else:
+                                print("⚠️ Auto-generated glossary has no entries - skipping append")
+                                # Still clear the deferred flag even if we don't append
+                                if 'DEFER_GLOSSARY_APPEND' in os.environ:
+                                    del os.environ['DEFER_GLOSSARY_APPEND']
+                                if 'GLOSSARY_APPEND_PROMPT' in os.environ:
+                                    del os.environ['GLOSSARY_APPEND_PROMPT']
+                        except Exception as e:
+                            print(f"⚠️ Failed to append auto-generated glossary: {e}")
+                    else:
+                        print("⚠️ No glossary file found after automatic generation")
+                
+            except Exception as e:
+                print(f"❌ Glossary generation failed: {e}")
     else:
         print("📑 Automatic glossary generation disabled")
         # Don't create an empty glossary - let any existing manual glossary remain
