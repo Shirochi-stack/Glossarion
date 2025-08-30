@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
-
+from bubble_detector import BubbleDetector
 
 # Google Cloud Vision imports
 try:
@@ -61,17 +61,57 @@ class TextRegion:
 class MangaTranslator:
     """Main class for manga translation pipeline using Google Cloud Vision + API Key"""
     
-    def __init__(self, google_credentials_path: str, unified_client, main_gui, log_callback=None):
-        """Initialize with Google Cloud Vision credentials and API client from main GUI"""
+    def __init__(self, ocr_config: dict, unified_client, main_gui, log_callback=None):
+        """Initialize with OCR configuration and API client from main GUI
         
-        if not GOOGLE_CLOUD_VISION_AVAILABLE:
-            raise ImportError("Google Cloud Vision required. Install with: pip install google-cloud-vision")
+        Args:
+            ocr_config: Dictionary with OCR provider settings:
+                {
+                    'provider': 'google' or 'azure',
+                    'google_credentials_path': str (if google),
+                    'azure_key': str (if azure),
+                    'azure_endpoint': str (if azure)
+                }
+        """
         
-        # Set up Google Cloud Vision
-        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_credentials_path
-        self.vision_client = vision.ImageAnnotatorClient()
+        # Determine OCR provider
+        self.ocr_provider = ocr_config.get('provider', 'google')
+        self.bubble_detector = None
+
+        if self.ocr_provider == 'google':
+            if not GOOGLE_CLOUD_VISION_AVAILABLE:
+                raise ImportError("Google Cloud Vision required. Install with: pip install google-cloud-vision")
+            
+            google_path = ocr_config.get('google_credentials_path')
+            if not google_path:
+                raise ValueError("Google credentials path required")
+                
+            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_path
+            self.vision_client = vision.ImageAnnotatorClient()
+            
+        elif self.ocr_provider == 'azure':
+            # Import Azure libraries
+            try:
+                from azure.cognitiveservices.vision.computervision import ComputerVisionClient
+                from msrest.authentication import CognitiveServicesCredentials
+                self.azure_cv = ComputerVisionClient
+                self.azure_creds = CognitiveServicesCredentials
+            except ImportError:
+                raise ImportError("Azure Computer Vision required. Install with: pip install azure-cognitiveservices-vision-computervision")
+            
+            azure_key = ocr_config.get('azure_key')
+            azure_endpoint = ocr_config.get('azure_endpoint')
+            
+            if not azure_key or not azure_endpoint:
+                raise ValueError("Azure key and endpoint required")
+                
+            self.vision_client = self.azure_cv(
+                azure_endpoint,
+                self.azure_creds(azure_key)
+            )
+        else:
+            raise ValueError(f"Unknown OCR provider: {self.ocr_provider}")
         
-        # API client from main GUI
         self.client = unified_client
         self.main_gui = main_gui
         self.log_callback = log_callback
@@ -201,6 +241,109 @@ class MangaTranslator:
         if self.stop_flag and self.stop_flag.is_set():
             return True
         return False
+
+    def _merge_with_bubble_detection(self, regions: List[TextRegion], image_path: str) -> List[TextRegion]:
+        """Use YOLO bubble detection to group text regions"""
+        try:
+            # Initialize detector if needed
+            if self.bubble_detector is None:
+                self.bubble_detector = BubbleDetector()
+                
+                # Load model from config
+                model_path = self.main_gui.config.get('manga_settings', {}).get('ocr', {}).get('bubble_model_path')
+                if not model_path:
+                    self._log("❌ No bubble detection model configured", "error")
+                    return self._merge_nearby_regions(regions)
+                
+                self._log(f"🔧 Loading bubble detection model: {os.path.basename(model_path)}")
+                if not self.bubble_detector.load_model(model_path):
+                    self._log("❌ Failed to load bubble detection model", "error")
+                    return self._merge_nearby_regions(regions)
+            
+            # Get confidence threshold
+            confidence = self.main_gui.config.get('manga_settings', {}).get('ocr', {}).get('bubble_confidence', 0.5)
+            
+            # Detect bubbles
+            self._log(f"🎯 Detecting speech bubbles...")
+            bubbles = self.bubble_detector.detect_bubbles(image_path, confidence)
+            
+            if not bubbles:
+                self._log("⚠️ No bubbles detected, falling back to traditional merging", "warning")
+                return self._merge_nearby_regions(regions)
+            
+            self._log(f"✅ Detected {len(bubbles)} speech bubbles")
+            
+            # Group text regions into detected bubbles
+            merged_regions = []
+            used_indices = set()
+            
+            for bubble_idx, (bx, by, bw, bh) in enumerate(bubbles):
+                bubble_texts = []
+                bubble_regions = []
+                
+                # Find text regions inside this bubble
+                for i, region in enumerate(regions):
+                    if i in used_indices:
+                        continue
+                    
+                    rx, ry, rw, rh = region.bounding_box
+                    
+                    # Check if region center is inside bubble
+                    region_center_x = rx + rw / 2
+                    region_center_y = ry + rh / 2
+                    
+                    # Check if center point is inside bubble bounds
+                    if (bx <= region_center_x <= bx + bw and 
+                        by <= region_center_y <= by + bh):
+                        bubble_texts.append(region.text)
+                        bubble_regions.append(region)
+                        used_indices.add(i)
+                
+                # Create merged region for this bubble if it contains text
+                if bubble_regions:
+                    # Combine all text
+                    merged_text = " ".join(bubble_texts)
+                    
+                    # Combine all vertices if available
+                    all_vertices = []
+                    for r in bubble_regions:
+                        if hasattr(r, 'vertices') and r.vertices:
+                            all_vertices.extend(r.vertices)
+                    
+                    # If no vertices, create from bubble bounds
+                    if not all_vertices:
+                        all_vertices = [
+                            (bx, by),
+                            (bx + bw, by),
+                            (bx + bw, by + bh),
+                            (bx, by + bh)
+                        ]
+                    
+                    # Create merged region
+                    merged_region = TextRegion(
+                        text=merged_text,
+                        vertices=all_vertices,
+                        bounding_box=(bx, by, bw, bh),
+                        confidence=0.95,
+                        region_type='bubble_detected'
+                    )
+                    merged_regions.append(merged_region)
+                    
+                    self._log(f"   Bubble {bubble_idx + 1}: Merged {len(bubble_regions)} text regions")
+            
+            # Add any text regions that weren't inside any bubble
+            for i, region in enumerate(regions):
+                if i not in used_indices:
+                    merged_regions.append(region)
+                    self._log(f"   Text outside bubbles: '{region.text[:30]}...'")
+            
+            self._log(f"📊 Bubble detection complete: {len(regions)} regions → {len(merged_regions)} final regions")
+            return merged_regions
+            
+        except Exception as e:
+            self._log(f"❌ Bubble detection error: {str(e)}", "error")
+            self._log("   Falling back to traditional merging", "warning")
+            return self._merge_nearby_regions(regions)
     
     def set_full_page_context(self, enabled: bool, custom_prompt: str = None):
         """Configure full page context translation mode
@@ -284,8 +427,9 @@ class MangaTranslator:
             print(message)
             
     def detect_text_regions(self, image_path: str) -> List[TextRegion]:
-        """Detect text regions using Google Cloud Vision API with preprocessing"""
+        """Detect text regions using configured OCR provider (Google or Azure)"""
         self._log(f"🔍 Detecting text regions in: {os.path.basename(image_path)}")
+        self._log(f"   Using OCR provider: {self.ocr_provider.upper()}")
         
         try:
             # Get manga settings from main_gui config
@@ -302,91 +446,191 @@ class MangaTranslator:
                 with open(image_path, 'rb') as image_file:
                     processed_image_data = image_file.read()
             
-            # Create Vision API image object
-            image = vision.Image(content=processed_image_data)
-            
-            # Configure text detection based on settings
-            detection_mode = ocr_settings.get('text_detection_mode', 'document')
-            
-            if detection_mode == 'document':
-                # Perform document text detection (better for manga/dense text)
-                response = self.vision_client.document_text_detection(
-                    image=image,
-                    image_context=vision.ImageContext(
-                        language_hints=ocr_settings.get('language_hints', ['ja', 'ko', 'zh'])
-                    )
-                )
-            else:
-                # Regular text detection
-                response = self.vision_client.text_detection(
-                    image=image,
-                    image_context=vision.ImageContext(
-                        language_hints=ocr_settings.get('language_hints', ['ja', 'ko', 'zh'])
-                    )
-                )
-            
-            if response.error.message:
-                raise Exception(f"Cloud Vision API error: {response.error.message}")
-            
             regions = []
             confidence_threshold = ocr_settings.get('confidence_threshold', 0.8)
             
-            # Process each page (usually just one for manga)
-            for page in response.full_text_annotation.pages:
-                for block in page.blocks:
-                    # Extract text first to check if it's worth processing
-                    block_text = ""
-                    total_confidence = 0.0
-                    word_count = 0
-                    
-                    for paragraph in block.paragraphs:
-                        for word in paragraph.words:
-                            # Get word-level confidence (more reliable than block level)
-                            word_confidence = getattr(word, 'confidence', 0.0)  # Default to 0 if not available
-                            word_text = ''.join([symbol.text for symbol in word.symbols])
-                            
-                            # Only include words above threshold
-                            if word_confidence >= confidence_threshold:
-                                block_text += word_text + " "
-                                total_confidence += word_confidence
-                                word_count += 1
-                            else:
-                                self._log(f"   Skipping low confidence word ({word_confidence:.2f}): {word_text}")
-                    
-                    block_text = block_text.strip()
-                    
-                    # Skip if no confident words found
-                    if word_count == 0 or not block_text:
-                        self._log(f"   Skipping block - no words above threshold {confidence_threshold}")
-                        continue
-                    
-                    # Calculate average confidence for the block
-                    avg_confidence = total_confidence / word_count if word_count > 0 else 0.0
-                    
-                    # Extract vertices and create region
-                    vertices = [(v.x, v.y) for v in block.bounding_box.vertices]
-                    
-                    # Calculate bounding box
-                    xs = [v[0] for v in vertices]
-                    ys = [v[1] for v in vertices]
-                    x_min, x_max = min(xs), max(xs)
-                    y_min, y_max = min(ys), max(ys)
-                    
-                    region = TextRegion(
-                        text=block_text,
-                        vertices=vertices,
-                        bounding_box=(x_min, y_min, x_max - x_min, y_max - y_min),
-                        confidence=avg_confidence,  # Use average confidence
-                        region_type='text_block'
+            # Route to appropriate provider
+            if self.ocr_provider == 'google':
+                # [YOUR EXISTING GOOGLE CLOUD VISION CODE HERE - keep it exactly as is]
+                # Create Vision API image object
+                image = vision.Image(content=processed_image_data)
+                
+                # Configure text detection based on settings
+                detection_mode = ocr_settings.get('text_detection_mode', 'document')
+                
+                if detection_mode == 'document':
+                    # Perform document text detection (better for manga/dense text)
+                    response = self.vision_client.document_text_detection(
+                        image=image,
+                        image_context=vision.ImageContext(
+                            language_hints=ocr_settings.get('language_hints', ['ja', 'ko', 'zh'])
+                        )
                     )
-                    regions.append(region)
-                    self._log(f"   Found text region ({avg_confidence:.2f}): {block_text[:50]}...")
+                else:
+                    # Regular text detection
+                    response = self.vision_client.text_detection(
+                        image=image,
+                        image_context=vision.ImageContext(
+                            language_hints=ocr_settings.get('language_hints', ['ja', 'ko', 'zh'])
+                        )
+                    )
+                
+                if response.error.message:
+                    raise Exception(f"Cloud Vision API error: {response.error.message}")
+                
+                # Process each page (usually just one for manga)
+                for page in response.full_text_annotation.pages:
+                    for block in page.blocks:
+                        # [YOUR EXISTING BLOCK PROCESSING CODE - keep it exactly as is]
+                        # Extract text first to check if it's worth processing
+                        block_text = ""
+                        total_confidence = 0.0
+                        word_count = 0
+                        
+                        for paragraph in block.paragraphs:
+                            for word in paragraph.words:
+                                # Get word-level confidence (more reliable than block level)
+                                word_confidence = getattr(word, 'confidence', 0.0)  # Default to 0 if not available
+                                word_text = ''.join([symbol.text for symbol in word.symbols])
+                                
+                                # Only include words above threshold
+                                if word_confidence >= confidence_threshold:
+                                    block_text += word_text + " "
+                                    total_confidence += word_confidence
+                                    word_count += 1
+                                else:
+                                    self._log(f"   Skipping low confidence word ({word_confidence:.2f}): {word_text}")
+                        
+                        block_text = block_text.strip()
+                        
+                        # Skip if no confident words found
+                        if word_count == 0 or not block_text:
+                            self._log(f"   Skipping block - no words above threshold {confidence_threshold}")
+                            continue
+                        
+                        # Calculate average confidence for the block
+                        avg_confidence = total_confidence / word_count if word_count > 0 else 0.0
+                        
+                        # Extract vertices and create region
+                        vertices = [(v.x, v.y) for v in block.bounding_box.vertices]
+                        
+                        # Calculate bounding box
+                        xs = [v[0] for v in vertices]
+                        ys = [v[1] for v in vertices]
+                        x_min, x_max = min(xs), max(xs)
+                        y_min, y_max = min(ys), max(ys)
+                        
+                        region = TextRegion(
+                            text=block_text,
+                            vertices=vertices,
+                            bounding_box=(x_min, y_min, x_max - x_min, y_max - y_min),
+                            confidence=avg_confidence,  # Use average confidence
+                            region_type='text_block'
+                        )
+                        regions.append(region)
+                        self._log(f"   Found text region ({avg_confidence:.2f}): {block_text[:50]}...")
+                        
+            elif self.ocr_provider == 'azure':
+                import io
+                import time
+                from azure.cognitiveservices.vision.computervision.models import OperationStatusCodes
+                
+                # Create stream from image data
+                image_stream = io.BytesIO(processed_image_data)
+                
+                # Map language hints to Azure language codes
+                language_hints = ocr_settings.get('language_hints', ['ja', 'ko', 'zh'])
+                azure_lang = 'ja'  # Default
+                if 'ja' in language_hints:
+                    azure_lang = 'ja'
+                elif 'zh' in language_hints:
+                    azure_lang = 'zh-Hans'
+                elif 'ko' in language_hints:
+                    azure_lang = 'ko'
+                
+                self._log(f"   Using Azure Read API with language: {azure_lang}")
+                
+                # Start Read operation
+                read_response = self.vision_client.read_in_stream(
+                    image_stream,
+                    raw=True,
+                    language=azure_lang
+                )
+                
+                # Get operation ID
+                operation_location = read_response.headers["Operation-Location"]
+                operation_id = operation_location.split("/")[-1]
+                
+                # Poll for results
+                self._log("   Waiting for Azure OCR to complete...")
+                max_wait = 30  # Maximum 30 seconds
+                wait_time = 0
+                while wait_time < max_wait:
+                    result = self.vision_client.get_read_result(operation_id)
+                    if result.status not in [OperationStatusCodes.running, OperationStatusCodes.not_started]:
+                        break
+                    time.sleep(0.5)
+                    wait_time += 0.5
+                
+                if result.status == OperationStatusCodes.succeeded:
+                    for page in result.analyze_result.read_results:
+                        for line in page.lines:
+                            # Azure provides 8-point bounding box
+                            bbox = line.bounding_box
+                            vertices = [
+                                (bbox[0], bbox[1]),
+                                (bbox[2], bbox[3]),
+                                (bbox[4], bbox[5]),
+                                (bbox[6], bbox[7])
+                            ]
+                            
+                            # Calculate rectangular bounding box
+                            xs = [v[0] for v in vertices]
+                            ys = [v[1] for v in vertices]
+                            x_min, x_max = min(xs), max(xs)
+                            y_min, y_max = min(ys), max(ys)
+                            
+                            # Azure Read API is highly accurate, use high confidence
+                            confidence = 0.95
+                            
+                            if confidence >= confidence_threshold:
+                                region = TextRegion(
+                                    text=line.text,
+                                    vertices=vertices,
+                                    bounding_box=(x_min, y_min, x_max - x_min, y_max - y_min),
+                                    confidence=confidence,
+                                    region_type='text_line'  # Azure returns lines
+                                )
+                                regions.append(region)
+                                self._log(f"   Found text region (0.95): {line.text[:50]}...")
+                else:
+                    raise Exception(f"Azure OCR failed with status: {result.status}")
+            else:
+                raise ValueError(f"Unknown OCR provider: {self.ocr_provider}")
             
-            # Merge nearby regions based on settings
-            merge_threshold = ocr_settings.get('merge_nearby_threshold', 20)
-            regions = self._merge_nearby_regions(regions, threshold=merge_threshold)
+            # MERGING SECTION - THIS IS THE PART TO UPDATE
+            # Check if bubble detection is enabled
+            if ocr_settings.get('bubble_detection_enabled', False):
+                self._log("🤖 Using AI bubble detection for merging")
+                regions = self._merge_with_bubble_detection(regions, image_path)
+            else:
+                # Traditional merging
+                merge_threshold = ocr_settings.get('merge_nearby_threshold', 20)
+                
+                # Apply Azure multiplier if using Azure
+                if self.ocr_provider == 'azure':
+                    azure_multiplier = ocr_settings.get('azure_merge_multiplier', 2.0)
+                    merge_threshold = int(merge_threshold * azure_multiplier)
+                    self._log(f"📋 Using Azure-adjusted merge threshold: {merge_threshold}px (base: {ocr_settings.get('merge_nearby_threshold', 20)}px, multiplier: {azure_multiplier}x)")
+                    
+                    # Pre-group Azure lines if the method exists
+                    if hasattr(self, '_pregroup_azure_lines'):
+                        regions = self._pregroup_azure_lines(regions, merge_threshold)
+                
+                # Apply standard merging
+                regions = self._merge_nearby_regions(regions, threshold=merge_threshold)
             
-            self._log(f"✅ Detected {len(regions)} text regions")
+            self._log(f"✅ Detected {len(regions)} text regions after merging")
             
             # Save debug images if enabled
             advanced_settings = manga_settings.get('advanced', {})
@@ -398,6 +642,145 @@ class MangaTranslator:
         except Exception as e:
             self._log(f"❌ Error detecting text: {str(e)}", "error")
             raise
+
+    def _pregroup_azure_lines(self, lines: List[TextRegion], base_threshold: int) -> List[TextRegion]:
+        """Pre-group Azure lines that are obviously part of the same text block
+        This makes them more like Google's blocks before the main merge logic"""
+        
+        if len(lines) <= 1:
+            return lines
+        
+        # Sort by vertical position first, then horizontal
+        lines.sort(key=lambda r: (r.bounding_box[1], r.bounding_box[0]))
+        
+        pregrouped = []
+        i = 0
+        
+        while i < len(lines):
+            current_group = [lines[i]]
+            current_bbox = list(lines[i].bounding_box)
+            
+            # Look ahead for lines that should obviously be grouped
+            j = i + 1
+            while j < len(lines):
+                x1, y1, w1, h1 = current_bbox
+                x2, y2, w2, h2 = lines[j].bounding_box
+                
+                # Calculate gaps
+                vertical_gap = y2 - (y1 + h1) if y2 > y1 + h1 else 0
+                
+                # Check horizontal alignment
+                center_x1 = x1 + w1 / 2
+                center_x2 = x2 + w2 / 2
+                horizontal_offset = abs(center_x1 - center_x2)
+                avg_width = (w1 + w2) / 2
+                
+                # Group if:
+                # 1. Lines are vertically adjacent (small gap)
+                # 2. Lines are well-aligned horizontally (likely same bubble)
+                if (vertical_gap < h1 * 0.5 and  # Less than half line height gap
+                    horizontal_offset < avg_width * 0.5):  # Well centered
+                    
+                    # Add to group
+                    current_group.append(lines[j])
+                    
+                    # Update bounding box to include new line
+                    min_x = min(x1, x2)
+                    min_y = min(y1, y2)
+                    max_x = max(x1 + w1, x2 + w2)
+                    max_y = max(y1 + h1, y2 + h2)
+                    current_bbox = [min_x, min_y, max_x - min_x, max_y - min_y]
+                    
+                    j += 1
+                else:
+                    break
+            
+            # Create merged region from group
+            if len(current_group) > 1:
+                merged_text = " ".join([line.text for line in current_group])
+                all_vertices = []
+                for line in current_group:
+                    all_vertices.extend(line.vertices)
+                
+                merged_region = TextRegion(
+                    text=merged_text,
+                    vertices=all_vertices,
+                    bounding_box=tuple(current_bbox),
+                    confidence=0.95,
+                    region_type='pregrouped_lines'
+                )
+                pregrouped.append(merged_region)
+                
+                self._log(f"   Pre-grouped {len(current_group)} Azure lines into block")
+            else:
+                # Single line, keep as is
+                pregrouped.append(lines[i])
+            
+            i = j if j > i + 1 else i + 1
+        
+        self._log(f"   Azure pre-grouping: {len(lines)} lines → {len(pregrouped)} blocks")
+        return pregrouped
+
+    def _detect_text_azure(self, image_data: bytes, ocr_settings: dict) -> List[TextRegion]:
+        """Detect text using Azure Computer Vision"""
+        import io
+        from azure.cognitiveservices.vision.computervision.models import OperationStatusCodes
+        
+        stream = io.BytesIO(image_data)
+        
+        # Use Read API for better manga text detection
+        read_result = self.vision_client.read_in_stream(
+            stream,
+            raw=True,
+            language='ja'  # or from ocr_settings
+        )
+        
+        # Get operation ID from headers
+        operation_location = read_result.headers["Operation-Location"]
+        operation_id = operation_location.split("/")[-1]
+        
+        # Wait for completion
+        import time
+        while True:
+            result = self.vision_client.get_read_result(operation_id)
+            if result.status not in [OperationStatusCodes.running, OperationStatusCodes.not_started]:
+                break
+            time.sleep(0.5)
+        
+        regions = []
+        confidence_threshold = ocr_settings.get('confidence_threshold', 0.8)
+        
+        if result.status == OperationStatusCodes.succeeded:
+            for page in result.analyze_result.read_results:
+                for line in page.lines:
+                    # Azure returns bounding box as 8 coordinates
+                    bbox = line.bounding_box
+                    vertices = [
+                        (bbox[0], bbox[1]),
+                        (bbox[2], bbox[3]),
+                        (bbox[4], bbox[5]),
+                        (bbox[6], bbox[7])
+                    ]
+                    
+                    xs = [v[0] for v in vertices]
+                    ys = [v[1] for v in vertices]
+                    x_min, x_max = min(xs), max(xs)
+                    y_min, y_max = min(ys), max(ys)
+                    
+                    # Azure doesn't provide per-line confidence in Read API
+                    confidence = 0.95  # Default high confidence
+                    
+                    if confidence >= confidence_threshold:
+                        region = TextRegion(
+                            text=line.text,
+                            vertices=vertices,
+                            bounding_box=(x_min, y_min, x_max - x_min, y_max - y_min),
+                            confidence=confidence,
+                            region_type='text_line'
+                        )
+                        regions.append(region)
+        
+        return regions
 
     def _preprocess_image(self, image_path: str, preprocessing_settings: Dict) -> bytes:
         """Preprocess image for better OCR results"""
@@ -2197,7 +2580,8 @@ class MangaTranslator:
             return safe_x, safe_y, safe_width, safe_height
         
         try:
-            vertices = np.array(region.vertices)
+            # Convert vertices to numpy array with correct dtype
+            vertices = np.array(region.vertices, dtype=np.int32)
             hull = cv2.convexHull(vertices)
             hull_area = cv2.contourArea(hull)
             poly_area = cv2.contourArea(vertices)
@@ -2209,18 +2593,20 @@ class MangaTranslator:
             
             # LESS CONSERVATIVE margins for better readability
             if convexity < 0.85:  # Speech bubble with tail
-                margin_factor = 0.75  # Was 0.6
+                margin_factor = 0.75
                 self._log(f"  Speech bubble detected, using 75% of area", "info")
             elif convexity > 0.98:  # Rectangular
-                margin_factor = 0.9   # Was 0.75
+                margin_factor = 0.9
                 self._log(f"  Rectangular bubble, using 90% of area", "info")
             else:  # Regular bubble
-                margin_factor = 0.8   # Was 0.65
+                margin_factor = 0.8
                 self._log(f"  Regular bubble, using 80% of area", "info")
         except:
             margin_factor = 0.8  # Safe default
         
-        x, y, w, h = cv2.boundingRect(vertices)
+        # Convert vertices to numpy array for boundingRect
+        vertices_np = np.array(region.vertices, dtype=np.int32)
+        x, y, w, h = cv2.boundingRect(vertices_np)
         
         safe_width = int(w * margin_factor)
         safe_height = int(h * margin_factor)
@@ -2638,6 +3024,7 @@ class MangaTranslator:
 
     def _regions_should_merge(self, region1: TextRegion, region2: TextRegion, threshold: int = 50) -> bool:
         """Determine if two regions should be merged - with bubble detection"""
+        
         # First check if they're close enough spatially
         if not self._regions_are_nearby(region1, region2, threshold):
             return False
@@ -2645,12 +3032,27 @@ class MangaTranslator:
         x1, y1, w1, h1 = region1.bounding_box
         x2, y2, w2, h2 = region2.bounding_box
         
+        # ONLY apply special handling if regions are from Azure
+        if hasattr(region1, 'from_azure') and region1.from_azure:
+            # Azure lines are typically small - be more lenient
+            avg_height = (h1 + h2) / 2
+            if avg_height < 50:  # Likely single lines
+                self._log(f"   Azure lines detected, using lenient merge criteria", "info")
+                
+                center_x1 = x1 + w1 / 2
+                center_x2 = x2 + w2 / 2
+                horizontal_center_diff = abs(center_x1 - center_x2)
+                avg_width = (w1 + w2) / 2
+                
+                # If horizontally aligned and nearby, merge them
+                if horizontal_center_diff < avg_width * 0.7:
+                    return True
+        
+        # GOOGLE LOGIC - unchanged from your original
         # SPECIAL CASE: If one region is very small, bypass strict checks
         area1 = w1 * h1
         area2 = w2 * h2
         if area1 < 500 or area2 < 500:
-            # Small text has already passed _regions_are_nearby and bubble detection
-            # Don't apply additional strict checks that might reject valid merges
             self._log(f"   Small text region (area: {min(area1, area2)}), bypassing strict alignment checks", "info")
             return True
         
