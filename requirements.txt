@@ -1,5 +1,4 @@
 # Python 3.12.9
-
 # Core packages
 pyinstaller
 pyinstaller-hooks-contrib
@@ -24,6 +23,7 @@ poe-api-wrapper
 google-genai
 google-cloud-aiplatform>=1.60.0
 deepl
+vertexai  # ADD THIS
 
 # Data processing
 datasketch
@@ -35,6 +35,14 @@ httpx
 httpcore
 anyio
 sniffio
+websocket-client  # ADD THIS
+websockets  # ADD THIS
+aiohttp  # ADD THIS
+aiofiles  # ADD THIS
+multidict  # ADD THIS
+yarl  # ADD THIS
+async-timeout  # ADD THIS
+attrs  # ADD THIS
 
 # Text processing
 regex
@@ -53,8 +61,9 @@ opencv-python
 # Pin typing-extensions
 typing-extensions
 
-# Google Cloud Vision
+# Google Cloud Services
 google-cloud-vision
+google-cloud-translate  # ADD THIS (if using)
 google-auth
 google-auth-httplib2
 google-api-core
@@ -63,6 +72,19 @@ grpcio
 grpcio-status
 proto-plus
 protobuf
+
+# Azure Computer Vision  # ADD THIS SECTION
+azure-cognitiveservices-vision-computervision
+msrest
+msrestazure
+isodate
+azure-core
+azure-identity
+
+# YOLO Bubble Detection  # ADD THIS SECTION
+onnxruntime
+# onnxruntime-gpu  # Optional, uncomment for GPU support
+ultralytics  # Optional, for PT to ONNX conversion
 
 # Inpainting
 replicate
