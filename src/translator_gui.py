@@ -48,6 +48,10 @@ fallback_compile_epub = scan_html_folder = None
 CONFIG_FILE = "config.json"
 BASE_WIDTH, BASE_HEIGHT = 1920, 1080
 
+def is_traditional_translation_api(model: str) -> bool:
+    """Check if the model is a traditional translation API"""
+    return model in ['deepl', 'google-translate'] or model.startswith('deepl/') or model.startswith('google-translate/')
+    
 def check_epub_folder_match(epub_name, folder_name, custom_suffixes=''):
     """
     Check if EPUB name and folder name likely refer to the same content
@@ -1029,7 +1033,7 @@ class TranslatorGUI:
         master.lift()
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "4.0.6"
+        __version__ = "4.0.8"
         self.__version__ = __version__  # Store as instance variable
         master.title(f"Glossarion v{__version__}")
         
@@ -1914,7 +1918,7 @@ Recent translations to summarize:
             self.toggle_token_btn.config(text="Enable Input Token Limit", bootstyle="success-outline")
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v4.0.6 - Ready to use!")
+        self.append_log("🚀 Glossarion v4.0.8 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
     
     def create_file_section(self):
@@ -2044,14 +2048,18 @@ Recent translations to summarize:
         # Get the current model value (from dropdown or manually typed)
         model = self.model_var.get()
         
-        # Show Google Cloud Credentials button for Vertex AI models
+        # Show Google Cloud Credentials button for Vertex AI models AND Google Translate
+        needs_google_creds = False
+        
         if '@' in model or model.startswith('vertex/') or model.startswith('vertex_ai/'):
+            needs_google_creds = True
+            self.vertex_location_entry.grid()  # Show location selector for Vertex
+        elif model == 'google-translate':
+            needs_google_creds = True
+            self.vertex_location_entry.grid_remove()  # Hide location selector for Google Translate
+        
+        if needs_google_creds:
             self.gcloud_button.config(state=tk.NORMAL)
-            self.vertex_location_entry.grid() 
-            
-            # Update API key label to indicate it's optional for Vertex
-            # Find your api_key_label and update it
-            # self.api_key_label.config(text="Project ID (optional):")
             
             # Check if credentials are already loaded
             if self.config.get('google_cloud_credentials'):
@@ -2060,8 +2068,16 @@ Recent translations to summarize:
                     try:
                         with open(creds_path, 'r') as f:
                             creds_data = json.load(f)
+                            project_id = creds_data.get('project_id', 'Unknown')
+                            
+                            # Different status messages for different services
+                            if model == 'google-translate':
+                                status_text = f"✓ Google Translate ready (Project: {project_id})"
+                            else:
+                                status_text = f"✓ Credentials: {os.path.basename(creds_path)} (Project: {project_id})"
+                            
                             self.gcloud_status_label.config(
-                                text=f"✓ Credentials: {os.path.basename(creds_path)} (Project: {creds_data.get('project_id', 'Unknown')})",
+                                text=status_text,
                                 foreground='green'
                             )
                     except:
@@ -2075,16 +2091,21 @@ Recent translations to summarize:
                         foreground='red'
                     )
             else:
+                # Different prompts for different services
+                if model == 'google-translate':
+                    warning_text = "⚠ Google Cloud credentials needed for Translate API"
+                else:
+                    warning_text = "⚠ No Google Cloud credentials selected"
+                
                 self.gcloud_status_label.config(
-                    text="⚠ No Google Cloud credentials selected",
+                    text=warning_text,
                     foreground='orange'
                 )
         else:
+            # Not a Google service, hide everything
             self.gcloud_button.config(state=tk.DISABLED)
             self.vertex_location_entry.grid_remove()
             self.gcloud_status_label.config(text="")
-            # Reset API key label if you changed it
-            # self.api_key_label.config(text="API Key:")
 
     # Also add this to bind manual typing events to the combobox
     def setup_model_combobox_bindings(self):
@@ -2200,6 +2221,10 @@ Recent translations to summarize:
             "eh/gpt-4", "eh/gpt-3.5-turbo", "eh/claude-3-opus", "eh/claude-3-sonnet",
             "eh/llama-2-70b-chat", "eh/yi-34b-chat-200k", "eh/mistral-large",
             "eh/gemini-pro", "eh/deepseek-coder-33b",
+            
+            # Last Resort
+            "deepl",  # Will use DeepL API
+            "google-translate",  # Will use Google Cloud Translate
         ]
         self.model_combo = tb.Combobox(self.frame, textvariable=self.model_var, values=models, state="normal")
         self.model_combo.grid(row=1, column=1, columnspan=2, sticky=tk.EW, padx=5, pady=5)
@@ -8990,12 +9015,16 @@ Important rules:
 
     def _extract_glossary_from_text_file(self, file_path):
         """Extract glossary from EPUB or TXT file using existing glossary extraction"""
+        # Skip glossary extraction for traditional APIs
         try:
             api_key = self.api_key_entry.get()
             model = self.model_var.get()
+            if is_traditional_translation_api(model):
+               self.append_log("ℹ️ Skipping automatic glossary extraction (not supported by Google Translate / DeepL translation APIs)")
+               return {}
             
             # Validate Vertex AI credentials if needed
-            if '@' in model or model.startswith('vertex/'):
+            elif '@' in model or model.startswith('vertex/'):
                 google_creds = self.config.get('google_cloud_credentials')
                 if not google_creds or not os.path.exists(google_creds):
                     self.append_log("❌ Error: Google Cloud credentials required for Vertex AI models.")
@@ -14888,7 +14917,7 @@ Important rules:
 if __name__ == "__main__":
     import time
     
-    print("🚀 Starting Glossarion v4.0.6...")
+    print("🚀 Starting Glossarion v4.0.8...")
     
     # Initialize splash screen
     splash_manager = None
