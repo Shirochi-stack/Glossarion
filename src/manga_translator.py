@@ -447,7 +447,7 @@ class MangaTranslator:
                     processed_image_data = image_file.read()
             
             regions = []
-            confidence_threshold = ocr_settings.get('confidence_threshold', 0.8)
+            confidence_threshold = ocr_settings.get('confidence_threshold', 0.1)
             
             # Route to appropriate provider
             if self.ocr_provider == 'google':
