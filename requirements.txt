@@ -56,7 +56,7 @@ markdown2
 rapidfuzz
 
 # Image processing
-opencv-python
+opencv-python-headless
 
 # Pin typing-extensions
 typing-extensions
