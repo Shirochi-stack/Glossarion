@@ -99,6 +99,8 @@ app_files = [
 	('enhanced_text_extractor.py', '.'),	
 	
 	('multi_api_key_manager.py', '.'),	
+	
+	('bubble_detector.py', '.'),	
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -132,6 +134,7 @@ app_modules = [
 	'metadata_batch_translator',
 	'enhanced_text_extractor.py',
 	'multi_api_key_manager.py',
+	'bubble_detector',  
 	
 ]
 
@@ -290,6 +293,86 @@ api_modules = [
     'google.protobuf.reflection',
     'google.rpc',
     'google.type',
+    
+    # Azure Computer Vision (for manga OCR) - ADD THIS SECTION
+    'azure',
+    'azure.cognitiveservices',
+    'azure.cognitiveservices.vision',
+    'azure.cognitiveservices.vision.computervision',
+    'azure.cognitiveservices.vision.computervision.models',
+    'azure.cognitiveservices.vision.computervision.operations',
+    'azure.cognitiveservices.vision.computervision._configuration',
+    'azure.cognitiveservices.vision.computervision._computer_vision_client',
+    'azure.cognitiveservices.vision.computervision.aio',
+    'azure.core',
+    'azure.core.credentials',
+    'azure.core.exceptions',
+    'azure.core.pipeline',
+    'azure.core.pipeline.transport',
+    'azure.core.pipeline.policies',
+    'azure.core.polling',
+    'azure.core.paging',
+    'azure.core.async_paging',
+    'azure.core.rest',
+    'azure.core.tracing',
+    'azure.core.utils',
+    'azure.identity',
+    'azure.common',
+    
+    # MSRest (required for Azure authentication)
+    'msrest',
+    'msrest.authentication',
+    'msrest.configuration',
+    'msrest.exceptions',
+    'msrest.http_logger',
+    'msrest.paging',
+    'msrest.pipeline',
+    'msrest.polling',
+    'msrest.serialization',
+    'msrest.service_client',
+    'msrest.universal_http',
+    'msrest.universal_http.requests',
+    'msrest.async_client',
+    'msrest.version',
+    'msrestazure',
+    'msrestazure.azure_configuration',
+    'msrestazure.azure_exceptions',
+    'msrestazure.azure_operation',
+    'msrestazure.polling',
+    
+    # Additional Azure dependencies
+    'isodate',  # Required by msrest
+    'oauthlib',  # May be required for Azure auth
+    'requests_oauthlib',  # May be required for Azure auth
+
+    # YOLO Bubble Detection Support (ADD THIS SECTION)
+    'onnxruntime',
+    'onnxruntime.capi',
+    'onnxruntime.capi.onnxruntime_pybind11_state',
+    'onnxruntime.capi._pybind_state',
+    'onnxruntime.tools',
+    'onnxruntime.transformers',
+    'onnxruntime.backend',
+    'onnxruntime.backend.backend',
+    'onnxruntime.datasets',
+    'onnxruntime.quantization',
+    'onnxruntime.training',
+    
+    # Ultralytics (optional - for PT to ONNX conversion)
+    'ultralytics',
+    'ultralytics.yolo',
+    'ultralytics.engine',
+    'ultralytics.engine.model',
+    'ultralytics.engine.exporter',
+    'ultralytics.engine.predictor',
+    'ultralytics.engine.results',
+    'ultralytics.nn',
+    'ultralytics.nn.modules',
+    'ultralytics.utils',
+    'ultralytics.utils.ops',
+    'ultralytics.utils.torch_utils',
+    'ultralytics.data',
+    'ultralytics.cfg',
     
     # Google Cloud Vision (for manga OCR)
     'google.cloud',
@@ -648,6 +731,11 @@ system_modules = [
     'ctypes.wintypes',
     'aiohttp',
     'aiofiles',
+	'yarl',  # URL handling for aiohttp
+    'multidict',  # Required by aiohttp
+    'async_timeout',  # Required by aiohttp
+    'attrs',  # Required by aiohttp
+    'charset_normalizer',  # Encoding detection
 ]
 
 # Date & Time
