@@ -8494,7 +8494,7 @@ class UnifiedClient:
         
         # CUSTOM ENDPOINT OVERRIDE - Check if enabled and override base_url
         use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
-        actual_api_key = self.api_key  # Store original API key
+        actual_api_key = self.api_key
         
         # Determine if this is a local endpoint that doesn't need a real API key
         is_local_endpoint = False
@@ -8502,6 +8502,58 @@ class UnifiedClient:
         if use_custom_endpoint and provider != "gemini-openai":
             custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
             if custom_base_url:
+                # Check if it's Azure
+                if '.azure.com' in custom_base_url or '.cognitiveservices' in custom_base_url:
+                    # Azure needs special client
+                    from openai import AzureOpenAI
+                    
+                    deployment = self.model  # Use model as deployment name
+                    api_version = os.getenv('AZURE_API_VERSION', '2024-12-01-preview')
+                    
+                    # Azure endpoint should be just the base URL
+                    azure_endpoint = custom_base_url.split('/openai')[0] if '/openai' in custom_base_url else custom_base_url
+                    
+                    print(f"🔷 Azure endpoint detected")
+                    print(f"   Endpoint: {azure_endpoint}")
+                    print(f"   Deployment: {deployment}")
+                    print(f"   API Version: {api_version}")
+                    
+                    # Create Azure client
+                    for attempt in range(max_retries):
+                        try:
+                            client = AzureOpenAI(
+                                api_key=actual_api_key,
+                                api_version=api_version,
+                                azure_endpoint=azure_endpoint
+                            )
+                            
+                            # Use the deployment name instead of model
+                            response = client.chat.completions.create(
+                                model=deployment,
+                                messages=messages,
+                                temperature=temperature,
+                                max_tokens=max_tokens
+                            )
+                            
+                            # Extract response
+                            content = response.choices[0].message.content if response.choices else ""
+                            finish_reason = response.choices[0].finish_reason if response.choices else "stop"
+                            
+                            return UnifiedResponse(
+                                content=content,
+                                finish_reason=finish_reason,
+                                raw_response=response
+                            )
+                            
+                        except Exception as e:
+                            if attempt < max_retries - 1:
+                                print(f"Azure error (attempt {attempt + 1}): {e}")
+                                time.sleep(api_delay)
+                                continue
+                            raise UnifiedClientError(f"Azure error: {e}")
+                
+                # Not Azure, continue with regular custom endpoint
+                base_url = custom_base_url
                 print(f"🔄 Custom endpoint enabled: Overriding {provider} endpoint")
                 print(f"   Original: {base_url}")
                 print(f"   Override: {custom_base_url}")
@@ -9035,9 +9087,15 @@ class UnifiedClient:
         
         data = {
             "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens
+            "temperature": temperature
         }
+        
+        # Check MODEL_CONSTRAINTS to determine which token parameter to use
+        model_base = self.model.split('-')[0] if '-' in self.model else self.model
+        if any(model in self.model.lower() for model in self.MODEL_CONSTRAINTS.get('max_completion_tokens', [])):
+            data["max_completion_tokens"] = max_tokens
+        else:
+            data["max_tokens"] = max_tokens
         
         try:
             resp = requests.post(
