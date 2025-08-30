@@ -1141,6 +1141,8 @@ class TranslatorGUI:
         self.current_file_index = 0
         self.use_gemini_openai_endpoint_var = tk.BooleanVar(value=self.config.get('use_gemini_openai_endpoint', False))
         self.gemini_openai_endpoint_var = tk.StringVar(value=self.config.get('gemini_openai_endpoint', ''))
+        self.azure_api_version_var = tk.StringVar(value=self.config.get('azure_api_version', '2024-08-01-preview'))
+
         # Initialize fuzzy threshold variable
         if not hasattr(self, 'fuzzy_threshold_var'):
             self.fuzzy_threshold_var = tk.DoubleVar(value=self.config.get('glossary_fuzzy_threshold', 0.90))
@@ -2348,7 +2350,8 @@ Recent translations to summarize:
     
     def _create_api_section(self):
         """Create API key section"""
-        tb.Label(self.frame, text="OpenAI/Gemini/... API Key:").grid(row=8, column=0, sticky=tk.W, padx=5, pady=5)
+        self.api_key_label = tb.Label(self.frame, text="OpenAI/Gemini/... API Key:")
+        self.api_key_label.grid(row=8, column=0, sticky=tk.W, padx=5, pady=5)
         self.api_key_entry = tb.Entry(self.frame, show='*')
         self.api_key_entry.grid(row=8, column=1, columnspan=3, sticky=tk.EW, padx=5, pady=5)
         initial_key = self.config.get('api_key', '')
@@ -8219,6 +8222,10 @@ Provide translations in the same numbered format."""
             'GOOGLE_APPLICATION_CREDENTIALS': os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),
             'GOOGLE_CLOUD_PROJECT': google_cloud_project,  # Now properly set from credentials
             'VERTEX_AI_LOCATION': self.vertex_location_var.get() if hasattr(self, 'vertex_location_var') else 'us-east5',
+            'IS_AZURE_ENDPOINT': '1' if (self.use_custom_openai_endpoint_var.get() and 
+                                  ('.azure.com' in self.openai_base_url_var.get() or 
+                                   '.cognitiveservices' in self.openai_base_url_var.get())) else '0',
+            'AZURE_API_VERSION': str(self.config.get('azure_api_version', '2024-08-01-preview')),
             
            # Multi API Key support
             'USE_MULTI_API_KEYS': "1" if self.config.get('use_multi_api_keys', False) else "0",
@@ -13717,6 +13724,7 @@ Important rules:
         tb.Label(openai_url_frame, text="Override API Endpoint:").pack(side=tk.LEFT, padx=(0, 5))
         self.openai_base_url_var = tk.StringVar(value=self.config.get('openai_base_url', ''))
         self.openai_base_url_entry = tb.Entry(openai_url_frame, textvariable=self.openai_base_url_var, width=50)
+        self.openai_base_url_var.trace('w', self._check_azure_endpoint)
         self.openai_base_url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
         
         # Clear button
@@ -13735,6 +13743,23 @@ Important rules:
                             text="Enable checkbox to use custom endpoint. For Ollama: http://localhost:11434/v1",
                             font=('TkDefaultFont', 8), foreground='gray')
         help_text.pack(anchor=tk.W, padx=5, pady=(0, 10))
+        
+        # ADD AZURE VERSION FRAME HERE (initially hidden):
+        self.azure_version_frame = tb.Frame(endpoints_frame)
+        # Don't pack it yet - it will be shown/hidden dynamically
+        
+        tb.Label(self.azure_version_frame, text="Azure API Version:").pack(side=tk.LEFT, padx=(5, 5))
+        
+        self.azure_api_version_var = tk.StringVar(value=self.config.get('azure_api_version', '2024-08-01-preview'))
+        versions = ['2024-08-01-preview', '2024-02-01', '2023-12-01-preview', '2023-05-15']
+        self.azure_version_combo = ttk.Combobox(
+            self.azure_version_frame, 
+            textvariable=self.azure_api_version_var,
+            values=versions,
+            width=20,
+            state='normal'
+        )
+        self.azure_version_combo.pack(side=tk.LEFT, padx=(0, 5))
 
         # Show More Fields button
         self.show_more_endpoints = False
@@ -13834,6 +13859,27 @@ Important rules:
             self.gemini_endpoint_entry.configure(state='disabled')
             self.gemini_clear_button.configure(state='disabled')
 
+    def _check_azure_endpoint(self, *args):
+        """Check if endpoint is Azure and update UI"""
+        if not self.use_custom_openai_endpoint_var.get():
+            if hasattr(self, 'azure_version_frame'):
+                self.azure_version_frame.pack_forget()
+            return
+            
+        url = self.openai_base_url_var.get()
+        if '.azure.com' in url or '.cognitiveservices' in url:
+            self.api_key_label.config(text="Azure Key:")
+            
+            # Show Azure version frame in settings dialog
+            if hasattr(self, 'azure_version_frame'):
+                self.azure_version_frame.pack(before=self.more_fields_button, pady=(0, 10))
+        else:
+            self.api_key_label.config(text="OpenAI/Gemini/... API Key:")
+            
+            # Hide Azure version frame
+            if hasattr(self, 'azure_version_frame'):
+                self.azure_version_frame.pack_forget()
+
     def toggle_gemini_endpoint(self):
         """Enable/disable Gemini endpoint entry based on toggle"""
         if self.use_gemini_openai_endpoint_var.get():
@@ -13844,14 +13890,23 @@ Important rules:
             self.gemini_clear_button.configure(state='disabled')
         
     def toggle_custom_endpoint_ui(self):
-        """Enable/disable the OpenAI base URL entry and clear button based on checkbox"""
+        """Enable/disable the OpenAI base URL entry and detect Azure"""
         if self.use_custom_openai_endpoint_var.get():
             self.openai_base_url_entry.configure(state='normal')
             self.openai_clear_button.configure(state='normal')
+            
+            # Check if it's Azure
+            url = self.openai_base_url_var.get()
+            if '.azure.com' in url or '.cognitiveservices' in url:
+                self.api_key_label.config(text="Azure Key:")
+            else:
+                self.api_key_label.config(text="OpenAI/Gemini/... API Key:")
+                
             print("✅ Custom OpenAI endpoint enabled")
         else:
             self.openai_base_url_entry.configure(state='disabled')
             self.openai_clear_button.configure(state='disabled')
+            self.api_key_label.config(text="OpenAI/Gemini/... API Key:")
             print("❌ Custom OpenAI endpoint disabled - using default OpenAI API")
 
     def toggle_more_endpoints(self):
@@ -13918,7 +13973,22 @@ Important rules:
         if self.use_custom_openai_endpoint_var.get():
             openai_url = self.openai_base_url_var.get()
             if openai_url:
-                endpoints_to_test.append(("OpenAI (Custom)", openai_url, self.model_var.get() if hasattr(self, 'model_var') else "gpt-3.5-turbo"))
+                # Check if it's Azure
+                if '.azure.com' in openai_url or '.cognitiveservices' in openai_url:
+                    # Azure endpoint
+                    deployment = self.model_var.get() if hasattr(self, 'model_var') else "gpt-35-turbo"
+                    api_version = self.azure_api_version_var.get() if hasattr(self, 'azure_api_version_var') else "2024-08-01-preview"
+                    
+                    # Format Azure URL
+                    if '/openai/deployments/' not in openai_url:
+                        azure_url = f"{openai_url.rstrip('/')}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
+                    else:
+                        azure_url = openai_url
+                    
+                    endpoints_to_test.append(("Azure OpenAI", azure_url, deployment, "azure"))
+                else:
+                    # Regular custom endpoint
+                    endpoints_to_test.append(("OpenAI (Custom)", openai_url, self.model_var.get() if hasattr(self, 'model_var') else "gpt-3.5-turbo"))
             else:
                 # Use default OpenAI endpoint if checkbox is on but no custom URL provided
                 endpoints_to_test.append(("OpenAI (Default)", "https://api.openai.com/v1", self.model_var.get() if hasattr(self, 'model_var') else "gpt-3.5-turbo"))
@@ -13963,35 +14033,68 @@ Important rules:
             return
         
         # Test each endpoint
+        # Test each endpoint
         results = []
-        for name, base_url, model in endpoints_to_test:
-            try:
-                # Create client for this endpoint
-                test_client = openai.OpenAI(
-                    api_key=api_key,
-                    base_url=base_url,
-                    timeout=5.0  # Short timeout for testing
-                )
-                
-                # Try a minimal completion
-                response = test_client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": "Hi"}],
-                    max_tokens=5
-                )
-                
-                results.append(f"✅ {name}: Connected successfully! (Model: {model})")
-            except Exception as e:
-                error_msg = str(e)
-                # Simplify common error messages
-                if "404" in error_msg:
-                    error_msg = "404 - Endpoint not found. Check URL and model name."
-                elif "401" in error_msg or "403" in error_msg:
-                    error_msg = "Authentication failed. Check API key."
-                elif "model" in error_msg.lower() and "not found" in error_msg.lower():
-                    error_msg = f"Model '{model}' not found at this endpoint."
-                
-                results.append(f"❌ {name}: {error_msg}")
+        for endpoint_info in endpoints_to_test:
+            if len(endpoint_info) == 4 and endpoint_info[3] == "azure":
+                # Azure endpoint
+                name, base_url, model, endpoint_type = endpoint_info
+                try:
+                    # Azure uses different headers
+                    import requests
+                    headers = {
+                        "api-key": api_key,
+                        "Content-Type": "application/json"
+                    }
+                    
+                    response = requests.post(
+                        base_url,
+                        headers=headers,
+                        json={
+                            "messages": [{"role": "user", "content": "Hi"}],
+                            "max_tokens": 5
+                        },
+                        timeout=5.0
+                    )
+                    
+                    if response.status_code == 200:
+                        results.append(f"✅ {name}: Connected successfully! (Deployment: {model})")
+                    else:
+                        results.append(f"❌ {name}: {response.status_code} - {response.text[:100]}")
+                        
+                except Exception as e:
+                    error_msg = str(e)[:100]
+                    results.append(f"❌ {name}: {error_msg}")
+            else:
+                # Regular OpenAI-compatible endpoint
+                name, base_url, model = endpoint_info[:3]
+                try:
+                    # Create client for this endpoint
+                    test_client = openai.OpenAI(
+                        api_key=api_key,
+                        base_url=base_url,
+                        timeout=5.0  # Short timeout for testing
+                    )
+                    
+                    # Try a minimal completion
+                    response = test_client.chat.completions.create(
+                        model=model,
+                        messages=[{"role": "user", "content": "Hi"}],
+                        max_tokens=5
+                    )
+                    
+                    results.append(f"✅ {name}: Connected successfully! (Model: {model})")
+                except Exception as e:
+                    error_msg = str(e)
+                    # Simplify common error messages
+                    if "404" in error_msg:
+                        error_msg = "404 - Endpoint not found. Check URL and model name."
+                    elif "401" in error_msg or "403" in error_msg:
+                        error_msg = "Authentication failed. Check API key."
+                    elif "model" in error_msg.lower() and "not found" in error_msg.lower():
+                        error_msg = f"Model '{model}' not found at this endpoint."
+                    
+                    results.append(f"❌ {name}: {error_msg}")
         
         # Show results
         result_message = "Connection Test Results:\n\n" + "\n\n".join(results)
@@ -14071,6 +14174,8 @@ Important rules:
                     'use_gemini_openai_endpoint': self.use_gemini_openai_endpoint_var.get(),
                     'gemini_openai_endpoint': self.gemini_openai_endpoint_var.get(),
                     'image_chunk_overlap': safe_float(self.image_chunk_overlap_var.get(), 1.0),
+                    'azure_api_version': self.azure_api_version_var.get() if hasattr(self, 'azure_api_version_var') else '2024-08-01-preview',
+
                                         
                     # ALL Anti-duplicate parameters (moved below other settings)
                     'enable_anti_duplicate': getattr(self, 'enable_anti_duplicate_var', type('', (), {'get': lambda: False})).get(),
@@ -14204,7 +14309,7 @@ Important rules:
                     'BIAS_COMMON_WORDS': '1' if hasattr(self, 'bias_common_words_var') and self.bias_common_words_var.get() else '0',
                     'BIAS_REPETITIVE_PHRASES': '1' if hasattr(self, 'bias_repetitive_phrases_var') and self.bias_repetitive_phrases_var.get() else '0',
                     'EXTRACTION_WORKERS': str(self.extraction_workers_var.get()) if self.enable_parallel_extraction_var.get() else '1',
-                    
+                    'AZURE_API_VERSION': str(self.config.get('azure_api_version', '2024-08-01-preview')),
                 }
                 os.environ.update(env_updates)
                 
@@ -14721,7 +14826,10 @@ Important rules:
                     self.config['glossary_format_instructions'] = self.format_instructions_text.get('1.0', tk.END).strip()
                 except:
                     pass 
-                    
+ 
+            if hasattr(self, 'azure_api_version_var'):
+                self.config['azure_api_version'] = self.azure_api_version_var.get()
+    
             # Save all other settings
             self.config['api_key'] = self.api_key_entry.get()
             self.config['REMOVE_AI_ARTIFACTS'] = self.REMOVE_AI_ARTIFACTS_var.get()
