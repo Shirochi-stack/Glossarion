@@ -212,6 +212,10 @@ class BubbleDetector:
         """Process YOLO output"""
         boxes = []
         
+        # DEBUG: Initialize counters at the start
+        total_detections = 0
+        filtered_out = 0
+        
         # Handle different output formats
         if len(output.shape) == 3:
             predictions = output[0].T
@@ -222,9 +226,19 @@ class BubbleDetector:
         x_scale = orig_w / 640
         y_scale = orig_h / 640
         
-        for pred in predictions:
+        # DEBUG: Log prediction count
+        print(f"\n   YOLO OUTPUT DEBUG:")
+        print(f"   - Raw predictions shape: {predictions.shape}")
+        print(f"   - Confidence threshold: {conf_thresh:.3f}")
+        
+        for i, pred in enumerate(predictions):
             if len(pred) >= 5:
                 confidence = pred[4]
+                total_detections += 1
+                
+                # DEBUG: Only log first 10 to avoid spam
+                if total_detections <= 10:
+                    print(f"   Detection {total_detections}: confidence={confidence:.3f}", end="")
                 
                 if confidence >= conf_thresh:
                     cx, cy, w, h = pred[:4]
@@ -242,5 +256,21 @@ class BubbleDetector:
                     height = min(height, orig_h - y)
                     
                     boxes.append((int(x), int(y), int(width), int(height)))
+                    
+                    if total_detections <= 10:
+                        print(f" ✓ ACCEPTED")
+                else:
+                    filtered_out += 1
+                    if total_detections <= 10:
+                        print(f" ✗ REJECTED")
+        
+        # DEBUG: Summary
+        print(f"\n   CONFIDENCE FILTER SUMMARY:")
+        print(f"   - Total YOLO detections: {total_detections}")
+        print(f"   - Accepted (>={conf_thresh:.2f}): {len(boxes)}")
+        print(f"   - Filtered out: {filtered_out}")
+        if total_detections > 0:
+            print(f"   - Acceptance rate: {len(boxes)/total_detections*100:.1f}%")
+        print("")
         
         return boxes
