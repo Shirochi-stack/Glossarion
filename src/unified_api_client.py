@@ -2730,9 +2730,9 @@ class UnifiedClient:
                                 
                                 # Determine new token limit
                                 current_limit = max_tokens or max_completion_tokens or 8192
-                                new_limit = max(current_limit * 2, max_retry_tokens)
+                                new_limit = max(current_limit * 1, max_retry_tokens)
                                 
-                                print(f"[{thread_name}] Retrying with increased tokens: {current_limit} → {new_limit}")
+                                print(f"[{thread_name}] Retrying with set limit: {current_limit} → {new_limit}")
                                 
                                 # Update token limits for retry
                                 if max_tokens is not None:
