@@ -260,7 +260,6 @@ class UnifiedClient:
     """
     # Thread safety for file operations
     _file_write_lock = RLock()
-    _chapter_request_tracker = {}  # Track chapter requests to prevent duplication
     _tracker_lock = RLock()
     _model_lock = RLock()
     
@@ -511,10 +510,6 @@ class UnifiedClient:
         self._file_write_locks_lock = RLock()
         if not hasattr(self, '_model_lock'):
             self._model_lock = threading.RLock()
-        
-        # Duplicate request tracking (existing but enhanced)
-        self._chapter_request_tracker = {}  # {request_hash: {timestamp, thread, context}}
-        self._tracker_lock = RLock()
         
         # Stats tracking
         self.stats = {
@@ -1290,47 +1285,19 @@ class UnifiedClient:
 
     def _get_cached_response(self, request_hash: str) -> Optional[Tuple[str, str]]:
         """Get cached response if available and not expired"""
-        with self._request_cache_lock:
-            if request_hash in self._request_cache:
-                content, finish_reason, timestamp = self._request_cache[request_hash]
-                if time.time() - timestamp < self._cache_expiry_seconds:
-                    return content, finish_reason
-                else:
-                    # Expired, remove it
-                    del self._request_cache[request_hash]
-        return None
+        pass
 
     def _cache_response(self, request_hash: str, content: str, finish_reason: str):
         """Cache a response with timestamp"""
-        with self._request_cache_lock:
-            self._request_cache[request_hash] = (content, finish_reason, time.time())
-            
-            # Cleanup old entries if cache is too large
-            if len(self._request_cache) > 1000:
-                # Remove oldest 100 entries
-                sorted_items = sorted(
-                    self._request_cache.items(),
-                    key=lambda x: x[1][2]  # Sort by timestamp
-                )
-                for key, _ in sorted_items[:100]:
-                    del self._request_cache[key]
+        pass
 
     def _complete_request(self, request_hash: str):
         """Mark a request as complete and notify waiting threads"""
-        with self._active_requests_lock:
-            if request_hash in self._active_requests:
-                event = self._active_requests[request_hash]
-                event.set()  # Wake up waiting threads
-                
-                # Schedule cleanup after a delay
-                threading.Timer(5.0, self._cleanup_active_request, args=[request_hash]).start()
+        pass
 
     def _cleanup_active_request(self, request_hash: str):
         """Remove completed request from active tracking after delay"""
-        with self._active_requests_lock:
-            self._active_requests.pop(request_hash, None)
-            logger.debug(f"Cleaned up active request {request_hash[:8]}")
-        
+        pass
     
     def _apply_custom_endpoint_if_needed(self):
         """Apply custom endpoint configuration if needed"""
@@ -1932,12 +1899,6 @@ class UnifiedClient:
 
     def _debug_active_requests(self):
         """Debug method to show current active requests"""
-        #with self._active_requests_lock:
-        #    active_count = len(self._active_requests)
-        #    if active_count > 0:
-        #        logger.debug(f"Active requests: {active_count}")
-        #        for hash_key in list(self._active_requests.keys())[:5]:  # Show first 5
-        #            logger.debug(f"  - {hash_key[:8]}...")
         pass
 
     def _ensure_thread_safety_init(self):
@@ -1957,8 +1918,6 @@ class UnifiedClient:
             self._file_write_locks_lock = RLock()
         
         # Legacy tracker (for backward compatibility)
-        if not hasattr(self, '_chapter_request_tracker'):
-            self._chapter_request_tracker = {}
         if not hasattr(self, '_tracker_lock'):
             self._tracker_lock = RLock()
 
@@ -1967,34 +1926,7 @@ class UnifiedClient:
         Periodically clean up expired cache entries and active requests.
         Should be called periodically or scheduled with a timer.
         """
-        current_time = time.time()
-        
-        # Clean up expired cache entries
-        with self._request_cache_lock:
-            expired_keys = [
-                key for key, (_, _, timestamp) in self._request_cache.items()
-                if current_time - timestamp > self._cache_expiry_seconds
-            ]
-            for key in expired_keys:
-                del self._request_cache[key]
-            
-            if expired_keys:
-                logger.debug(f"Cleaned up {len(expired_keys)} expired cache entries")
-        
-        # Clean up stuck active requests (older than 5 minutes)
-        #with self._active_requests_lock:
-        #    stuck_timeout = 300  # 5 minutes
-        #    stuck_requests = []
-        #    
-        #    for request_hash, event in list(self._active_requests.items()):
-                # Note: We can't easily track creation time of events,
-                # so we rely on the cleanup timer approach in the main send() method
-                # This is just a safety cleanup for any that got stuck
-        #        if not event.is_set():
-                    # Check if any thread is waiting on this event
-                    # If no waiters after timeout, remove it
-                    # This is a simplified check - in production you might track timestamps
-        #            pass
+        pass
 
     def _get_thread_status(self) -> dict:
         """
@@ -2031,14 +1963,7 @@ class UnifiedClient:
         # Release thread key assignment if in multi-key mode
         if self._multi_key_mode and self._api_key_pool:
             thread_id = threading.current_thread().ident
-            self._api_key_pool.release_thread_assignment(thread_id)
-        
-        # Clear any pending active requests for this client
-        #with self._active_requests_lock:
-            # Set all events to release waiting threads
-        #    for event in self._active_requests.values():
-        #        event.set()
-            # Note: We don't clear the dict here as other threads might still be using it
+            self._api_key_pool.release_thread_assignment(thread_id)      
         
         # Clear thread-local storage
         if hasattr(self, '_thread_local'):
