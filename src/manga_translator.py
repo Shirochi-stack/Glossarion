@@ -73,7 +73,6 @@ class MangaTranslator:
                     'azure_endpoint': str (if azure)
                 }
         """
-        
         # Determine OCR provider
         self.ocr_provider = ocr_config.get('provider', 'google')
         self.bubble_detector = None
@@ -224,7 +223,10 @@ class MangaTranslator:
         
         self.manga_settings = config.get('manga_settings', {})
 
-
+        # Initialize local inpainter if configured
+        if self.manga_settings.get('inpainting', {}).get('method') == 'local':
+            self._initialize_local_inpainter()
+            
         # advanced settings
         self.debug_mode = self.manga_settings.get('advanced', {}).get('debug_mode', False)
         self.save_intermediate = self.manga_settings.get('advanced', {}).get('save_intermediate', False)
